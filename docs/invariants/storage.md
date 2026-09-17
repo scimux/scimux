@@ -79,7 +79,7 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam,
   never a new file or truncation; the context gauge is segment-scoped.
-  - ACP nodes (pi/opencode/grok) implement it as **deterministic process
+  - ACP nodes (pi/opencode/grok/cursor) implement it as **deterministic process
     replacement** — kill the subprocess, negotiate a fresh one under the same
     node, because a second `session/new` on one connection is unproven
     upstream while a fresh PID self-evidently carries no context. codex opens

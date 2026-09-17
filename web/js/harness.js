@@ -65,6 +65,7 @@ const HARNESS_TERMS = Object.freeze({
   claude: `<a href="https://www.anthropic.com/legal/consumer-terms" target="_blank" rel="noopener">Terms of Service</a>`,
   codex: `<a href="https://openai.com/policies/terms-of-use/" target="_blank" rel="noopener">Terms of Use</a>`,
   grok: `<a href="https://x.ai/legal/terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
+  cursor: `<a href="https://cursor.com/terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
 });
 
 const BYO_PROVIDER_NOTE =

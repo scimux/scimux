@@ -21,6 +21,7 @@ import {
   effortLevelsFor,
   effortOptionsHTML,
   preservedEffortValue,
+  seededEffortValue,
   launchSeedFrom,
   lanePreselectForActivity,
   forkRequiresLane,
@@ -90,7 +91,7 @@ test("Grok model/effort options and probe replacement", () => {
   assert.deepEqual(models.grok, ["", "grok-4.5", "grok-code-fast-1"]);
   assert.deepEqual(
     effortLevelsFor("grok", "grok-4.5", me),
-    { list: ["low", "high"], default: "high" },
+    { list: ["low", "high"], default: "high", required: false },
   );
 });
 
@@ -129,24 +130,50 @@ test("effortLevelsFor: per-model wins, then static, then common three", () => {
   };
   assert.deepEqual(
     effortLevelsFor("codex", "gpt-5.4", me),
-    { list: ["minimal", "low", "high"], default: "low" },
+    { list: ["minimal", "low", "high"], default: "low", required: false },
   );
   assert.deepEqual(
     effortLevelsFor("claude", "opus", me),
-    { list: DEFAULT_EFFORTS.claude, default: undefined },
+    { list: DEFAULT_EFFORTS.claude, default: undefined, required: false },
   );
   assert.deepEqual(
     effortLevelsFor("unknown", "", {}),
-    { list: ["low", "medium", "high"], default: undefined },
+    { list: ["low", "medium", "high"], default: undefined, required: false },
+  );
+  /* Cursor's levels only exist per model, because the level is part of the
+     model id. A row that has none (`auto`) must offer none: the generic
+     low/medium/high would name three ids cursor would then refuse. */
+  assert.deepEqual(
+    effortLevelsFor("cursor", "auto", { cursor: {} }),
+    { list: [], default: undefined, required: false },
+  );
+  assert.deepEqual(
+    effortLevelsFor("cursor", "demo", { cursor: { demo: { levels: ["high", "xhigh"], default: "high" } } }),
+    { list: ["high", "xhigh"], default: "high", required: false },
   );
 });
 
 test("effortOptionsHTML marks default; preservedEffortValue", () => {
   const html = effortOptionsHTML(["low", "high"], "high", esc);
+  /* A required menu drops the empty option: there is no id it could mean. */
+  const req = effortOptionsHTML(["low", "high"], "low", esc, true);
+  assert.doesNotMatch(req, /<option value=""/);
+  assert.match(req, /value="low">low \(default\)/);
   assert.match(html, /value="">/);
   assert.match(html, /value="high">high \(default\)/);
   assert.equal(preservedEffortValue(["low", "high"], "high"), "high");
   assert.equal(preservedEffortValue(["low"], "high"), null);
+  /* A rebuild keeps a level the new menu still has, blank where blank is a
+     real choice, and the default where it is not. */
+  const menu = { list: ["low", "medium", "high"], dflt: "low" };
+  assert.equal(seededEffortValue({ ...menu, required: true, want: "high" }), "high");
+  assert.equal(seededEffortValue({ ...menu, required: true, want: "" }), "low");
+  assert.equal(seededEffortValue({ ...menu, required: true, want: "max" }), "low");
+  assert.equal(seededEffortValue({ ...menu, required: false, want: "" }), "");
+  assert.equal(seededEffortValue({ ...menu, required: false, want: "max" }), "");
+  /* Required with nothing published still has to name something on the menu. */
+  assert.equal(seededEffortValue({ list: ["xhigh"], dflt: "", required: true, want: "" }), "xhigh");
+  assert.equal(seededEffortValue({ list: [], dflt: "", required: true, want: "" }), "");
 });
 
 test("applyAgentsProbe replaces catalogs; empty no-op", () => {
@@ -220,6 +247,11 @@ test("createErrorField and submit/head labels", () => {
   assert.equal(createErrorField("bad directory"), "dir");
   assert.equal(createErrorField("unknown path"), "dir");
   assert.equal(createErrorField("title required"), "title");
+  // A launch refused for the model or the effort points at the select that
+  // chose it; parking it under the prompt sends the user to edit the one
+  // field that was fine.
+  assert.equal(createErrorField('cursor has no model "example-flash" at effort "max"'), "model");
+  assert.equal(createErrorField("effort is not offered"), "model");
   assert.equal(createErrorField("something else"), "prompt");
   assert.equal(submitButtonLabel({ editing: false, submitting: false }), "Start");
   assert.equal(submitButtonLabel({ editing: false, submitting: true }), "Starting...");
@@ -770,6 +802,118 @@ test("agent and model change rebuild model/effort menus", () => {
   assert.equal(byId.nc_effort.value, "medium");
 });
 
+/* A cursor row whose ids all carry a level has no id that means "no level":
+   the server picks one at launch. The dialog must therefore choose it visibly,
+   or the node is stored with effort "" while the process runs at "low". */
+const cursorAgentsPayload = {
+  cursor: {
+    models: ["example-codex", "example-flash"],
+    efforts: {
+      /* Has a level-free id (`example-codex`), so blank effort is a real,
+         launchable choice and stays on offer. */
+      "example-codex": { levels: ["low", "high"] },
+      /* No level-free id: blank resolves server-side to `example-flash-low`. */
+      "example-flash": { levels: ["low", "medium", "high"], default: "low", required: true },
+    },
+  },
+  codex: { models: ["gpt-5.4"], efforts: { "gpt-5.4": { levels: ["low", "medium", "high"], default: "medium" } } },
+};
+
+async function pickCursorModel(ctx, model){
+  ctx.feature.bind();
+  await Promise.resolve();
+  await Promise.resolve();
+  ctx.byId.plusbtn.dispatch("click");
+  ctx.byId.nc_agent.value = "cursor";
+  ctx.byId.nc_agent.dispatch("change");
+  ctx.byId.nc_model.value = model;
+  ctx.byId.nc_model.dispatch("change");
+}
+
+test("a fresh cursor row with no blank id selects and submits its default effort", async () => {
+  const ctx = createFeature({ agentsPayload: cursorAgentsPayload });
+  await pickCursorModel(ctx, "example-flash");
+
+  /* The select shows the level the launch will use, before anything is sent. */
+  assert.equal(ctx.byId.nc_effort.value, "low");
+  /* And offers no empty choice, because there is no id that empty would mean. */
+  assert.doesNotMatch(ctx.byId.nc_effort.innerHTML, /<option value=""/);
+
+  ctx.byId.nc_title.value = "Work";
+  ctx.byId.nc_prompt.value = "Do it";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  const post = ctx.apiCalls.find(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  assert.ok(post, "no create request");
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.agent, "cursor");
+  assert.equal(body.model, "example-flash");
+  assert.equal(body.effort, "low", "the stored node must name the level the process gets");
+});
+
+test("a cursor fork names a level even when the parent record stored none", async () => {
+  /* Forks seed the dialog from the parent, and the parent may predate this
+     rule (or be a cursor node whose effort was resolved server-side), so the
+     seeded menu has to answer the same question the fresh one does. */
+  const cursorNodes = {
+    "c-blank": {
+      id: "c-blank", title: "Blank", agent: "cursor", model: "example-flash",
+      effort: "", dir: "/w", lane_id: "lane-a",
+      created_at: "2020-01-01T00:00:00Z", stops: ["2020-01-02T00:00:00Z"],
+    },
+    "c-high": {
+      id: "c-high", title: "High", agent: "cursor", model: "example-flash",
+      effort: "high", dir: "/w", lane_id: "lane-a",
+      created_at: "2020-01-01T00:00:00Z", stops: ["2020-01-02T00:00:00Z"],
+    },
+  };
+  const ctx = createFeature({ agentsPayload: cursorAgentsPayload, nodes: cursorNodes });
+  ctx.feature.bind();
+  await Promise.resolve();
+  await Promise.resolve();
+  ctx.feature.forkFromStation("c-blank");
+  assert.equal(ctx.byId.nc_effort.value, "low");
+
+  const ctx2 = createFeature({ agentsPayload: cursorAgentsPayload, nodes: cursorNodes });
+  ctx2.feature.bind();
+  await Promise.resolve();
+  await Promise.resolve();
+  ctx2.feature.forkFromStation("c-high");
+  assert.equal(ctx2.byId.nc_effort.value, "high");
+});
+
+test("a chosen cursor effort survives a menu rebuild", async () => {
+  const ctx = createFeature({ agentsPayload: cursorAgentsPayload });
+  await pickCursorModel(ctx, "example-flash");
+  ctx.byId.nc_effort.value = "high";
+  ctx.byId.nc_model.dispatch("change");
+  assert.equal(ctx.byId.nc_effort.value, "high");
+});
+
+test("blank effort still means blank where it names a real id", async () => {
+  /* The cursor row that has a level-free id, and every other agent: blank is
+     "let the harness decide", and preselecting a level there would pin today's
+     default into a durable record. */
+  const ctx = createFeature({ agentsPayload: cursorAgentsPayload });
+  await pickCursorModel(ctx, "example-codex");
+  assert.equal(ctx.byId.nc_effort.value, "");
+  assert.match(ctx.byId.nc_effort.innerHTML, /<option value=""/);
+
+  const ctx2 = createFeature({ agentsPayload: cursorAgentsPayload });
+  ctx2.feature.bind();
+  await Promise.resolve();
+  await Promise.resolve();
+  ctx2.byId.plusbtn.dispatch("click");
+  ctx2.byId.nc_agent.value = "codex";
+  ctx2.byId.nc_agent.dispatch("change");
+  ctx2.byId.nc_model.value = "gpt-5.4";
+  ctx2.byId.nc_model.dispatch("change");
+  assert.equal(ctx2.byId.nc_effort.value, "");
+});
+
 /* ---------- forks and new activity ---------- */
 test("plain new activity seeds last dir and scoped lane", () => {
   const ctx = createFeature({ storageInit: { [LAST_DIR_KEY]: "/last" }, laneFilter: "lane-a" });
@@ -1004,6 +1148,7 @@ test("create error maps to dir/title/prompt fields", async () => {
     ["bad directory path", "nc_dir"],
     ["title is invalid", "nc_title"],
     ["agent failed", "nc_prompt"],
+    ['cursor has no model "example-flash" at effort "max"', "nc_model"],
   ];
   for (const [msg, id] of cases){
     const ctx = createFeature();
@@ -2233,6 +2378,94 @@ test("delayed agents probe preserves an open same-agent Muse fork", async () => 
   assert.equal("tier" in body, false);
   assert.equal("label" in body, false);
   assert.equal("launchable" in body, false);
+});
+
+/* Cursor is the strict version of the Muse case: its effort menu exists only
+   per model in the catalog, so before the probe answers there is no menu at
+   all, and a fork opened in that window has nothing to hold the parent's level
+   with. What the parent chose has to survive the wait. */
+function cursorParentNode(id, effort){
+  return {
+    id, title: "Cursor parent", description: "keep going",
+    agent: "cursor", model: "example-flash", effort, dir: "/cur",
+    lane_id: "lane-a", created_at: "2020-01-01T00:00:00Z",
+  };
+}
+
+test("delayed agents probe preserves an open Cursor fork", async () => {
+  for (const [effort, want] of [["high", "high"], ["", "low"]]){
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    const ctx = createFeature({ nodes: { c1: cursorParentNode("c1", effort) } });
+    ctx.setApi(async (path, opts = {}) => {
+      ctx.apiCalls.push({ path, opts });
+      if (path === "/api/agents") return pending;
+      if (path === "/api/nodes" && opts.method === "POST")
+        return { id: "created-1", title: JSON.parse(opts.body).title };
+      return {};
+    });
+    ctx.feature.bind();
+    ctx.feature.forkFromTurn("Follow this", "c1");
+    assert.equal(ctx.byId.nc_agent.value, "cursor", effort);
+    assert.equal(ctx.byId.nc_model.value, "example-flash", effort);
+
+    release(cursorAgentsPayload);
+    await settle();
+    assert.equal(ctx.byId.nc_agent.value, "cursor", effort);
+    assert.equal(ctx.byId.nc_model.value, "example-flash", effort);
+    /* Blank is not a choice on this row, so a parent that stored none inherits
+       the level the launch would use; a parent that stored one keeps it. */
+    assert.equal(ctx.byId.nc_effort.value, want, effort);
+
+    ctx.byId.nc_title.value = "Fork";
+    ctx.byId.nc_lane.value = "lane-a";
+    ctx.byId.nc_start.dispatch("click");
+    await settle();
+    const post = ctx.apiCalls.find(c => c.path === "/api/nodes" && c.opts.method === "POST");
+    assert.ok(post, effort);
+    const body = JSON.parse(post.opts.body);
+    assert.equal(body.agent, "cursor", effort);
+    assert.equal(body.model, "example-flash", effort);
+    assert.equal(body.effort, want, effort);
+    assert.equal(body.parent, "c1", effort);
+  }
+});
+
+test("switching agents while the probe is pending drops the inherited level", async () => {
+  /* Blank is a real choice on codex. Once the user has changed the agent, the
+     cursor parent's level is not an unshown inheritance any more -- it is a
+     value for a row that is no longer selected, and replaying it when the
+     catalog lands would submit a level nobody picked. */
+  let release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const ctx = createFeature({ nodes: { c1: cursorParentNode("c1", "high") } });
+  ctx.setApi(async (path, opts = {}) => {
+    ctx.apiCalls.push({ path, opts });
+    if (path === "/api/agents") return pending;
+    if (path === "/api/nodes" && opts.method === "POST")
+      return { id: "created-1", title: JSON.parse(opts.body).title };
+    return {};
+  });
+  ctx.feature.bind();
+  ctx.feature.forkFromTurn("Follow this", "c1");
+  ctx.byId.nc_agent.value = "codex";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.equal(ctx.byId.nc_effort.value, "");
+
+  release(cursorAgentsPayload);
+  await settle();
+  assert.equal(ctx.byId.nc_agent.value, "codex");
+  assert.equal(ctx.byId.nc_effort.value, "");
+
+  ctx.byId.nc_title.value = "Fork";
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+  const post = ctx.apiCalls.find(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  assert.ok(post);
+  const body = JSON.parse(post.opts.body);
+  assert.equal(body.agent, "codex");
+  assert.equal(body.effort, "");
 });
 
 test("delayed probe does not insert a stale inherited Muse model", async () => {

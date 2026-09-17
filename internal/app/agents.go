@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,6 +27,14 @@ import (
 type modelEffort struct {
 	Levels  []string `json:"levels"`
 	Default string   `json:"default,omitempty"`
+	// Required marks a menu where leaving the effort blank is not a choice the
+	// harness can carry: cursor rows whose ids all name a level have no id that
+	// means "no level", so the server would have to pick one. The dialog picks
+	// Default visibly instead, which is what makes the stored node and the
+	// running process agree. Harnesses that read a blank effort as "use your
+	// own default" -- codex, grok -- leave it false, and preselecting a level
+	// for them would pin today's default into a durable record.
+	Required bool `json:"required,omitempty"`
 }
 
 // agentInfo is one harness's offering to the new-activity dialog: an ordered
@@ -36,7 +45,18 @@ type agentInfo struct {
 	Models     []string               `json:"models"`
 	Efforts    map[string]modelEffort `json:"efforts,omitempty"`
 	MuseModels []museModelView        `json:"muse_models,omitempty"`
+	// ids resolves an offered (model, effort) pair back to the one exact CLI
+	// model id it was decomposed from. Only cursor needs it, because only
+	// cursor spells the effort level inside the model id — and spells it in an
+	// order a join cannot reproduce. It stays unexported so it never reaches
+	// the browser: publishing it would ship the flat two-hundred-id list the
+	// row decomposition exists to avoid.
+	ids map[modelEffortKey]string
 }
+
+// modelEffortKey is one row of the new-activity dialog as the user leaves it:
+// the model they picked and the effort they picked, nothing else.
+type modelEffortKey struct{ model, effort string }
 
 const (
 	museTierStandard   = "standard"
@@ -75,9 +95,23 @@ type harness struct {
 	// nodes launch via `pi-acp` (the ACP transport) but list models via `pi`,
 	// so offering pi when only `pi` — not `pi-acp` — is installed would present
 	// a selectable agent that cannot start (finding 56).
-	require  string
+	require string
+	// name is the agent name this harness is published and launched under when
+	// it differs from bin. Cursor lists and launches through `cursor-agent`,
+	// but `cursor` is what nodes, transports and the dialog call it.
+	name     string
 	list     func(ctx context.Context, bin string) agentInfo
 	fallback func() agentInfo
+}
+
+// agentName is the key a harness is published under: its name where one is
+// given, else the binary, which is the historical spelling for the harnesses
+// whose binary and agent name coincide.
+func (h harness) agentName() string {
+	if h.name != "" {
+		return h.name
+	}
+	return h.bin
 }
 
 // justModels adapts a model-only lister (pi/opencode, which have no per-model
@@ -105,6 +139,10 @@ var harnesses = []harness{
 	// grok exposes ACP as `grok agent stdio`; models come from `grok models`
 	// and per-model effort menus from the CLI's models cache when available.
 	{bin: "grok", list: grokModelsFromCLI, fallback: grokModelsFallback},
+	// cursor exposes ACP as `cursor-agent acp` and lists its catalog with
+	// `cursor-agent --list-models`; the binary is not the agent name because
+	// `agent`, cursor's other installed name, is already grok's on some hosts.
+	{name: "cursor", bin: "cursor-agent", list: cursorModelsFromCLI},
 	// Muse has no static model fallback. Catalog rows come from the injectable
 	// probe (handleAgents overlay); an installed binary with no probe is an
 	// empty, valid model list.
@@ -160,9 +198,175 @@ func probeAgents(hs []harness) map[string]agentInfo {
 		if info.Models == nil {
 			info.Models = []string{}
 		}
-		res[h.bin] = info
+		res[h.agentName()] = info
 	}
 	return res
+}
+
+// cursorEffortLevels are the reasoning levels cursor folds into a model id.
+// Longest first, so `extra-high` wins over the `high` it ends with.
+var cursorEffortLevels = []string{"extra-high", "minimal", "medium", "xhigh", "none", "high", "max", "low"}
+
+// cursorLevelWords is how a label spells each level. A row's default level is
+// the one whose label leaves its own level unsaid — `Example Opus Thinking`
+// against `Example Opus Extra High Thinking` — which is how the CLI marks the
+// rendering it considers canonical. Nothing else in the output says it.
+var cursorLevelWords = map[string]string{
+	"none": "none", "minimal": "minimal", "low": "low", "medium": "medium",
+	"high": "high", "xhigh": "extra high", "extra-high": "extra high", "max": "max",
+}
+
+// cursorVariant is one printed id seen as a member of its model row.
+type cursorVariant struct{ level, label, id string }
+
+// splitCursorModelID lifts the effort level out of a cursor model id. The
+// grammar is base + [-thinking] + [-level] + [-fast], so the level sits in the
+// middle: `-fast` has to come off first and go back on afterwards. That is
+// exactly why the pair cannot be joined back into an id and must be looked up.
+func splitCursorModelID(id string) (row, level string) {
+	core, fast := strings.CutSuffix(id, "-fast")
+	for _, lv := range cursorEffortLevels {
+		if rest, ok := strings.CutSuffix(core, "-"+lv); ok && rest != "" {
+			core, level = rest, lv
+			break
+		}
+	}
+	if fast {
+		core += "-fast"
+	}
+	return core, level
+}
+
+// cursorDefaultLevel returns the row's default level, or "" when the labels do
+// not single one out. Guessing would preselect an effort the user never chose.
+func cursorDefaultLevel(variants []cursorVariant) string {
+	found := ""
+	for _, v := range variants {
+		if v.level == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(v.label), cursorLevelWords[v.level]) {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = v.level
+	}
+	return found
+}
+
+// parseCursorModels turns `cursor-agent --list-models` into the three fields
+// the dialog already has. The CLI prints one flat line per (model, effort)
+// combination — over two hundred of them — which no one is going to scroll;
+// lifting the level out leaves a few dozen model rows each carrying its own
+// effort menu, and an index that maps the pair back to the printed id.
+func parseCursorModels(out string) agentInfo {
+	var order []string
+	rows := map[string][]cursorVariant{}
+	for _, line := range strings.Split(out, "\n") {
+		id, label, ok := strings.Cut(strings.TrimSpace(line), " - ")
+		// Anything that is not `<id> - <label>` is a header or the trailing
+		// usage tip; an id never contains a space.
+		if !ok || id == "" || strings.ContainsAny(id, " \t") {
+			continue
+		}
+		row, level := splitCursorModelID(id)
+		if _, seen := rows[row]; !seen {
+			order = append(order, row)
+		}
+		rows[row] = append(rows[row], cursorVariant{level: level, label: label, id: id})
+	}
+	if len(order) == 0 {
+		return agentInfo{}
+	}
+	info := agentInfo{Models: order, ids: map[modelEffortKey]string{}}
+	if _, ok := rows["auto"]; ok {
+		info.Models = prependModel("auto", order)
+	}
+	for row, variants := range rows {
+		var levels []string
+		blank := false
+		for _, v := range variants {
+			info.ids[modelEffortKey{row, v.level}] = v.id
+			if v.level == "" {
+				blank = true
+				continue
+			}
+			levels = append(levels, v.level)
+		}
+		if len(levels) == 0 {
+			continue
+		}
+		def := ""
+		if !blank {
+			// No level-free member, so leaving effort blank has to land on a
+			// real id: the row default, or failing that the first level the
+			// CLI printed, which is its own ordering and so its own preference.
+			// Whichever it is, it is published as the row's default rather than
+			// applied behind an empty select -- the dialog and the durable node
+			// would otherwise show no effort while the process ran at one.
+			def = cursorDefaultLevel(variants)
+			if def == "" {
+				def = levels[0]
+			}
+			info.ids[modelEffortKey{row, ""}] = info.ids[modelEffortKey{row, def}]
+		}
+		if info.Efforts == nil {
+			info.Efforts = map[string]modelEffort{}
+		}
+		info.Efforts[row] = modelEffort{Levels: levels, Default: def, Required: !blank}
+	}
+	return info
+}
+
+func cursorModelsFromCLI(ctx context.Context, bin string) agentInfo {
+	out, err := exec.CommandContext(ctx, bin, "--list-models").Output()
+	if err != nil {
+		return agentInfo{}
+	}
+	return parseCursorModels(string(out))
+}
+
+// cursorModelErr marks a (model, effort) pair cursor does not offer as the
+// dialog's error rather than the server's, so launchNode can answer 400 the way
+// the muse gate does. Everything else that can fail in a launch is the
+// machine's fault; this one the user can fix in the select they just used.
+type cursorModelErr struct{ error }
+
+// resolveCursorModel turns the dialog pair into the single `--model` value
+// cursor accepts. A pair the catalog does not hold is refused here, with both
+// halves named: cursor itself rejects an unknown id as an undiagnosed
+// session/new failure, long after the user could connect it to their choice.
+func resolveCursorModel(info agentInfo, model, effort string) (string, error) {
+	if id, ok := info.ids[modelEffortKey{model, effort}]; ok {
+		return id, nil
+	}
+	if effort == "" {
+		// An empty model leaves cursor on its own default. An empty catalog is
+		// not evidence of anything, and cursor validates the flag itself at
+		// launch. An exact id posted straight to the API is a value the catalog
+		// holds, just not a row name, so it launches unchanged.
+		if model == "" || len(info.ids) == 0 {
+			return model, nil
+		}
+		for _, id := range info.ids {
+			if id == model {
+				return model, nil
+			}
+		}
+		return "", cursorModelErr{fmt.Errorf("cursor has no model %q", model)}
+	}
+	// An effort gets no benefit of the doubt, because cursor has no effort
+	// flag to carry it: an unresolved level is not passed through, it is
+	// dropped, and the node launches at a level nobody picked while its record
+	// still claims the one they did. That includes the case where the catalog
+	// is missing entirely -- a failed or timed-out --list-models probe must not
+	// quietly downgrade the launch.
+	if len(info.ids) == 0 {
+		return "", cursorModelErr{fmt.Errorf("cursor model list unavailable, so model %q at effort %q cannot be resolved", model, effort)}
+	}
+	return "", cursorModelErr{fmt.Errorf("cursor has no model %q at effort %q", model, effort)}
 }
 
 // claudeProbeWorkdir is the directory every claude probe runs in, created on

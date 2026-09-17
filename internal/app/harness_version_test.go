@@ -80,6 +80,7 @@ func TestProbeHarnessInventory(t *testing.T) {
 	writeScript(t, binDir, "pi", `printf '%s\n' '0.84.3'`)
 	// pi-acp deliberately absent: pi is installed but not launchable.
 	writeScript(t, binDir, "grok", `printf '%s\n' 'grok 1.0.3 (1a29d5bc12) [stable]'`)
+	writeScript(t, binDir, "cursor-agent", `printf '%s\n' '2026.09.15-d2fe57e'`)
 	// opencode absent entirely.
 	t.Setenv("PATH", binDir)
 
@@ -111,6 +112,18 @@ func TestProbeHarnessInventory(t *testing.T) {
 	}
 	if got := byAgent["opencode"]; got.Present || got.Installed != "" {
 		t.Errorf("opencode = %+v, want absent with no version", got)
+	}
+	// The row is keyed by the agent name the rest of scimux uses, not by the
+	// binary: cursor launches and lists through `cursor-agent`, but a panel row
+	// headed "cursor-agent" would not match the agent named anywhere else.
+	// Cursor dates its releases; the build suffix is part of what it printed
+	// and is kept, exactly as grok's build hash is dropped because grok
+	// prints it outside the version token.
+	if got := byAgent["cursor"]; got.Installed != "2026.09.15-d2fe57e" || !got.Present || !got.Launchable {
+		t.Errorf("cursor = %+v, want 2026.09.15-d2fe57e present and launchable", got)
+	}
+	if _, ok := byAgent["cursor-agent"]; ok {
+		t.Error("cursor appeared in the harness panel under its binary name")
 	}
 }
 
@@ -305,17 +318,33 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 	// its version with nothing to explain it.
 	src := harnessSources()
 	for _, h := range harnesses {
-		s, ok := src[h.bin]
+		agent := h.agentName()
+		if agent == "cursor" {
+			continue // see TestCursorPublishesNoUnauthenticatedVersion
+		}
+		s, ok := src[agent]
 		if !ok {
-			t.Errorf("harness %q has no upstream source", h.bin)
+			t.Errorf("harness %q has no upstream source", agent)
 			continue
 		}
 		if s.URL == "" || s.Kind == "" || s.Label == "" {
-			t.Errorf("harness %q source = %+v, want url, kind and label", h.bin, s)
+			t.Errorf("harness %q source = %+v, want url, kind and label", agent, s)
 		}
 		if s.Kind != "npm" && s.Kind != "text" && s.Kind != "muse-stable" {
-			t.Errorf("harness %q source kind = %q, want npm, text, or muse-stable", h.bin, s.Kind)
+			t.Errorf("harness %q source kind = %q, want npm, text, or muse-stable", agent, s)
 		}
+	}
+}
+
+// Cursor is the one harness with no upstream row, and that is a finding rather
+// than an omission. Its CLI learns its own latest version from
+// `getCliDownloadUrl` on the authenticated dashboard backend; the only public
+// endpoint, cursor.com/api/agent-cli-download, hands back a binary, not a
+// version. Every source in the map must be an unauthenticated public endpoint,
+// so cursor's version row stays unchecked until such an endpoint exists.
+func TestCursorPublishesNoUnauthenticatedVersion(t *testing.T) {
+	if src, ok := harnessSources()["cursor"]; ok {
+		t.Fatalf("cursor upstream source = %+v; adding one means an authenticated check", src)
 	}
 }
 

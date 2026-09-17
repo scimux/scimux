@@ -475,6 +475,10 @@ printf '%s\n' 'openai/gpt-5.5' 'anthropic/claude-sonnet-4-5'
 if [ "$1" != "models" ]; then exit 2; fi
 printf '%s\n' 'Default model: grok-4.5' '- grok-code-fast-1' '* grok-4.5 (default)'
 `)
+	writeScript(t, binDir, "cursor-agent", `
+if [ "$1" != "--list-models" ]; then exit 2; fi
+printf '%s\n' 'Available models' '' 'auto - Auto (current, default)' 'demo-high - Demo' 'demo-xhigh - Demo Extra High'
+`)
 	writeScript(t, binDir, "muse", `exit 0`)
 	t.Setenv("PATH", binDir)
 
@@ -506,6 +510,17 @@ printf '%s\n' 'Default model: grok-4.5' '- grok-code-fast-1' '* grok-4.5 (defaul
 	}
 	if got := grok.Efforts["grok-code-fast-1"]; got.Default != "high" {
 		t.Errorf("grok-code-fast-1 fallback efforts = %+v", got)
+	}
+	// cursor is keyed by its agent name, not by the binary that lists models.
+	cursor := agents["cursor"]
+	if want := []string{"auto", "demo"}; !reflect.DeepEqual(cursor.Models, want) {
+		t.Errorf("cursor models = %v, want %v", cursor.Models, want)
+	}
+	if got := cursor.Efforts["demo"]; got.Default != "high" || !reflect.DeepEqual(got.Levels, []string{"high", "xhigh"}) {
+		t.Errorf("cursor demo efforts = %+v", got)
+	}
+	if _, ok := agents["cursor-agent"]; ok {
+		t.Error("cursor was published under its binary name")
 	}
 	if got := agents["muse"].Models; got == nil || len(got) != 0 {
 		t.Errorf("muse models = %v, want empty with no static fallback", got)

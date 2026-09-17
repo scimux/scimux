@@ -212,6 +212,9 @@ func TestResolveNodeRootTransportByAgent(t *testing.T) {
 		{"codex", "codex"},
 		{"pi", "acp"},
 		{"opencode", "acp"},
+		// cursor speaks ACP over stdio like pi/opencode/grok, so it shares
+		// their transport rather than earning one of its own.
+		{"cursor", "acp"},
 		{"muse", "muse"},
 	}
 	for _, c := range cases {
@@ -1133,6 +1136,7 @@ func TestResolveNodeTransport(t *testing.T) {
 		{Node{Title: "T", Prompt: "p", Agent: "pi", Dir: dir}, "acp"},
 		{Node{Title: "T", Prompt: "p", Agent: "opencode", Dir: dir}, "acp"},
 		{Node{Title: "T", Prompt: "p", Agent: "grok", Dir: dir}, "acp"},
+		{Node{Title: "T", Prompt: "p", Agent: "cursor", Dir: dir}, "acp"},
 		{Node{Title: "T", Prompt: "p", Agent: "claude", Dir: dir}, "tmux"},
 		{Node{Title: "T", Prompt: "p", Agent: "codex", Dir: dir}, "codex"},
 		{Node{Title: "T", Prompt: "p", Agent: "muse", Dir: dir}, "muse"},

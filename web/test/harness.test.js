@@ -204,15 +204,17 @@ test("every single-vendor harness row links its vendor's terms", () => {
     { agent: "claude", present: true, launchable: true, installed: "2.1.236" },
     { agent: "codex", present: true, launchable: true, installed: "0.153.4" },
     { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+    { agent: "cursor", present: true, launchable: true, installed: "2026.09.15-d2fe57e" },
   ], null);
 
   assert.match(html, /href="https:\/\/www\.anthropic\.com\/legal\/consumer-terms"/);
   assert.match(html, /href="https:\/\/openai\.com\/policies\/terms-of-use\/"/);
   assert.match(html, /href="https:\/\/x\.ai\/legal\/terms-of-service"/);
+  assert.match(html, /href="https:\/\/cursor\.com\/terms-of-service"/);
   /* Leaving scimux must not navigate away from a live supervision page, and
      an opener handle to a third-party tab is a needless one. */
-  assert.equal((html.match(/target="_blank"/g) || []).length, 3);
-  assert.equal((html.match(/rel="noopener"/g) || []).length, 3);
+  assert.equal((html.match(/target="_blank"/g) || []).length, 4);
+  assert.equal((html.match(/rel="noopener"/g) || []).length, 4);
 });
 
 test("a BYO-provider harness says whose terms apply instead of guessing", () => {

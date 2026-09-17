@@ -14,7 +14,7 @@ import (
 
 func TestProductionSessionHarnessUsesOnlyCurrentStructuredTransports(t *testing.T) {
 	dataDir := t.TempDir()
-	for _, agent := range []string{"pi", "opencode", "grok", "codex", "muse"} {
+	for _, agent := range []string{"pi", "opencode", "grok", "cursor", "codex", "muse"} {
 		t.Run(agent, func(t *testing.T) {
 			config := sessionWorkerConfig{
 				DataDir:  dataDir,

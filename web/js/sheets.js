@@ -104,6 +104,11 @@ export const DEFAULT_EFFORTS = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex:  ["low", "medium", "high"],
   grok:   ["low", "medium", "high"],
+  /* Cursor has no agent-wide effort list: the level is spelled inside the
+     model id, so the only levels that exist are the ones a given model row
+     actually published. An empty list is the honest fallback — the common
+     three would name ids cursor does not have. */
+  cursor: [],
 };
 
 /* ---------- pure: catalogs / options ---------- */
@@ -206,17 +211,31 @@ export function effortLevelsFor(agent, model, modelEfforts, efforts = DEFAULT_EF
   const perModel = (modelEfforts[agent] || {})[model];
   const list = (perModel && perModel.levels) || efforts[agent] || ["low", "medium", "high"];
   const dflt = perModel && perModel.default;
-  return { list, default: dflt };
+  return { list, default: dflt, required: !!(perModel && perModel.required) };
 }
 
-export function effortOptionsHTML(list, dflt, esc = escDefault){
-  return `<option value=""></option>` +
+/* required drops the empty option: the catalog is saying this model has no id
+   that means "no level", so an empty choice would be one the server silently
+   replaced. Everywhere else the empty option is the honest "harness default". */
+export function effortOptionsHTML(list, dflt, esc = escDefault, required = false){
+  return (required ? "" : `<option value=""></option>`) +
     list.map(e => `<option value="${esc(e)}">${esc(e)}${e === dflt ? " (default)" : ""}</option>`).join("");
 }
 
 /* Preserve current effort across agent/model rebuild when still valid. */
 export function preservedEffortValue(list, cur){
   return list.includes(cur) ? cur : null;
+}
+
+/* The value an effort select lands on after a rebuild: the wanted level when
+   the new menu still offers it, else blank -- except on a required menu, which
+   has no blank to fall back to, so it lands on the level the launch would have
+   used anyway. `want` is the current selection on an agent/model change and the
+   parent's stored effort on a fork; both ask the same question. */
+export function seededEffortValue({ list, dflt, required, want }){
+  const kept = preservedEffortValue(list, want || "");
+  if (kept !== null) return kept;
+  return required ? (dflt || list[0] || "") : "";
 }
 
 /* ---------- pure: launch seed / lane ---------- */
@@ -304,6 +323,10 @@ export function createErrorField(msg){
   const m = msg || "";
   if (/\b(dir|directory|path)\b/i.test(m)) return "dir";
   if (/\btitle\b/i.test(m)) return "title";
+  /* A launch refused for its model or effort belongs on the select that chose
+     it. The prompt is the catch-all target, and parking a rejected model under
+     it sends the user to rewrite the one field that was fine. */
+  if (/\b(model|effort)\b/i.test(m)) return "model";
   return "prompt";
 }
 
@@ -385,6 +408,10 @@ export function createSheetsFeature(deps = {}){
   let ncParent = "";
   let ncRationale = "";
   let ncMuseInherit = false;
+  /* An inherited effort the menus could not hold yet, kept until the agents
+     probe answers. Cursor publishes its levels only per model, so a fork opened
+     while the probe is in flight has no menu to put the parent's level on. */
+  let ncSeedEffort = "";
   let ncEdit = "";
   let ncEditStop = "";
   let ncForwardSources = [];
@@ -555,6 +582,13 @@ export function createSheetsFeature(deps = {}){
       applyMuseModelValue(mo, { prev, preserveSelection: !!opts.preserveSelection });
     } else {
       mo.innerHTML = modelOptionsHTML(MODELS, agent, p, esc);
+      /* A rebuilt select falls back to its first (blank) option, which would
+         drop a model the user picked -- or a fork inherited -- while the agents
+         probe was in flight. Restore it only if the arriving catalog still
+         offers it, so a retired id is dropped rather than reinstated, which is
+         the rule the Muse branch applies above. */
+      if (opts.preserveSelection && prev && (MODELS[agent] || [""]).includes(prev))
+        mo.value = prev;
     }
   }
 
@@ -571,20 +605,27 @@ export function createSheetsFeature(deps = {}){
     if (live && ag && prevAgent && Object.prototype.hasOwnProperty.call(MODELS, prevAgent))
       ag.value = prevAgent;
     fillModels({ preserveSelection: live });
-    fillEfforts();
+    /* Now that the per-model menus exist, replay the inherited level the sheet
+       could not show before. Anything chosen since wins: ncSeedEffort is only
+       set when there was no menu to choose from, so a blank here was never a
+       decision. */
+    const ef = root("nc_effort");
+    fillEfforts((ef && ef.value) || ncSeedEffort);
+    ncSeedEffort = "";
   }
 
-  function fillEfforts(){
+  /* want overrides the current selection: a fork seeds from its parent. */
+  function fillEfforts(want){
     const ef = root("nc_effort");
     if (!ef) return;
-    const cur = ef.value;
+    const cur = want === undefined ? ef.value : (want || "");
     const agentEl = root("nc_agent");
     const modelEl = root("nc_model");
     const agent = agentEl ? agentEl.value : "";
     const model = modelEl ? modelEl.value : "";
-    const { list, default: dflt } = effortLevelsFor(agent, model, MODEL_EFFORTS, EFFORTS);
-    ef.innerHTML = effortOptionsHTML(list, dflt, esc);
-    if (list.includes(cur)) ef.value = cur;
+    const { list, default: dflt, required } = effortLevelsFor(agent, model, MODEL_EFFORTS, EFFORTS);
+    ef.innerHTML = effortOptionsHTML(list, dflt, esc, required);
+    ef.value = seededEffortValue({ list, dflt, required, want: cur });
   }
 
   function prepareLaunchConfig(cfg){
@@ -615,13 +656,11 @@ export function createSheetsFeature(deps = {}){
           }
         mo.value = p.model || "";
       }
+      /* Rebuilt against the model just selected, not the one the dialog
+         happened to open on, and seeded from the parent in the same step. */
+      fillEfforts(p.effort || "");
       const ef = root("nc_effort");
-      if (ef){
-        const want = p.effort || "";
-        ef.value = (typeof ef.querySelector === "function"
-          ? ef.querySelector(`option[value="${esc(want)}"]`) : null)
-          ? want : "";
-      }
+      ncSeedEffort = ef && ef.value !== (p.effort || "") ? (p.effort || "") : "";
       const dir = root("nc_dir");
       if (dir) dir.value = p.dir || "";
     } else {
@@ -629,6 +668,7 @@ export function createSheetsFeature(deps = {}){
       if (ef) ef.value = "";
       const dir = root("nc_dir");
       if (dir) dir.value = "";
+      ncSeedEffort = "";
     }
     for (const id of ["nc_agent", "nc_model", "nc_effort", "nc_dir"]){
       const el = root(id);
@@ -972,7 +1012,8 @@ export function createSheetsFeature(deps = {}){
       const msg = (err && err.message) || "Could not start this activity.";
       const field = createErrorField(msg);
       const target = field === "dir" ? root("nc_dir")
-        : field === "title" ? root("nc_title") : root("nc_prompt");
+        : field === "title" ? root("nc_title")
+        : field === "model" ? root("nc_model") : root("nc_prompt");
       fieldError(target, msg);
       if (target && typeof target.focus === "function") target.focus();
       if (target && typeof target.scrollIntoView === "function")
@@ -984,11 +1025,16 @@ export function createSheetsFeature(deps = {}){
 
   function onAgentChange(){
     ncMuseInherit = false;
+    /* The user has moved off the row the seed belonged to, so it is no longer
+       an inheritance waiting for a menu -- and on an agent where blank is a
+       real choice, replaying it later would submit a level nobody picked. */
+    ncSeedEffort = "";
     const mo = root("nc_model");
     if (mo) mo.value = "";
     fillModels(); fillEfforts();
   }
   function onModelChange(){
+    ncSeedEffort = "";
     fillEfforts();
   }
 
