@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/fare"
+	"github.com/scimux/scimux/internal/fare"
 )
 
 // Phase 2 fold readers (fare-design.md §4.2, §4.3, D2, D3). Fixtures are

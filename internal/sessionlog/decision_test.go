@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/fare"
+	"github.com/scimux/scimux/internal/fare"
 )
 
 func sampleDecision() DecisionEvent {

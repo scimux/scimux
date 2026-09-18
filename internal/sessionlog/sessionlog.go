@@ -40,7 +40,7 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Event is one record of the append-only session log. It mirrors the ACP

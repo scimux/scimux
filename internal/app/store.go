@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // storeRecord is one line of the append-only store file. Node metadata is

@@ -38,7 +38,7 @@ set -eu
 # Overridable so the download path can be exercised against a stub in tests
 # (internal/app/install_script_test.go). Nothing but a test sets it, and every
 # URL this script uses is printed before it is fetched.
-REPO_URL="${SCIMUX_REPO_URL:-https://codeberg.org/chrberger/scimux}"
+REPO_URL="${SCIMUX_REPO_URL:-https://github.com/scimux/scimux}"
 INSTALL_DIR="${SCIMUX_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Empty until release signing goes live. See verify_signature().
@@ -63,7 +63,7 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-# The four names below are exactly the artifacts .forgejo/workflows/release.yml
+# The four names below are exactly the artifacts .github/workflows/release.yml
 # builds. freebsd/amd64 is built by CI on purpose but never released -- it
 # exists to keep the static-build invariant honest -- so it is named here
 # rather than falling into the generic "unsupported" arm, which would read

@@ -38,7 +38,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
 const (

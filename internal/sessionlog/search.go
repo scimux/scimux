@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // scanCtxCheck is how often (in parsed lines) a context-aware scan re-checks for

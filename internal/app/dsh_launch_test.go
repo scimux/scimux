@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/acp"
 )
 
 // A model or thought level dsh refuses is the user's input being wrong, not the

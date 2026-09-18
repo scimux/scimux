@@ -32,8 +32,8 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // attachUploadMax bounds a multipart attachment upload. Files blow past

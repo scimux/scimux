@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 const webChildCmd = "web-child"

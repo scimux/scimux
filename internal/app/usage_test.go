@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/acp"
 )
 
 // ---------- collectors ----------

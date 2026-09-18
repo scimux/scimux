@@ -21,9 +21,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // mirror is one node's projection state. All fields are owned by the poller

@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Stage A tests for LogCache: one walk per (path, size, mtime) feeding all

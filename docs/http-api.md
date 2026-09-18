@@ -806,10 +806,11 @@ Body: `{"expected_tag":"vX.Y.Z"}`, using the `latest` tag returned by the
 update check. Missing or malformed input is `400`; if the latest release has
 changed since the check, the apply is `409` and the client must check again.
 
-Self-update: downloads the release binary for this OS/arch from the trusted
-HTTPS release origin (`codeberg.org` only — exact host, no userinfo, port
-empty or 443), verifies it against the release's `SHA256SUMS` (same origin
-policy on the initial URL and every redirect), starts it as a standby
+Self-update: downloads the release binary for this OS/arch from GitHub's exact
+HTTPS release hosts (`github.com` and `release-assets.githubusercontent.com`;
+no userinfo, port empty or 443), verifies it against the release's
+`SHA256SUMS` (the same allowlist applies to the initial URL and every
+redirect), starts it as a standby
 web-server child, proves that its private Unix-socket protocol is compatible,
 and atomically replaces the installed executable only after size, close,
 checksum, and compatibility checks succeed. The response then commits a

@@ -7,7 +7,7 @@ import (
 	"path"
 	"strings"
 
-	webassets "codeberg.org/chrberger/scimux/web"
+	webassets "github.com/scimux/scimux/web"
 )
 
 // webFS preserves the historic web/... paths at the application boundary even

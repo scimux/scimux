@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // The reported bug: an agent regenerates a file under the same path with new

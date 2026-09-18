@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 func reflectedString(t *testing.T, value any, field string) string {

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // gzipGET issues a GET through the full NewHandler stack (mutation guard + gzip).

@@ -2,7 +2,7 @@
 
 This repository vendors the scimux-rv rendezvous protocol specification
 and its test vectors. The current copy is taken from scimux-rv committed
-revision 27f165d.
+revision f4646e6.
 
 S1 is Gate B. These files are the protocol artifacts, not shipped product
 logic. The Go and WebCrypto acceptance tests bind both sides to the same
@@ -11,8 +11,8 @@ logic. The Go and WebCrypto acceptance tests bind both sides to the same
 ## Source revision
 
 Name the scimux-rv Git object id that produced the vendored bytes. The
-current source is committed revision **27f165d**
-(`27f165d4acaef66ab01e66fbafb68d1ce34d84af`). When rv regenerates
+current source is committed revision **f4646e6**
+(`f4646e6ce94ac0f5d6ebfb81d57ed6fcf35a196a`). When rv regenerates
 vectors, replace that oid with the new committed revision and record it
 here in the same sentence form: “scimux-rv committed revision \<oid\>”.
 
@@ -80,7 +80,7 @@ is absent from that source revision. Run both verification commands.
 2. Byte-copy the specification, `vectors.sha256`, and every vector
    JSON from that commit using the table above.
 3. Record the new concrete committed Git OID in this document (replace
-   `27f165d` in the source-revision paragraph). Do not leave the old
+   `f4646e6` in the source-revision paragraph). Do not leave the old
    oid in place as the current source.
 4. Run both verification commands below. Both must pass against the
    newly copied bytes.

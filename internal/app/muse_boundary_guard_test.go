@@ -501,8 +501,8 @@ func museAppAllowedImport(p string) bool {
 	if museAppAllowedStdlib[p] {
 		return true
 	}
-	if strings.HasPrefix(p, "codeberg.org/chrberger/scimux/internal/") ||
-		p == "codeberg.org/chrberger/scimux/legal" {
+	if strings.HasPrefix(p, "github.com/scimux/scimux/internal/") ||
+		p == "github.com/scimux/scimux/legal" {
 		return true
 	}
 	return false

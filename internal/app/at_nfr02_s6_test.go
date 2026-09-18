@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/legal"
+	"github.com/scimux/scimux/legal"
 )
 
 // AT-NFR-02-a (S6 load-bearing half): AGENTS.md must record pion as a

@@ -55,8 +55,8 @@ const ALLOWLIST = [
    * any wrapper other than assetURL(...) remains a finding. */
 
   /* app.js sets the release-page href from update-check data. The value is
-   * dynamic, and it is EXTERNAL by intent (a codeberg release URL, with a
-   * codeberg fallback) — recorded here with that reason rather than omitted,
+   * dynamic, and it is EXTERNAL by intent (a github release URL, with a
+   * github fallback) — recorded here with that reason rather than omitted,
    * because a dynamic href is exactly what a syntax audit cannot classify. */
   { file: "js/app.js", kind: "dom-url", detail: "prop:href:dynamic", count: 1 },
 

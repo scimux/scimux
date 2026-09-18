@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/notestore"
 )
 
 // patchNote drives handleNotePatch with the id path value set (the mux would

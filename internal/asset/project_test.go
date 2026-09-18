@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 func TestProject_RewritesImageMarker(t *testing.T) {

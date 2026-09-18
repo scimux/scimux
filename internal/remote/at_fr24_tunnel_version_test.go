@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/remote/codec"
+	"github.com/scimux/scimux/internal/remote/codec"
 )
 
 // AT-FR-24-g (tunnel 2.0.0): a MAJOR protocol mismatch is a named FR-24

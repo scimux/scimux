@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/dialoghint"
+	"github.com/scimux/scimux/internal/dialoghint"
 )
 
 // claudeSupervision is the Claude-only UI/server contract. Empty means the

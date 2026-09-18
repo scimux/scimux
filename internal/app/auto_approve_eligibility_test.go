@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // TestEligibleAutoAllowMatrix is the pure policy table for structured

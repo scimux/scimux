@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp/muse"
-	"codeberg.org/chrberger/scimux/internal/backend"
-	"codeberg.org/chrberger/scimux/internal/remote"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/acp/muse"
+	"github.com/scimux/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
 // TestWebGenerationChangePreservesInFlightPermission is the first backend
@@ -208,7 +208,7 @@ func TestWebUpdatePreservesRealSessionWorkerAndPermission(t *testing.T) {
 	// is a tiny launcher for this same test binary, not a fake supervisor call.
 	launcher := []byte("#!/bin/sh\nSCIMUX_WEB_CHILD_TEST_VERSION=v9.9.9 exec \"" + strings.ReplaceAll(exe, "\"", "\\\"") + "\" \"$@\"\n")
 	assetName := "scimux-" + goosArch()
-	releases := fakeForgejo(t, "v9.9.9", map[string][]byte{
+	releases := fakeGitHub(t, "v9.9.9", map[string][]byte{
 		assetName: launcher, "SHA256SUMS": []byte(shaSums(assetName, launcher)),
 	})
 	withUpdateSeams(t, releases.URL, "v1.0.0")

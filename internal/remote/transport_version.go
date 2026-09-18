@@ -17,7 +17,7 @@ import (
 	"errors"
 	"fmt"
 
-	"codeberg.org/chrberger/scimux/internal/remote/codec"
+	"github.com/scimux/scimux/internal/remote/codec"
 )
 
 // ClassTunnelVersion is the transport class for a MAJOR protocol mismatch.

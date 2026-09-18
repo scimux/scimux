@@ -34,7 +34,7 @@ import (
 	"sort"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // claudeAskedTTL bounds how long a notice may stand. It is a leak backstop,

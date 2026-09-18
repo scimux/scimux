@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // storedEnrollmentKeypair is a deterministic Ed25519 identity used only by

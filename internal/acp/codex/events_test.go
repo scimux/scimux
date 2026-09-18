@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 func TestDecodeAgentDelta(t *testing.T) {

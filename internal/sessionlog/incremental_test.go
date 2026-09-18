@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/fare"
+	"github.com/scimux/scimux/internal/fare"
 )
 
 // Stage B — incremental tail parse. Every product after every append must

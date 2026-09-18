@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // fakePairingClient is the in-process hostedPairingClient used by the S8

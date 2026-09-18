@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/dialoghint"
+	"github.com/scimux/scimux/internal/dialoghint"
 )
 
 func TestClaudeLaunchDoesNotUseBridgeStatus(t *testing.T) {

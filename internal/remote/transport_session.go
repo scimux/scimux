@@ -20,7 +20,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"codeberg.org/chrberger/scimux/internal/remote/codec"
+	"github.com/scimux/scimux/internal/remote/codec"
 )
 
 // tunnelChannelLabel is the single data channel every session opens. One

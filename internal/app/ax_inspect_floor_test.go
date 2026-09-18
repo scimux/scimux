@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // The stall ladder: AX is exactly one rung slower than non-AX, and the cancel

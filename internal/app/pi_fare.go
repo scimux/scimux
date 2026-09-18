@@ -17,8 +17,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // piFareMirror is one pi node's native-usage projection state. Owned by the

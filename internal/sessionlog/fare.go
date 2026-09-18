@@ -1,7 +1,7 @@
 package sessionlog
 
 import (
-	"codeberg.org/chrberger/scimux/internal/fare"
+	"github.com/scimux/scimux/internal/fare"
 )
 
 // ReadFare folds the whole session-log journey into canonical fare totals:

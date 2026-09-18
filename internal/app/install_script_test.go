@@ -35,7 +35,7 @@ func (s *installServer) handler(asset string) http.Handler {
 		p := r.URL.Path
 		switch {
 		case strings.HasSuffix(p, "/releases/latest"):
-			http.Redirect(w, r, "/chrberger/scimux/releases/tag/"+s.tag, http.StatusSeeOther)
+			http.Redirect(w, r, "/scimux/scimux/releases/tag/"+s.tag, http.StatusSeeOther)
 		case strings.Contains(p, "/releases/tag/"):
 			fmt.Fprintf(w, "release %s", s.tag)
 		case strings.HasSuffix(p, "/SHA256SUMS"):
@@ -82,7 +82,7 @@ func runInstallScript(t *testing.T, s *installServer, dir string, args ...string
 	cmd.Env = append(os.Environ(),
 		"HOME="+t.TempDir(),
 		"SCIMUX_INSTALL_DIR="+dir,
-		"SCIMUX_REPO_URL="+srv.URL+"/chrberger/scimux",
+		"SCIMUX_REPO_URL="+srv.URL+"/scimux/scimux",
 	)
 	b, err := cmd.CombinedOutput()
 	return string(b), err

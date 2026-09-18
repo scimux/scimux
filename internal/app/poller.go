@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/dialoghint"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/dialoghint"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Lock ownership for the poll path (existing behavior; do not change locking

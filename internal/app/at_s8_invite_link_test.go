@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // The mint response must carry the invite link (rendezvous-v1 §11.1).

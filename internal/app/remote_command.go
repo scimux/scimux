@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // errFlagsReported marks an argv error the FlagSet has already reported to

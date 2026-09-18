@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // AT-int-a: Two pion peers in-process drive a real /api/state through

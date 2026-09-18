@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // attachRefRE matches the plain-text attachment marker extendPrompt appends

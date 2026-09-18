@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp/codex"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/acp/codex"
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
 // Timeout budgets for the Claude first-turn delivery tests.

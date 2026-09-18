@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 func TestMetaHeaderRoundTrip(t *testing.T) {

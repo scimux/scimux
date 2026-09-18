@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 func TestS5R5_F2_HostedStatusWaitChallengeTransitions(t *testing.T) {

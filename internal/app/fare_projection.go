@@ -10,7 +10,7 @@ package app
 // capsule/callout (V2-P4); v1 fareLineHTML is retired.
 
 import (
-	"codeberg.org/chrberger/scimux/internal/fare"
+	"github.com/scimux/scimux/internal/fare"
 )
 
 // fareAndRides returns whole-journey totals and per-segment rides (V2-P2).

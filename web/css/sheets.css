@@ -117,6 +117,11 @@
    sheet — it is a standing fact, not a warning, and styling it as an alert
    would make it read as something to dismiss. */
 #m_affil { color: var(--dim); font-size: 12px; line-height: 1.45; margin: 2px 0 10px; }
+/* Authorship disclosure belongs immediately under the author rather than in
+   the third-party licence list: the named agents helped realise scimux, but
+   they are neither authors nor shipped dependencies. */
+#m_ai_engineering { color: var(--dim); font-size: 12px; line-height: 1.45;
+  margin: -2px 0 10px; }
 .sheet .pos-item { display: flex; gap: 10px; align-items: center; min-height: 44px; margin: 6px 0; font-size: 14px; }
 .sheet .pos-item .d { color: var(--dim); font-size: 12px; flex: none; }
 /* send-to group headers — rendered only when both blocks exist, so the split

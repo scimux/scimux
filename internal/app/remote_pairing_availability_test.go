@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // notEnrolledStatuses are the hosted values that mean "there is no identity

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
-	"codeberg.org/chrberger/scimux/internal/remote"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 func TestSplitRuntimeCompositionAndShutdown(t *testing.T) {

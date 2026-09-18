@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// releaseUploadServer is a Codeberg release API just real enough to answer the
+// releaseUploadServer is a GitHub release API just real enough to answer the
 // script: it hands out a release id, records what was uploaded, and lets a
 // test decide what the asset endpoint says.
 type releaseUploadServer struct {
@@ -32,10 +32,7 @@ func (s *releaseUploadServer) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		switch {
-		case strings.HasSuffix(path, "/releases/tags/v-test"):
-			// No such release yet, so the script creates one.
-			w.Write([]byte(`{}`))
-		case strings.HasSuffix(path, "/releases") && r.Method == http.MethodPost:
+		case strings.HasSuffix(path, "/releases/tags/v1.2.3"):
 			w.Write([]byte(`{"id": 42}`))
 		case strings.HasSuffix(path, "/releases/42/assets") && r.Method == http.MethodPost:
 			name := r.URL.Query().Get("name")
@@ -86,11 +83,13 @@ func runReleaseScript(t *testing.T, s *releaseUploadServer) (string, error) {
 			t.Fatal(err)
 		}
 	}
-	script := filepath.Join(repoRootFromTest(t), ".forgejo", "codeberg-release.sh")
-	cmd := exec.Command("bash", script, "v-test", dir)
+	script := filepath.Join(repoRootFromTest(t), ".github", "github-release.sh")
+	cmd := exec.Command("bash", script, "v1.2.3", dir)
 	cmd.Env = append(os.Environ(),
-		"CODEBERG_TOKEN=test-token",
-		"CODEBERG_API="+srv.URL+"/api/v1",
+		"GITHUB_RELEASE_TOKEN=test-token",
+		"GITHUB_REPOSITORY=scimux/scimux",
+		"GITHUB_API_URL="+srv.URL,
+		"GITHUB_UPLOAD_URL="+srv.URL,
 	)
 	b, err := cmd.CombinedOutput()
 	return string(b), err

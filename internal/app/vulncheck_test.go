@@ -12,8 +12,8 @@ import (
 // an advisory published after a green build gets noticed at all, and the
 // release lane is the last point before users download the result.
 var vulncheckWorkflows = []string{
-	".forgejo/workflows/build.yml",
-	".forgejo/workflows/release.yml",
+	".github/workflows/build.yml",
+	".github/workflows/release.yml",
 }
 
 // A scanner whose findings nobody acts on is a report, not a gate. This pins
@@ -49,11 +49,11 @@ func TestWorkflowsGateOnAVulnerabilityScan(t *testing.T) {
 // result can only be an apology.
 func TestReleaseScansBeforeItPublishes(t *testing.T) {
 	root := repoRootFromTest(t)
-	body := stripYAMLComments(mustReadFile(t, filepath.Join(root, ".forgejo/workflows/release.yml")))
+	body := stripYAMLComments(mustReadFile(t, filepath.Join(root, ".github/workflows/release.yml")))
 	scan := strings.Index(body, "govulncheck")
-	publish := strings.Index(body, "codeberg-release.sh")
+	publish := strings.Index(body, "github-release.sh")
 	if publish < 0 {
-		t.Fatal("release.yml no longer calls codeberg-release.sh; this guard needs rewriting, not deleting")
+		t.Fatal("release.yml no longer calls github-release.sh; this guard needs rewriting, not deleting")
 	}
 	if scan < 0 || scan > publish {
 		t.Fatal("release.yml publishes artifacts before it scans them, so the scan gates nothing")

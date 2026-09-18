@@ -2,9 +2,11 @@ on:
   push:
     branches:
       - "**"
+permissions:
+  contents: read
 jobs:
   build-and-test:
-    runs-on: go-builder
+    runs-on: [self-hosted, linux, x64, go-builder]
     steps:
       - name: Add missing tools
         run: |
@@ -15,14 +17,21 @@ jobs:
         # any shell parses it, so it must never appear inside a run block:
         # the value reaches the shell as a variable instead.
         env:
+          GITHUB_CLONE_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -eu
-          git clone https://codeberg.org/chrberger/scimux.git .
           case "$COMMIT_SHA" in
             *[!0-9a-f]* | "") echo "not a commit id: $COMMIT_SHA" >&2; exit 1 ;;
           esac
-          git checkout "$COMMIT_SHA"
+          case "$GITHUB_CLONE_TOKEN" in
+            ''|*[!0-9A-Za-z_]*) echo "GITHUB_CLONE_TOKEN must be a GitHub repository token" >&2; exit 1 ;;
+          esac
+          GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
+            -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "%s\n" "username=x-access-token" "password=$GITHUB_CLONE_TOKEN"; fi; }; f' \
+            clone https://github.com/scimux/scimux.git .
+          unset GITHUB_CLONE_TOKEN
+          git checkout --detach "$COMMIT_SHA"
           mkdir -p builds
 
       # A vulnerability gate, not a vulnerability report. govulncheck's JSON

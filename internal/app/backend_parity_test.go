@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/backend"
 )
 
 // TestLegacyAndSplitPublicSurfacesMatch runs the characterized monolith and
@@ -19,7 +19,7 @@ import (
 // web UI routes drives the comparison, so adding a UI-callable REST path adds
 // a parity case automatically rather than relying on a hand-maintained list.
 func TestLegacyAndSplitPublicSurfacesMatch(t *testing.T) {
-	release := fakeForgejo(t, "v1.0.0", nil)
+	release := fakeGitHub(t, "v1.0.0", nil)
 	withUpdateSeams(t, release.URL, "v1.0.0")
 
 	legacyApp := newTestApp(t, &fakeTmux{})

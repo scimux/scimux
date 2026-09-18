@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
 // probeTmux is a real tmux on a private random socket. The probe launches a

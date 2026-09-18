@@ -26,7 +26,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/notestore"
 )
 
 // TestPublicRouteNotesLifecycle exercises the complete notes route family
@@ -161,14 +161,14 @@ func jsonQuote(s string) string {
 
 // TestPublicRouteUpdateCheckAndApplyValidation exercises update routes through
 // NewHandler only:
-//   - GET /api/update/check against a private httptest Forgejo
+//   - GET /api/update/check against a private httptest GitHub
 //   - POST /api/update only through the pre-network missing/empty expected_tag path
 //
 // Detailed download/checksum/install/refusal coverage stays in update_test.go.
 // Process-global update seams are sequential (no t.Parallel).
 func TestPublicRouteUpdateCheckAndApplyValidation(t *testing.T) {
 	// Do not run in parallel: withUpdateSeams mutates package-level releaseAPIBase/version.
-	srv := fakeForgejo(t, "v9.9.9", nil)
+	srv := fakeGitHub(t, "v9.9.9", nil)
 	withUpdateSeams(t, srv.URL, "v1.0.0")
 
 	a := newTestApp(t, &fakeTmux{})

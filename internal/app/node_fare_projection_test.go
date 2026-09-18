@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // TestNodeProjection_FareFieldsPopulated: a node whose session log has usage

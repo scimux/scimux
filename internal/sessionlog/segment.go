@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Segment is the log's tail after its last source seam — "the current

@@ -20,7 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // claudeElicitationHookCmd is the hidden helper argv token for both

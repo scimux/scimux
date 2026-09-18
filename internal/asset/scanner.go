@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // Candidate is a local-path reference found in a turn, before eligibility

@@ -21,13 +21,13 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
-	"codeberg.org/chrberger/scimux/internal/acp/codex"
+	"github.com/scimux/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/acp/codex"
 )
 
-// fakeForgejo serves /releases/latest plus the named assets, mimicking the
-// Codeberg release API shape the updater consumes.
-func fakeForgejo(t *testing.T, tag string, assets map[string][]byte) *httptest.Server {
+// fakeGitHub serves /releases/latest plus the named assets, mimicking the
+// GitHub release API shape the updater consumes.
+func fakeGitHub(t *testing.T, tag string, assets map[string][]byte) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -58,7 +58,7 @@ func fakeForgejo(t *testing.T, tag string, assets map[string][]byte) *httptest.S
 }
 
 // allowTestServerPolicy trusts only the given httptest server's host (HTTP or
-// TLS). Production Codeberg policy is never weakened globally.
+// TLS). Production GitHub policy is never weakened globally.
 func allowTestServerPolicy(t *testing.T, srv *httptest.Server) releaseDownloadPolicy {
 	t.Helper()
 	base, err := url.Parse(srv.URL)
@@ -102,7 +102,7 @@ func withTestAssetPolicy(t *testing.T, srv *httptest.Server) {
 }
 
 func TestUpdateCheck(t *testing.T) {
-	srv := fakeForgejo(t, "v9.9.9", nil)
+	srv := fakeGitHub(t, "v9.9.9", nil)
 	for _, tc := range []struct {
 		current   string
 		available bool
@@ -161,7 +161,7 @@ func TestUpdateApplyInstallsVerifiedBinary(t *testing.T) {
 	name := "scimux-" + goosArch()
 	sum := sha256.Sum256(newBin)
 	sums := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), name)
-	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+	srv := fakeGitHub(t, "v9.9.9", map[string][]byte{
 		name: newBin, "SHA256SUMS": []byte(sums),
 	})
 	withUpdateSeams(t, srv.URL, "v1.0.0")
@@ -204,7 +204,7 @@ func TestUpdateApplyInstallsVerifiedBinary(t *testing.T) {
 }
 
 func TestUpdateApplyUsesActiveWebVersion(t *testing.T) {
-	srv := fakeForgejo(t, "v9.9.9", nil)
+	srv := fakeGitHub(t, "v9.9.9", nil)
 	withUpdateSeams(t, srv.URL, "v1.0.0")
 	a := newUpdateTestApp(t)
 	a.runtimeStatus = &muxerRuntimeStatus{version: "v9.9.9"}
@@ -219,7 +219,7 @@ func TestUpdateApplyUsesActiveWebVersion(t *testing.T) {
 func TestUpdateApplyPreparesThenCommitsWebOnly(t *testing.T) {
 	newBin := []byte("new split web binary")
 	name := "scimux-" + goosArch()
-	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+	srv := fakeGitHub(t, "v9.9.9", map[string][]byte{
 		name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
 	})
 	withUpdateSeams(t, srv.URL, "v1.0.0")
@@ -267,7 +267,7 @@ func TestUpdateApplyPreparesThenCommitsWebOnly(t *testing.T) {
 func TestUpdateApplyPreparationFailureLeavesRunningWebAlone(t *testing.T) {
 	newBin := []byte("verified but incompatible web binary")
 	name := "scimux-" + goosArch()
-	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+	srv := fakeGitHub(t, "v9.9.9", map[string][]byte{
 		name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
 	})
 	withUpdateSeams(t, srv.URL, "v1.0.0")
@@ -297,7 +297,7 @@ func TestUpdateApplyPreparationFailureLeavesRunningWebAlone(t *testing.T) {
 
 func TestUpdateApplyChecksumMismatchLeavesBinary(t *testing.T) {
 	name := "scimux-" + goosArch()
-	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+	srv := fakeGitHub(t, "v9.9.9", map[string][]byte{
 		name:         []byte("tampered payload"),
 		"SHA256SUMS": []byte(strings.Repeat("0", 64) + "  " + name + "\n"),
 	})
@@ -333,7 +333,7 @@ func TestUpdateApplyChecksumMismatchLeavesBinary(t *testing.T) {
 }
 
 func TestUpdateApplyRefusesDevAndCurrent(t *testing.T) {
-	srv := fakeForgejo(t, "v9.9.9", nil)
+	srv := fakeGitHub(t, "v9.9.9", nil)
 	a := newUpdateTestApp(t)
 	for _, current := range []string{"dev", "v9.9.9"} {
 		withUpdateSeams(t, srv.URL, current)
@@ -348,7 +348,7 @@ func TestUpdateApplyRefusesDevAndCurrent(t *testing.T) {
 // The apply must refuse when no expected_tag is sent, and when the tag the user
 // confirmed no longer matches the latest release (pinned, intentional update).
 func TestUpdateApplyPinsExpectedTag(t *testing.T) {
-	srv := fakeForgejo(t, "v9.9.9", nil)
+	srv := fakeGitHub(t, "v9.9.9", nil)
 	a := newUpdateTestApp(t)
 	withUpdateSeams(t, srv.URL, "v1.0.0")
 
@@ -422,6 +422,25 @@ func TestAboutSheetNamesEveryEmbeddedLicense(t *testing.T) {
 	for key := range shown {
 		if _, ok := served[key]; !ok {
 			t.Errorf("About sheet offers license %q but /api/licenses does not serve it; the sheet would open empty", key)
+		}
+	}
+}
+
+func TestAboutSheetDisclosesAIEnabledEngineeringUnderAuthor(t *testing.T) {
+	index, err := webFS.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(index)
+	author := strings.Index(html, "Christian Berger")
+	disclosure := strings.Index(html, "AI-enabled Software Engineering")
+	source := strings.Index(html, `<span>Source</span>`)
+	if author < 0 || disclosure < 0 || source < 0 || !(author < disclosure && disclosure < source) {
+		t.Fatalf("About disclosure must appear directly after the author and before Source")
+	}
+	for _, agent := range []string{"Claude", "Codex", "Grok"} {
+		if !strings.Contains(html[disclosure:source], agent) {
+			t.Errorf("About AI-enabled engineering disclosure does not name %s", agent)
 		}
 	}
 }
@@ -778,7 +797,7 @@ func TestDownloadInjectedClientCannotBypassRedirectPolicy(t *testing.T) {
 func TestUpdateApplySmallVerifiedPayload(t *testing.T) {
 	newBin := []byte("tiny-ok")
 	name := "scimux-" + goosArch()
-	srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+	srv := fakeGitHub(t, "v9.9.9", map[string][]byte{
 		name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
 	})
 	withUpdateSeams(t, srv.URL, "v1.0.0")
@@ -877,7 +896,7 @@ func TestUpdateFailureCleanupMatrix(t *testing.T) {
 				p := productionReleasePolicy()
 				p.MaxBytes = 64
 				_, err := downloadVerifiedWith(context.Background(), p,
-					"http://codeberg.org/assets/bin", shaSums("bin", []byte("x")), "bin", exe)
+					"http://github.com/assets/bin", shaSums("bin", []byte("x")), "bin", exe)
 				if err == nil {
 					t.Fatal("want URL rejection")
 				}
@@ -947,7 +966,7 @@ func TestUpdateFailureCleanupMatrix(t *testing.T) {
 			run: func(t *testing.T, dir, exe string) {
 				p := productionReleasePolicy()
 				// Direct validation of the hostile URL (suffix host).
-				err := p.validateURL("https://codeberg.org.evil.example/assets/bin")
+				err := p.validateURL("https://github.com.evil.example/assets/bin")
 				if err == nil {
 					t.Fatal("suffix host must be rejected")
 				}
@@ -1019,7 +1038,7 @@ func TestUpdateFailureCleanupMatrix(t *testing.T) {
 			run: func(t *testing.T, dir, exe string) {
 				newBin := []byte("chmod-fail-bin")
 				name := "scimux-" + goosArch()
-				srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+				srv := fakeGitHub(t, "v9.9.9", map[string][]byte{
 					name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
 				})
 				withUpdateSeams(t, srv.URL, "v1.0.0")
@@ -1050,7 +1069,7 @@ func TestUpdateFailureCleanupMatrix(t *testing.T) {
 			run: func(t *testing.T, dir, exe string) {
 				newBin := []byte("rename-fail-bin")
 				name := "scimux-" + goosArch()
-				srv := fakeForgejo(t, "v9.9.9", map[string][]byte{
+				srv := fakeGitHub(t, "v9.9.9", map[string][]byte{
 					name: newBin, "SHA256SUMS": []byte(shaSums(name, newBin)),
 				})
 				withUpdateSeams(t, srv.URL, "v1.0.0")
@@ -1108,10 +1127,12 @@ func TestUpdateFailureCleanupMatrix(t *testing.T) {
 
 func TestProductionAssetURLPolicy(t *testing.T) {
 	p := productionReleasePolicy()
-	// Accepts canonical Codeberg HTTPS asset URL (no port / :443).
+	// Accepts canonical GitHub HTTPS asset URL (no port / :443).
 	for _, ok := range []string{
-		"https://codeberg.org/chrberger/scimux/releases/download/v1.0.0/scimux-linux-amd64",
-		"https://codeberg.org:443/chrberger/scimux/releases/download/v1.0.0/SHA256SUMS",
+		"https://github.com/scimux/scimux/releases/download/v1.0.0/scimux-linux-amd64",
+		"https://github.com:443/scimux/scimux/releases/download/v1.0.0/SHA256SUMS",
+		"https://release-assets.githubusercontent.com/github-production-release-asset/1/example",
+		"https://release-assets.githubusercontent.com:443/github-production-release-asset/1/example",
 	} {
 		if err := p.validateURL(ok); err != nil {
 			t.Errorf("accept %s: %v", ok, err)
@@ -1119,12 +1140,14 @@ func TestProductionAssetURLPolicy(t *testing.T) {
 	}
 	// Rejects.
 	for _, bad := range []string{
-		"http://codeberg.org/x",
+		"http://github.com/x",
 		"https://evil.example/x",
-		"https://codeberg.org.evil.example/x",
-		"https://user@codeberg.org/x",
-		"https://codeberg.org:8443/x",
-		"https://user:pass@codeberg.org/x",
+		"https://github.com.evil.example/x",
+		"https://release-assets.githubusercontent.com.evil.example/x",
+		"https://user@github.com/x",
+		"https://user@release-assets.githubusercontent.com/x",
+		"https://github.com:8443/x",
+		"https://user:pass@github.com/x",
 	} {
 		if err := p.validateURL(bad); err == nil {
 			t.Errorf("reject %s: got nil", bad)

@@ -16,7 +16,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"codeberg.org/chrberger/scimux/internal/remote/codec"
+	"github.com/scimux/scimux/internal/remote/codec"
 )
 
 // Data-channel write sizing. dcMaxMessage is well under the 64 KiB an SCTP

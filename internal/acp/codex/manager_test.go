@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/agentperm"
+	"github.com/scimux/scimux/internal/agentperm"
 )
 
 // newManagerWithMock builds a Manager whose SpawnFunc returns an in-process

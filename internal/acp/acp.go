@@ -36,10 +36,10 @@ import (
 
 	sdk "github.com/coder/acp-go-sdk"
 
-	"codeberg.org/chrberger/scimux/internal/agentperm"
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/agentperm"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Errors returned to the HTTP layer so it can pick a status code.

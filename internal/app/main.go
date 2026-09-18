@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // version is set by the command package, whose symbol is stamped at build time

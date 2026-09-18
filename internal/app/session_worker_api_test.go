@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 func TestStructuredWorkerInspectFallsBackToCanonicalSessionLog(t *testing.T) {

@@ -28,13 +28,13 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/dialoghint"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/dialoghint"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // segment returns the node's current conversation — the session log's tail

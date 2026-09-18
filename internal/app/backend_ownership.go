@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/backend"
 )
 
 // muxerBackend owns global metadata and the private routing registry. Each

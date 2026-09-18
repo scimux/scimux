@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 const (

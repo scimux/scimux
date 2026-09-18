@@ -118,7 +118,7 @@ export const CANNED = Object.freeze({
     current: "1.0",
     latest: "2.0",
     available: true,
-    url: "https://codeberg.org/chrberger/scimux/releases",
+    url: "https://github.com/scimux/scimux/releases",
     notes: "",
   },
   update: {},

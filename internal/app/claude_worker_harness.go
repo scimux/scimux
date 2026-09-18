@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/dialoghint"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/dialoghint"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
 var errClaudeWorkerConflict = errors.New("claude session worker: state conflict")

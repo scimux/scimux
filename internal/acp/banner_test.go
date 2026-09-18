@@ -13,8 +13,8 @@ import (
 	"context"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	sdk "github.com/coder/acp-go-sdk"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 func TestCaptureBannerNamespacedPiMeta(t *testing.T) {

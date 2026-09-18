@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // claudeCompactHookCmd is the hidden helper argv token for both PreCompact

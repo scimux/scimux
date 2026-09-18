@@ -27,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // flagCommand runs argv through Command.Run and hands back the command, the

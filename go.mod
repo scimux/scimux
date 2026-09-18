@@ -1,4 +1,4 @@
-module codeberg.org/chrberger/scimux
+module github.com/scimux/scimux
 
 go 1.26.0
 

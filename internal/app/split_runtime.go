@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/backend"
 )
 
 // splitRuntime is the process boundary in one place: the muxer, its private

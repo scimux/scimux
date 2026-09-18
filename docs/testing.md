@@ -30,17 +30,17 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   `case` arm is not enough on its own, because a shell glob's `*` matches
   shell syntax too. `internal/app/workflow_injection_test.go` pins all three.
 - The release matrix is not written down twice: `TestCrossBuildTargets` parses
-  the `GOOS=… GOARCH=…` pairs out of `.forgejo/workflows/{build,release}.yml`,
+  the `GOOS=… GOARCH=…` pairs out of `.github/workflows/{build,release}.yml`,
   so a target added to a workflow is defended from that moment. freebsd/amd64
   is built but deliberately not released — it keeps the static-build invariant
   honest.
 - Release builds and publication are separate jobs with a same-workflow
-  artifact handoff. The build job has no publication secret; the fresh publish
+  artifact handoff. The build job has read-only repository permission; the fresh publish
   job accepts only the closed binary inventory, verifies `SHA256SUMS`, and only
-  then exposes the release token to the reviewed upload script. Forgejo upload
+  then exposes the release token to the reviewed upload script. GitHub upload
   and download actions are pinned to commits
-  `16871d9e8cfcf27ff31822cac382bbb5450f1e1e` and
-  `d8d0a99033603453ad2255e58720b460a0555e1e`. The operator must configure the
+  `ea165f8d65b6e75b540449e92b4886f43607fa02` and
+  `d3f86a106a0bac45b974a628896c90dbdf5c8093`. The operator must configure the
   `release-publisher` runner as a fresh environment. Runner labels do not grant
   authorization; repository write access remains maintainer-only.
 - Integration tests create private, randomly named tmux sockets and never

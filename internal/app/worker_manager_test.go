@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 func syntheticWorkerManager(t *testing.T, data string) *workerManager {

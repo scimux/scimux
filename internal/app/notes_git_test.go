@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/notestore"
 )
 
 // requireGit skips when git is not on PATH. Git is present in the CI image

@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/backend"
 )
 
 const stopCmd = "stop"

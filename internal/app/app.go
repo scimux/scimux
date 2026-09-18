@@ -9,15 +9,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
-	"codeberg.org/chrberger/scimux/internal/acp/codex"
-	"codeberg.org/chrberger/scimux/internal/acp/muse"
-	"codeberg.org/chrberger/scimux/internal/agentperm"
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/notestore"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/acp/codex"
+	"github.com/scimux/scimux/internal/acp/muse"
+	"github.com/scimux/scimux/internal/agentperm"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 type Config struct {

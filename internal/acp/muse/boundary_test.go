@@ -120,7 +120,7 @@ func TestBoundaryRejectsDotlessThirdPartyImport(t *testing.T) {
 	if allowedImport("github.com/coder/acp-go-sdk") {
 		t.Fatal("ACP SDK must be rejected")
 	}
-	if !allowedImport("fmt") || !allowedImport("codeberg.org/chrberger/scimux/internal/sessionlog") {
+	if !allowedImport("fmt") || !allowedImport("github.com/scimux/scimux/internal/sessionlog") {
 		t.Fatal("allowlist rejected a genuine production import")
 	}
 }
@@ -239,10 +239,10 @@ var allowedStdlibImports = map[string]bool{
 }
 
 var allowedInternalImports = map[string]bool{
-	"codeberg.org/chrberger/scimux/internal/agentperm":  true,
-	"codeberg.org/chrberger/scimux/internal/asset":      true,
-	"codeberg.org/chrberger/scimux/internal/sessionlog": true,
-	"codeberg.org/chrberger/scimux/internal/transcript": true,
+	"github.com/scimux/scimux/internal/agentperm":  true,
+	"github.com/scimux/scimux/internal/asset":      true,
+	"github.com/scimux/scimux/internal/sessionlog": true,
+	"github.com/scimux/scimux/internal/transcript": true,
 }
 
 func allowedImport(p string) bool {

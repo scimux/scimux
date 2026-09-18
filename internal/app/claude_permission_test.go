@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // permBundle builds a bare hook bundle directory with the permission

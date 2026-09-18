@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/backend"
 )
 
 func TestStopCommandE2E(t *testing.T) {

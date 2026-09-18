@@ -8,7 +8,7 @@ import (
 	"sync"
 	"syscall"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/acp"
 )
 
 // Transport is the subprocess seam, mirroring internal/acp's Process. The real

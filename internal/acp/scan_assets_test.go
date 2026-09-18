@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // TestScanAssetsLocked pins the Phase-4 turn-append ingestion gate: nil hook,

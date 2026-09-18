@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 // hostedPairingClient is the pairing API the HTTP routes call. *remote.Client

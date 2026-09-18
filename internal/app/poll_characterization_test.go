@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp/codex"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/acp/codex"
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
 // pollRunner builds a fake-tmux Runner that reports session liveness via

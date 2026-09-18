@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/acp/muse"
-	"codeberg.org/chrberger/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/acp/muse"
+	"github.com/scimux/scimux/internal/backend"
 )
 
 func TestMuxerBackendStatusAndOwnership(t *testing.T) {

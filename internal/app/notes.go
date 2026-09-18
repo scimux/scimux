@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"codeberg.org/chrberger/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/notestore"
 )
 
 // Notes HTTP API (phase 1b of the notes/notes feature). Thin handlers over

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/acp"
 )
 
 // Subscription-usage observability. Best-effort only: missing fields, failed

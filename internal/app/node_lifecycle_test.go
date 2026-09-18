@@ -27,8 +27,8 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"codeberg.org/chrberger/scimux/internal/acp/muse"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/acp/muse"
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
 // ---------- 1. ID allocation matrix ----------

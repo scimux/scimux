@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/agentperm"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
 	sdk "github.com/coder/acp-go-sdk"
+	"github.com/scimux/scimux/internal/agentperm"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // fakeAgent is an in-process ACP agent driven over pipes by the SDK, so tests

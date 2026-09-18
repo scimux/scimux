@@ -20,7 +20,7 @@ func TestWorkflowTestJobsInstallReleaseUploadTools(t *testing.T) {
 		{"release.yml", "build-and-test:"},
 	} {
 		t.Run(lane.file, func(t *testing.T) {
-			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows", lane.file)))
+			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", lane.file)))
 			commands := strings.Join(workflowRunBlocks(workflowJobBlock(t, src, lane.job)), "\n")
 			firstTest := strings.Index(commands, "go test ")
 			if firstTest < 0 {
@@ -112,7 +112,7 @@ func writeLines(t *testing.T, dir string, lines []string) {
 
 func releaseVerifyScript(t *testing.T) string {
 	t.Helper()
-	src := mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows/release.yml"))
+	src := mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml"))
 	marker := "      - name: Verify closed inventory and exact digests"
 	start := strings.Index(src, marker)
 	if start < 0 {
@@ -135,7 +135,7 @@ func releaseVerifyScript(t *testing.T) string {
 }
 
 func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows/release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml")))
 	build := workflowJobBlock(t, src, "build-and-test:")
 	publish := workflowJobBlock(t, src, "publish:")
 
@@ -143,17 +143,17 @@ func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
 		t.Error("publish job must depend on the completed build-and-test job")
 	}
 	for _, pin := range []string{
-		"https://code.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e",
-		"https://code.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e",
+		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
 	} {
 		if !strings.Contains(src, pin) {
-			t.Errorf("release workflow does not use verified Forgejo action pin %q", pin)
+			t.Errorf("release workflow does not use verified GitHub action pin %q", pin)
 		}
 	}
-	if strings.Contains(build, "secrets.") {
+	if strings.Contains(build, "GITHUB_RELEASE_TOKEN") || strings.Contains(build, "contents: write") {
 		t.Error("build-and-test job has a secret in reach")
 	}
-	if !strings.Contains(publish, "CODEBERG_TOKEN: ${{ secrets.CODEBERG_RELEASE_TOKEN }}") {
+	if !strings.Contains(publish, "GITHUB_RELEASE_TOKEN: ${{ github.token }}") {
 		t.Error("only the fresh publish job should receive the release token")
 	}
 	for _, forbidden := range []string{"go test", "go build", "govulncheck", "web/test/"} {
@@ -162,14 +162,14 @@ func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
 		}
 	}
 	verify := strings.Index(publish, "sha256sum -c SHA256SUMS")
-	secret := strings.Index(publish, "secrets.CODEBERG_RELEASE_TOKEN")
+	secret := strings.Index(publish, "GITHUB_RELEASE_TOKEN: ${{ github.token }}")
 	if verify < 0 || secret < 0 || verify > secret {
 		t.Error("downloaded artifact must pass exact digest validation before the release token is exposed")
 	}
 }
 
 func TestReleaseBindsSafeTagToExactCommit(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows/release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml")))
 	build := workflowJobBlock(t, src, "build-and-test:")
 	for _, required := range []string{
 		`grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'`,
@@ -187,7 +187,7 @@ func TestReleaseBindsSafeTagToExactCommit(t *testing.T) {
 }
 
 func TestReleaseArtifactInventoryIsClosed(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows/release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml")))
 	publish := workflowJobBlock(t, src, "publish:")
 	for _, name := range []string{
 		"SHA256SUMS",
@@ -228,14 +228,14 @@ func workflowJobBlock(t *testing.T, src, key string) string {
 // Artifact actions are JavaScript programs. Each fresh Alpine job must install
 // their runtime itself; packages installed in the build job do not reach publish.
 func TestReleaseInstallsNodeBeforeArtifactActions(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".forgejo/workflows", "release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", "release.yml")))
 	for _, lane := range []struct{ job, action string }{
 		{"build-and-test:", "upload-artifact@"},
 		{"publish:", "download-artifact@"},
 	} {
 		t.Run(lane.job, func(t *testing.T) {
 			body := workflowJobBlock(t, src, lane.job)
-			action := strings.Index(body, "uses: https://code.forgejo.org/forgejo/"+lane.action)
+			action := strings.Index(body, "uses: actions/"+lane.action)
 			if action < 0 {
 				t.Fatal("artifact action is missing")
 			}

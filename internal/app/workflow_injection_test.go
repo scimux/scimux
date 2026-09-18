@@ -7,11 +7,11 @@ import (
 )
 
 // Every checked-in CI pipeline. build.yml and offline.yml only clone and
-// test; release.yml also publishes to Codeberg with a token.
+// test; release.yml also publishes to GitHub with a token.
 var allWorkflows = []string{
-	".forgejo/workflows/build.yml",
-	".forgejo/workflows/offline.yml",
-	".forgejo/workflows/release.yml",
+	".github/workflows/build.yml",
+	".github/workflows/offline.yml",
+	".github/workflows/release.yml",
 }
 
 // A `${{ ... }}` expression is substituted **textually** into the script
@@ -64,11 +64,11 @@ func TestWorkflowSecretsAreScopedToTheStepThatSpendsThem(t *testing.T) {
 }
 
 // Routing the ref through `env:` stops it being executed; it does not stop
-// it being wrong. The release lane names a tag to the Codeberg API and
+// it being wrong. The release lane names a tag to the GitHub API and
 // stamps it into every binary, so it bounds what a tag may be before it
 // builds or publishes anything.
 func TestTheReleaseTagIsBoundedBeforeItIsBuiltOrPublished(t *testing.T) {
-	rel := ".forgejo/workflows/release.yml"
+	rel := ".github/workflows/release.yml"
 	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), rel)))
 
 	guard := strings.Index(src, `case "$REF_NAME" in`)
@@ -80,7 +80,7 @@ func TestTheReleaseTagIsBoundedBeforeItIsBuiltOrPublished(t *testing.T) {
 	if !strings.Contains(src, `*[!0-9A-Za-z.-]*)`) {
 		t.Errorf("%s admits a tag containing characters outside 0-9 A-Z a-z . -", rel)
 	}
-	for _, use := range []string{"go build", "codeberg-release.sh"} {
+	for _, use := range []string{"go build", "github-release.sh"} {
 		at := strings.Index(src, use)
 		if at < 0 {
 			t.Fatalf("%s no longer contains %q; this guard needs rewriting, not deleting", rel, use)

@@ -9,11 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
-	"codeberg.org/chrberger/scimux/internal/acp/codex"
-	"codeberg.org/chrberger/scimux/internal/acp/muse"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/acp/codex"
+	"github.com/scimux/scimux/internal/acp/muse"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 // oneSessionHarness narrows the existing multi-node manager interface to the

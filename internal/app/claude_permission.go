@@ -24,7 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // claudePermissionHookCmd is the hidden helper argv token, beside

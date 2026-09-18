@@ -21,10 +21,10 @@ import (
 	"testing"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // seedAttachNode registers a live-looking tmux node without going through create.

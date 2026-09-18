@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp"
-	"codeberg.org/chrberger/scimux/internal/tmuxsession"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/acp"
+	"github.com/scimux/scimux/internal/tmuxsession"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // ---------- node lifecycle ----------

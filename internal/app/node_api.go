@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {

@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 var errNoSessionWorker = errors.New("no live session worker for node")

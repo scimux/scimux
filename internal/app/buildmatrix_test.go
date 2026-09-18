@@ -45,8 +45,8 @@ var goosGoarchRe = regexp.MustCompile(`GOOS=([A-Za-z0-9_]+)\s+GOARCH=([A-Za-z0-9
 // crossBuildWorkflows are the jobs that produce release binaries. The
 // offline job is deliberately not in this list: it never cross-builds.
 var crossBuildWorkflows = []string{
-	filepath.Join(".forgejo", "workflows", "build.yml"),
-	filepath.Join(".forgejo", "workflows", "release.yml"),
+	filepath.Join(".github", "workflows", "build.yml"),
+	filepath.Join(".github", "workflows", "release.yml"),
 }
 
 type crossBuildTarget struct {
@@ -174,7 +174,7 @@ func TestWorkflowsRunTheIntegrationTier(t *testing.T) {
 
 func listWorkflowFiles(t *testing.T, root string) []string {
 	t.Helper()
-	dir := filepath.Join(root, ".forgejo", "workflows")
+	dir := filepath.Join(root, ".github", "workflows")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read %s: %v", dir, err)

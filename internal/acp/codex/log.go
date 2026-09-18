@@ -1,8 +1,8 @@
 package codex
 
 import (
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // The session log machinery lives in internal/sessionlog — one unified

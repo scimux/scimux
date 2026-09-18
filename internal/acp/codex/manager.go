@@ -42,10 +42,10 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/agentperm"
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/agentperm"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Manager owns every codex node's app-server subprocess and JSON-RPC client.

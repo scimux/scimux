@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/remote"
+	"github.com/scimux/scimux/internal/remote"
 )
 
 const s1PairingSAS = "706990"

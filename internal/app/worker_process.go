@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 const (

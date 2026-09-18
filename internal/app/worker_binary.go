@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 // pinWorkerExecutable snapshots the running muxer's own image into a

@@ -1,18 +1,22 @@
 on:
   release:
     types: [published]
+permissions: {}
 jobs:
   # Released source runs without publication credentials. The output crosses
   # to a fresh publisher only through the same-workflow artifact store.
   build-and-test:
-    runs-on: go-builder
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, x64, go-builder]
     env:
-      REF_NAME: ${{ forgejo.ref_name }}
+      REF_NAME: ${{ github.ref_name }}
     steps:
       - name: Add missing build tools
         run: apk add --no-cache bash curl jq file git nodejs
       - name: Clone and bind the release tag to its commit
         env:
+          GITHUB_CLONE_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -eu
@@ -28,7 +32,13 @@ jobs:
           esac
           printf '%s\n' "$REF_NAME" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
             || { echo "not an exact vMAJOR.MINOR.PATCH tag: $REF_NAME" >&2; exit 1; }
-          git clone https://codeberg.org/chrberger/scimux.git .
+          case "$GITHUB_CLONE_TOKEN" in
+            ''|*[!0-9A-Za-z_]*) echo "GITHUB_CLONE_TOKEN must be a GitHub repository token" >&2; exit 1 ;;
+          esac
+          GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
+            -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "%s\n" "username=x-access-token" "password=$GITHUB_CLONE_TOKEN"; fi; }; f' \
+            clone https://github.com/scimux/scimux.git .
+          unset GITHUB_CLONE_TOKEN
           git show-ref --verify --quiet "refs/tags/$REF_NAME" \
             || { echo "release ref is not a repository tag: $REF_NAME" >&2; exit 1; }
           TAG_COMMIT="$(git rev-parse "$REF_NAME^{commit}")"
@@ -63,7 +73,7 @@ jobs:
           sha256sum scimux-darwin-amd64 scimux-darwin-arm64 scimux-linux-amd64 scimux-linux-arm64 > SHA256SUMS
           cat SHA256SUMS
       - name: Hand tested files to the fresh publisher
-        uses: https://code.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: scimux-release-${{ github.sha }}
           path: builds/
@@ -74,12 +84,14 @@ jobs:
   # access remains maintainer-only, and production credentials stay outside CI.
   publish:
     needs: build-and-test
-    runs-on: release-publisher
+    permissions:
+      contents: write
+    runs-on: [self-hosted, linux, x64, release-publisher]
     steps:
       - name: Add publishing tools
         run: apk add --no-cache bash curl jq coreutils nodejs
       - name: Download tested release files
-        uses: https://code.forgejo.org/forgejo/download-artifact@d8d0a99033603453ad2255e58720b460a0555e1e
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: scimux-release-${{ github.sha }}
           path: handoff
@@ -105,6 +117,7 @@ jobs:
           sha256sum -c SHA256SUMS
       - name: Fetch only the reviewed publishing script
         env:
+          GITHUB_CLONE_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -eu
@@ -115,10 +128,18 @@ jobs:
           case "$COMMIT_SHA" in
             *[!0-9a-f]*) echo "not a commit id: $COMMIT_SHA" >&2; exit 1 ;;
           esac
-          curl -fsS -o /tmp/codeberg-release.sh "https://codeberg.org/chrberger/scimux/raw/commit/$COMMIT_SHA/.forgejo/codeberg-release.sh"
-          chmod 0500 /tmp/codeberg-release.sh
+          case "$GITHUB_CLONE_TOKEN" in
+            ''|*[!0-9A-Za-z_]*) echo "GITHUB_CLONE_TOKEN must be a GitHub repository token" >&2; exit 1 ;;
+          esac
+          { printf 'header = "Authorization: Bearer %s"\n' "$GITHUB_CLONE_TOKEN"; \
+            printf 'header = "Accept: application/vnd.github.raw+json"\n'; \
+            printf 'header = "X-GitHub-Api-Version: 2022-11-28"\n'; } | \
+            curl -q --config - -fsS -o /tmp/github-release.sh \
+              "https://api.github.com/repos/scimux/scimux/contents/.github/github-release.sh?ref=$COMMIT_SHA"
+          unset GITHUB_CLONE_TOKEN
+          chmod 0500 /tmp/github-release.sh
       - name: Attach the verified files
         env:
-          CODEBERG_TOKEN: ${{ secrets.CODEBERG_RELEASE_TOKEN }}
-          REF_NAME: ${{ forgejo.ref_name }}
-        run: /tmp/codeberg-release.sh "$REF_NAME" ./handoff
+          GITHUB_RELEASE_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: /tmp/github-release.sh "$REF_NAME" ./handoff

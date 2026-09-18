@@ -1823,7 +1823,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       $("#m_result").hidden = false;
       $("#m_reltext").textContent = updateInfo.available
         ? updateInfo.latest + " available" : "up to date (" + updateInfo.latest + ")";
-      $("#m_relurl").href = updateInfo.url || "https://codeberg.org/chrberger/scimux/releases";
+      $("#m_relurl").href = updateInfo.url || "https://github.com/scimux/scimux/releases";
       $("#m_apply").hidden = !updateInfo.available;
       $("#m_notes").innerHTML = updateInfo.available ? md(updateInfo.notes || "") : "";
       $("#m_notes").hidden = !updateInfo.available || !updateInfo.notes;

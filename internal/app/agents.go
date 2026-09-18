@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/acp/muse"
+	"github.com/scimux/scimux/internal/acp/muse"
 )
 
 // modelEffort is one model's reasoning-effort menu: the levels its CLI accepts

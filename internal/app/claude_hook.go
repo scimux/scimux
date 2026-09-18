@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 // claudeSessionHookCmd is the hidden helper argv token. Product behavior stays

@@ -27,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"codeberg.org/chrberger/scimux/legal"
+	"github.com/scimux/scimux/legal"
 )
 
 // The binary carries its own legal notices (MPL-2.0 §3.2 asks executable
@@ -81,12 +81,12 @@ func handleLicenses(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// releaseAPIBase is a var only so tests can point it at a fake Forgejo.
+// releaseAPIBase is a var only so tests can point it at a fake GitHub.
 // The release *metadata* API host is not the asset download boundary: binary
 // and SHA256SUMS downloads use releaseDownloadPolicy (production: HTTPS
-// codeberg.org only). Tests may point this at httptest without weakening
-// production asset policy.
-var releaseAPIBase = "https://codeberg.org/api/v1/repos/chrberger/scimux"
+// github.com and its dedicated release-asset CDN only). Tests may point this
+// at httptest without weakening production asset policy.
+var releaseAPIBase = "https://api.github.com/repos/scimux/scimux"
 
 // maxUpdateBinaryBytes is the production maximum size of a self-update binary
 // download (256 MiB). Comfortably above current release artifacts; finite so
@@ -94,13 +94,17 @@ var releaseAPIBase = "https://codeberg.org/api/v1/repos/chrberger/scimux"
 // runs. Metadata/SHA256SUMS text retains its own smaller 1 MiB cap in fetchText.
 const maxUpdateBinaryBytes int64 = 256 << 20
 
-// releaseAssetHost is the only hostname production will download update
-// binaries and SHA256SUMS from. Exact match — no suffix tricks, no userinfo,
-// HTTPS only, port empty or 443.
-const releaseAssetHost = "codeberg.org"
+// These are the only hostnames production will download update binaries and
+// SHA256SUMS from. GitHub's browser_download_url starts at github.com and
+// redirects to its dedicated release-asset CDN. Both are exact matches — no
+// suffix tricks, no userinfo, HTTPS only, port empty or 443.
+const (
+	releasePageHost = "github.com"
+	releaseCDNHost  = "release-assets.githubusercontent.com"
+)
 
 // releaseDownloadPolicy bounds and authorizes self-update asset downloads.
-// Production uses allowCodebergAssetURL + maxUpdateBinaryBytes. Tests inject a
+// Production uses allowGitHubAssetURL + maxUpdateBinaryBytes. Tests inject a
 // narrow policy (and optional client for private TLS) via setReleasePolicyForTest;
 // production policy is never globally rewritten to allow arbitrary HTTP.
 type releaseDownloadPolicy struct {
@@ -174,9 +178,9 @@ func (p releaseDownloadPolicy) httpClient() *http.Client {
 	return &http.Client{CheckRedirect: wrap(nil)}
 }
 
-// allowCodebergAssetURL is the fixed production asset URL policy: HTTPS,
-// hostname exactly codeberg.org, no userinfo, port empty or 443.
-func allowCodebergAssetURL(u *url.URL) error {
+// allowGitHubAssetURL is the fixed production asset URL policy: HTTPS, one of
+// the two exact release hosts above, no userinfo, port empty or 443.
+func allowGitHubAssetURL(u *url.URL) error {
 	if u == nil {
 		return errors.New("nil URL")
 	}
@@ -187,8 +191,8 @@ func allowCodebergAssetURL(u *url.URL) error {
 		return errors.New("userinfo not allowed")
 	}
 	host := strings.ToLower(u.Hostname())
-	if host != releaseAssetHost {
-		return fmt.Errorf("host %q not %s", host, releaseAssetHost)
+	if host != releasePageHost && host != releaseCDNHost {
+		return fmt.Errorf("host %q is not a trusted GitHub release host", host)
 	}
 	switch u.Port() {
 	case "", "443":
@@ -200,13 +204,13 @@ func allowCodebergAssetURL(u *url.URL) error {
 
 func productionReleasePolicy() releaseDownloadPolicy {
 	return releaseDownloadPolicy{
-		AllowURL: allowCodebergAssetURL,
+		AllowURL: allowGitHubAssetURL,
 		MaxBytes: maxUpdateBinaryBytes,
 	}
 }
 
 // activeReleasePolicy is the policy handleUpdateApply uses for asset downloads.
-// Tests replace it with setReleasePolicyForTest; production stays Codeberg-only.
+// Tests replace it with setReleasePolicyForTest; production stays GitHub-only.
 var activeReleasePolicy = productionReleasePolicy()
 
 // setReleasePolicyForTest replaces the active download policy; restore via the

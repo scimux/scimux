@@ -4,8 +4,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // agentAssetMaxBytes bounds how large an agent-referenced file scimux will

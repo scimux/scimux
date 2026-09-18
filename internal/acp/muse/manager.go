@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/agentperm"
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/agentperm"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // SpawnFunc launches one Muse transport for a node. Tests inject in-process

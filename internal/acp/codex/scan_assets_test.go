@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/asset"
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/sessionlog"
 )
 
 // TestScanAssetsLocked mirrors the ACP transport's Phase-4 turn-append gate:

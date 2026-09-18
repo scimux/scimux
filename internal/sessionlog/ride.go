@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/fare"
+	"github.com/scimux/scimux/internal/fare"
 )
 
 // ReadRidesBySegment folds per-segment token fare + the v2 time model into

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"codeberg.org/chrberger/scimux/internal/sessionlog"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 func piFareTestApp(t *testing.T) *app {

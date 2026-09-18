@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"codeberg.org/chrberger/scimux/internal/fare"
-	"codeberg.org/chrberger/scimux/internal/transcript"
+	"github.com/scimux/scimux/internal/fare"
+	"github.com/scimux/scimux/internal/transcript"
 )
 
 // LogCache memoizes all four poll-path products of one session log under a
