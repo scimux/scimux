@@ -35,11 +35,11 @@ func TestFR38_RenamePairedDeviceIsDurable(t *testing.T) {
 	if _, err := c.State(); err != nil {
 		t.Fatalf("State: %v", err)
 	}
-	dev, err := c.RenamePairedDevice(context.Background(), rid, "Christian's iPhone")
+	dev, err := c.RenamePairedDevice(context.Background(), rid, "Test User's Phone")
 	if err != nil {
 		t.Fatalf("RenamePairedDevice: %v", err)
 	}
-	if dev.Label != "Christian's iPhone" {
+	if dev.Label != "Test User's Phone" {
 		t.Errorf("returned label = %q, want the new name", dev.Label)
 	}
 	if dev.RID != rid || hex.EncodeToString(dev.PubKey) != hex.EncodeToString(y) {
@@ -50,7 +50,7 @@ func TestFR38_RenamePairedDeviceIsDurable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PairedDevices: %v", err)
 	}
-	if len(list) != 1 || list[0].Label != "Christian's iPhone" {
+	if len(list) != 1 || list[0].Label != "Test User's Phone" {
 		t.Fatalf("list after rename = %+v, want the new name", list)
 	}
 
@@ -65,7 +65,7 @@ func TestFR38_RenamePairedDeviceIsDurable(t *testing.T) {
 	if len(st.Devices) != 1 {
 		t.Fatalf("persisted devices = %d, want 1", len(st.Devices))
 	}
-	if st.Devices[0].Label != "Christian's iPhone" {
+	if st.Devices[0].Label != "Test User's Phone" {
 		t.Errorf("persisted label = %q, want the new name", st.Devices[0].Label)
 	}
 	if st.Devices[0].ECDHPub != hex.EncodeToString(y) || st.Devices[0].PairedAt != at {
@@ -80,7 +80,7 @@ func TestFR38_RenamePairedDeviceIsDurable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PairedDevices: %v", err)
 	}
-	if len(after) != 1 || after[0].Label != "Christian's iPhone" {
+	if len(after) != 1 || after[0].Label != "Test User's Phone" {
 		t.Fatalf("after restart = %+v, want the new name", after)
 	}
 }

@@ -1,17 +1,13 @@
 module codeberg.org/chrberger/scimux
 
-go 1.25.0
+go 1.26.0
 
 // The minimum *patched* toolchain, which the go directive cannot express: that
-// one is the language floor and is satisfied by any 1.25.x, including patches
-// with known defects in crypto/x509, net/http and os. 1.25.13 is the highest
-// fix version govulncheck reports for the stdlib paths this binary reaches.
-//
-// Advisory by design. CI resolves it and builds what users download on a
-// patched toolchain; a developer running GOTOOLCHAIN=local falls back to
-// theirs rather than being stopped, because the gate that must not be dodged
-// is in the workflows, not on the contributor's machine.
-toolchain go1.25.13
+// one is the language floor and is satisfied by any 1.26.x, including patches
+// with known standard-library defects. CI resolves this version and builds what
+// users download on a patched toolchain; a developer running GOTOOLCHAIN=local
+// may still use theirs because the release gate is enforced in the workflows.
+toolchain go1.26.8
 
 // builds/ is the gitignored directory the workflows write release binaries
 // into, and review sandboxes have parked whole GOCACHE trees under it. It
@@ -44,8 +40,8 @@ require (
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )

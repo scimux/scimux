@@ -39,6 +39,7 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	}
 
 	mux := http.NewServeMux()
+	mux.Handle("GET /assets", http.RedirectHandler("/assets/", http.StatusMovedPermanently))
 	mux.Handle("GET /assets/", webHandlers.assets)
 	mux.Handle("GET /css/", webHandlers.css)
 	mux.Handle("GET /js/", webHandlers.js)

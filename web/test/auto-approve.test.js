@@ -60,7 +60,7 @@ test("P4 icons are checked-in SVG constants, not a runtime Font Awesome load", (
   assert.match(appJs, /ICON_WARN/);
   assert.doesNotMatch(appJs, /fontawesome\.com\/.*\.css/);
   assert.doesNotMatch(appJs, /kit\.fontawesome/);
-  assert.doesNotMatch(indexHtml, /fontawesome/i);
+  assert.doesNotMatch(indexHtml, /<(?:link|script)\b[^>]*fontawesome/i);
   assert.match(appJs, /Font Awesome Free/);
   assert.match(appJs, /CC BY 4\.0/);
 });

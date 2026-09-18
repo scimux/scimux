@@ -379,10 +379,12 @@ func TestLicensesEmbedded(t *testing.T) {
 		t.Fatal(err)
 	}
 	for key, marker := range map[string]string{
-		"scimux":    "Mozilla Public License Version 2.0",
-		"acp":       "Apache License",
-		"go":        "The Go Authors",
-		"qrcodegen": "Project Nayuki",
+		"scimux":      "Mozilla Public License Version 2.0",
+		"acp":         "Apache License",
+		"go":          "The Go Authors",
+		"qrcodegen":   "Project Nayuki",
+		"lobeicons":   "LobeHub",
+		"fontawesome": "Fonticons, Inc.",
 	} {
 		if !strings.Contains(got[key], marker) {
 			t.Errorf("license %q does not contain %q", key, marker)

@@ -106,7 +106,7 @@ const RENAME_A = "PATCH /api/remote/devices/dev-a";
 
 const TWO = {
   devices: [
-    { id: "dev-a", label: "Christian's <b>iPhone</b>", paired_at: "2026-08-20T09:00:00Z" },
+    { id: "dev-a", label: "Test User's <b>Phone</b>", paired_at: "2026-08-20T09:00:00Z" },
     { id: "dev-b", label: "iPad", paired_at: "2026-08-21T09:00:00Z" },
   ],
 };
@@ -125,7 +125,7 @@ function setup(routes) {
 test("the list names every paired device and offers each one a revoke", async () => {
   const h = setup({ [LIST]: TWO });
   await h.f.refresh();
-  assert.match(h.html(), /Christian's &lt;b&gt;iPhone&lt;\/b&gt;/,
+  assert.match(h.html(), /Test User's &lt;b&gt;Phone&lt;\/b&gt;/,
     "a device label the phone chose was rendered as markup, or not rendered at all");
   assert.match(h.html(), /iPad/);
   assert.match(h.html(), /data-dev="dev-a"/);
@@ -404,7 +404,7 @@ test("the pencil turns the name into a field holding the name it had", async () 
   await h.f.settled();
   assert.match(h.html(), /class="devnameedit"/, "the pencil did not open an editable name");
   assert.match(h.html(), /data-devname="dev-a"/);
-  assert.match(h.html(), /value="Christian's &lt;b&gt;iPhone&lt;\/b&gt;"/,
+  assert.match(h.html(), /value="Test User's &lt;b&gt;Phone&lt;\/b&gt;"/,
     "the field opened empty, or opened with unescaped markup in it");
   assert.deepEqual(h.api.calls, [LIST], "opening a rename talked to the computer");
   assert.equal(h.host().input.focused, 1, "the field opened without focus, so no keyboard appears");
@@ -443,7 +443,7 @@ test("Escape leaves the name exactly as it was, and says nothing to the computer
   h.host().key("dev-a", "Escape", "something else");
   await h.f.settled();
   assert.deepEqual(h.api.calls, [LIST], "Escape sent the edit anyway");
-  assert.match(h.html(), /Christian's &lt;b&gt;iPhone&lt;\/b&gt;/);
+  assert.match(h.html(), /Test User's &lt;b&gt;Phone&lt;\/b&gt;/);
   assert.doesNotMatch(h.html(), /devnameedit/);
 });
 
@@ -452,7 +452,7 @@ test("a rename that changes nothing is not a request", async () => {
   await h.f.refresh();
   h.host().click("dev-a", "rename");
   await h.f.settled();
-  h.host().key("dev-a", "Enter", "Christian's <b>iPhone</b>");
+  h.host().key("dev-a", "Enter", "Test User's <b>Phone</b>");
   await h.f.settled();
   assert.deepEqual(h.api.calls, [LIST], "an unchanged name still went to the computer");
 });
@@ -465,7 +465,7 @@ test("a rename that fails says so and leaves the old name standing", async () =>
   h.host().key("dev-a", "Enter", "my iPhone");
   await h.f.settled();
   assert.match(h.html(), /could not rename/i);
-  assert.match(h.html(), /Christian's &lt;b&gt;iPhone&lt;\/b&gt;/, "the row kept a name the computer never stored");
+  assert.match(h.html(), /Test User's &lt;b&gt;Phone&lt;\/b&gt;/, "the row kept a name the computer never stored");
 });
 
 test("a name the computer shortened is what the row shows", async () => {

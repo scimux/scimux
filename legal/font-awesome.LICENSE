@@ -1,0 +1,33 @@
+Font Awesome Free icons
+
+Versions used: 6.7.2 and 7.3.1
+Copyright 2024 Fonticons, Inc. (Font Awesome Free 6.7.2)
+Copyright 2026 Fonticons, Inc. (Font Awesome Free 7.3.1)
+https://fontawesome.com
+Source and full Font Awesome Free license:
+https://fontawesome.com/license/free
+
+The icons are licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+This notice covers the Claude, Meta, and OpenAI agent SVGs and the Font
+Awesome interface icons embedded in web/js/app.js. Some icon path data is
+reformatted into inline SVG templates and rendered with scimux's currentColor
+styling; standalone agent SVGs retain their upstream attribution comments.
+
+Brand icons are trademarks of their respective owners. Their use identifies
+the company, product, or service they represent and does not imply endorsement
+by either the trademark holder or Font Awesome.
+
+----------------------------------------------------------------------
+
+Font Awesome Free License — Icons
+
+Font Awesome Free is free, open source, and GPL friendly. You can use it for
+commercial projects, open source projects, or really almost whatever you want.
+Full Font Awesome Free license: https://fontawesome.com/license/free.
+
+The Font Awesome Free download is licensed under a Creative Commons
+Attribution 4.0 International License and applies to all icons packaged as SVG
+and JS file types.

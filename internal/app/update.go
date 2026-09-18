@@ -53,6 +53,9 @@ var (
 	// Vendored Grok, Cursor and DeepSeek SVGs from Lobe Icons; also outside the
 	// Go module graph. One notice covers all three: same project, same MIT licence.
 	lobeIconsLicense = mustEmbeddedLicense("lobe-icons.LICENSE")
+	// Font Awesome agent SVGs and inline interface icon paths are CC BY 4.0.
+	// They are browser assets, so the Go module inventory cannot discover them.
+	fontAwesomeLicense = mustEmbeddedLicense("font-awesome.LICENSE")
 )
 
 func mustEmbeddedLicense(name string) string {
@@ -65,15 +68,16 @@ func mustEmbeddedLicense(name string) string {
 
 func handleLicenses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{
-		"scimux":    ownLicense,
-		"acp":       acpLicense,
-		"go":        goLicense,
-		"pion":      pionLicense,
-		"golangx":   golangXLicense,
-		"uuid":      uuidLicense,
-		"anet":      anetLicense,
-		"qrcodegen": qrcodegenLicense,
-		"lobeicons": lobeIconsLicense,
+		"scimux":      ownLicense,
+		"acp":         acpLicense,
+		"go":          goLicense,
+		"pion":        pionLicense,
+		"golangx":     golangXLicense,
+		"uuid":        uuidLicense,
+		"anet":        anetLicense,
+		"qrcodegen":   qrcodegenLicense,
+		"lobeicons":   lobeIconsLicense,
+		"fontawesome": fontAwesomeLicense,
 	})
 }
 

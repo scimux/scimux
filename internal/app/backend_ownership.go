@@ -56,6 +56,7 @@ func newWebMux(web fs.FS, core http.Handler, pairing hostedPairingClient) (*http
 	remoteHTTP := remoteHandlers{client: func() hostedPairingClient { return pairing }}
 
 	mux := http.NewServeMux()
+	mux.Handle("GET /assets", http.RedirectHandler("/assets/", http.StatusMovedPermanently))
 	mux.Handle("GET /assets/", webHandlers.assets)
 	mux.Handle("GET /css/", webHandlers.css)
 	mux.Handle("GET /js/", webHandlers.js)
