@@ -51,8 +51,8 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   cleanup deletes, and the two helpers assert the removal rather than
   best-effort it — litter nobody is told about is litter nobody clears. Never
   run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`,
-  `cursor-agent`, `dsh`) in tests — wrapped test commands are `bash --norc` or
-  `cat`.
+  `cursor-agent`, `dsh`, `muse`) in tests — wrapped test commands are
+  `bash --norc` or `cat`.
 - The fuzz targets state contracts as properties over all inputs; seed
   corpora run under plain `go test`. `FuzzParseLine` guards defensive parsing in
   `docs/invariants/storage.md`; `FuzzClaudeHookStdin` guards that no Claude hook helper writes to
@@ -63,8 +63,9 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
 ## Fixtures and privacy
 
 - `internal/transcript/testdata/real-*.jsonl`,
-  `internal/acp/codex/testdata/real-*.ndjson` and
-  `internal/acp/testdata/real-*.ndjson` are captured from real CLI runs and
+  `internal/acp/codex/testdata/real-*.ndjson`,
+  `internal/acp/testdata/real-*.ndjson`, and
+  `internal/acp/muse/testdata/real-*.ndjson` are captured from real CLI runs and
   are **gitignored — never commit them**: even scrubbed they are personal
   environment snapshots. Optional replay tests skip when these local files
   are absent. Live capture tools are private maintainer utilities archived
@@ -78,8 +79,8 @@ go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime
   shape we wrote down, so when dsh's wire changes these are what notice — and
   they skip everywhere the capture is absent, which is everywhere but a
   maintainer's machine.
-- The committed fixtures (`claude-session.jsonl`, `codex-rollout.jsonl`,
-  `internal/acp/codex/testdata/synthetic-session.ndjson`,
-  `internal/acp/testdata/synthetic-grok-turn.ndjson`,
-  `internal/acp/testdata/synthetic-dsh-turn.ndjson`) are fully synthetic.
-  Keep them that way; never paste real transcript or wire content into them.
+- Every committed JSONL/NDJSON fixture under `internal/*/testdata` is fully
+  synthetic, including the transcript samples, ACP/Codex protocol samples,
+  `internal/app/testdata/codex-session-sample.jsonl`, and the fare fixtures in
+  `internal/sessionlog/testdata/fare/`. Keep them that way; never paste real
+  transcript or wire content into them.

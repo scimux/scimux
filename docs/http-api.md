@@ -10,10 +10,10 @@ in any release and are only guaranteed to match the scimux version serving
 them. Script against it read-mostly, and prefer `GET /api/state` and the
 per-node reads over anything that mutates.
 
-**Security:** there is no authentication (see "Remote access and security"
-in the README). Anything that can reach the port on an allowed Host can do
-everything listed here, including answering approval prompts. These
-controls protect the loopback/browser boundary; they are not a login.
+**Security:** there is no authentication (see [SECURITY.md](../SECURITY.md)).
+Anything that can reach the port on an allowed Host can do everything listed
+here, including answering approval prompts. These controls protect the
+loopback/browser boundary; they are not a login.
 
 - **Trusted Host.** Every request — the token-bearing index, static files,
   APIs, and 404/405 — is checked against a Host policy derived from `-addr`
@@ -537,7 +537,7 @@ Interrupt the node's in-flight turn.
 ### `POST /api/nodes/{id}/key`
 
 Body: `{"key": "1"}` for ordinary tmux keys, `{"key": "1", "request_id":
-"<opaque>"}` for structured transports (Codex, ACP), or `{"key": "1",
+"<opaque>"}` for structured transports (Codex, ACP, Muse), or `{"key": "1",
 "dialog_id": "<epoch>"}` for a strict Claude permission dialog. Answers a
 dialog. Keys are a whitelist (digits, `y`/`n`, arrows, Tab, Enter, Escape)
 — this endpoint answers prompts, it is not a keystroke injector; anything
@@ -566,11 +566,11 @@ the answer.
 
 Body: `{"enabled": true}`. Arms or disarms the server-owned, one-turn
 auto-approval lease. Supported on the structured transports (Codex
-app-server; Grok, OpenCode, and Pi through ACP; Muse through MSP) and on
-Claude/tmux chats that scimux launched itself — those carry a hook bundle registering a
-`PermissionRequest` hook, which is how a Claude tool call can be answered at
-all. Two cases still return `400` and create no state: a Claude pane scimux
-did not launch before the feature existed, so its
+app-server; pi, opencode, Grok, Cursor, and dsh through ACP; Muse through MSP)
+and on Claude/tmux chats that scimux launched itself — those carry a hook
+bundle registering a `PermissionRequest` hook, which is how a Claude tool call
+can be answered at all. Two cases still return `400` and create no state: a
+Claude pane scimux did not launch before the feature existed, so its
 bundle has no permission rendezvous), and any other unsupported transport.
 The lease is transient. Structured leases are owned by the muxer; Claude's
 lease is owned by its session worker. Restarting that owner clears its lease;

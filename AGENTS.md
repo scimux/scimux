@@ -93,8 +93,10 @@ whose triggers apply, including when changing their tests or instructions.
   Local `real-*` captures remain ignored even after scrubbing; optional replay
   tests skip without them. Public tests never depend on private capture tools.
 - **Tests cannot touch a user's agents.** Never run real agent CLIs in tests;
-  use `bash --norc`, `cat` or fake protocol/helper processes. Integration tests
-  use private random tmux sockets and remove both servers and socket files.
+  this includes `claude`, `codex`, `pi`, `opencode`, `grok`, `cursor-agent`,
+  `dsh`, and `muse`. Use `bash --norc`, `cat` or fake protocol/helper
+  processes. Integration tests use private random tmux sockets and remove both
+  servers and socket files.
   Fuzz crashers are bug reports to fix, never committed fixtures.
 - **Frozen characterization suites.**
   `internal/app/router_characterization_test.go`,

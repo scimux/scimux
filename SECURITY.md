@@ -59,15 +59,14 @@ at the next tag, and "the latest release" stays true.)
 
 - **The unauthenticated local UI.** scimux listens on loopback and has no
   authentication: anyone who can reach the port can read your conversations
-  and answer your agents' prompts. That is a documented non-goal: reaching
-  scimux from elsewhere is a separate, explicit step — an SSH tunnel, or
-  remote access by invite — see "Remote access and security" in the
-  [README](README.md). A way to reach that port *around* the Host and
-  `Sec-Fetch` checks is in scope; the absence of a login is not.
+  and answer your agents' prompts. That is a documented non-goal. A way to
+  reach that port *around* the Host and `Sec-Fetch` checks is in scope; the
+  absence of a login is not. The optional remote-pairing surface has its own
+  in-scope entry above; it does not turn the local HTTP surface into a login.
 - **Binding `-addr` wider than loopback.** Doing so exposes full controller
   access by design, and the README says so.
 - **Bugs in the wrapped agent CLIs** (claude, codex, pi, opencode, grok,
-  cursor-agent, dsh).
+  cursor-agent, dsh, muse).
   Report those to their vendors. Bugs in how *scimux* drives them are in
   scope.
 - **Findings that assume the attacker already has your OS account**, unless

@@ -3,8 +3,8 @@
 # Bootstrap installer for scimux: fetch one release binary, verify it,
 # put it somewhere you can run it. Nothing else.
 #
-#   curl -fsSL https://scimux.com/install | sh
-#   curl -fsSL https://scimux.com/install -o install.sh   # read before running, if you prefer
+#   curl -fsSL https://scimux.ai/install | bash
+#   curl -fsSL https://scimux.ai/install -o install.sh    # read before running, if you prefer
 #   sh install.sh --dry-run                               # say what it would do, install nothing
 #   sh install.sh --version v1.2.3                        # pin a release instead of the latest
 #
@@ -20,13 +20,13 @@
 #
 #   - no sudo: the binary lands in ~/.local/bin, a directory you own
 #   - no PATH edits: it prints the line to add; your shell rc is yours
-#   - no agent CLIs: scimux supervises claude/codex/pi/opencode/grok,
-#     it does not install them and never touches their credentials
+#   - no agent CLIs: scimux supervises claude/codex/pi/opencode/grok/cursor/
+#     dsh/muse; it does not install them and never touches their credentials
 #
 # On integrity, plainly: SHA256SUMS is published by the same release as
 # the binary, so comparing against it catches a truncated or corrupted
 # download -- not a compromised release, and not a compromised
-# scimux.com. Release signing is the actual fix, it is on the v1.0.0
+# scimux.ai. Release signing is the actual fix, it is on the v1.0.0
 # checklist, and it is not live yet: verify_signature() below is where
 # the key goes. Until it holds one, this script is exactly as
 # trustworthy as the domain you piped it from. If that is not good
@@ -181,7 +181,7 @@ staged=""
 # here -- as a warning, never a failure, because installing in the wrong
 # order is allowed.
 found=""
-for cli in claude codex pi opencode grok; do
+for cli in claude codex pi-acp opencode grok cursor-agent dsh muse; do
 	command -v "$cli" >/dev/null 2>&1 && found="$found $cli"
 done
 echo
@@ -189,8 +189,8 @@ echo "installed: $dest"
 if [ -n "$found" ]; then
 	echo "agents found:$found"
 else
-	echo "no agent CLI found (claude, codex, pi, opencode, grok) -- scimux has"
-	echo "nothing to supervise until one is installed and logged in: $REPO_URL#faq"
+	echo "no agent CLI found (claude, codex, pi-acp, opencode, grok, cursor-agent, dsh, muse) -- scimux has"
+	echo "nothing to supervise until one is installed and logged in: $REPO_URL#supported-agent-harnesses"
 fi
 command -v tmux >/dev/null 2>&1 || echo "tmux not found -- needed for Claude Code sessions only"
 case ":$PATH:" in

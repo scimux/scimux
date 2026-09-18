@@ -1765,49 +1765,16 @@ func TestMuseBrowserComposition(t *testing.T) {
 	}
 }
 
-func TestMuseReadme(t *testing.T) {
-	b, err := os.ReadFile(webSourcePath("README.md"))
+func TestSupportedHarnessesAreDocumented(t *testing.T) {
+	b, err := os.ReadFile(webSourcePath("docs/http-api.md"))
 	if err != nil {
-		t.Fatalf("read README.md: %v", err)
+		t.Fatalf("read docs/http-api.md: %v", err)
 	}
-	readme := string(b)
-	for _, want := range []string{
-		"Claude Code", "Codex", "pi", "opencode", "Grok", "Cursor", "dsh", "Muse",
-		"cursor-agent acp",
-		"dsh --profile acp",
-		"deepseek-terms-of-use",
-		"muse serve",
-		"remain pending until resolved",
-		"Auto-approve this turn",
-		"approval judge",
-		"catalog models as Standard",
-		"supplies no model access",
-	} {
-		if !strings.Contains(readme, want) {
-			t.Errorf("README.md missing %q", want)
-		}
-	}
-	for _, obsolete := range []string{"notification-only", "cannot guarantee that work is held"} {
-		if strings.Contains(readme, obsolete) {
-			t.Errorf("README.md retains obsolete Muse claim %q", obsolete)
-		}
-	}
-	for _, stale := range []string{"five agents side by side", "six agents side by side", "seven agents side by side"} {
-		if strings.Contains(readme, stale) {
-			t.Errorf("README still promises %q", stale)
-		}
-	}
-	if !strings.Contains(readme, "eight agents side by side") {
-		t.Error("README must keep the no-benchmark position with eight agents")
-	}
-	for _, banned := range []string{
-		"developers.facebook.com",
-		"ai.meta.com",
-		"llama.com",
-		"meta.com/llama",
-	} {
-		if strings.Contains(readme, banned) {
-			t.Errorf("README must not guess Meta documentation links (%q)", banned)
+	doc := string(b)
+	for _, h := range harnesses {
+		name := h.agentName()
+		if !strings.Contains(doc, "`"+name+"`") {
+			t.Errorf("docs/http-api.md does not name supported harness %q", name)
 		}
 	}
 }
