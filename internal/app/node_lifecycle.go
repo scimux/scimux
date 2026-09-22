@@ -23,6 +23,8 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+const claudeFeedbackSurveySuppression = "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"
+
 // newUUID mints a v4 UUID used as a Claude session id. randSource is a seam so
 // TestNewUUID can force the RNG-failure path. A silent zero/partial UUID on RNG
 // failure would be exactly the kind of identity bug the rest of the code avoids
@@ -97,7 +99,11 @@ func agentCommandClaude(n *Node, addDirs []string, settingsPath string) string {
 	// than pointing at hooks or headless mode. Demoting it to an option would
 	// quietly move scimux's Claude integration off the permitted footing for
 	// whoever turned it off.
-	parts := []string{"claude", "--session-id", n.SessionID, "--ax-screen-reader"}
+	// Keep Anthropic's optional session-quality survey out of supervised panes:
+	// it is neither agent output nor a prompt scimux can safely answer. This
+	// assignment applies only to the Claude process launched by this command and
+	// overrides an inherited value without changing scimux's own environment.
+	parts := []string{claudeFeedbackSurveySuppression, "claude", "--session-id", n.SessionID, "--ax-screen-reader"}
 	if settingsPath != "" {
 		parts = append(parts, "--settings", shellQuote(settingsPath))
 	}

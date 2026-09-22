@@ -384,6 +384,7 @@ func TestLicensesEmbedded(t *testing.T) {
 		"go":          "The Go Authors",
 		"qrcodegen":   "Project Nayuki",
 		"lobeicons":   "LobeHub",
+		"opencode":    "Copyright (c) 2025 opencode",
 		"fontawesome": "Fonticons, Inc.",
 	} {
 		if !strings.Contains(got[key], marker) {

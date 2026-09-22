@@ -524,6 +524,9 @@ func TestCaptureClaudeModelPickerIgnoresAnotherSessionsMarker(t *testing.T) {
 // and a candidate the CLI rejects can change what the picker draws.
 func TestClaudeModelPickerArgvPinsNoModel(t *testing.T) {
 	argv := claudeModelPickerArgv("/probe/settings.json")
+	if !strings.HasPrefix(argv, "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude ") {
+		t.Fatalf("model picker does not suppress the feedback survey: %q", argv)
+	}
 	if !strings.Contains(argv, "--settings "+shellQuote("/probe/settings.json")) {
 		t.Fatalf("argv %q does not install the probe settings", argv)
 	}

@@ -196,6 +196,7 @@ func readClaudeModelMarker(dir string) (claudeModelMarker, bool) {
 // would replace ours, and their hooks have no business firing in a probe.
 func claudeModelProbeArgv(settingsPath, candidate string) string {
 	return strings.Join([]string{
+		claudeFeedbackSurveySuppression,
 		"claude",
 		"--settings", shellQuote(settingsPath),
 		"--setting-sources", shellQuote(""),
@@ -328,6 +329,7 @@ const claudeModelPickerCommand = "/model"
 // and a --model the CLI rejects can change that.
 func claudeModelPickerArgv(settingsPath string) string {
 	return strings.Join([]string{
+		claudeFeedbackSurveySuppression,
 		"claude",
 		"--settings", shellQuote(settingsPath),
 		"--setting-sources", shellQuote(""),

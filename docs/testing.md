@@ -7,9 +7,9 @@ For application changes, read the relevant subsystem rules as well.
 ## Commands
 
 ```sh
-go build -o scimux ./cmd/scimux # single static binary; web/index.html is embedded
-go test ./...          # unit + integration (integration needs tmux)
-go test -short ./...   # unit only; the offline CI lane (build.yml runs the full suite)
+env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux # static; web is embedded
+env GOTOOLCHAIN=auto go test ./...        # unit + integration (integration needs tmux)
+env GOTOOLCHAIN=auto go test -short ./... # unit only; CI also runs the full suite
 node --test web/test/*.test.js  # browser unit suite; no browser needed
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target CI ships
@@ -18,6 +18,10 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
 ```
+
+Keep `TMPDIR` short (prefer `/tmp`) when running the suite. Integration tests
+create Unix-domain sockets below temporary directories, and long sandbox paths
+can exceed the platform socket-path limit and produce unrelated failures.
 
 - **No `${{ }}` inside a workflow `run:` block.** An expression is substituted
   into the script as *text* before any shell parses it, so a ref name of

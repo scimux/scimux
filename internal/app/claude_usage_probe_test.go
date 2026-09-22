@@ -159,6 +159,9 @@ func TestClaudeUsageProbeRejectsIncompleteOptions(t *testing.T) {
 // dropping any one of them multiplies the tokens a probe spends.
 func TestClaudeUsageProbeArgvIsMinimal(t *testing.T) {
 	cmd := claudeUsageProbeArgv("/data/probe/settings.json")
+	if !strings.HasPrefix(cmd, "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude ") {
+		t.Fatalf("usage probe does not suppress the feedback survey: %q", cmd)
+	}
 	for _, want := range []string{
 		"claude ",
 		"--settings '/data/probe/settings.json'",
@@ -240,6 +243,9 @@ func writeModelMarkerCmd(dir, id, display string) string {
 // zero-token catalog read back into a billed turn.
 func TestClaudeModelProbeArgvSubmitsNothing(t *testing.T) {
 	argv := claudeModelProbeArgv("/probe/settings.json", "claude-opus-5")
+	if !strings.HasPrefix(argv, "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude ") {
+		t.Fatalf("model probe does not suppress the feedback survey: %q", argv)
+	}
 	for _, want := range []string{
 		"--settings " + shellQuote("/probe/settings.json"),
 		"--setting-sources " + shellQuote(""),

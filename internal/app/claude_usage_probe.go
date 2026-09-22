@@ -101,6 +101,7 @@ type claudeProbeOptions struct {
 // measured cost control; see the file header for the numbers.
 func claudeUsageProbeArgv(settingsPath string) string {
 	parts := []string{
+		claudeFeedbackSurveySuppression,
 		"claude",
 		"--settings", shellQuote(settingsPath),
 		// Load none of the user's own settings: their status line would

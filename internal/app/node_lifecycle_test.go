@@ -539,7 +539,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus' --effort 'high'`
+	want := `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus' --effort 'high'`
 	if got != want {
 		t.Errorf("full claude =\n  %s\nwant\n  %s", got, want)
 	}
@@ -549,7 +549,7 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 
 	// Title only (no model, no effort).
 	titleOnly := &Node{Agent: "claude", SessionID: "u", Title: "T", Prompt: "p"}
-	if got, _ := agentCommand(titleOnly, nil); got != `claude --session-id u --ax-screen-reader --remote-control 'T'` {
+	if got, _ := agentCommand(titleOnly, nil); got != `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control 'T'` {
 		t.Errorf("title-only claude = %s", got)
 	}
 
@@ -561,18 +561,42 @@ func TestAgentCommandClaudeMatrix(t *testing.T) {
 	// The first prompt is deliberately absent: owned Claude waits for its
 	// bridge_status record and receives it through tmux after startup.
 	// because empty Title skips the shellQuote(title) append only.
-	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet'`
+	wantModel := `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control --model 'sonnet'`
 	if got != wantModel {
 		t.Errorf("model-only claude =\n  %s\nwant\n  %s", got, wantModel)
 	}
 
 	bare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(bare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control` {
+	if got, _ := agentCommand(bare, nil); got != `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id uuid-2 --ax-screen-reader --remote-control` {
 		t.Errorf("bare claude = %s", got)
 	}
 	for _, cmd := range []string{got, want, wantModel} {
 		if strings.Contains(cmd, "hello world") || strings.HasSuffix(cmd, " 'p'") {
 			t.Errorf("Claude launch leaked the deferred prompt into argv: %s", cmd)
+		}
+	}
+}
+
+func TestAgentCommandClaudeDisablesFeedbackSurvey(t *testing.T) {
+	const suppression = "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1"
+	got, err := agentCommand(&Node{Agent: "claude", SessionID: "survey-off"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, suppression+" claude ") {
+		t.Fatalf("owned Claude launch does not narrowly suppress the feedback survey: %q", got)
+	}
+	if strings.Count(got, suppression) != 1 {
+		t.Fatalf("owned Claude launch must set the survey suppression exactly once: %q", got)
+	}
+
+	for _, agent := range []string{"pi", "opencode", "grok"} {
+		cmd, err := agentCommand(&Node{Agent: agent, Prompt: "synthetic prompt"}, nil)
+		if err != nil {
+			t.Fatalf("agentCommand(%s): %v", agent, err)
+		}
+		if strings.Contains(cmd, "CLAUDE_CODE_") {
+			t.Errorf("%s launch inherited a Claude-only environment setting: %q", agent, cmd)
 		}
 	}
 }
@@ -857,7 +881,7 @@ func TestAgentCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != `claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus'` {
+	if got != `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id uuid-1 --ax-screen-reader --remote-control 'My Session' --model 'opus'` {
 		t.Errorf("claude cmd = %s", got)
 	}
 	if strings.Count(got, "--ax-screen-reader") != 1 {
@@ -865,7 +889,7 @@ func TestAgentCommand(t *testing.T) {
 	}
 
 	claudeBare := &Node{Agent: "claude", SessionID: "uuid-2", Prompt: "p"}
-	if got, _ := agentCommand(claudeBare, nil); got != `claude --session-id uuid-2 --ax-screen-reader --remote-control` {
+	if got, _ := agentCommand(claudeBare, nil); got != `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id uuid-2 --ax-screen-reader --remote-control` {
 		t.Errorf("bare claude cmd = %s", got)
 	}
 
@@ -898,7 +922,7 @@ func TestAgentCommand(t *testing.T) {
 func TestAgentCommandClaudeEffort(t *testing.T) {
 	n := &Node{Agent: "claude", SessionID: "u", Title: "T", Model: "claude-opus-4-8", Effort: "medium", Prompt: "hi"}
 	got, _ := agentCommand(n, nil)
-	if got != `claude --session-id u --ax-screen-reader --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium'` {
+	if got != `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control 'T' --model 'claude-opus-4-8' --effort 'medium'` {
 		t.Errorf("claude+effort cmd = %s", got)
 	}
 	// No effort -> no --effort flag.
@@ -906,7 +930,7 @@ func TestAgentCommandClaudeEffort(t *testing.T) {
 	if got, _ := agentCommand(n2, nil); strings.Contains(got, "--effort") {
 		t.Errorf("effort-less claude cmd must omit --effort, got %s", got)
 	}
-	if got, _ := agentCommand(n2, nil); got != `claude --session-id u --ax-screen-reader --remote-control` {
+	if got, _ := agentCommand(n2, nil); got != `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control` {
 		t.Errorf("effort-less claude cmd = %s", got)
 	}
 }
@@ -1341,7 +1365,7 @@ func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantTitled := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --add-dir ` + quotedDir
+	wantTitled := `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control 'My Title' --add-dir ` + quotedDir
 	if got != wantTitled {
 		t.Errorf("titled =\n  %s\nwant\n  %s", got, wantTitled)
 	}
@@ -1353,7 +1377,7 @@ func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBare := `claude --session-id u --ax-screen-reader --remote-control --add-dir ` + quotedDir
+	wantBare := `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control --add-dir ` + quotedDir
 	if got != wantBare {
 		t.Errorf("empty title =\n  %s\nwant\n  %s", got, wantBare)
 	}
@@ -1363,7 +1387,7 @@ func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantFull := `claude --session-id u --ax-screen-reader --remote-control 'My Title' --model 'opus' --effort 'high' --add-dir ` + quotedDir
+	wantFull := `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control 'My Title' --model 'opus' --effort 'high' --add-dir ` + quotedDir
 	if got != wantFull {
 		t.Errorf("title+model+effort =\n  %s\nwant\n  %s", got, wantFull)
 	}
@@ -1375,7 +1399,7 @@ func TestFlagOrderKeepsAnEmptyTitleUnambiguous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantModel := `claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' --add-dir ` + quotedDir
+	wantModel := `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude --session-id u --ax-screen-reader --remote-control --model 'sonnet' --add-dir ` + quotedDir
 	if got != wantModel {
 		t.Errorf("empty title+model =\n  %s\nwant\n  %s", got, wantModel)
 	}

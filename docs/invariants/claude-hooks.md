@@ -25,11 +25,14 @@ startup/hook-health acknowledgement. The undocumented transcript
 - Flags: `--session-id` seeds the first transcript, `--continue` is
   forbidden, and `--settings` must precede `--remote-control` (an
   optional-value flag that would otherwise swallow it). Owned launches also
-  pass `--ax-screen-reader` and an `--add-dir` per genuinely additional
+  set `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, pass `--ax-screen-reader`, and
+  pass an `--add-dir` per genuinely additional
   directory (including attachment staging). `--add-dir` does **not** bypass
   Claude workspace trust, and scimux never edits undocumented trust-state
   files. An exact pre-session workspace-trust dialog is instead surfaced as
   an audited `y`/`n` web decision; generic lettered menus remain inert.
+  Throwaway usage and model-probe sessions set the same narrow suppression:
+  no Claude process scimux starts may surface the survey.
 - Only Claude's default `~/.claude` state root is supported;
   `CLAUDE_CONFIG_DIR` is deliberately not evaluated, and transcript-path
   validation stays anchored under `~/.claude/projects` unless that scope

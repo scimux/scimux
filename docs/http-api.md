@@ -857,7 +857,9 @@ already up to date, a `dev` build, or an update is already in progress.
 
 ### `GET /api/licenses`
 
-License texts bundled into the binary (shown in the About sheet).
+License texts bundled into the binary (shown in the About sheet). Returns a
+JSON object keyed by the About sheet's license identifiers, with each value
+holding the corresponding full notice.
 
 ### `GET /api/harnesses`
 

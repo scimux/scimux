@@ -24,8 +24,11 @@ agent CLI.
 You can also download a binary from the
 [releases page](https://github.com/scimux/scimux/releases) or build it yourself:
 
+Source builds require Go 1.26 or later. With Go's default
+`GOTOOLCHAIN=auto`, this module selects the patched Go 1.26.8 toolchain.
+
 ```sh
-go build -o scimux ./cmd/scimux
+env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux
 ```
 
 ## What it gives you
@@ -171,10 +174,10 @@ running on your machine.
 ## Development
 
 ```sh
-go build -o scimux ./cmd/scimux
-go test ./...                    # integration tests require tmux
+env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux
+env GOTOOLCHAIN=auto go test ./... # integration tests require tmux
 node --test web/test/*.test.js   # Node 22+
-go vet ./...
+env GOTOOLCHAIN=auto go vet ./...
 ```
 
 The shipped application has no Node runtime dependency. See
