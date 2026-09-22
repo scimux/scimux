@@ -57,7 +57,7 @@ tokens.
 
 | Agent | scimux integration | What must be installed |
 | --- | --- | --- |
-| [Claude Code](https://code.claude.com/docs/en/overview) | Owned tmux session, transcript, official hooks, and Remote Control | `claude` v2.1.181 or later, plus `tmux` |
+| [Claude Code](https://code.claude.com/docs/en/overview) | Owned tmux session, transcript, official hooks, and Remote Control | A current `claude` release, plus `tmux`; tested with v2.1.278 |
 | [Codex CLI](https://developers.openai.com/codex/cli/) | Codex app-server protocol | `codex` |
 | [pi](https://pi.dev/) | Agent Client Protocol (ACP) | `pi-acp`; `pi` enables model discovery |
 | [opencode](https://opencode.ai/docs) | ACP via `opencode acp` | `opencode` |
