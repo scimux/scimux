@@ -41,6 +41,45 @@ func TestWorkflowTestJobsInstallReleaseUploadTools(t *testing.T) {
 	}
 }
 
+func TestWorkflowJobsUsePinnedContainersAndCleanWorkspaces(t *testing.T) {
+	lanes := []struct{ file, job string }{
+		{"build.yml", "build-and-test:"},
+		{"offline.yml", "offline-tests:"},
+		{"release.yml", "build-and-test:"},
+		{"release.yml", "publish:"},
+	}
+	image := regexp.MustCompile(`(?m)^\s*image: golang:1\.26\.8-alpine@sha256:[0-9a-f]{64}$`)
+	for _, lane := range lanes {
+		t.Run(lane.file+"/"+lane.job, func(t *testing.T) {
+			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", lane.file)))
+			body := workflowJobBlock(t, src, lane.job)
+			if !image.MatchString(body) {
+				t.Fatal("job must run in the reviewed Go toolchain container pinned by digest")
+			}
+			clean := strings.Index(body, "- name: Clean dedicated workspace")
+			if clean < 0 {
+				t.Fatal("persistent self-hosted workspace is not cleaned before use")
+			}
+			for _, firstUse := range []string{"git clone", "uses: actions/"} {
+				if at := strings.Index(body, firstUse); at >= 0 && clean > at {
+					t.Fatalf("workspace cleanup occurs after %q", firstUse)
+				}
+			}
+		})
+	}
+
+	offline := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", "offline.yml")))
+	job := workflowJobBlock(t, offline, "offline-tests:")
+	if strings.Contains(job, "--privileged") {
+		t.Fatal("offline test container must not run privileged")
+	}
+	for _, capability := range []string{"--cap-add=SYS_ADMIN", "--cap-add=NET_ADMIN"} {
+		if !strings.Contains(job, capability) {
+			t.Errorf("offline network namespace lacks %s", capability)
+		}
+	}
+}
+
 func TestReleaseVerificationBlockExecutesFailClosed(t *testing.T) {
 	names := []string{"scimux-darwin-amd64", "scimux-darwin-arm64", "scimux-linux-amd64", "scimux-linux-arm64"}
 	cases := map[string]func(string, []string){

@@ -19,10 +19,21 @@ permissions:
 jobs:
   offline-tests:
     runs-on: [self-hosted, linux, x64, go-builder]
+    container:
+      image: golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
+      options: --cap-add=SYS_ADMIN --cap-add=NET_ADMIN
     steps:
       - name: Add missing tools
         run: |
           apk add --no-cache bash curl jq file git nodejs util-linux iproute2
+
+      - name: Clean dedicated workspace
+        run: |
+          set -eu
+          test -n "$GITHUB_WORKSPACE"
+          test "$GITHUB_WORKSPACE" != /
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 
       - name: Clone and checkout repository
         # A ${{ }} expression is substituted into the script as text before

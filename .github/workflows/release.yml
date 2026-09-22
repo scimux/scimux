@@ -9,11 +9,20 @@ jobs:
     permissions:
       contents: read
     runs-on: [self-hosted, linux, x64, go-builder]
+    container:
+      image: golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
     env:
       REF_NAME: ${{ github.ref_name }}
     steps:
       - name: Add missing build tools
         run: apk add --no-cache bash curl jq file git nodejs
+      - name: Clean dedicated workspace
+        run: |
+          set -eu
+          test -n "$GITHUB_WORKSPACE"
+          test "$GITHUB_WORKSPACE" != /
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
       - name: Clone and bind the release tag to its commit
         env:
           GITHUB_CLONE_TOKEN: ${{ github.token }}
@@ -87,9 +96,18 @@ jobs:
     permissions:
       contents: write
     runs-on: [self-hosted, linux, x64, release-publisher]
+    container:
+      image: golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
     steps:
       - name: Add publishing tools
         run: apk add --no-cache bash curl jq coreutils nodejs
+      - name: Clean dedicated workspace
+        run: |
+          set -eu
+          test -n "$GITHUB_WORKSPACE"
+          test "$GITHUB_WORKSPACE" != /
+          test "$(pwd -P)" = "$GITHUB_WORKSPACE"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
       - name: Download tested release files
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
