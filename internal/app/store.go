@@ -320,6 +320,7 @@ func (a *app) removeNodeLocked(id string) {
 	delete(a.claudeAck, id)
 	delete(a.claudeStartPending, id)
 	delete(a.claudeLaunchErr, id)
+	delete(a.claudeRecoverableErr, id)
 	delete(a.claudeTurns, id)
 	delete(a.claudeClosing, id)
 	delete(a.claudeDialogNote, id)

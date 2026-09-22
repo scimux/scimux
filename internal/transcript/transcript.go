@@ -144,7 +144,23 @@ func ParseLine(line []byte) (Turn, bool) {
 		if msg.Role != "" && msg.Role != generic.Type {
 			return Turn{}, false
 		}
-		turn, ok := makeTurn(generic.Type, contentText(msg.Content), generic.Timestamp)
+		text := contentText(msg.Content)
+		if generic.Type == "user" {
+			// Claude Code 2.1.278 began recording bracketed terminal pastes in a
+			// synthetic pasted_content envelope. It is still the user's turn, but
+			// the broad scaffolding guard in makeTurn quite correctly rejects an
+			// otherwise-unclassified '<' prefix. Accept only the exact scalar
+			// envelope observed from Claude, with a bounded safe id repeated by the
+			// closing tag; malformed/lookalike tags keep falling through to the
+			// scaffolding guard.
+			var scalar string
+			if json.Unmarshal(msg.Content, &scalar) == nil {
+				if pasted, ok := unwrapClaudePastedContent(scalar); ok {
+					text = pasted
+				}
+			}
+		}
+		turn, ok := makeTurn(generic.Type, text, generic.Timestamp)
 		if !ok {
 			return Turn{}, false
 		}
@@ -170,6 +186,54 @@ func ParseLine(line []byte) (Turn, bool) {
 		return turn, true
 	}
 	return Turn{}, false
+}
+
+const claudePastedContentPrefix = `<pasted_content id="`
+
+// unwrapClaudePastedContent removes Claude Code's transcript-only wrapper for
+// a bracketed terminal paste. The closing tag repeats the id (the shape is not
+// XML), so exact agreement is the useful structural proof that this is the
+// wrapper rather than arbitrary user/scaffolding text.
+func unwrapClaudePastedContent(text string) (string, bool) {
+	s := strings.TrimSpace(text)
+	if !strings.HasPrefix(s, claudePastedContentPrefix) {
+		return "", false
+	}
+	headerEnd := strings.IndexByte(s, '>')
+	if headerEnd < 0 {
+		return "", false
+	}
+	header := s[:headerEnd+1]
+	if len(header) < len(claudePastedContentPrefix)+2 || !strings.HasSuffix(header, `">`) {
+		return "", false
+	}
+	id := header[len(claudePastedContentPrefix) : len(header)-2]
+	if !validClaudePastedContentID(id) {
+		return "", false
+	}
+	footer := `</pasted_content id="` + id + `">`
+	if !strings.HasSuffix(s, footer) {
+		return "", false
+	}
+	body := s[headerEnd+1 : len(s)-len(footer)]
+	if len(body) < 2 || body[0] != '\n' || body[len(body)-1] != '\n' {
+		return "", false
+	}
+	return body[1 : len(body)-1], true
+}
+
+func validClaudePastedContentID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func makeTurn(role, text, ts string) (Turn, bool) {

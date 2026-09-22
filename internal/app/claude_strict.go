@@ -116,6 +116,28 @@ func (a *app) recordClaudeLaunchError(nodeID, msg string) {
 		a.claudeLaunchErr = map[string]string{}
 	}
 	a.claudeLaunchErr[nodeID] = msg
+	delete(a.claudeRecoverableErr, nodeID)
+}
+
+// recordClaudeRecoverableError keeps an inline delivery diagnostic without
+// invalidating a SessionStart-acknowledged hook bundle. If the turn truly is
+// still outstanding, the accepted-turn nonce independently refuses the next
+// send; if Claude finished and only transcript parsing missed the prompt, the
+// node remains usable instead of becoming permanently claude_failed.
+func (a *app) recordClaudeRecoverableError(nodeID, msg string) {
+	if nodeID == "" || msg == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.claudeLaunchErr == nil {
+		a.claudeLaunchErr = map[string]string{}
+	}
+	if a.claudeRecoverableErr == nil {
+		a.claudeRecoverableErr = map[string]bool{}
+	}
+	a.claudeLaunchErr[nodeID] = msg
+	a.claudeRecoverableErr[nodeID] = true
 }
 
 // claudeLaunchError returns a recorded launch error. Test seam: production
@@ -130,6 +152,20 @@ func (a *app) clearClaudeLaunchError(nodeID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.claudeLaunchErr, nodeID)
+	delete(a.claudeRecoverableErr, nodeID)
+}
+
+// clearClaudeRecoverableError retires only the older delivery diagnostic. A
+// fatal binding/launch error can be recorded concurrently while pane delivery
+// is in flight; successful keystroke delivery must not erase that newer fault.
+func (a *app) clearClaudeRecoverableError(nodeID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.claudeRecoverableErr[nodeID] {
+		return
+	}
+	delete(a.claudeLaunchErr, nodeID)
+	delete(a.claudeRecoverableErr, nodeID)
 }
 
 // bundleCompleteCurrent reports whether a hook bundle on disk is the complete
@@ -181,7 +217,7 @@ func (a *app) claudeSupervisionOf(n *Node) claudeSupervision {
 	if n == nil || n.Agent != "claude" || n.transport() != "tmux" {
 		return claudeSupNone
 	}
-	if a.claudeLaunchErr[n.ID] != "" {
+	if a.claudeLaunchErr[n.ID] != "" && !a.claudeRecoverableErr[n.ID] {
 		return claudeSupFailed
 	}
 	hookID := a.claudeHookIDLocked(n.ID)
@@ -237,6 +273,9 @@ func claudeSupervisionExplain(sup claudeSupervision, launchErr string) string {
 func claudeChatSupervisionExplain(sup claudeSupervision, launchErr string, ended bool) string {
 	if ended {
 		return ""
+	}
+	if launchErr != "" {
+		return launchErr
 	}
 	return claudeSupervisionExplain(sup, launchErr)
 }

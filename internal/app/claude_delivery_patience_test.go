@@ -172,6 +172,9 @@ func TestUnconfirmedFirstPromptGivesUpAtTheOuterBound(t *testing.T) {
 			if msg != claudeDeliveryExplain {
 				t.Fatalf("launch error = %q, want %q", msg, claudeDeliveryExplain)
 			}
+			if a.claudeRecoverableErr[n.ID] {
+				t.Fatal("a launch whose transcript never appeared must fail, not retain strict supervision")
+			}
 			if locked {
 				t.Fatal("giving up must release the gate so the user can send again")
 			}
@@ -181,6 +184,46 @@ func TestUnconfirmedFirstPromptGivesUpAtTheOuterBound(t *testing.T) {
 					"scimux has genuinely given up", body["restore_draft"])
 			}
 		})
+	}
+}
+
+func TestFirstPromptConfirmationErrorDoesNotBrickAcknowledgedClaude(t *testing.T) {
+	f := &fakeTmux{capture: "ready", captureAfterEnter: "working"}
+	a := newTestApp(t, f)
+	n, _ := seedPermClaude(t, a, "cl1", hookSIDOwn)
+	n.Prompt = "first prompt"
+	a.sendState[n.ID] = sendInitialUnconfirmed
+	a.noteDelivery(n.ID, time.Now().Add(-a.claudeDeliveryGiveUp-time.Second))
+
+	a.reconcileClaudeInitialDelivery(n)
+	if got := a.claudeSupervisionOf(n); got != claudeSupStrict {
+		t.Fatalf("supervision = %q, want strict: SessionStart remains valid after a delivery parse miss", got)
+	}
+	if got := a.claudeLaunchError(n.ID); got != claudeDeliveryExplain {
+		t.Fatalf("inline error = %q, want %q", got, claudeDeliveryExplain)
+	}
+	body := chatBody(t, a, n.ID)
+	if body["error"] != claudeDeliveryExplain {
+		t.Fatalf("chat error = %v, want recoverable delivery explanation", body["error"])
+	}
+
+	status, delivery, err := a.sendTmuxPrompt(n, "second prompt", false)
+	if err != nil || status != 0 || delivery != initialAcknowledged {
+		t.Fatalf("next send = status %d delivery %q err %v, want acknowledged", status, delivery, err)
+	}
+	if got := a.claudeLaunchError(n.ID); got != "" {
+		t.Fatalf("successful next send left stale delivery error %q", got)
+	}
+}
+
+func TestRecoverableCleanupDoesNotEraseNewFatalClaudeError(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	const nodeID = "cl1"
+	a.recordClaudeRecoverableError(nodeID, claudeDeliveryExplain)
+	a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+	a.clearClaudeRecoverableError(nodeID)
+	if got := a.claudeLaunchError(nodeID); got != claudeResumeExplain {
+		t.Fatalf("fatal error after recoverable cleanup = %q, want %q", got, claudeResumeExplain)
 	}
 }
 

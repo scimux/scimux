@@ -24,6 +24,13 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     scaffolding filter keys on `role == "user"`, a `type:"user"` record
     claiming `role:"assistant"` would render an injected `<user_instructions>`
     block as agent prose.
+  - Claude Code 2.1.278 wraps a bracketed terminal paste in a transcript-only
+    `<pasted_content id="…">` envelope. That is a real user turn, not injected
+    scaffolding: unwrap it only when the scalar envelope is exact, the bounded
+    safe id matches its non-XML closing tag, and nothing follows it. Then run
+    the ordinary scaffolding guard on the unwrapped body. A loose exception to
+    the "user text beginning with `<`" rule can expose injected instructions;
+    rejecting the wrapper strands every scimux-delivered Claude prompt.
 
 - **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
   corrections are new records, never rewrites.

@@ -638,7 +638,19 @@ func (a *app) reconcileClaudeInitialDelivery(n *Node) {
 		time.Since(deliv) <= a.claudeDeliveryGiveUp {
 		return
 	}
-	a.recordClaudeLaunchError(n.ID, claudeDeliveryExplain)
+	// A bound/acknowledged SessionStart still proves the hook contract even if
+	// transcript parsing missed this one user turn. Keep that diagnostic
+	// recoverable and let the accepted-turn nonce decide whether another send
+	// is safe. If the transcript never appeared, the hook is only pending and
+	// the launch did not complete; that remains a fatal startup state.
+	a.mu.Lock()
+	acked := a.claudeHookAckedLocked(n.ID)
+	a.mu.Unlock()
+	if acked {
+		a.recordClaudeRecoverableError(n.ID, claudeDeliveryExplain)
+	} else {
+		a.recordClaudeLaunchError(n.ID, claudeDeliveryExplain)
+	}
 	a.mu.Lock()
 	if a.sendState[n.ID] == sendInitialUnconfirmed {
 		delete(a.sendState, n.ID)

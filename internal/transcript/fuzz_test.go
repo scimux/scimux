@@ -11,6 +11,7 @@ import (
 func FuzzParseLine(f *testing.F) {
 	// Claude Code session-log shapes.
 	f.Add([]byte(`{"type":"user","timestamp":"2026-07-11T09:00:00.000Z","uuid":"u1","message":{"role":"user","content":"Hello agent, analyze run 42"}}`))
+	f.Add([]byte(`{"type":"user","timestamp":"2027-01-02T03:04:05.000Z","uuid":"u2","message":{"role":"user","content":"\n\n<pasted_content id=\"a1b2\">\nSynthetic pasted prompt\n</pasted_content id=\"a1b2\">\n"}}`))
 	f.Add([]byte(`{"type":"assistant","timestamp":"2026-07-11T09:00:05.000Z","uuid":"a1","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"Looking at run 42 now."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}`))
 	// Codex rollout shape.
 	f.Add([]byte(`{"timestamp":"2026-07-11T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello codex, sweep the detector thresholds"}]}}`))

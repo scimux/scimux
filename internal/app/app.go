@@ -237,6 +237,9 @@ func (a *app) initMaps() {
 	if a.claudeLaunchErr == nil {
 		a.claudeLaunchErr = map[string]string{}
 	}
+	if a.claudeRecoverableErr == nil {
+		a.claudeRecoverableErr = map[string]bool{}
+	}
 	if a.claudeTurns == nil {
 		a.claudeTurns = map[string]claudeAcceptedTurn{}
 	}
@@ -441,6 +444,11 @@ type app struct {
 	// claudeLaunchErr is a durable-for-the-process inline launch/delivery
 	// error for a Claude node. It is never a reason to open the terminal.
 	claudeLaunchErr map[string]string
+	// claudeRecoverableErr distinguishes a delivery-confirmation failure from
+	// a broken launch/binding. SessionStart and the hook bundle remain valid in
+	// that case, so the accepted-turn fence — not the diagnostic — decides
+	// whether another prompt is safe.
+	claudeRecoverableErr map[string]bool
 	// claudeClearSent is when a /clear was pasted, kept only until the
 	// SessionStart source:"clear" that proves the page actually turned. It
 	// exists to time the wait out, never to act on: the page turn itself is

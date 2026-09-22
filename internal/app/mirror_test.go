@@ -180,6 +180,47 @@ func TestMirrorRestartRemirrorsUnchangedTranscriptAfterParserRecovery(t *testing
 	}
 }
 
+func TestMirrorRestartRecoversClaudePastedPromptDiscardedByOldParser(t *testing.T) {
+	a := mirrorTestApp(t)
+	tdir := t.TempDir()
+	tp := filepath.Join(tdir, "sid.jsonl")
+	transcriptText := `{"type":"user","timestamp":"t1","message":{"role":"user","content":"\n\n<pasted_content id=\"p7q2\">\nReview the synthetic release checklist\n</pasted_content id=\"p7q2\">\n"}}` + "\n" +
+		claudeTurn("assistant", "Synthetic review complete.", "t2")
+	if err := os.WriteFile(tp, []byte(transcriptText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// This is the durable state the pre-fix parser produced: the '<'-prefixed
+	// user record was classified as scaffolding, the answer was mirrored, and
+	// the complete transcript size was marked consumed.
+	logPath := filepath.Join(a.sessionsDir, "n1.jsonl")
+	w := &sessionlog.Writer{Path: logPath}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta("n1", "claude", "opus", "", tdir),
+		sessionlog.NewSource(tp, "sid"),
+		{T: "assistant", Text: "Synthetic review complete.", Time: "t2"},
+		sessionlog.NewMark(int64(len(transcriptText))),
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n := &Node{ID: "n1", Agent: "claude", Model: "opus", Dir: tdir, Transcript: tp}
+	_ = a.tailerFor(n)
+	a.syncMirror(n)
+	seg := sessionlog.ReadSegment(logPath)
+	if len(seg.Turns) != 2 {
+		t.Fatalf("recovered turns = %d, want prompt and answer", len(seg.Turns))
+	}
+	if seg.Turns[0].Role != "user" || seg.Turns[0].Text != "Review the synthetic release checklist" {
+		t.Fatalf("recovered first turn = %+v, want unwrapped user prompt", seg.Turns[0])
+	}
+	if seg.Turns[1].Role != "assistant" || seg.Turns[1].Text != "Synthetic review complete." {
+		t.Fatalf("recovered second turn = %+v, want assistant answer", seg.Turns[1])
+	}
+}
+
 func TestMirrorClearRolloverWritesNewSource(t *testing.T) {
 	a := mirrorTestApp(t)
 	tdir := t.TempDir()

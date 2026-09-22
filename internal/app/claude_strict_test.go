@@ -54,6 +54,25 @@ func TestClaudeLaunchWaitsForSessionStartThenConfirms(t *testing.T) {
 	}
 }
 
+func TestClaudeLaunchConfirmsBracketedPasteTranscriptEnvelope(t *testing.T) {
+	f := &fakeTmux{captureAfterEnter: "pane"}
+	a := newTestApp(t, f)
+	a.claudeReadyTimeout = testReadyBudget
+	a.claudeDeliveryTimeout = testDeliverBudget
+	a.claudeInitialPoll = testInitialPoll
+	n := &Node{ID: "n1", Agent: "claude", SessionID: hookSIDOwn, Prompt: "Review the synthetic release checklist"}
+	path := writeClaudeTranscript(t, a.home, n.SessionID)
+	n.Transcript = path
+	a.byID[n.ID] = n
+	a.nodes = append(a.nodes, n)
+	installPreparedClaudeHook(t, a, n)
+	f.appendOnEnter(t, path,
+		`{"type":"user","timestamp":"2027-01-02T03:04:05Z","message":{"role":"user","content":"\n\n<pasted_content id=\"p7_q-2\">\nReview the synthetic release checklist\n</pasted_content id=\"p7_q-2\">\n"}}`)
+	if got := a.deliverClaudeInitialPrompt(n); got != initialAcknowledged {
+		t.Fatalf("delivery = %q, want acknowledged for Claude's pasted_content envelope", got)
+	}
+}
+
 func TestClaudeTrustDialogDiagnosesLaunchWithoutTerminal(t *testing.T) {
 	f := &fakeTmux{capture: workspaceTrustPane}
 	a := newTestApp(t, f)

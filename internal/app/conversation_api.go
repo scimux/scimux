@@ -323,6 +323,11 @@ func (a *app) sendTmuxPrompt(n *Node, delivered string, isClear bool) (int, init
 		}
 		return status, "", err
 	}
+	// Reaching this point proves the new prompt was accepted by the pane. Any
+	// older recoverable first-prompt confirmation error is now obsolete. Clear
+	// only that diagnostic: a fatal launch/binding error recorded concurrently
+	// with delivery must remain fail-closed.
+	a.clearClaudeRecoverableError(n.ID)
 	if !acked && tl != nil && len(tl.Poll()) > turnsBefore {
 		acked = true
 	}

@@ -142,6 +142,35 @@ func TestParseLineRejectsUnknownClaudeRole(t *testing.T) {
 	}
 }
 
+func TestParseLineClaudePastedContentEnvelope(t *testing.T) {
+	line := `{"type":"user","timestamp":"2027-01-02T03:04:05.000Z","message":{"role":"user","content":"\n\n<pasted_content id=\"a1B_2-c\">\nfirst line\nsecond line\n</pasted_content id=\"a1B_2-c\">\n"}}`
+	got, ok := ParseLine([]byte(line))
+	if !ok {
+		t.Fatal("Claude's bracketed-paste envelope was discarded as scaffolding")
+	}
+	if got.Role != "user" || got.Text != "first line\nsecond line" {
+		t.Fatalf("turn = %+v, want unwrapped user prompt", got)
+	}
+}
+
+func TestParseLineRejectsMalformedClaudePastedContentEnvelope(t *testing.T) {
+	contents := []string{
+		"<pasted_content>\nprompt\n</pasted_content>",
+		`<pasted_content id=">`,
+		"<pasted_content id=\"a1\">\nprompt\n</pasted_content id=\"b2\">",
+		`<pasted_content id="a1">prompt</pasted_content id="a1">`,
+		"<pasted_content id=\"a 1\">\nprompt\n</pasted_content id=\"a 1\">",
+		"<pasted_content id=\"a1\">\nprompt\n</pasted_content id=\"a1\"> trailing",
+		"<pasted_content id=\"a1\">\n<user_instructions>secret</user_instructions>\n</pasted_content id=\"a1\">",
+	}
+	for _, content := range contents {
+		line := `{"type":"user","message":{"role":"user","content":` + strconv.Quote(content) + `}}`
+		if got, ok := ParseLine([]byte(line)); ok {
+			t.Errorf("malformed/lookalike pasted_content yielded %+v from %q", got, content)
+		}
+	}
+}
+
 func TestTailerIncrementalAndPartialLines(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "live.jsonl")
