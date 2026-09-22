@@ -720,7 +720,15 @@ test("AT-FR-41-d: the computer loader installs and starts its verified applicati
   const at = "AT-FR-41-d";
   const inventory = servedFromDisk();
   const manifest = await computerManifest(inventory);
-  const channel = diskChannel(inventory);
+  const staticChannel = diskChannel(inventory);
+  const plotPath = "/api/nodes/drive/assets/a_plot";
+  const channel = async (...args) => {
+    if (args[0] === "/api/nodes/drive/chat") {
+      return new Response(JSON.stringify({ assets: { a_plot: { url: plotPath } } }));
+    }
+    if (args[0] === plotPath) return new Response("plot", { headers: { "Content-Type": "image/png" } });
+    return staticChannel(...args);
+  };
   const s = seams();
 
   const dom = browserDocumentFixture();
@@ -755,9 +763,12 @@ test("AT-FR-41-d: the computer loader installs and starts its verified applicati
   assert.equal(dom.installed.body.length, 1);
   assert.equal(appDeps.document, dom.document);
   assert.equal(appDeps.window, dom.window);
-  assert.equal(appDeps.fetchImpl, channel);
+  assert.equal(typeof appDeps.fetchImpl, "function");
   assert.match(appDeps.assetURL("/assets/agents/claude.svg"), /^blob:boot\//);
   assert.equal(appDeps.assetURL("/assets/missing.svg"), "");
+  await (await appDeps.fetchImpl("/api/nodes/drive/chat")).json();
+  assert.match(appDeps.assetURL(plotPath), /^blob:boot\//,
+    "chat images must be resolved through the same channel as the application");
   /* Anti-vacuity: the existing return contract is unchanged. */
   for (const key of ["index", "stylesheets", "assets", "entry"]) {
     if (!(key in result)) fail(at, `bootstrap stopped returning ${key}`);

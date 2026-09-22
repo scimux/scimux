@@ -127,7 +127,55 @@ function blobType(kind) {
 
 /* The loader owns the computer document as well as its graph. rv must not
  * learn createApp's API or which verified objects are styles and assets. */
-function activateBrowser(result, { document: doc, window: win, fetchImpl }) {
+export function createRemoteAssetTransport({ channel, assets, createObjectURL }) {
+  const pending = new Map();
+  async function load(path) {
+    // Only canonical computer-owned session assets may be requested here.
+    if (!/^\/api\/nodes\/[^/?#]+\/assets\/[^/?#]+$/.test(path) || assets.has(path)) return;
+    if (pending.has(path)) return pending.get(path);
+    const task = (async () => {
+      try {
+        const response = await channel(path);
+        if (!response.ok) return;
+        const bytes = await response.arrayBuffer();
+        const type = response.headers.get('Content-Type') || 'application/octet-stream';
+        assets.set(path, createObjectURL(new Blob([bytes], { type })));
+      } catch {
+        // A failed image must not hide the chat; the next poll retries it.
+      }
+    })();
+    pending.set(path, task);
+    try { await task; } finally { pending.delete(path); }
+  }
+  async function prepare(value) {
+    if (!value || typeof value !== 'object') return;
+    if (value.assets && typeof value.assets === 'object') {
+      // Sequential loads also stay below the tunnel's concurrent-request cap.
+      for (const asset of Object.values(value.assets)) {
+        if (asset && typeof asset.url === 'string') await load(asset.url);
+      }
+    }
+    // History segments and bookmark previews may contain their own assets.
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== 'assets' && child && typeof child === 'object') await prepare(child);
+    }
+  }
+  return {
+    assetURL: path => assets.get(path) || '',
+    fetchImpl: async (...args) => {
+      const response = await channel(...args);
+      const json = response.json.bind(response);
+      response.json = async () => {
+        const value = await json();
+        await prepare(value);
+        return value;
+      };
+      return response;
+    },
+  };
+}
+
+function activateBrowser(result, { document: doc, window: win, fetchImpl, createObjectURL }) {
   if (!result.module || typeof result.module.createApp !== "function") {
     throw named("bootstrap-entry", "the entry module exports no createApp()");
   }
@@ -153,9 +201,9 @@ function activateBrowser(result, { document: doc, window: win, fetchImpl }) {
   doc.body.replaceChildren(...Array.from(parsed.body.childNodes, node => doc.importNode(node, true)));
 
   const assets = new Map(result.assets.map(row => [row.url, row.blobURL]));
+  const transport = createRemoteAssetTransport({ channel: fetchImpl, assets, createObjectURL });
   result.module.createApp({
-    fetchImpl,
-    assetURL: path => assets.get(path) || "",
+    ...transport,
     document: doc,
     window: win,
   });
@@ -261,6 +309,7 @@ export async function bootstrap({
       document: globalThis.document,
       window: globalThis.window,
       fetchImpl: channel,
+      createObjectURL,
     });
   }
   return result;
