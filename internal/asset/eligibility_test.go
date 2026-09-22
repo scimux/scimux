@@ -200,6 +200,32 @@ func TestResolve_MultipleRootsSecondMatches(t *testing.T) {
 	}
 }
 
+func TestOpenPinsEligibleDescriptorAcrossPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "result.txt")
+	writeFile(t, path, []byte("approved"))
+	f, _, _, err := Open(path, root, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, []byte("replacement"))
+	got, err := os.ReadFile(path + ".old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(got))
+	if _, err := f.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "approved" {
+		t.Fatalf("descriptor read %q, want original approved bytes", buf)
+	}
+}
+
 func TestStorageMode(t *testing.T) {
 	cases := []struct {
 		size, cap int64

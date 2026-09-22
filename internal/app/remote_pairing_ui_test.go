@@ -19,6 +19,7 @@ import (
 // a missing slot (every write is guarded), which is right for a browser and
 // wrong for a build: a typo'd id would ship as a blank sheet with no error.
 var pairSlots = []string{
+	"m_remote",
 	"pairsheet",
 	"pair_title",
 	"pair_body",
@@ -85,6 +86,19 @@ func TestRemoteAccessIsTheFirstMenuSection(t *testing.T) {
 		t.Errorf("m_pair (%d) / m_devices (%d) are not inside the FIRST menu section "+
 			"(which spans %d..%d): the list of devices holding SSH-equivalent "+
 			"authority is below the version check", pair, devices, first, second)
+	}
+}
+
+func TestRemoteAccessSectionShipsHidden(t *testing.T) {
+	html := readWebFile(t, "web/index.html")
+	i := strings.Index(html, `id="m_remote"`)
+	if i < 0 {
+		t.Fatal(`index.html has no id="m_remote"`)
+	}
+	tag := html[strings.LastIndex(html[:i], "<"):]
+	tag = tag[:strings.Index(tag, ">")+1]
+	if !strings.Contains(tag, "hidden") {
+		t.Errorf("the experimental Remote access section ships visible (%s)", tag)
 	}
 }
 

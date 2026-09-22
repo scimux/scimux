@@ -27,6 +27,18 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
 
 - **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
   corrections are new records, never rewrites.
+- **Budgets refuse writes; they never rewrite retention.** Managed growth
+  (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a
+  default 64 MiB free-space reserve plus optional global/per-node byte budgets
+  from server-owned settings. Muxer and worker processes serialize the check
+  with the same owner-only storage lock; live-to-archive renames take that lock
+  too, so a scan cannot miss bytes while they move. The per-node budget counts
+  only that node's live session log, attachments, and asset blobs:
+  `nodes.jsonl` remains subject to the global and free-space limits so a full
+  node can still record audit evidence, be renamed, or be deleted. Hitting a
+  limit is an explicit write error and an observable `/api/state` storage
+  condition; scimux never silently truncates or deletes durable history to get
+  back under budget.
 - **One session-log store, one schema.** Every transport writes its per-node
   history to `~/.scimux/sessions/<node-id>.jsonl` as `internal/sessionlog`
   events — plain JSONL, because the corpus must stay grep/sed/awk-able. The

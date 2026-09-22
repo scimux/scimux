@@ -10,6 +10,7 @@ import (
 	"hash/fnv"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/storagebudget"
 )
 
 // ---------- sysload ----------
@@ -135,6 +137,10 @@ type nodeView struct {
 	// MuseSchemaWarning is additive fingerprint-drift notice. Older browsers
 	// ignore it. It is never a reason to hide chat or change liveness.
 	MuseSchemaWarning string `json:"muse_schema_warning,omitempty"`
+	// StorageBytes is this live node's session log, attachments, and asset
+	// blobs. Archived history remains in the aggregate storage snapshot.
+	StorageBytes    int64 `json:"storage_bytes"`
+	StorageWritable bool  `json:"storage_writable"`
 }
 
 func unixMSStamp(s string) int64 {
@@ -276,9 +282,16 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 		p := ctxPctOf(seg.Used, win)
 		v.CtxPct = &p
 	}
+	storage := a.storageStatus()
+	for i := range views {
+		views[i].StorageBytes = storage.Nodes[views[i].ID]
+		views[i].StorageWritable = storage.Writable &&
+			(storage.NodeLimitBytes == 0 || views[i].StorageBytes < storage.NodeLimitBytes)
+	}
 	payload := map[string]any{
 		"nodes": views, "sys": sysload(),
 		"socket": a.server.Socket, "hostname": hostname, "version": a.activeWebVersion(),
+		"storage": storage,
 	}
 	if hosted != nil {
 		payload["remote"] = map[string]string{"status": hosted.HostedStatus()}
@@ -300,6 +313,21 @@ func (a *app) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+func (a *app) storageStatus() storagebudget.Status {
+	a.storageMu.Lock()
+	defer a.storageMu.Unlock()
+	if time.Since(a.storageAt) < 30*time.Second && a.storageSnapshot.Nodes != nil {
+		return a.storageSnapshot
+	}
+	dataDir := filepath.Dir(a.sessionsDir)
+	status, err := storagebudget.Inspect(dataDir)
+	if err != nil {
+		status = storagebudget.Status{Writable: false, Reason: err.Error(), Nodes: map[string]int64{}}
+	}
+	a.storageSnapshot, a.storageAt = status, time.Now()
+	return status
 }
 
 // ctxWindowFor returns the context window, estimating it from the model name

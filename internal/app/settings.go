@@ -17,6 +17,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/scimux/scimux/internal/storagebudget"
 )
 
 const settingsMax = 1 << 16
@@ -33,6 +36,11 @@ type settings struct {
 	// settings read as false. True never disables the judge and never emits a
 	// Muse CLI flag.
 	MuseApprovalJudgeConsent bool `json:"muse_approval_judge_consent"`
+	// Storage limits are byte counts. Zero disables that particular limit;
+	// MinFreeBytes defaults to a conservative reserve on a missing setting.
+	StorageGlobalLimitBytes int64 `json:"storage_global_limit_bytes"`
+	StorageNodeLimitBytes   int64 `json:"storage_node_limit_bytes"`
+	StorageMinFreeBytes     int64 `json:"storage_min_free_bytes"`
 	// Extra preserves settings written by a newer scimux. A Phase 5 write must
 	// not erase a field merely because this binary does not understand it yet.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -44,22 +52,35 @@ func (s *settings) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	var known struct {
-		ClaudeUsageChecks        bool `json:"claude_usage_checks"`
-		MuseApprovalJudgeConsent bool `json:"muse_approval_judge_consent"`
+		ClaudeUsageChecks        bool  `json:"claude_usage_checks"`
+		MuseApprovalJudgeConsent bool  `json:"muse_approval_judge_consent"`
+		StorageGlobalLimitBytes  int64 `json:"storage_global_limit_bytes"`
+		StorageNodeLimitBytes    int64 `json:"storage_node_limit_bytes"`
+		StorageMinFreeBytes      int64 `json:"storage_min_free_bytes"`
 	}
+	known.StorageMinFreeBytes = storagebudget.DefaultMinFreeBytes
 	if err := json.Unmarshal(b, &known); err != nil {
 		return err
 	}
+	if known.StorageGlobalLimitBytes < 0 || known.StorageNodeLimitBytes < 0 || known.StorageMinFreeBytes < 0 {
+		return errSettings("storage limits must be non-negative integer byte counts")
+	}
 	s.ClaudeUsageChecks = known.ClaudeUsageChecks
 	s.MuseApprovalJudgeConsent = known.MuseApprovalJudgeConsent
+	s.StorageGlobalLimitBytes = known.StorageGlobalLimitBytes
+	s.StorageNodeLimitBytes = known.StorageNodeLimitBytes
+	s.StorageMinFreeBytes = known.StorageMinFreeBytes
 	delete(raw, "claude_usage_checks")
 	delete(raw, "muse_approval_judge_consent")
+	delete(raw, "storage_global_limit_bytes")
+	delete(raw, "storage_node_limit_bytes")
+	delete(raw, "storage_min_free_bytes")
 	s.Extra = raw
 	return nil
 }
 
 func (s settings) MarshalJSON() ([]byte, error) {
-	raw := make(map[string]json.RawMessage, len(s.Extra)+2)
+	raw := make(map[string]json.RawMessage, len(s.Extra)+5)
 	for key, value := range s.Extra {
 		raw[key] = append(json.RawMessage(nil), value...)
 	}
@@ -67,6 +88,14 @@ func (s settings) MarshalJSON() ([]byte, error) {
 	museConsent, _ := json.Marshal(s.MuseApprovalJudgeConsent)
 	raw["claude_usage_checks"] = claude
 	raw["muse_approval_judge_consent"] = museConsent
+	for key, value := range map[string]int64{
+		"storage_global_limit_bytes": s.StorageGlobalLimitBytes,
+		"storage_node_limit_bytes":   s.StorageNodeLimitBytes,
+		"storage_min_free_bytes":     s.StorageMinFreeBytes,
+	} {
+		encoded, _ := json.Marshal(value)
+		raw[key] = encoded
+	}
 	return json.Marshal(raw)
 }
 
@@ -75,18 +104,22 @@ const errMuseConsentRequired = errSettings("muse approval-judge consent is requi
 // settings reads one atomically replaced snapshot. The PUT handler separately
 // serializes its read-modify-write cycle; ordinary readers need no lock.
 func (a *app) settings() settings {
-	var s settings
+	s := defaultSettings()
 	if a == nil || a.settingsPath == "" {
 		return s
 	}
 	b, err := os.ReadFile(a.settingsPath)
 	if err != nil || len(b) == 0 || len(b) > settingsMax {
-		return settings{}
+		return defaultSettings()
 	}
 	if json.Unmarshal(b, &s) != nil {
-		return settings{}
+		return defaultSettings()
 	}
 	return s
+}
+
+func defaultSettings() settings {
+	return settings{StorageMinFreeBytes: storagebudget.DefaultMinFreeBytes}
 }
 
 // saveSettings replaces the document atomically. Owner-only, like every other
@@ -175,7 +208,8 @@ func (a *app) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 		s.Extra = map[string]json.RawMessage{}
 	}
 	for key, raw := range patch {
-		if key == "claude_usage_checks" || key == "muse_approval_judge_consent" {
+		if key == "claude_usage_checks" || key == "muse_approval_judge_consent" ||
+			key == "storage_global_limit_bytes" || key == "storage_node_limit_bytes" || key == "storage_min_free_bytes" {
 			continue
 		}
 		s.Extra[key] = append(json.RawMessage(nil), raw...)
@@ -192,9 +226,28 @@ func (a *app) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	for key, dst := range map[string]*int64{
+		"storage_global_limit_bytes": &s.StorageGlobalLimitBytes,
+		"storage_node_limit_bytes":   &s.StorageNodeLimitBytes,
+		"storage_min_free_bytes":     &s.StorageMinFreeBytes,
+	} {
+		raw, ok := patch[key]
+		if !ok || string(raw) == "null" {
+			continue
+		}
+		var value int64
+		if json.Unmarshal(raw, &value) != nil || value < 0 {
+			http.Error(w, "storage limits must be non-negative integer byte counts", 400)
+			return
+		}
+		*dst = value
+	}
 	if err := a.writeSettingsLocked(s); err != nil {
 		http.Error(w, "save settings: "+err.Error(), 500)
 		return
 	}
+	a.storageMu.Lock()
+	a.storageAt = time.Time{}
+	a.storageMu.Unlock()
 	writeJSON(w, s)
 }

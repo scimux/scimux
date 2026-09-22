@@ -27,18 +27,20 @@ the maintainer by a route that doesn't depend on email.
 
 ## Supported versions
 
-Only the latest release and `main` are supported. scimux is pre-1.0: fixes
-land on `main` and in the next release, and there are no backports to earlier
-tags. (No release number is named here on purpose — this file would go stale
-at the next tag, and "the latest release" stays true.)
+Only the latest release and `main` are supported. Fixes land on `main` and in
+the next release, and there are no backports to earlier tags. (No release
+number is named here on purpose — this file would go stale at the next tag,
+and "the latest release" stays true.)
 
 ## What is in scope
 
 - **The browser boundary.** Anything that reaches the controller from a page
   the operator merely has open — a trusted-`Host` or `Sec-Fetch` check that
   can be bypassed, DNS rebinding, framing.
-- **Remote access by invite** (`internal/remote`): pairing, invite handling,
-  the peer-to-peer data channel, and the bootstrap loader. The wire format
+- **Experimental remote access by invite** (`internal/remote`): this surface is
+  runtime-gated and off in an ordinary scimux run, but remains in security
+  scope because its code ships. Pairing, invite handling, the peer-to-peer
+  data channel, and the bootstrap loader are covered. The wire format
   itself is specified in `scimux-connect`, which delivers the trusted viewer.
   The `scimux-rv` repository owns rendezvous and its own security policy.
   The official pairing link opens the independently hosted trusted viewer at

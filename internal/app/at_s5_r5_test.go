@@ -26,10 +26,11 @@ func TestS5R5_F2_HostedStatusWaitChallengeTransitions(t *testing.T) {
 	data := t.TempDir()
 	writeEnrolledStateWithDevice(t, data)
 	cmd := &Command{
-		Args:   []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout: io.Discard,
-		Stderr: new(bytes.Buffer),
-		Home:   t.TempDir(),
+		ExperimentalRemote: true,
+		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
+		Stdout:             io.Discard,
+		Stderr:             new(bytes.Buffer),
+		Home:               t.TempDir(),
 		Config: remote.Config{
 			DataDir:       data,
 			RendezvousURL: srv.URL,

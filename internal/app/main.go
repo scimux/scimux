@@ -189,11 +189,12 @@ func Run() {
 	// drift; the one that binds the listener and builds the request policy is
 	// the one that survives.
 	cmd := &Command{
-		Args:   os.Args,
-		Stdin:  os.Stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
-		Home:   home,
+		Args:               os.Args,
+		Stdin:              os.Stdin,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
+		Home:               home,
+		ExperimentalRemote: experimentalRemoteEnabled(os.Getenv),
 		Config: remote.Config{
 			Stdin:  os.Stdin,
 			Stdout: os.Stdout,

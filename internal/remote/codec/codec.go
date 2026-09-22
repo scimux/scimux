@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Per-route body caps. These are the codec's own copies of the handler
@@ -132,18 +133,12 @@ type Conn struct {
 
 	loopOnce sync.Once
 
-	mu      sync.Mutex
-	pending map[string]*call
-	inBody  map[string]*incoming
-	cancels map[string]context.CancelFunc
-	reqMeta map[string]reqMeta
-	handler Handler
-	serveWG sync.WaitGroup
-}
-
-type reqMeta struct {
-	method string
-	path   string
+	mu          sync.Mutex
+	pending     map[string]*call
+	incoming    map[string]*incoming
+	handler     Handler
+	serveWG     sync.WaitGroup
+	bodyTimeout time.Duration
 }
 
 type call struct {
@@ -167,15 +162,14 @@ type respOrErr struct {
 // is, not of any one request, and the peer is told it in the hello.
 func NewConn(r io.Reader, w io.Writer, role uint8) *Conn {
 	return &Conn{
-		r:       r,
-		w:       w,
-		role:    role,
-		br:      bufio.NewReaderSize(r, chunkBufSize),
-		closeCh: make(chan struct{}),
-		pending: make(map[string]*call),
-		inBody:  make(map[string]*incoming),
-		cancels: make(map[string]context.CancelFunc),
-		reqMeta: make(map[string]reqMeta),
+		r:           r,
+		w:           w,
+		role:        role,
+		br:          bufio.NewReaderSize(r, chunkBufSize),
+		closeCh:     make(chan struct{}),
+		pending:     make(map[string]*call),
+		incoming:    make(map[string]*incoming),
+		bodyTimeout: incompleteRequestBodyTimeout,
 	}
 }
 

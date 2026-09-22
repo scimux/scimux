@@ -1,7 +1,7 @@
 package app
 
 import (
-	"os"
+	"io"
 	"path/filepath"
 
 	"github.com/scimux/scimux/internal/asset"
@@ -10,7 +10,7 @@ import (
 
 // agentAssetMaxBytes bounds how large an agent-referenced file scimux will
 // actually copy into the asset store. This is a practical ceiling on the
-// existing in-memory ingestion pipeline (ReadFile + WriteBlob both work on a
+// existing in-memory ingestion pipeline (ReadAll + WriteBlob both work on a
 // whole []byte, matching upload ingestion), not part of the storage-mode
 // decision: a file under this bound but over assetInlineCap still gets
 // ingested as a blob (see asset.StorageMode). A file over this bound is the
@@ -53,14 +53,17 @@ func (a *app) ingestAssetHook(nodeID, dir string, cands []asset.Candidate) {
 		havePath[p] = true
 	}
 	for _, c := range cands {
-		resolved, size, err := asset.Resolve(c.Ref, dir, roots)
+		f, resolved, size, err := asset.Open(c.Ref, dir, roots)
 		if err != nil || size > agentAssetMaxBytes {
+			if f != nil {
+				_ = f.Close()
+			}
 			continue
 		}
-		data, err := os.ReadFile(resolved)
-		// Re-check the length after the read, not just the pre-read Stat size:
-		// agentAssetMaxBytes is a hard memory ceiling, and a file that grew
-		// between Resolve's Stat and this read must not slip past it.
+		data, err := io.ReadAll(io.LimitReader(f, agentAssetMaxBytes+1))
+		_ = f.Close()
+		// The descriptor size is only an early refusal. LimitReader is the hard
+		// allocation ceiling if the already-open file grows while it is read.
 		if err != nil || int64(len(data)) > agentAssetMaxBytes {
 			continue
 		}

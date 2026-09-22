@@ -16,6 +16,7 @@ import (
 	"github.com/scimux/scimux/internal/asset"
 	"github.com/scimux/scimux/internal/notestore"
 	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/storagebudget"
 	"github.com/scimux/scimux/internal/tmuxsession"
 	"github.com/scimux/scimux/internal/transcript"
 )
@@ -556,7 +557,10 @@ type app struct {
 	// settingsPath is the computer's own settings (~/.scimux/settings.json),
 	// distinct from the opaque per-browser blob at uiPath. Empty disables them,
 	// which reads as every default — see settings.go.
-	settingsPath string
+	settingsPath    string
+	storageMu       sync.Mutex
+	storageSnapshot storagebudget.Status
+	storageAt       time.Time
 	// sessionsDir is the unified session-log store: one JSONL file per node,
 	// every transport, one schema (internal/sessionlog). Future readers
 	// (search, consolidation, sharing) scan this one directory. It is also

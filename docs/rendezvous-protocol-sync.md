@@ -1,8 +1,8 @@
 # Rendezvous protocol vector sync
 
 This repository vendors the scimux-rv rendezvous protocol specification
-and its test vectors. The current copy is taken from scimux-rv committed
-revision f4646e6.
+and its test vectors. The current copy is taken from scimux-rv release
+`v1.0.0`, committed revision 9adf896.
 
 S1 is Gate B. These files are the protocol artifacts, not shipped product
 logic. The Go and WebCrypto acceptance tests bind both sides to the same
@@ -11,10 +11,15 @@ logic. The Go and WebCrypto acceptance tests bind both sides to the same
 ## Source revision
 
 Name the scimux-rv Git object id that produced the vendored bytes. The
-current source is committed revision **f4646e6**
-(`f4646e6ce94ac0f5d6ebfb81d57ed6fcf35a196a`). When rv regenerates
+current source is committed revision **9adf896**
+(`9adf896bd0faae5e54a48392ea3165060e865345`). When rv regenerates
 vectors, replace that oid with the new committed revision and record it
 here in the same sentence form: “scimux-rv committed revision \<oid\>”.
+
+Resolve the object from the canonical public repository at
+`https://github.com/scimux/scimux-rv`. The immutable `v1.0.0` tag names the
+revision above. Public provenance must be reproducible from that repository
+and tag; do not substitute an object from superseded local history.
 
 ## Byte-copy mappings
 
@@ -35,17 +40,17 @@ forbidden. A pretty-printer or a key reorder silently breaks
 Extraction must come from Git, for example:
 
 ```
-git -C /path/to/scimux-rv cat-file blob $(git -C /path/to/scimux-rv rev-parse 27f165d:docs/protocol/rendezvous-v1.md)
+git -C /path/to/scimux-rv cat-file blob $(git -C /path/to/scimux-rv rev-parse v1.0.0:docs/protocol/rendezvous-v1.md)
 ```
 
-and the analogous `rev-parse <oid>:<path>` for the digest and each
+and the analogous `rev-parse v1.0.0:<path>` for the digest and each
 JSON file. `git show` of a blob is acceptable only when the output is
 byte-identical to `git cat-file blob`.
 
 ## Reading the vendored copy
 
 The specification is a byte copy, so it is written for its own
-repository and reads a little oddly here. Three things a reader of this
+repository and reads a little oddly here. Two things a reader of this
 tree will notice, none of which is a defect and none of which may be
 "fixed" in place -- an edit would break the byte copy, disagree with the
 bytes rv publishes, and be reverted by the next sync:
@@ -55,13 +60,6 @@ bytes rv publishes, and be reverted by the next sync:
   per the table above. The tunnel specification and browser implementation now
   live in scimux-connect and deliberately have no copy here; see
   `docs/invariants/remote.md` for the ownership boundary.
-- **It cites two design documents this repository does not track.**
-  `remote-scimux.md` and `remote-by-invite-only.md` are superseded plans,
-  archived under untracked `attic/`. Every citation quotes the sentence it
-  supersedes or relies on, so nothing in the spec depends on opening them;
-  they are provenance for a decision, not a reference you must follow.
-  This is the same arrangement AGENTS.md already records for the FR-xx and
-  NFR-xx numbering, which those archived documents also originate.
 - **It is therefore self-contained, and says so.** Its header claims a
   browser and a computer that have never read the scimux-rv repository can
   be implemented from it plus the vectors. That claim is the reason the
@@ -80,7 +78,7 @@ is absent from that source revision. Run both verification commands.
 2. Byte-copy the specification, `vectors.sha256`, and every vector
    JSON from that commit using the table above.
 3. Record the new concrete committed Git OID in this document (replace
-   `f4646e6` in the source-revision paragraph). Do not leave the old
+   the current OID in the source-revision paragraph). Do not leave the old
    oid in place as the current source.
 4. Run both verification commands below. Both must pass against the
    newly copied bytes.

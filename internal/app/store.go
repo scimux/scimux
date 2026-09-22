@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/storagebudget"
 )
 
 // storeRecord is one line of the append-only store file. Node metadata is
@@ -62,6 +63,20 @@ func (a *app) appendRecord(rec storeRecord) error {
 	// is only "done" once the bytes and a full-write check have reached disk.
 	a.storeMu.Lock()
 	defer a.storeMu.Unlock()
+	// Registry metadata is global bookkeeping, not node content. In
+	// particular, a node that has filled its own content budget must still be
+	// renameable, auditable, and deletable. Global and minimum-free limits
+	// continue to apply.
+	repairTail := sessionlog.UnterminatedTail(a.storePath)
+	incoming := int64(len(b))
+	if repairTail {
+		incoming++
+	}
+	releaseBudget, err := storagebudget.Reserve(filepath.Dir(a.storePath), "", incoming)
+	if err != nil {
+		return err
+	}
+	defer releaseBudget()
 	// A first append creates nodes.jsonl; its dirent is not crash-durable until
 	// the parent directory is synced too (see sessionlog.SyncParentDir). Detect
 	// creation under the same lock that serializes the write.
@@ -69,7 +84,7 @@ func (a *app) appendRecord(rec storeRecord) error {
 	created := os.IsNotExist(statErr)
 	// Close an interrupted append before adding to it, or the two become one
 	// malformed line and replay discards both (sessionlog.UnterminatedTail).
-	if sessionlog.UnterminatedTail(a.storePath) {
+	if repairTail {
 		b = append([]byte{'\n'}, b...)
 	}
 	f, err := os.OpenFile(a.storePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -335,6 +350,12 @@ func (a *app) archiveSessionLog(id string) {
 	if _, err := os.Stat(src); err != nil {
 		return
 	}
+	releaseBudget, err := storagebudget.Lock(filepath.Dir(a.sessionsDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive session log for %s: %v\n", id, err)
+		return
+	}
+	defer releaseBudget()
 	dir := filepath.Join(a.sessionsDir, "archive")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: archive session log for %s: %v\n", id, err)

@@ -6,6 +6,19 @@ pairing, bootstrap, browser module imports, codec vectors, or dependencies in
 its vendoring procedure is in `docs/rendezvous-protocol-sync.md`. FR-xx/NFR-xx
 identifiers retain their numbering from the archived remote-access requirements.
 
+- **Remote access is release-gated and then explicitly activated.** The public
+  process enables the remote CLI surface only when its experimental environment
+  gate is exactly `1`; `-remote` is still required to start rendezvous or read an
+  invite. Without both decisions there is no remote client, no remote status
+  projection, the browser hides the complete Remote access section, and the
+  web gateway answers constant 404 throughout `/api/remote/*`. Keep the code,
+  protocol artifacts and dependency licences compiled and testable: this is a
+  rollout gate, not an alternate build. The one compatibility exception is an
+  authenticated same-PID muxer handoff: inherited listener and ownership
+  descriptors temporarily retain the hidden flag table so a previously
+  authorized `-remote` process cannot install an update and then fail to parse
+  its own unchanged argv. A fresh process receives no such exception.
+
 - **Viewer and service origins are independent configuration.** Official v2
   pairing links open `https://my.scimux.com/p`; fragment `o` names the
   cryptographic rendezvous service `https://rv.scimux.com`. `Config.Origin`
@@ -51,6 +64,11 @@ identifiers retain their numbering from the archived remote-access requirements.
     anywhere so a claimed count cannot be lied about. The frozen 8-byte
     `SCMX` preamble never gains a field — capabilities grow in the hello, and
     payload fields are tagged records rather than positional.
+  - One authenticated channel admits at most 32 live requests. A duplicate
+    live request id or a 33rd concurrent request is a malformed-channel error;
+    an incomplete request body expires after 30 seconds. Closing a channel
+    cancels every handler and closes every pipe before waiting for handler
+    cleanup, so a peer cannot retain an unbounded body/goroutine set.
 - **`internal/remote/codec/testdata/vectors.json` is a published contract, not
   a local fixture.** `vectors_test.go` regenerates it from the production
   encoders and fails on drift; scimux-connect byte-copies it and decodes every

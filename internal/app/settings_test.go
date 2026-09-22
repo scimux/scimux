@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/scimux/scimux/internal/storagebudget"
 )
 
 func settingsApp(t *testing.T) *app {
@@ -24,6 +26,9 @@ func TestSettingsDefaultIsOff(t *testing.T) {
 	a := settingsApp(t)
 	if a.settings().ClaudeUsageChecks {
 		t.Fatal("a computer with no settings file consented to spending quota")
+	}
+	if got := a.settings().StorageMinFreeBytes; got != storagebudget.DefaultMinFreeBytes {
+		t.Fatalf("default minimum free bytes = %d, want %d", got, storagebudget.DefaultMinFreeBytes)
 	}
 }
 
@@ -99,6 +104,18 @@ func TestSettingsHTTP(t *testing.T) {
 	}
 	if got := get()["claude_usage_checks"]; got != true {
 		t.Fatal("a rejected write changed the stored setting")
+	}
+	if code := put(`{"storage_global_limit_bytes":1048576,"storage_node_limit_bytes":524288,"storage_min_free_bytes":0}`); code != http.StatusOK {
+		t.Fatalf("storage PUT = %d", code)
+	}
+	limits := get()
+	if limits["storage_global_limit_bytes"] != float64(1048576) ||
+		limits["storage_node_limit_bytes"] != float64(524288) ||
+		limits["storage_min_free_bytes"] != float64(0) {
+		t.Fatalf("storage settings = %#v", limits)
+	}
+	if code := put(`{"storage_node_limit_bytes":-1}`); code != http.StatusBadRequest {
+		t.Fatalf("negative storage PUT = %d, want 400", code)
 	}
 }
 

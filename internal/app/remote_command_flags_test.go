@@ -37,12 +37,13 @@ func flagCommand(t *testing.T, args ...string) (*Command, *bytes.Buffer, error) 
 	t.Helper()
 	stderr := new(bytes.Buffer)
 	cmd := &Command{
-		Args:   append([]string{"scimux"}, args...),
-		Stdin:  strings.NewReader(""),
-		Stdout: io.Discard,
-		Stderr: stderr,
-		Home:   t.TempDir(),
-		Config: remote.Config{HTTPClient: unreachableHTTP()},
+		Args:               append([]string{"scimux"}, args...),
+		Stdin:              strings.NewReader(""),
+		Stdout:             io.Discard,
+		Stderr:             stderr,
+		Home:               t.TempDir(),
+		ExperimentalRemote: true,
+		Config:             remote.Config{HTTPClient: unreachableHTTP()},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
@@ -253,6 +254,93 @@ func TestCommandRunHelpIsTheProcessUsage(t *testing.T) {
 	}
 	if !strings.Contains(out, "-trusted-host") {
 		t.Errorf("-h did not print the flag defaults.\ngot:\n%s", out)
+	}
+	for _, name := range []string{"-remote", "-invite-file", "-invite-stdin"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("experimental -h did not print %s.\ngot:\n%s", name, out)
+		}
+	}
+}
+
+func TestExperimentalRemoteGateIsExactAndFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"0", false},
+		{"true", false},
+		{"01", false},
+		{"1", true},
+	} {
+		got := experimentalRemoteEnabled(func(string) string { return tc.value })
+		if got != tc.want {
+			t.Errorf("value %q: enabled = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+	if experimentalRemoteEnabled(nil) {
+		t.Fatal("nil environment reader enabled experimental remote access")
+	}
+}
+
+func TestRemoteFlagsAreAbsentWithoutExperimentalGate(t *testing.T) {
+	stderr := new(bytes.Buffer)
+	cmd := &Command{
+		Args:   []string{"scimux", "-remote"},
+		Stdin:  strings.NewReader(""),
+		Stdout: io.Discard,
+		Stderr: stderr,
+		Home:   t.TempDir(),
+	}
+	err := cmd.Run(context.Background())
+	if !errors.Is(err, errFlagsReported) {
+		t.Fatalf("Run(-remote) error = %v, want an argv error", err)
+	}
+	if cmd.Listener() != nil {
+		t.Fatal("disabled experimental flag bound a listener")
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined: -remote") {
+		t.Fatalf("disabled flag did not look absent:\n%s", stderr.String())
+	}
+
+	help := new(bytes.Buffer)
+	cmd = &Command{
+		Args:   []string{"scimux", "-h"},
+		Stdin:  strings.NewReader(""),
+		Stdout: io.Discard,
+		Stderr: help,
+		Home:   t.TempDir(),
+	}
+	if err := cmd.Run(context.Background()); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("Run(-h) error = %v, want flag.ErrHelp", err)
+	}
+	for _, name := range []string{"-remote", "-invite-file", "-invite-stdin", "-rendezvous-url", "-viewer-origin"} {
+		if strings.Contains(help.String(), name) {
+			t.Errorf("ordinary -h exposed %s:\n%s", name, help.String())
+		}
+	}
+}
+
+func TestInheritedMuxerHandoffRetainsLegacyRemoteFlagSurface(t *testing.T) {
+	help := new(bytes.Buffer)
+	cmd := &Command{
+		Args:   []string{"scimux", "-h"},
+		Stdin:  strings.NewReader(""),
+		Stdout: io.Discard,
+		Stderr: help,
+		Home:   t.TempDir(),
+		// loadMuxerExecFiles is the production constructor for this value. The
+		// help path stops before descriptors are consumed, so placeholders are
+		// sufficient to exercise the inherited flag table here.
+		handoff: &muxerExecFiles{},
+	}
+	if err := cmd.Run(context.Background()); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("inherited Run(-h) error = %v, want flag.ErrHelp", err)
+	}
+	for _, name := range []string{"-remote", "-invite-file", "-invite-stdin", "-rendezvous-url", "-viewer-origin"} {
+		if !strings.Contains(help.String(), name) {
+			t.Errorf("inherited handoff did not retain %s:\n%s", name, help.String())
+		}
 	}
 }
 

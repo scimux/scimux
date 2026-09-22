@@ -12,7 +12,7 @@ import (
 // implemented by the web generation or cross the muxer capability unchanged.
 func TestSplitGatewayOwnsOrForwardsEveryExistingAPIRoute(t *testing.T) {
 	core := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
-	mux, err := newWebMux(webFS, core, nil)
+	mux, err := newWebMux(webFS, core, newFakeWebRemote("enrolled"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +46,68 @@ func TestSplitGatewayOwnsOrForwardsEveryExistingAPIRoute(t *testing.T) {
 				t.Fatalf("muxer-owned route resolved as %q, want /api/ proxy", pattern)
 			}
 		})
+	}
+}
+
+func TestSplitGatewayHidesRemoteNamespaceWhenInactive(t *testing.T) {
+	coreCalls := 0
+	core := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { coreCalls++ })
+	mux, err := newWebMux(webFS, core, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/remote"},
+		{http.MethodGet, "/api/remote/status"},
+		{http.MethodPost, "/api/remote/pairing"},
+		{http.MethodGet, "/api/remote/bootstrap"},
+		{http.MethodDelete, "/api/remote/devices/device"},
+		{http.MethodGet, "/api/remote/not-a-route"},
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404", tc.method, tc.path, rec.Code)
+		}
+		if location := rec.Header().Get("Location"); location != "" {
+			t.Errorf("%s %s redirected to %q, want no redirect", tc.method, tc.path, location)
+		}
+	}
+	if coreCalls != 0 {
+		t.Fatalf("inactive remote namespace reached the core %d times", coreCalls)
+	}
+}
+
+func TestSplitGatewayPreservesActiveRemoteMethodSemantics(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	core, err := newCoreMux(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux, err := newWebMux(webFS, core, newFakeWebRemote("enrolled"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		method string
+		path   string
+		allow  string
+	}{
+		{http.MethodGet, "/api/remote/pairing", http.MethodPost},
+		{http.MethodPost, "/api/remote/status", http.MethodGet + ", " + http.MethodHead},
+		{http.MethodGet, "/api/remote/devices/device", http.MethodDelete + ", " + http.MethodPatch},
+	} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s = %d, want 405", tc.method, tc.path, rec.Code)
+		}
+		if got := rec.Header().Get("Allow"); got != tc.allow {
+			t.Errorf("%s %s Allow = %q, want %q", tc.method, tc.path, got, tc.allow)
+		}
 	}
 }
 

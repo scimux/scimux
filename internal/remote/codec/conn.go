@@ -4,9 +4,21 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 )
 
 const chunkBufSize = bodyChunkSize
+
+const (
+	// maxInFlightRequests bounds pipes, handler goroutines, cancellation
+	// contexts, and request bookkeeping an authenticated peer can retain on
+	// one channel.
+	maxInFlightRequests = 32
+	// An admitted request must finish its body promptly. This is deliberately
+	// much longer than normal local API uploads while still making an abandoned
+	// pipe finite.
+	incompleteRequestBodyTimeout = 30 * time.Second
+)
 
 // RoundTrip sends req and returns the matching response. ctx cancellation
 // must propagate to the peer handler.
@@ -151,17 +163,15 @@ func (c *Conn) Serve(ctx context.Context, h Handler) error {
 		return err
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	c.mu.Lock()
 	c.handler = h
 	c.mu.Unlock()
 	err := c.readLoop(ctx, true)
-	c.mu.Lock()
-	for id, fn := range c.cancels {
-		fn()
-		delete(c.cancels, id)
-	}
-	c.mu.Unlock()
+	cancel()
+	// A reader-side EOF/protocol failure ends the whole bidirectional channel.
+	// Close the writer too so a handler already streaming a response cannot
+	// keep Serve blocked forever while the peer has stopped reading.
+	_ = c.Close()
 	c.serveWG.Wait()
 	return err
 }
@@ -193,7 +203,7 @@ func (c *Conn) forgetCall(id string) {
 
 func (c *Conn) failAll(err error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var responseBodies []*io.PipeWriter
 	for id, cl := range c.pending {
 		cl.settled = true
 		select {
@@ -201,13 +211,25 @@ func (c *Conn) failAll(err error) {
 		default:
 		}
 		if cl.bodyW != nil {
-			_ = cl.bodyW.CloseWithError(err)
+			responseBodies = append(responseBodies, cl.bodyW)
 		}
 		delete(c.pending, id)
 	}
-	for id, inf := range c.inBody {
+	var requests []*incoming
+	for id, inf := range c.incoming {
+		delete(c.incoming, id)
+		if inf.timer != nil {
+			inf.timer.Stop()
+		}
+		requests = append(requests, inf)
+	}
+	c.mu.Unlock()
+	for _, w := range responseBodies {
+		_ = w.CloseWithError(err)
+	}
+	for _, inf := range requests {
+		inf.cancel()
 		_ = inf.w.CloseWithError(err)
-		delete(c.inBody, id)
 	}
 }
 
@@ -258,17 +280,19 @@ func (c *Conn) readLoop(ctx context.Context, server bool) error {
 			continue
 		}
 		if server {
-			c.handleServerFrame(ctx, fr)
+			if err := c.handleServerFrame(ctx, fr); err != nil {
+				return err
+			}
 		} else {
 			c.handleClientFrame(fr)
 		}
 	}
 }
 
-func (c *Conn) handleServerFrame(ctx context.Context, fr *frame) {
+func (c *Conn) handleServerFrame(ctx context.Context, fr *frame) error {
 	switch fr.typ {
 	case typeRequest:
-		c.acceptRequest(ctx, fr.payload)
+		return c.acceptRequest(ctx, fr.payload)
 	case typeBody:
 		c.acceptBody(fr.payload)
 	case typeBodyEnd:
@@ -276,34 +300,32 @@ func (c *Conn) handleServerFrame(ctx context.Context, fr *frame) {
 	case typeCancel:
 		c.acceptCancel(fr.payload)
 	}
+	return nil
 }
 
 type incoming struct {
-	w   *io.PipeWriter
-	n   int64
-	cap int64
+	w        *io.PipeWriter
+	n        int64
+	cap      int64
+	cancel   context.CancelFunc
+	timer    *time.Timer
+	bodyOpen bool
 }
 
-func (c *Conn) acceptRequest(ctx context.Context, payload []byte) {
+func (c *Conn) acceptRequest(ctx context.Context, payload []byte) error {
 	id, method, path, query, hdrs, err := decodeRequestPayload(payload)
 	if err != nil {
-		return
+		return nil
 	}
 	tmp := &Request{ID: id, Method: method, Path: path, Query: query, Headers: hdrs}
 	hdrs, err = validateRequest(tmp)
 	if err != nil {
 		_ = c.writeReject(id, err)
-		return
+		return nil
 	}
 	pr, pw := io.Pipe()
-	c.mu.Lock()
-	c.inBody[id] = &incoming{w: pw, cap: requestBodyLimit(method, path)}
 	reqCtx, cancel := context.WithCancel(ctx)
-	c.cancels[id] = cancel
-	c.reqMeta[id] = reqMeta{method: method, path: path}
-	h := c.handler
-	c.mu.Unlock()
-
+	inf := &incoming{w: pw, cap: requestBodyLimit(method, path), cancel: cancel, bodyOpen: true}
 	req := &Request{
 		ID:      id,
 		Method:  method,
@@ -312,19 +334,57 @@ func (c *Conn) acceptRequest(ctx context.Context, payload []byte) {
 		Headers: hdrs,
 		Body:    pr,
 	}
+	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		cancel()
+		_ = pr.Close()
+		_ = pw.Close()
+		return io.ErrClosedPipe
+	}
+	if _, duplicate := c.incoming[id]; duplicate {
+		c.mu.Unlock()
+		cancel()
+		_ = pr.Close()
+		_ = pw.Close()
+		err := reject(ClassMalformed, "")
+		_ = c.writeReject(id, err)
+		return err
+	}
+	if len(c.incoming) >= maxInFlightRequests {
+		c.mu.Unlock()
+		cancel()
+		_ = pr.Close()
+		_ = pw.Close()
+		err := reject(ClassMalformed, "")
+		_ = c.writeReject(id, err)
+		return err
+	}
+	// Publish the timer, request state, and handler goroutine as one admission
+	// under c.mu. Close/failAll can therefore never observe a live request with
+	// an uninitialized timer or finish before its handler is launched.
+	inf.timer = time.AfterFunc(c.bodyTimeout, func() { c.expireIncomingBody(id, inf) })
+	c.incoming[id] = inf
+	h := c.handler
 	c.serveWG.Add(1)
 	go func() {
 		defer c.serveWG.Done()
 		defer cancel()
 		defer func() {
+			var closeBody bool
 			c.mu.Lock()
-			delete(c.cancels, id)
-			delete(c.reqMeta, id)
-			if inf, ok := c.inBody[id]; ok {
-				_ = inf.w.Close()
-				delete(c.inBody, id)
+			if current := c.incoming[id]; current == inf {
+				delete(c.incoming, id)
+				if inf.timer != nil {
+					inf.timer.Stop()
+				}
+				closeBody = inf.bodyOpen
+				inf.bodyOpen = false
 			}
 			c.mu.Unlock()
+			if closeBody {
+				_ = inf.w.Close()
+			}
 		}()
 		resp, herr := h.ServeRemote(reqCtx, req)
 		_ = pr.Close()
@@ -334,6 +394,8 @@ func (c *Conn) acceptRequest(ctx context.Context, payload []byte) {
 		resp.ID = id
 		c.writeOutgoingResponse(reqCtx, id, method, path, resp)
 	}()
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *Conn) acceptBody(payload []byte) {
@@ -342,17 +404,23 @@ func (c *Conn) acceptBody(payload []byte) {
 		return
 	}
 	c.mu.Lock()
-	inf := c.inBody[id]
-	c.mu.Unlock()
-	if inf == nil {
+	inf := c.incoming[id]
+	if inf == nil || !inf.bodyOpen {
+		c.mu.Unlock()
 		return
 	}
 	if inf.cap-inf.n < int64(len(data)) {
+		inf.bodyOpen = false
+		if inf.timer != nil {
+			inf.timer.Stop()
+		}
+		c.mu.Unlock()
 		_ = inf.w.CloseWithError(reject(ClassBodyTooLarge, ""))
 		_ = c.writeReject(id, reject(ClassBodyTooLarge, ""))
 		return
 	}
 	inf.n += int64(len(data))
+	c.mu.Unlock()
 	_, _ = inf.w.Write(data)
 }
 
@@ -362,9 +430,13 @@ func (c *Conn) acceptBodyEnd(payload []byte) {
 		return
 	}
 	c.mu.Lock()
-	inf, ok := c.inBody[id]
+	inf := c.incoming[id]
+	ok := inf != nil && inf.bodyOpen
 	if ok {
-		delete(c.inBody, id)
+		inf.bodyOpen = false
+		if inf.timer != nil {
+			inf.timer.Stop()
+		}
 	}
 	c.mu.Unlock()
 	if ok {
@@ -378,18 +450,34 @@ func (c *Conn) acceptCancel(payload []byte) {
 		return
 	}
 	c.mu.Lock()
-	fn := c.cancels[id]
-	inf := c.inBody[id]
-	if inf != nil {
-		delete(c.inBody, id)
+	inf := c.incoming[id]
+	closeBody := inf != nil && inf.bodyOpen
+	if closeBody {
+		inf.bodyOpen = false
+		if inf.timer != nil {
+			inf.timer.Stop()
+		}
 	}
 	c.mu.Unlock()
-	if fn != nil {
-		fn()
-	}
 	if inf != nil {
-		_ = inf.w.CloseWithError(context.Canceled)
+		inf.cancel()
+		if closeBody {
+			_ = inf.w.CloseWithError(context.Canceled)
+		}
 	}
+}
+
+func (c *Conn) expireIncomingBody(id string, inf *incoming) {
+	c.mu.Lock()
+	if c.incoming[id] != inf || !inf.bodyOpen {
+		c.mu.Unlock()
+		return
+	}
+	inf.bodyOpen = false
+	c.mu.Unlock()
+	inf.cancel()
+	_ = inf.w.CloseWithError(context.DeadlineExceeded)
+	_ = c.writeReject(id, reject(ClassTruncated, ""))
 }
 
 func (c *Conn) handleClientFrame(fr *frame) {

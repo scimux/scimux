@@ -28,37 +28,37 @@ var (
 	ErrOutsideRoot = errors.New("asset: outside allowed roots")
 )
 
-// Resolve decides whether ref is eligible for ingestion as a session asset.
+// Open decides whether ref is eligible for ingestion as a session asset and
+// returns the already-checked descriptor. The caller must read this descriptor,
+// never reopen path: os.Root keeps every symlink traversal beneath the approved
+// root and closes the check/use pathname race.
 // ref may be absolute or relative; relative paths are resolved against dir
 // (the node's working directory). Symlinks are followed to their final
 // target, and eligibility is checked against the resolved target, not the
 // link — a symlink inside an allowed root whose target lives outside every
-// root is rejected. On success it returns the resolved absolute path and
-// the file's size; StorageMode then decides inline vs blob storage, but
-// never revisits eligibility.
-func Resolve(ref, dir string, roots []string) (path string, size int64, err error) {
+// root is rejected. On success it returns the descriptor, resolved absolute
+// path, and descriptor size.
+func Open(ref, dir string, roots []string) (file *os.File, path string, size int64, err error) {
 	p := ref
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(dir, p)
 	}
-	p = filepath.Clean(p)
+	p, err = filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+	}
 
 	if _, err := os.Lstat(p); err != nil {
-		return "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
 	}
 
 	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
 	}
-	resolved = filepath.Clean(resolved)
-
-	fi, err := os.Stat(resolved)
+	resolved, err = filepath.Abs(filepath.Clean(resolved))
 	if err != nil {
-		return "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
-	}
-	if !fi.Mode().IsRegular() {
-		return "", 0, fmt.Errorf("%w: %s", ErrNotRegularFile, ref)
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
 	}
 
 	for _, root := range roots {
@@ -66,12 +66,59 @@ func Resolve(ref, dir string, roots []string) (path string, size int64, err erro
 		if err != nil {
 			continue
 		}
-		rroot = filepath.Clean(rroot)
-		if withinRoot(resolved, rroot) {
-			return resolved, fi.Size(), nil
+		rroot, err = filepath.Abs(filepath.Clean(rroot))
+		if err != nil || !withinRoot(resolved, rroot) {
+			continue
 		}
+
+		// Open and pin the approved root before opening the candidate. Stat the
+		// root on both sides of OpenRoot so replacing the root pathname cannot
+		// silently redirect the capability to another tree.
+		before, err := os.Stat(rroot)
+		if err != nil || !before.IsDir() {
+			continue
+		}
+		cap, err := os.OpenRoot(rroot)
+		if err != nil {
+			continue
+		}
+		rootInfo, statErr := cap.Stat(".")
+		if statErr != nil || !os.SameFile(before, rootInfo) {
+			cap.Close()
+			continue
+		}
+		rel, err := filepath.Rel(rroot, resolved)
+		if err != nil {
+			cap.Close()
+			continue
+		}
+		f, err := cap.Open(rel)
+		cap.Close()
+		if err != nil {
+			return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		}
+		if !fi.Mode().IsRegular() {
+			f.Close()
+			return nil, "", 0, fmt.Errorf("%w: %s", ErrNotRegularFile, ref)
+		}
+		return f, resolved, fi.Size(), nil
 	}
-	return "", 0, fmt.Errorf("%w: %s", ErrOutsideRoot, ref)
+	return nil, "", 0, fmt.Errorf("%w: %s", ErrOutsideRoot, ref)
+}
+
+// Resolve is the metadata-only compatibility surface. Security-sensitive
+// ingestion must use Open and consume its returned descriptor.
+func Resolve(ref, dir string, roots []string) (path string, size int64, err error) {
+	f, path, size, err := Open(ref, dir, roots)
+	if f != nil {
+		_ = f.Close()
+	}
+	return path, size, err
 }
 
 // withinRoot reports whether path is root itself or a descendant of it.

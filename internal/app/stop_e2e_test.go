@@ -220,7 +220,7 @@ func TestMuxerDeathReapsWebChildBlockedOnInviteStdinE2E(t *testing.T) {
 	}
 	defer logFile.Close()
 	muxer := exec.Command(bin, "-addr", addr, "-socket", "blocked-invite-e2e", "--remote", "--invite-stdin")
-	muxer.Env = append(os.Environ(), "HOME="+home, "PATH="+t.TempDir())
+	muxer.Env = append(os.Environ(), "HOME="+home, "PATH="+t.TempDir(), experimentalRemoteEnv+"=1")
 	muxer.Stdout, muxer.Stderr = logFile, logFile
 	muxer.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	inviteReader, inviteWriter, err := os.Pipe()

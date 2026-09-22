@@ -939,6 +939,57 @@ func TestAppendRecordFileMode(t *testing.T) {
 	}
 }
 
+func TestAppendRecordUsesExactGlobalReservation(t *testing.T) {
+	data := t.TempDir()
+	rec := storeRecord{Type: "delete", ID: "n1", Time: "2026-09-21T10:00:00Z"}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := int64(len(b) + 1) // appendRecord's one terminating newline
+	settings := fmt.Sprintf(`{"storage_min_free_bytes":0,"storage_global_limit_bytes":%d}`, want)
+	if err := os.WriteFile(filepath.Join(data, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{byID: map[string]*Node{}, storePath: filepath.Join(data, "nodes.jsonl")}
+	if err := a.appendRecord(rec); err != nil {
+		t.Fatalf("exact-limit append: %v", err)
+	}
+	info, err := os.Stat(a.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != want {
+		t.Fatalf("stored bytes = %d, want %d", info.Size(), want)
+	}
+}
+
+func TestAppendRecordIgnoresPerNodeContentLimit(t *testing.T) {
+	records := []storeRecord{
+		{Type: "node", Node: &Node{ID: "n1", Title: "renamed"}},
+		{Type: "key", ID: "n1", Key: "y", Excerpt: "synthetic audit", Time: "t"},
+		{Type: "delete", ID: "n1", Time: "t"},
+	}
+	for _, rec := range records {
+		t.Run(rec.Type, func(t *testing.T) {
+			data := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(data, "sessions"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(data, "sessions", "n1.jsonl"), []byte("12345678"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(data, "settings.json"), []byte(`{"storage_min_free_bytes":0,"storage_node_limit_bytes":8}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			a := &app{byID: map[string]*Node{}, storePath: filepath.Join(data, "nodes.jsonl")}
+			if err := a.appendRecord(rec); err != nil {
+				t.Fatalf("metadata append at full node budget: %v", err)
+			}
+		})
+	}
+}
+
 // TestLoadStoreMissingFile: a fresh install has no store yet.
 func TestLoadStoreMissingFile(t *testing.T) {
 	a := &app{byID: map[string]*Node{}, storePath: filepath.Join(t.TempDir(), "absent.jsonl")}

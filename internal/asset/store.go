@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/scimux/scimux/internal/privatefs"
 	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/storagebudget"
 )
 
 // NodeDir returns the node-scoped blob directory under assetsRoot
@@ -24,9 +26,14 @@ func NodeDir(assetsRoot, nodeID string) string {
 // as sessionlog.Writer.Append.
 func WriteBlob(assetsRoot, nodeID, id, name string, data []byte) (relPath string, err error) {
 	dir := NodeDir(assetsRoot, nodeID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := privatefs.EnsureDir(dir, 0o700); err != nil {
 		return "", err
 	}
+	releaseBudget, err := storagebudget.Reserve(filepath.Dir(assetsRoot), nodeID, int64(len(data)))
+	if err != nil {
+		return "", err
+	}
+	defer releaseBudget()
 	fname := id + "-" + sessionlog.SanitizeAssetName(name)
 	path := filepath.Join(dir, fname)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

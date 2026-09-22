@@ -3,6 +3,7 @@ package sessionlog
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,6 +34,34 @@ func TestMetaHeaderRoundTrip(t *testing.T) {
 	}
 	if NewMeta("a", "b", "", "", "").Meta.UID == m.UID {
 		t.Fatal("meta UIDs must differ between calls")
+	}
+}
+
+func TestAppendUsesExactStorageReservation(t *testing.T) {
+	data := t.TempDir()
+	path := filepath.Join(data, "sessions", "n1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{T: "user", Text: "synthetic", Time: "2026-09-21T10:00:00Z"}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := int64(len(b) + 1)
+	settings := fmt.Sprintf(`{"storage_min_free_bytes":0,"storage_global_limit_bytes":%d,"storage_node_limit_bytes":%d}`, want, want)
+	if err := os.WriteFile(filepath.Join(data, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Writer{Path: path}).Append(ev); err != nil {
+		t.Fatalf("exact-limit append: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != want {
+		t.Fatalf("stored bytes = %d, want %d", info.Size(), want)
 	}
 }
 

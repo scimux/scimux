@@ -33,9 +33,14 @@ loopback/browser boundary; they are not a login.
   with `Sec-Fetch-Site: cross-site` or `same-site` are rejected, including
   safe GETs such as search and update-check. `same-origin`, `none`, and
   clients that omit the header follow the documented route behavior.
-- **Anti-framing.** Successful and error responses carry
-  `Content-Security-Policy: frame-ancestors 'none'` and
-  `X-Frame-Options: DENY`.
+- **Browser response policy.** Successful and error responses carry a
+  deny-by-default Content Security Policy (`script-src 'self'`, no objects,
+  bases, forms, or framing), `X-Frame-Options: DENY`, `nosniff`,
+  `Referrer-Policy: no-referrer`, and a restrictive Permissions Policy. Inline
+  styles remain allowed for dynamic layout and lane colours; inline scripts
+  and script attributes do not. The frozen `/assets/` compatibility surface
+  retains its historical header shape, while executable CSS/JS handlers set
+  `nosniff` themselves.
 
 Binding `-addr` wider than loopback still exposes full controller access
 to every client that can reach an allowed Host.
@@ -57,11 +62,15 @@ The polling snapshot the UI runs on. Returns:
 {
   "nodes":     [ { …node fields…, "live": "quiet", "attention": "approval",
                    "has_transcript": true, "last_activity": 1752849600000,
-                   "ctx_pct": 37, "stops": ["2026-07-24T09:12:00Z"] } ],
+                   "ctx_pct": 37, "storage_bytes": 1048576,
+                   "storage_writable": true,
+                   "stops": ["2026-07-24T09:12:00Z"] } ],
   "sys":       { …host load/memory… },
+  "storage":   { "used_bytes": 8388608, "free_bytes": 4294967296,
+                   "min_free_bytes": 67108864, "writable": true },
   "socket":    "scimux",
   "hostname":  "workstation",
-  "version":   "v0.5.0"
+  "version":   "v1.0.0"
 }
 ```
 
@@ -86,6 +95,13 @@ deliberately closed via
 `POST …/exit`: the node stays visible with a dead-end cap on the map rather
 than being deleted. Live tmux inventory is not exposed; it remains internal
 input for owned-session liveness and name-collision checks.
+
+`storage_bytes` is the live node's session log, attachments, and stored asset
+blobs; `storage_writable` also accounts for that node's configured limit. The
+top-level `storage` snapshot covers those managed stores globally,
+including archived history; it reports usage/free space, effective limits,
+whether writes are currently possible, and a `reason` when not. It is sampled
+at most once per 30 seconds so polling does not rescan history every second.
 
 Responses carry an `ETag`; polling clients may send `If-None-Match` and receive
 `304 Not Modified` when the snapshot is unchanged.
@@ -632,7 +648,10 @@ document, whose contents are opaque to the server.
 ```json
 {
   "claude_usage_checks": false,
-  "muse_approval_judge_consent": false
+  "muse_approval_judge_consent": false,
+  "storage_global_limit_bytes": 0,
+  "storage_node_limit_bytes": 0,
+  "storage_min_free_bytes": 67108864
 }
 ```
 
@@ -645,6 +664,15 @@ Muse nodes (including forks) and `/clear`. It does not disable the judge,
 grant a tool permission, or arm auto-approval. Turning it off prevents those
 new launches/session resets; it does not stop an existing Muse session.
 
+The storage fields are non-negative integer byte counts. A zero global or
+per-node limit means unlimited; a zero minimum-free value disables that
+reserve. A missing `storage_min_free_bytes` uses the 64 MiB safety default.
+The global budget covers `nodes.jsonl`, session logs, attachments, asset blobs,
+and their archives. The per-node budget covers that live node's session log,
+attachments, and asset blobs. Before a managed write, all scimux processes
+serialize the usage check through an owner-only lock. A write that would cross
+a limit fails without truncating or deleting existing durable history.
+
 **Both consent fields default to off.** A missing, unreadable, empty,
 oversized, or invalid settings file is read as no consent.
 
@@ -652,7 +680,8 @@ PUT **merges the supplied JSON object** into the stored document. Omitted
 fields retain their current values, including unknown fields written by a
 newer client. For example, `{"claude_usage_checks":false}` turns off the
 Claude probe without changing Muse consent. To revoke both, explicitly send
-both fields as `false`; `{}` changes nothing. Send booleans for consent:
+both fields as `false`; `{}` changes nothing. Send booleans for consent and
+non-negative integers for storage limits:
 `null` leaves the current value unchanged, while other non-boolean values
 are `400`.
 
@@ -863,8 +892,10 @@ map — "unknown" is what happened, and it is not the same claim as up to date.
 
 ## Remote pairing
 
-Loopback pairing for `-remote`. Confirm is a separate explicit call;
-mint never completes a pairing. CSRF is required on unsafe methods;
+This experimental namespace is present only in a run where remote access was
+unlocked and explicitly activated; otherwise every `/api/remote/*` request is
+404. Loopback pairing for an active remote run. Confirm is a separate explicit
+call; mint never completes a pairing. CSRF is required on unsafe methods;
 GET needs no CSRF header. Missing Origin and Referer are accepted for scripts,
 but do not bypass the token requirement.
 
@@ -995,5 +1026,6 @@ Computer-supplied FR-40 bootstrap manifest. JSON with `source` (`computer`),
 `url`, `kind`, `size`, and `integrity` (`sha256-` + standard-base64
 SHA-256 of the bytes that GET on that URL returns). Derived from the
 embedded filesystem the handlers serve, computed once per process. GET
-needs no CSRF header. Always reachable — this is application content,
-not pairing state.
+needs no CSRF header. It is always reachable during an active remote run —
+this is application content, not pairing state — and absent with the rest of
+the namespace when the experiment is inactive.

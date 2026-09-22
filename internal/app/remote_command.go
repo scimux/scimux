@@ -23,6 +23,12 @@ import (
 // 2 that flag.ExitOnError produced before Phase 3 removed the duplicate parse.
 var errFlagsReported = errors.New("scimux: invalid command line")
 
+const experimentalRemoteEnv = "SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_REMOTE"
+
+func experimentalRemoteEnabled(getenv func(string) string) bool {
+	return getenv != nil && getenv(experimentalRemoteEnv) == "1"
+}
+
 // Command is the injectable startup seam for remote-aware scimux (S5).
 // Tests call Run; they must not spawn the scimux binary or os.Exit.
 type Command struct {
@@ -31,6 +37,12 @@ type Command struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Home   string
+
+	// ExperimentalRemote is set only by the public process entry point after
+	// reading experimentalRemoteEnv. Keeping it explicit on the injectable
+	// command makes the default fail closed and keeps tests independent of the
+	// agent's own environment.
+	ExperimentalRemote bool
 
 	Config remote.Config
 
@@ -123,11 +135,23 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	addr := fs.String("addr", addrDefault, "listen address (defaults to loopback; widening it exposes the unauthenticated UI)")
 	data := fs.String("data", dataDefault, "data directory for the node store")
 	socket := fs.String("socket", socketDefault, "tmux socket name (tmux -L) for the private server")
-	doRemote := fs.Bool("remote", c.Config.Remote, "enable remote access")
-	inviteFile := fs.String("invite-file", c.Config.InviteFile, "read invite from a 0600 owner-only file")
-	inviteStdin := fs.Bool("invite-stdin", c.Config.InviteStdin, "read invite from stdin")
-	rvURL := fs.String("rendezvous-url", c.Config.Origin, "rendezvous base URL (default "+remote.DefaultOrigin+"); also the origin bound into pairing transcripts")
-	viewerURL := fs.String("viewer-origin", c.Config.ViewerOrigin, "trusted pairing viewer origin (default "+remote.DefaultViewerOrigin+")")
+	doRemote := false
+	inviteFile := ""
+	inviteStdin := false
+	rvURL := c.Config.Origin
+	viewerURL := c.Config.ViewerOrigin
+	// A valid same-PID muxer handoff is the compatibility bridge from a
+	// release that predates the rollout gate. Such a process may already have
+	// authorized remote access with -remote in its original argv. Accept the
+	// hidden flags only for that inherited lifetime; an ordinary fresh start
+	// still needs the explicit environment gate.
+	if c.ExperimentalRemote || c.handoff != nil {
+		fs.BoolVar(&doRemote, "remote", c.Config.Remote, "enable remote access")
+		fs.StringVar(&inviteFile, "invite-file", c.Config.InviteFile, "read invite from a 0600 owner-only file")
+		fs.BoolVar(&inviteStdin, "invite-stdin", c.Config.InviteStdin, "read invite from stdin")
+		fs.StringVar(&rvURL, "rendezvous-url", c.Config.Origin, "rendezvous base URL (default "+remote.DefaultOrigin+"); also the origin bound into pairing transcripts")
+		fs.StringVar(&viewerURL, "viewer-origin", c.Config.ViewerOrigin, "trusted pairing viewer origin (default "+remote.DefaultViewerOrigin+")")
+	}
 	var trustedHosts stringList
 	fs.Var(&trustedHosts, "trusted-host", "additional Host name or IP allowed at the request boundary (repeatable; not authentication)")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -137,12 +161,12 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("%w: %w", errFlagsReported, err)
 	}
 
-	origin, err := normalizeRendezvousURL(*rvURL)
+	origin, err := normalizeRendezvousURL(rvURL)
 	if err != nil {
 		return err
 	}
 	c.Config.Origin = origin
-	viewerOrigin, err := remote.NormalizeViewerOrigin(*viewerURL)
+	viewerOrigin, err := remote.NormalizeViewerOrigin(viewerURL)
 	if err != nil {
 		return fmt.Errorf("-viewer-origin: %w", err)
 	}
@@ -151,12 +175,10 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	c.listenAddr = *addr
 	c.socket = *socket
 	c.Config.DataDir = *data
-	c.Config.Remote = *doRemote
+	c.Config.Remote = doRemote
 	c.trustedHosts = append([]string(nil), trustedHosts...)
-	if *inviteFile != "" {
-		c.Config.InviteFile = *inviteFile
-	}
-	c.Config.InviteStdin = *inviteStdin
+	c.Config.InviteFile = inviteFile
+	c.Config.InviteStdin = inviteStdin
 	if c.Config.Stdin == nil {
 		c.Config.Stdin = c.Stdin
 	}
@@ -167,7 +189,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 		c.Config.Stderr = c.Stderr
 	}
 
-	if err := prepareDataDir(*data); err != nil {
+	if err := prepareDataDirectories(*data); err != nil {
 		return err
 	}
 	if c.muxerOnly {
@@ -188,6 +210,9 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 				c.closeOwnership()
 			}
 		}()
+	}
+	if err := secureDataFiles(*data); err != nil {
+		return err
 	}
 	if c.handoff != nil && c.handoff.csrfToken != "" {
 		c.csrfToken = c.handoff.csrfToken

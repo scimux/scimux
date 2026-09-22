@@ -612,16 +612,24 @@ func TestRequestBoundaryFetchMetadataAPI(t *testing.T) {
 	}
 }
 
-func TestRequestBoundaryAntiFramingHeaders(t *testing.T) {
+func TestRequestBoundaryBrowserDefenseHeaders(t *testing.T) {
 	h := newTestHandler(t, newTestApp(t, &fakeTmux{}))
-	wantCSP := "frame-ancestors 'none'"
 	check := func(name string, rec *httptest.ResponseRecorder) {
 		t.Helper()
-		if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
-			t.Fatalf("%s CSP = %q, want %q", name, got, wantCSP)
+		if got := rec.Header().Get("Content-Security-Policy"); got != localCSP {
+			t.Fatalf("%s CSP = %q, want %q", name, got, localCSP)
 		}
 		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
 			t.Fatalf("%s X-Frame-Options = %q, want DENY", name, got)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("%s X-Content-Type-Options = %q, want nosniff", name, got)
+		}
+		if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+			t.Fatalf("%s Referrer-Policy = %q, want no-referrer", name, got)
+		}
+		if got := rec.Header().Get("Permissions-Policy"); !strings.Contains(got, "camera=()") || !strings.Contains(got, "microphone=()") {
+			t.Fatalf("%s Permissions-Policy = %q, want camera/microphone denied", name, got)
 		}
 	}
 

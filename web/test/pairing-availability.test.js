@@ -11,10 +11,10 @@
  * is the same shape the unlink control beside it already has. Two properties
  * carry the weight:
  *   - it fails closed. Before the first answer, and after a read that could
- *     not be made at all, there is no button.
- *   - a hidden button says why. A control that vanishes without a word reads
- *     as a bug, and sends the user looking for the feature rather than for
- *     their enrollment.
+ *     not be made at all, there is no button or experimental section.
+ *   - inside an active remote run, a hidden button says why. A control that
+ *     vanishes without a word reads as a bug, and sends the user looking for
+ *     the feature rather than for their enrollment.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -27,6 +27,7 @@ function makeEl(id) {
 
 function makeDoc() {
   const els = new Map([
+    ["#m_remote", makeEl("m_remote")],
     ["#m_pair", makeEl("m_pair")],
     ["#m_pair_note", makeEl("m_pair_note")],
   ]);
@@ -49,6 +50,7 @@ function setup(handler) {
     f,
     doc,
     calls,
+    section: () => doc.el("#m_remote"),
     btn: () => doc.el("#m_pair"),
     note: () => doc.el("#m_pair_note"),
   };
@@ -61,10 +63,12 @@ const ok = (body) => (key) => {
 
 test("the button is hidden until a status read says pairing is possible", async () => {
   const s = setup(ok({ hosted: "enrolled", can_pair: true }));
+  assert.equal(s.section().hidden, true, "the experimental section ships closed");
   assert.equal(s.btn().hidden, true, "bind must not reveal the button on its own");
   await s.f.refresh();
   await s.f.settled();
   assert.equal(s.btn().hidden, false);
+  assert.equal(s.section().hidden, false);
   assert.equal(s.note().hidden, true);
   assert.equal(s.note().innerHTML, "");
 });
@@ -84,7 +88,17 @@ test("a refusal hides the button and says why, in the server's words", async () 
   assert.match(s.note().innerHTML, /not enrolled with a rendezvous/);
 });
 
-test("a status route that is not there at all hides the button and explains", async () => {
+test("a refusing status without a sentence still explains the hidden action", async () => {
+  const s = setup(ok({ hosted: "enrolled", can_pair: false }));
+  await s.f.refresh();
+  await s.f.settled();
+  assert.equal(s.section().hidden, false);
+  assert.equal(s.btn().hidden, true);
+  assert.equal(s.note().hidden, false);
+  assert.match(s.note().innerHTML, /cannot pair a device right now/i);
+});
+
+test("a status route that is not there keeps the experimental section absent", async () => {
   const s = setup(() => {
     const e = new Error("remote pairing is not enabled");
     e.status = 404;
@@ -93,8 +107,7 @@ test("a status route that is not there at all hides the button and explains", as
   await s.f.refresh();
   await s.f.settled();
   assert.equal(s.btn().hidden, true, "remote is off; there is nothing to pair with");
-  assert.equal(s.note().hidden, false);
-  assert.match(s.note().innerHTML, /remote access/i);
+  assert.equal(s.section().hidden, true, "an absent remote API keeps the whole section absent");
 });
 
 /* A read that failed is not evidence that anything changed. Hiding a working

@@ -33,11 +33,12 @@ func runCommand(t *testing.T, args ...string) *Command {
 	data := t.TempDir()
 	argv := append([]string{"scimux", "-data", data, "-addr", "127.0.0.1:0"}, args...)
 	cmd := &Command{
-		Args:   argv,
-		Stdout: io.Discard,
-		Stderr: new(bytes.Buffer),
-		Home:   t.TempDir(),
-		Config: remote.Config{DataDir: data, HTTPClient: unreachableHTTP()},
+		Args:               argv,
+		Stdout:             io.Discard,
+		Stderr:             new(bytes.Buffer),
+		Home:               t.TempDir(),
+		ExperimentalRemote: true,
+		Config:             remote.Config{DataDir: data, HTTPClient: unreachableHTTP()},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -88,11 +89,12 @@ func TestRendezvousURLMustBeAbsolute(t *testing.T) {
 	for _, bad := range []string{"rv.example", "ftp://rv.example", "/v1"} {
 		data := t.TempDir()
 		cmd := &Command{
-			Args:   []string{"scimux", "-data", data, "-addr", "127.0.0.1:0", "--rendezvous-url", bad},
-			Stdout: io.Discard,
-			Stderr: new(bytes.Buffer),
-			Home:   t.TempDir(),
-			Config: remote.Config{DataDir: data, HTTPClient: unreachableHTTP()},
+			Args:               []string{"scimux", "-data", data, "-addr", "127.0.0.1:0", "--rendezvous-url", bad},
+			Stdout:             io.Discard,
+			Stderr:             new(bytes.Buffer),
+			Home:               t.TempDir(),
+			ExperimentalRemote: true,
+			Config:             remote.Config{DataDir: data, HTTPClient: unreachableHTTP()},
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := cmd.Run(ctx)

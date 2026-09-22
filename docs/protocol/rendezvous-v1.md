@@ -375,14 +375,13 @@ against the handler and compared to this dump, headers included.
 **Decision 2 — who mints.** Locked. The enrolled installation
 mints the ID. rv never allocates one.
 
-This is what FR-04's "scimux MUST **register** one" already says.
-`remote-scimux.md` called IDs "a random key held by both" and
-"free to mint". The first stands; the second described an
-unauthenticated property that V1 admission removes. AT-NFR-17-a's
-server-side reading (a `newRendezvousID` / `generateRID` in rv)
-is superseded: that grep becomes a **negative** assertion — no
-minting function may exist in non-test rv source. Collision retry
-is a vector (`rid-collision-retry-test-only`), not a server test.
+This is what FR-04's "scimux MUST **register** one" says. An earlier
+design called IDs both "a random key held by both" and "free to mint".
+The first stands; unauthenticated minting does not. AT-NFR-17-a's
+server-side reading (a `newRendezvousID` / `generateRID` in rv) is
+superseded: that grep becomes a **negative** assertion — no minting
+function may exist in non-test rv source. Collision retry is a vector
+(`rid-collision-retry-test-only`), not a server test.
 
 **Canonical encoding.** 32 bytes (256 bits; NFR-17 floor 128,
 prefer 256) from `crypto/rand`. On the wire: 64 lowercase hex
@@ -423,12 +422,11 @@ IDs either.
 
 ## 9. Wait and envelopes
 
-**Decision 1 — FR-07's reply.** Locked as documentation of
-`remote-by-invite-only.md` §4.2 ("the envelope endpoint returns a
-reply meaningful only to a holder of the installation's key") and
-FR-07 / AT-FR-07-a, not as a new design. The sealed reply is the
-response body of `POST /v1/envelope/{id}`. The waiter hands it
-back as the `reply` field of its next `POST /v1/wait`.
+**Decision 1 — FR-07's reply.** Locked as documentation of FR-07 /
+AT-FR-07-a: the envelope endpoint returns a reply meaningful only to a
+holder of the installation's key. The sealed reply is the response body
+of `POST /v1/envelope/{id}`. The waiter hands it back as the `reply`
+field of its next `POST /v1/wait`.
 
 `/v1/envelope/{id}` stays unauthenticated: the paired phone holds
 a rendezvous ID and no installation key. There is no second
@@ -572,12 +570,23 @@ Caps (FR-26), enforced before registration:
 | cap | value |
 |---|---|
 | rendezvous IDs per installation | 16 |
+| rendezvous residents (process) | 4096 (256 possible concurrent installations × 16 IDs; active IDs plus idle tombstones) |
 | concurrent waits per installation | 8 |
 | total waits | 256 |
 | temporary pairing waits per installation | 32 (map residency: live, abandoned, and consumed-until-TTL) |
 | pairing residents (process) | 1024 (memory backstop) |
 
 Saturation is the constant rejection, early and stable.
+
+An idle rendezvous entry remains a tombstone for **at least 8 minutes** after
+the later of waiter detach and its last successful envelope-bucket charge.
+That is the time an empty 4-token bucket needs to recover at one token per
+120 seconds. It is then eligible for lazy eviction at the next admitted
+new-ID registration, and otherwise remains until that registration or process
+restart. A live waiter, held poster, pending envelope, or reconnect grace is
+never evicted. The process-wide resident cap is checked after that sweep; if
+no entry is eligible, registration receives the same constant rejection as
+other saturation.
 
 ### 9.4 FR-20 (content only) and the held POST
 
@@ -598,9 +607,8 @@ AT-FR-20-c (P3) locks the other side of that choice: an unknown
 ID is rejected before the body is read, allocates nothing, and
 is never held for the reply window.
 
-This amends the design document, not this spec alone. See
-`remote-by-invite-only.md` FR-20 and the "No oracle (FR-20)"
-paragraph, and §16 below.
+This is the authoritative amendment to FR-20's earlier "content and timing"
+wording. See §16 below.
 
 ---
 
@@ -1024,7 +1032,7 @@ kind-specific fields. A file is a JSON array. Kinds:
 | `envelope-seal-session` | seal and open as §12.2.2. `ephemeral_priv_hex` and `sender_priv_hex` are fixtures; a client MUST draw a fresh ephemeral per seal. Opening under any static other than `sender_pub_hex` MUST fail. |
 | `pairing-transcript`, `pairing-sas` | recompute HKDF |
 | `envelope-inner` | required JSON fields |
-| `http` | if the request path is registered, **replay** through `newAdmissionHandler` and compare `dumpResponse` (status + sorted headers + body). Otherwise declarative. Expected responses for built admission routes are authored from §4, not recorded from the handler. `/p` inventory rows become replayed once those GET routes are registered. |
+| `http` | if the request path is registered, **replay** through `newAdmissionHandler` and compare `dumpResponse` (status + sorted headers + body). Otherwise declarative. Expected responses for built admission routes are authored from §4, not recorded from the handler. `/p` and former viewer-asset paths are permanent constant rejections here; the trusted viewer and its tests belong to `scimux-connect`. |
 | `rejection` | as `http`, plus the dump MUST equal the live constant rejection. The expected 404 is authored from §7. |
 | `stun` | recompute XOR-MAPPED-ADDRESS from the documented address, port and transaction id (§17); compare `response_hex`. |
 | `stun-drop` | the request hex is documented as dropped; there is no response field. |
@@ -1042,14 +1050,14 @@ an expected response.
 
 ---
 
-## 16. Superseded text
+## 16. Recorded amendments
 
 | text | replacement |
 |---|---|
-| `remote-scimux.md`: rendezvous IDs are "free to mint" | Unauthenticated minting is gone. An enrolled installation mints; wait is admitted. The "random key held by both" wording stands. |
-| `remote-scimux.md` §6: `GET /v1/wait/{id}`, invite token on wait | V1 is `POST /v1/wait` with a JSON body, admitted by signature over a fresh challenge. The ID is a field, not a path element, so it does not leak in access logs as a URL. Envelope keeps `{id}` in the path because FR-18 resolve-before-read needs it. |
+| Earlier design: rendezvous IDs are "free to mint" | Unauthenticated minting is gone. An enrolled installation mints; wait is admitted. The "random key held by both" wording stands. |
+| Earlier design: `GET /v1/wait/{id}`, invite token on wait | V1 is `POST /v1/wait` with a JSON body, admitted by signature over a fresh challenge. The ID is a field, not a path element, so it does not leak in access logs as a URL. Envelope keeps `{id}` in the path because FR-18 resolve-before-read needs it. |
 | AT-NFR-17-a looking for `newRendezvousID` / `generateRID` in rv | Negative assertion: those identifiers must not exist in non-test rv source. Collision retry is vector `rid-collision-retry-test-only`. |
-| `remote-by-invite-only.md` FR-20 and "No oracle": "indistinguishable in content and in timing" | FR-20 is content only. The FR-20 row and that paragraph now state the envelope-route timing exception and reject padding. Requirement lives in the design document; this spec records the amendment. §9.4, AT-FR-20-c. |
+| Earlier FR-20 / "No oracle" wording: "indistinguishable in content and in timing" | FR-20 is content only. §9.4 states the envelope-route timing exception and rejects padding; AT-FR-20-c pins it. |
 | A challenge fetched before a long poll remaining usable for the reply | Dead on arrival. Next challenge is `X-Rv-Challenge` on the wait response. |
 | §9.3 item 3 read as the envelope POST creating a pending slot | The slot is created when a waiter registers. An envelope for an ID with no prior waiter is unknown: no body read, no allocation (FR-18, AT-FR-19-b). |
 | §10.3 "Consumption happens at … or at `pair/cancel`" | Cancel does not consume. Single-use of the code is at `reply` or TTL (§10.4, §10.6). |
@@ -1157,18 +1165,19 @@ Request. Vector `stun-drop-truncated` is a 10-byte prefix.
 prints the recovered XOR-MAPPED-ADDRESS. It is how AT-FR-08 is
 reproduced on a deployed host.
 
-Both the browser peer (rv `/p` composition) and the computer peer
-(scimux answering path) derive this same unauthenticated STUN service
-from the rendezvous origin: host of the origin, UDP port `3478`,
-ignoring any HTTP/HTTPS web port. There is no TURN or relay.
+Both the browser peer (the trusted viewer published by `scimux-connect`)
+and the computer peer (the scimux answering path) derive this same
+unauthenticated STUN service from the rendezvous origin: host of the origin,
+UDP port `3478`, ignoring any HTTP/HTTPS web port. There is no TURN or relay.
 
 ---
 
 ## 18. Aggregate health
 
 FR-09. Loopback-only, unauthenticated, reset on restart. The
-socket is the confinement: `-health-addr` MUST be a loopback
-host and startup refuses otherwise (§ existing `checkLoopback`).
+socket is the confinement: `-health-addr` MUST use a literal loopback
+IP address and startup refuses hostnames or non-loopback addresses
+(§ existing `checkLoopback`).
 A request that arrives on a non-loopback address cannot reach
 this mux, asserted by binding a second listener (AT-FR-09-a),
 never by inspecting a header.

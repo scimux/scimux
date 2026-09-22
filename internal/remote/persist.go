@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/scimux/scimux/internal/privatefs"
 )
 
 const tempSuffix = ".tmp"
@@ -37,10 +39,9 @@ func (c *Client) persist(st PersistedState) error {
 		c.cfg.BeforePersist()
 	}
 	dir := c.PrivateDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := privatefs.EnsureDir(dir, 0o700); err != nil {
 		return err
 	}
-	_ = os.Chmod(dir, 0o700)
 
 	fault := c.cfg.FailWrite
 	match := fault != nil && (fault.When == "" || fault.When == st.Status)
@@ -61,8 +62,22 @@ func (c *Client) persist(st PersistedState) error {
 	if fail(WriteTempCreate) {
 		return injected(WriteTempCreate)
 	}
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err := privatefs.EnsureFileIfExists(tmp, 0o600); err != nil {
+		return err
+	}
+	// Do not request O_TRUNC until the descriptor has been proven to be this
+	// owner-controlled regular file. Otherwise a pre-planted symlink could
+	// truncate its target before SecureOpenedFile had a chance to reject it.
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := privatefs.SecureOpenedFile(tmp, f, 0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
 		return err
 	}
 
@@ -100,15 +115,15 @@ func (c *Client) persist(st PersistedState) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	_ = os.Chmod(tmp, 0o600)
-
 	if fail(WriteRename) {
 		return injected(WriteRename)
 	}
 	if err := os.Rename(tmp, c.StatePath()); err != nil {
 		return err
 	}
-	_ = os.Chmod(c.StatePath(), 0o600)
+	if err := privatefs.EnsureFile(c.StatePath(), 0o600); err != nil {
+		return err
+	}
 
 	if fail(WriteParentSync) {
 		return injected(WriteParentSync)

@@ -296,7 +296,10 @@ test("emptyCardsHTML messages", () => {
   assert.match(emptyCardsHTML({ laneFilter: "L1", cardTab: "current" }), /No activities on this journey/);
   assert.match(emptyCardsHTML({ laneFilter: "L1", cardTab: "archived" }), /No archived activities on this journey/);
   assert.match(emptyCardsHTML({ laneFilter: "", cardTab: "archived" }), /Nothing archived yet/);
-  assert.match(emptyCardsHTML({ laneFilter: "", cardTab: "current" }), /start the first one/);
+  const empty = emptyCardsHTML({ laneFilter: "", cardTab: "current" });
+  assert.match(empty, /start the first one/);
+  assert.match(empty, /data-start-first/);
+  assert.doesNotMatch(empty, /onclick=/i);
 });
 
 test("stale unadopted state cannot render an external-session card", () => {

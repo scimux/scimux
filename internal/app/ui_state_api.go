@@ -4,8 +4,8 @@
 //   - Request-body reading and validation (size, JSON, If-Match presence)
 //     occur before uiMu.
 //   - GET holds uiMu only while reading the file (readUILocked).
-//   - PUT holds uiMu across current-state read, revision comparison, sibling
-//     .tmp write, and rename.
+//   - PUT holds uiMu across current-state read, revision comparison, unique
+//     temporary-file write, and rename.
 //   - uiMu is independent of a.mu (pure private-document I/O; must not stall
 //     the poller).
 //   - Response encoding (ETag header + writeJSON) occurs after the successful
@@ -22,6 +22,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+
+	"github.com/scimux/scimux/internal/privatefs"
 )
 
 // ---------- UI state ----------
@@ -118,12 +121,31 @@ func (a *app) handleUIPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ui state changed since this revision was read", 409)
 		return
 	}
-	// Private notes live here: owner-only permissions. The tmp write + rename is
-	// atomic for content (rename swaps the inode), which is the guarantee this
-	// per-device UI blob needs; unlike the audit store it is not fsync'd — a lost
-	// note after a host crash is recoverable, a corrupted nodes.jsonl is not.
-	tmp := a.uiPath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// Private notes live here: owner-only permissions. A unique O_EXCL temporary
+	// file prevents a pre-planted sibling symlink from redirecting the write;
+	// descriptor validation proves the file being written is the regular file
+	// CreateTemp just published. The rename is atomic for content (it swaps the
+	// inode), which is the guarantee this per-device UI blob needs; unlike the
+	// audit store it is not fsync'd — a lost note after a host crash is
+	// recoverable, a corrupted nodes.jsonl is not.
+	f, err := os.CreateTemp(filepath.Dir(a.uiPath), ".ui-*.tmp")
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if err := privatefs.SecureOpenedFile(tmp, f, 0o600); err != nil {
+		_ = f.Close()
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if err := f.Close(); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}

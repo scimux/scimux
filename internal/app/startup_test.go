@@ -84,11 +84,35 @@ func TestPrepareDataDirTightensPreexistingModes(t *testing.T) {
 			t.Fatalf("%s mode = %o, want 0600", path, got)
 		}
 	}
-	// Child directories are created with 0700 when missing; when they already
-	// exist, MkdirAll does not chmod them. Confirm the helper still succeeds
-	// and does not create notes/.
+	for _, name := range []string{"sessions", "attachments", "assets"} {
+		st, err := os.Stat(filepath.Join(data, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := st.Mode().Perm(); got != 0o700 {
+			t.Fatalf("%s mode = %o, want 0700", name, got)
+		}
+	}
+	// The notes store remains lazy.
 	if _, err := os.Stat(filepath.Join(data, "notes")); !os.IsNotExist(err) {
 		t.Fatalf("notes/ should remain absent; stat = %v", err)
+	}
+}
+
+func TestPrepareDataDirRejectsPrivateFileSymlink(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "scimux-data")
+	if err := os.MkdirAll(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "other-ui.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(data, "ui.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareDataDir(data); err == nil {
+		t.Fatal("prepareDataDir accepted a symlink in place of private ui.json")
 	}
 }
 

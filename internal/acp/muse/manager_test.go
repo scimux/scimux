@@ -141,6 +141,22 @@ func (h *holdLog) Append(ev Event) error {
 	return nil
 }
 
+type eventHoldLog struct {
+	target  string
+	entered chan struct{}
+	release <-chan struct{}
+	inner   logAppender
+	once    sync.Once
+}
+
+func (h *eventHoldLog) Append(ev Event) error {
+	if ev.T == h.target {
+		h.once.Do(func() { close(h.entered) })
+		<-h.release
+	}
+	return h.inner.Append(ev)
+}
+
 type seamHoldLog struct {
 	mu          sync.Mutex
 	seamEntered chan struct{}
@@ -1268,6 +1284,62 @@ func TestManagerNoOutputTerminalError(t *testing.T) {
 	}
 	if !sawErr {
 		t.Fatalf("missing no-output error: %v", eventTypes(evs))
+	}
+}
+
+func TestManagerNoOutputErrorIsDurableBeforeQuiet(t *testing.T) {
+	m, _, srv, logPath := launchOK(t, t.TempDir())
+	startTurn(t, m, srv, "hi", "turn-1")
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	s := m.session("n1")
+	s.logw = &eventHoldLog{
+		target:  "error",
+		entered: entered,
+		release: release,
+		inner:   &sessionlog.Writer{Path: logPath},
+	}
+
+	srv.note(t, "turn/completed", map[string]any{
+		"sessionId": "sess-1", "turnId": "turn-1", "terminal": "completed",
+	})
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no-output error append did not start")
+	}
+	if got := m.Live("n1"); got != "active" {
+		t.Fatalf("Live=%q before no-output error was durable", got)
+	}
+	if got := m.LastError("n1"); got != "" {
+		t.Fatalf("LastError=%q before no-output error was durable", got)
+	}
+	for _, ev := range readLog(t, logPath) {
+		if ev.T == "error" && strings.Contains(ev.Error, "no output") {
+			t.Fatal("blocked no-output error was already durable")
+		}
+	}
+
+	close(release)
+	waitFor(t, func() bool {
+		return m.Live("n1") == "quiet" && strings.Contains(m.LastError("n1"), "no output")
+	})
+	var sawErr bool
+	for _, ev := range readLog(t, logPath) {
+		if ev.T == "error" && strings.Contains(ev.Error, "no output") {
+			sawErr = true
+		}
+	}
+	if !sawErr {
+		t.Fatal("no-output error missing after quiet transition")
 	}
 }
 

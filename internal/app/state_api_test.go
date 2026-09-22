@@ -613,7 +613,7 @@ func TestHandleStateResponseShapeContentTypeAndStableETag(t *testing.T) {
 	if err := json.Unmarshal(rec1.Body.Bytes(), &top); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"nodes", "sys", "socket", "hostname", "version"} {
+	for _, key := range []string{"nodes", "sys", "storage", "socket", "hostname", "version"} {
 		if _, ok := top[key]; !ok {
 			t.Errorf("top-level missing %q", key)
 		}

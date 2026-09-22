@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/scimux/scimux/internal/privatefs"
 )
 
 // Client is the computer remote-access client.
@@ -422,6 +424,12 @@ func (c *Client) classify() EnrollmentState {
 
 func (c *Client) loadState() error {
 	path := c.StatePath()
+	if err := privatefs.EnsureFileIfExists(path, 0o600); err != nil {
+		return err
+	}
+	if err := privatefs.EnsureFileIfExists(c.tempPath(), 0o600); err != nil {
+		return err
+	}
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		if _, terr := os.Stat(c.tempPath()); terr == nil {

@@ -287,7 +287,7 @@ export function emptyCardsHTML({ laneFilter, cardTab }){
   if (cardTab === "archived") {
     return `<div class="empty">Nothing archived yet — long-press a card to archive it.</div>`;
   }
-  return `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" onclick="document.getElementById('plusbtn').click()">start the first one</button></div>`;
+  return `<div class="empty">No activities yet.<br><br><button class="plus" style="width:auto;padding:0 16px" data-start-first>start the first one</button></div>`;
 }
 
 export function attnFoldButtonHTML(foldLen, attnFoldOpen){
@@ -667,6 +667,11 @@ export function createCardsFeature(deps){
   }
 
   async function onListClick(e){
+	const start = e.target.closest("[data-start-first]");
+	if (start){
+	  doc?.getElementById?.("plusbtn")?.click?.();
+	  return;
+	}
     if (e.target.closest("[data-attnfold]")){
       set("attnFoldOpen", !g("attnFoldOpen", false));
       invalidate();

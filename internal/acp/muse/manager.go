@@ -862,10 +862,10 @@ func (s *nodeSession) onClientEvent(captured string, ev Event) {
 	}
 	if ok && ev.T == "stop" && s.turnActive {
 		if !s.turnHadOutput {
-			s.lastError = "agent produced no output this turn"
-			emptyStop = s.lastError
+			emptyStop = "agent produced no output this turn"
+		} else {
+			s.turnActive = false
 		}
-		s.turnActive = false
 	} else if ok && ev.T == "error" && s.turnActive && s.client != nil && !s.client.TurnActive() {
 		if s.lastError == "" {
 			s.lastError = ev.Error
@@ -874,7 +874,13 @@ func (s *nodeSession) onClientEvent(captured string, ev Event) {
 	}
 	s.mu.Unlock()
 	if emptyStop != "" {
-		s.persist(Event{T: "error", Error: emptyStop})
+		persisted := s.persist(Event{T: "error", Error: emptyStop})
+		s.mu.Lock()
+		if persisted {
+			s.lastError = emptyStop
+		}
+		s.turnActive = false
+		s.mu.Unlock()
 	}
 	s.syncPendingFromClient()
 	if hook != nil && len(cands) > 0 {

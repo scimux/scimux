@@ -20,10 +20,11 @@ import (
 func TestS5R4_F6_TerminalOpenFailure(t *testing.T) {
 	data := t.TempDir()
 	cmd := &Command{
-		Args:   []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout: io.Discard,
-		Stderr: new(bytes.Buffer),
-		Home:   t.TempDir(),
+		ExperimentalRemote: true,
+		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
+		Stdout:             io.Discard,
+		Stderr:             new(bytes.Buffer),
+		Home:               t.TempDir(),
 		Config: remote.Config{
 			DataDir:       data,
 			RendezvousURL: "http://127.0.0.1:1",
@@ -56,10 +57,11 @@ func TestS5R4_F6_InviteFileAndStdinBypassTTY(t *testing.T) {
 		path := writeInvitePath(t, data)
 		var opened int
 		cmd := &Command{
-			Args:   []string{"scimux", "--remote", "--invite-file", path, "-data", data, "-addr", "127.0.0.1:0"},
-			Stdout: io.Discard,
-			Stderr: new(bytes.Buffer),
-			Home:   t.TempDir(),
+			ExperimentalRemote: true,
+			Args:               []string{"scimux", "--remote", "--invite-file", path, "-data", data, "-addr", "127.0.0.1:0"},
+			Stdout:             io.Discard,
+			Stderr:             new(bytes.Buffer),
+			Home:               t.TempDir(),
 			Config: remote.Config{
 				DataDir:       data,
 				RendezvousURL: "http://127.0.0.1:1",
@@ -81,11 +83,12 @@ func TestS5R4_F6_InviteFileAndStdinBypassTTY(t *testing.T) {
 		data := t.TempDir()
 		var opened int
 		cmd := &Command{
-			Args:   []string{"scimux", "--remote", "--invite-stdin", "-data", data, "-addr", "127.0.0.1:0"},
-			Stdin:  strings.NewReader("0410-6105-0R3G-G28A-1C60-T3GF\n"),
-			Stdout: io.Discard,
-			Stderr: new(bytes.Buffer),
-			Home:   t.TempDir(),
+			ExperimentalRemote: true,
+			Args:               []string{"scimux", "--remote", "--invite-stdin", "-data", data, "-addr", "127.0.0.1:0"},
+			Stdin:              strings.NewReader("0410-6105-0R3G-G28A-1C60-T3GF\n"),
+			Stdout:             io.Discard,
+			Stderr:             new(bytes.Buffer),
+			Home:               t.TempDir(),
 			Config: remote.Config{
 				DataDir:       data,
 				RendezvousURL: "http://127.0.0.1:1",
@@ -177,10 +180,11 @@ func TestS5R4_F9_HostedRemoteStatusProjection(t *testing.T) {
 func remoteCmd(t *testing.T, data, url string, hc *http.Client) *Command {
 	t.Helper()
 	return &Command{
-		Args:   []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout: io.Discard,
-		Stderr: new(bytes.Buffer),
-		Home:   t.TempDir(),
+		ExperimentalRemote: true,
+		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
+		Stdout:             io.Discard,
+		Stderr:             new(bytes.Buffer),
+		Home:               t.TempDir(),
 		Config: remote.Config{
 			DataDir:       data,
 			RendezvousURL: url,

@@ -76,10 +76,11 @@ func TestAT_FR_01_b_RemoteWithoutInviteFailsLocally(t *testing.T) {
 		data := t.TempDir()
 		var enrolls int
 		cmd := &Command{
-			Args:   []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-			Stdout: io.Discard,
-			Stderr: new(bytes.Buffer),
-			Home:   t.TempDir(),
+			ExperimentalRemote: true,
+			Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
+			Stdout:             io.Discard,
+			Stderr:             new(bytes.Buffer),
+			Home:               t.TempDir(),
 			Config: remote.Config{
 				DataDir:       data,
 				RendezvousURL: "http://127.0.0.1:1",
@@ -126,10 +127,11 @@ func TestAT_FR_01_b_RemoteWithoutInviteFailsLocally(t *testing.T) {
 			t.Fatal(err)
 		}
 		cmd := &Command{
-			Args:   []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-			Stdout: io.Discard,
-			Stderr: new(bytes.Buffer),
-			Home:   t.TempDir(),
+			ExperimentalRemote: true,
+			Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
+			Stdout:             io.Discard,
+			Stderr:             new(bytes.Buffer),
+			Home:               t.TempDir(),
 			Config: remote.Config{
 				DataDir:       data,
 				RendezvousURL: "http://127.0.0.1:1",

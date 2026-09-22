@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"syscall"
 	"time"
+
+	"github.com/scimux/scimux/internal/privatefs"
 )
 
 const lockFileName = "state.lock"
@@ -71,13 +73,16 @@ func (c *Client) tryFlockLocked(op string) error {
 	if c.lockFile != nil {
 		return nil
 	}
-	if err := os.MkdirAll(c.PrivateDir(), 0o700); err != nil {
+	if err := privatefs.EnsureDir(c.PrivateDir(), 0o700); err != nil {
 		return err
 	}
-	_ = os.Chmod(c.PrivateDir(), 0o700)
 	path := filepath.Join(c.PrivateDir(), lockFileName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := privatefs.SecureOpenedFile(path, f, 0o600); err != nil {
+		_ = f.Close()
 		return err
 	}
 	fd := f.Fd()

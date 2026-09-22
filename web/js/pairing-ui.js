@@ -350,6 +350,7 @@ export function createDeviceList({ api, doc, icons } = {}) {
   let known = false;
   let notice = "";
   let chain = Promise.resolve();
+
   const cleanups = [];
   const glyphs = icons || {};
 
@@ -750,11 +751,17 @@ export function createUnlinkControl({ api, doc, onUnlinked } = {}) {
  * and is used as given: deciding it here from `hosted` would be a second
  * copy of the policy the mint enforces, and the two would drift.
  *
- * Owned roots: #m_pair (visibility only — the click belongs to the shell)
- * and #m_pair_note. No timers: read when the menu opens, and after an
- * unlink, which is the one action here that changes the answer.
+ * Owned roots: #m_remote (the whole experimental section), #m_pair
+ * (visibility only — the click belongs to the shell), and #m_pair_note. No
+ * timers: read when the menu opens, and after an unlink, which is the one
+ * action here that changes the answer.
  */
 export function createPairControl({ api, doc } = {}) {
+  /* A current server supplies pair_refusal whenever can_pair is false. Keep
+     this local sentence anyway: additive API evolution or a partial response
+     must not reveal the section with neither an action nor an explanation. */
+  const PAIR_REFUSAL_FALLBACK = "Remote access cannot pair a device right now.";
+
   /* Whether pairing is offered. Starts false: before the first answer
      there is nothing to base a button on, and offering one that mints an
      unusable code is the failure this control exists to end. */
@@ -766,14 +773,9 @@ export function createPairControl({ api, doc } = {}) {
   let notice = "";
   let chain = Promise.resolve();
 
-  /* The one sentence this side owns. Every other refusal is the server's
-     words, because the server is what knows which state it is in — but a
-     status route that is not there at all cannot say anything, and 404 is
-     exactly what a build with remote access switched off answers. */
-  const REMOTE_OFF = "Remote access is not enabled on this computer.";
-
   const btn = () => doc.querySelector("#m_pair");
   const note = () => doc.querySelector("#m_pair_note");
+  const section = () => doc.querySelector("#m_remote");
 
   function enqueue(fn) {
     chain = chain.then(fn).catch(() => {});
@@ -781,6 +783,8 @@ export function createPairControl({ api, doc } = {}) {
   }
 
   function render() {
+    const s = section();
+    if (s) s.hidden = !known;
     const b = btn();
     if (b) b.hidden = !available;
     const n = note();
@@ -795,14 +799,14 @@ export function createPairControl({ api, doc } = {}) {
       const r = await api("/api/remote/status", {});
       available = !!(r && r.can_pair);
       known = true;
-      notice = available ? "" : String((r && r.pair_refusal) || REMOTE_OFF);
+      notice = available ? "" : String((r && r.pair_refusal) || PAIR_REFUSAL_FALLBACK);
     } catch {
       /* Only the first read is allowed to conclude anything from a
          failure. After that the menu keeps what it last learned rather
          than flickering the button between visits. */
       if (!known) {
         available = false;
-        notice = REMOTE_OFF;
+        notice = "";
       }
     }
     render();

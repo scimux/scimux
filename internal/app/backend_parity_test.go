@@ -23,6 +23,7 @@ func TestLegacyAndSplitPublicSurfacesMatch(t *testing.T) {
 	withUpdateSeams(t, release.URL, "v1.0.0")
 
 	legacyApp := newTestApp(t, &fakeTmux{})
+	legacyApp.hostedPairing = &fakePairingClient{hosted: "enrolled"}
 	legacy, err := NewHandler(legacyApp, webFS)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +49,9 @@ func TestLegacyAndSplitPublicSurfacesMatch(t *testing.T) {
 	if _, err := client.Hello(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	split, err := newWebBackend(webBackendConfig{Web: webFS, Core: client.Proxy()})
+	split, err := newWebBackend(webBackendConfig{
+		Web: webFS, Core: client.Proxy(), Pairing: &fakePairingClient{hosted: "enrolled"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

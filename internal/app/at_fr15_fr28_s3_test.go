@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// AT-FR-15-a: The loopback handler chain is unchanged. S3 splits one boundary
-// into two; it does not weaken the local guard for remote's benefit. This is
+// AT-FR-15-a: S3 splits one boundary into two; it does not weaken the local
+// guard for remote's benefit. This is
 // the localhost half of the two-sided CSRF assertion — the tunnel half lives
 // in AT-FR-17-a/f.
 func TestAT_FR_15_a_LocalBoundaryUnchanged(t *testing.T) {
@@ -32,8 +32,8 @@ func TestAT_FR_15_a_LocalBoundaryUnchanged(t *testing.T) {
 		t.Fatalf("%s: local unsafe request with the real token was rejected = %d", at, rec.Code)
 	}
 
-	// Anti-framing and the Fetch Metadata guard are still the local
-	// boundary's, unchanged.
+	// Browser defenses and the Fetch Metadata guard remain local-boundary
+	// responsibilities.
 	fetchMeta := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8787/api/state", nil)
 	fetchMeta.Header.Set("Sec-Fetch-Site", "cross-site")
 	if rec := s3Serve(local, fetchMeta); rec.Code != http.StatusForbidden {
@@ -43,8 +43,8 @@ func TestAT_FR_15_a_LocalBoundaryUnchanged(t *testing.T) {
 	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
 		t.Fatalf("%s: local X-Frame-Options = %q, want DENY", at, got)
 	}
-	if got := rec.Header().Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
-		t.Fatalf("%s: local CSP = %q, want the unchanged localhost policy", at, got)
+	if got := rec.Header().Get("Content-Security-Policy"); got != localCSP {
+		t.Fatalf("%s: local CSP = %q, want %q", at, got, localCSP)
 	}
 }
 

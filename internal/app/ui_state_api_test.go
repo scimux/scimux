@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -399,52 +400,55 @@ func TestPublicRouteUIConcurrentSameRevision(t *testing.T) {
 	}
 }
 
-// ---------- atomic-write failure leaves prior valid document ----------
+// ---------- atomic write resists a pre-planted temporary symlink ----------
 
-func TestPublicRouteUITempWriteFailureLeavesPrior(t *testing.T) {
-	// Portable temp-write failure: sibling path ui.json.tmp is a directory, so
-	// WriteFile(tmp) fails while ReadFile(ui.json) still returns the prior
-	// valid document. No chmod denial required.
+func TestPublicRouteUITempSymlinkCannotRedirectWrite(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	prior := []byte(`{"prior":true,"notes":[]}`)
 	if err := os.WriteFile(a.uiPath, prior, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tmp := a.uiPath + ".tmp"
-	if err := os.Mkdir(tmp, 0o700); err != nil {
+	victim := filepath.Join(filepath.Dir(a.uiPath), "symlink-target")
+	victimBefore := []byte("must remain unchanged")
+	if err := os.WriteFile(victim, victimBefore, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(tmp) })
+	tmp := a.uiPath + ".tmp"
+	if err := os.Symlink(victim, tmp); err != nil {
+		t.Fatal(err)
+	}
 	h := newTestHandler(t, a)
 
-	// GET still serves the prior document.
 	g := uiGet(t, h, "")
 	if g.Code != http.StatusOK || !bytes.Equal(g.Body.Bytes(), prior) {
 		t.Fatalf("GET prior: status=%d body=%q", g.Code, g.Body.Bytes())
 	}
 	etag := g.Header().Get("ETag")
 
-	rec := uiPut(t, h, `{"after":true}`, etag)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("temp-write failure status = %d, want 500; body=%q", rec.Code, rec.Body.String())
+	next := []byte(`{"after":true}`)
+	rec := uiPut(t, h, string(next), etag)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT with planted temp symlink status = %d, want 200; body=%q", rec.Code, rec.Body.String())
 	}
-	got, err := os.ReadFile(a.uiPath)
+	gotVictim, err := os.ReadFile(victim)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, prior) {
-		t.Fatalf("temp-write failure overwrote prior document: %q", got)
+	if !bytes.Equal(gotVictim, victimBefore) {
+		t.Fatalf("planted temp symlink target changed: got %q, want %q", gotVictim, victimBefore)
 	}
-	// Wildcard must also fail without clobbering.
-	rec = uiPut(t, h, `{"after":true}`, "*")
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("wildcard temp-write failure status = %d, want 500", rec.Code)
-	}
-	got, err = os.ReadFile(a.uiPath)
+	info, err := os.Lstat(a.uiPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, prior) {
-		t.Fatalf("wildcard temp-write failure overwrote prior: %q", got)
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("ui.json mode = %v, want regular non-symlink", info.Mode())
+	}
+	gotUI, err := os.ReadFile(a.uiPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotUI, next) {
+		t.Fatalf("ui.json = %q, want %q", gotUI, next)
 	}
 }

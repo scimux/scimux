@@ -34,10 +34,11 @@ func TestListenBeforeInvite(t *testing.T) {
 	data := t.TempDir()
 	var remoteInits int
 	cmd := &Command{
-		Args:   []string{"scimux", "--remote", "-data", data, "-addr", busy.Addr().String()},
-		Stdout: io.Discard,
-		Stderr: new(bytes.Buffer),
-		Home:   t.TempDir(),
+		ExperimentalRemote: true,
+		Args:               []string{"scimux", "--remote", "-data", data, "-addr", busy.Addr().String()},
+		Stdout:             io.Discard,
+		Stderr:             new(bytes.Buffer),
+		Home:               t.TempDir(),
 		Config: remote.Config{
 			DataDir:       data,
 			RendezvousURL: "http://127.0.0.1:1",
@@ -112,10 +113,11 @@ func TestDegradedStartSaysWhy(t *testing.T) {
 
 	stderr := new(bytes.Buffer)
 	cmd := &Command{
-		Args:   []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout: io.Discard,
-		Stderr: stderr,
-		Home:   t.TempDir(),
+		ExperimentalRemote: true,
+		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
+		Stdout:             io.Discard,
+		Stderr:             stderr,
+		Home:               t.TempDir(),
 		Config: remote.Config{
 			DataDir:       data,
 			Remote:        true,
@@ -154,10 +156,11 @@ func TestDegradedStartNeverPrintsSecrets(t *testing.T) {
 
 	stderr := new(bytes.Buffer)
 	cmd := &Command{
-		Args:   []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout: io.Discard,
-		Stderr: stderr,
-		Home:   t.TempDir(),
+		ExperimentalRemote: true,
+		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
+		Stdout:             io.Discard,
+		Stderr:             stderr,
+		Home:               t.TempDir(),
 		Config: remote.Config{
 			DataDir:       data,
 			Remote:        true,

@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scimux/scimux/internal/storagebudget"
 	"github.com/scimux/scimux/internal/transcript"
 )
 
@@ -351,12 +352,22 @@ func (w *Writer) Append(ev Event) error {
 	b = append(b, '\n')
 	unlock := lockPath(w.Path)
 	defer unlock()
+	repairTail := UnterminatedTail(w.Path)
+	incoming := int64(len(b))
+	if repairTail {
+		incoming++
+	}
+	releaseBudget, err := storagebudget.ReserveSession(w.Path, incoming)
+	if err != nil {
+		return err
+	}
+	defer releaseBudget()
 	// A first append to this node's log creates the file; its dirent is not
 	// durable until the parent directory is also synced (see SyncParentDir).
 	// Detect that under the same per-path lock that serializes the write.
 	_, statErr := os.Stat(w.Path)
 	created := os.IsNotExist(statErr)
-	if UnterminatedTail(w.Path) {
+	if repairTail {
 		b = append([]byte{'\n'}, b...)
 	}
 	// 0600: rawInput and prompt text are as sensitive as pane-excerpt evidence.

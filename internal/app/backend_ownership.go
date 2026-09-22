@@ -63,16 +63,26 @@ func newWebMux(web fs.FS, core http.Handler, pairing hostedPairingClient) (*http
 	mux.Handle("GET /{$}", webHandlers.index)
 	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
 	mux.HandleFunc("GET /api/licenses", handleLicenses)
-	mux.HandleFunc("POST /api/remote/pairing", remoteHTTP.serveRemotePairingMint)
-	mux.HandleFunc("GET /api/remote/pairing/{code}", remoteHTTP.serveRemotePairingState)
-	mux.HandleFunc("POST /api/remote/pairing/{code}/confirm", remoteHTTP.serveRemotePairingConfirm)
-	mux.HandleFunc("POST /api/remote/pairing/{code}/cancel", remoteHTTP.serveRemotePairingCancel)
-	mux.HandleFunc("GET /api/remote/devices", remoteHTTP.serveRemoteDeviceList)
-	mux.HandleFunc("PATCH /api/remote/devices/{id}", remoteHTTP.serveRemoteDeviceRename)
-	mux.HandleFunc("DELETE /api/remote/devices/{id}", remoteHTTP.serveRemoteDeviceRevoke)
-	mux.HandleFunc("POST /api/remote/unenroll", remoteHTTP.serveRemoteUnenroll)
-	mux.HandleFunc("GET /api/remote/status", remoteHTTP.serveRemoteStatus)
-	mux.HandleFunc("GET /api/remote/bootstrap", serveRemoteBootstrapManifest)
+	if pairing != nil {
+		mux.HandleFunc("POST /api/remote/pairing", remoteHTTP.serveRemotePairingMint)
+		mux.HandleFunc("GET /api/remote/pairing/{code}", remoteHTTP.serveRemotePairingState)
+		mux.HandleFunc("POST /api/remote/pairing/{code}/confirm", remoteHTTP.serveRemotePairingConfirm)
+		mux.HandleFunc("POST /api/remote/pairing/{code}/cancel", remoteHTTP.serveRemotePairingCancel)
+		mux.HandleFunc("GET /api/remote/devices", remoteHTTP.serveRemoteDeviceList)
+		mux.HandleFunc("PATCH /api/remote/devices/{id}", remoteHTTP.serveRemoteDeviceRename)
+		mux.HandleFunc("DELETE /api/remote/devices/{id}", remoteHTTP.serveRemoteDeviceRevoke)
+		mux.HandleFunc("POST /api/remote/unenroll", remoteHTTP.serveRemoteUnenroll)
+		mux.HandleFunc("GET /api/remote/status", remoteHTTP.serveRemoteStatus)
+		mux.HandleFunc("GET /api/remote/bootstrap", serveRemoteBootstrapManifest)
+	} else {
+		// Do not let an inactive experimental surface fall through to the core
+		// mux, whose frozen monolithic route inventory still contains these paths.
+		// The exact-root handler suppresses net/http's automatic slash redirect;
+		// together these keep every method and unknown child uniformly absent
+		// rather than exposing the experiment through 405 responses.
+		mux.Handle("/api/remote", http.NotFoundHandler())
+		mux.Handle("/api/remote/", http.NotFoundHandler())
+	}
 	mux.Handle("/api/", core)
 	return mux, nil
 }

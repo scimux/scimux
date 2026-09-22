@@ -554,12 +554,17 @@ func TestMuxerExecChildHelperProcess(t *testing.T) {
 		t.Fatalf("load handoff = %#v, %v", handoff, err)
 	}
 	cmd := &Command{
-		Args: []string{"scimux", "-data", data, "-addr", "127.0.0.1:0"},
+		// Model an update from the last pre-gate release: its original argv
+		// contains -remote but it could not have carried the new gate variable.
+		Args: []string{"scimux", "-remote", "-data", data, "-addr", "127.0.0.1:0"},
 		Home: data, Stdout: io.Discard, Stderr: io.Discard,
 		Config: remote.Config{}, muxerOnly: true, handoff: handoff,
 	}
 	if err := cmd.Run(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	if !cmd.Config.Remote {
+		t.Fatal("legacy -remote authorization was lost across muxer exec")
 	}
 	if cmd.csrfToken != muxerExecCSRFToken {
 		t.Fatalf("CSRF token after exec = %q, want pre-exec token %q", cmd.csrfToken, muxerExecCSRFToken)

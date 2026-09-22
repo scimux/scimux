@@ -277,18 +277,36 @@ func validTCPPort(port string) error {
 	return nil
 }
 
+// localCSP permits the sources the embedded application currently uses while
+// making every unlisted capability fail closed. Inline styles remain necessary
+// for dynamic lane colours and layout values; inline script and script
+// attributes are not.
+const localCSP = "default-src 'self'; script-src 'self'; script-src-attr 'none'; " +
+	"style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; " +
+	"connect-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; " +
+	"form-action 'none'; frame-ancestors 'none'"
+
 // withRequestBoundary is the outermost *request* wrapper (gzip is outermost
-// on the response path only). It stamps anti-framing headers on every
-// response — success, handler error, and boundary rejection — then validates
-// Host before the mux sees the request, then rejects browser /api/* fetches
-// marked cross-site or same-site.
+// on the response path only). It stamps browser defenses on every response —
+// success, handler error, and boundary rejection — then validates Host before
+// the mux sees the request, then rejects browser /api/* fetches marked
+// cross-site or same-site.
 func withRequestBoundary(p *requestPolicy, next http.Handler) http.Handler {
 	if p == nil {
 		p = defaultLoopbackPolicy()
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", localCSP)
 		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		// The frozen static characterization records the historical absence of
+		// nosniff on /assets/*. Individual executable styles/scripts already set
+		// it in their handlers; keep that narrow compatibility exception while
+		// applying the default everywhere else.
+		if !strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
 		if !p.allow(r.Host) {
 			http.Error(w, "untrusted host", http.StatusForbidden)
 			return

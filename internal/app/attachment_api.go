@@ -33,7 +33,9 @@ import (
 	"time"
 
 	"github.com/scimux/scimux/internal/asset"
+	"github.com/scimux/scimux/internal/privatefs"
 	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/storagebudget"
 )
 
 // attachUploadMax bounds a multipart attachment upload. Files blow past
@@ -63,6 +65,14 @@ func (a *app) attachmentDir(id string) string { return filepath.Join(a.attachmen
 // can never escape the directory: filepath.Base strips any separators and the
 // token guarantees a non-empty, traversal-free leaf. Written O_EXCL 0600.
 func (a *app) storeAttachment(id, name, mime string, src io.Reader) (Attachment, error) {
+	expected := int64(-1)
+	if sized, ok := src.(interface{ Len() int }); ok {
+		expected = int64(sized.Len())
+	}
+	return a.storeAttachmentSized(id, name, mime, expected, src)
+}
+
+func (a *app) storeAttachmentSized(id, name, mime string, expected int64, src io.Reader) (Attachment, error) {
 	base := filepath.Base(name)
 	if base == "." || base == ".." || base == "" || base == string(filepath.Separator) {
 		base = "file"
@@ -72,16 +82,32 @@ func (a *app) storeAttachment(id, name, mime string, src io.Reader) (Attachment,
 		return Attachment{}, err
 	}
 	dir := a.attachmentDir(id)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := privatefs.EnsureDir(dir, 0o700); err != nil {
 		return Attachment{}, err
 	}
+	if expected < 0 {
+		expected = attachUploadMax
+	}
+	releaseBudget, err := storagebudget.Reserve(filepath.Dir(a.attachmentsDir), id, expected)
+	if err != nil {
+		return Attachment{}, err
+	}
+	defer releaseBudget()
 	dst := filepath.Join(dir, hex.EncodeToString(tok[:])+"-"+base)
 	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return Attachment{}, err
 	}
+	if err := privatefs.SecureOpenedFile(dst, f, 0o600); err != nil {
+		f.Close()
+		os.Remove(dst)
+		return Attachment{}, err
+	}
 	n, err := io.Copy(f, src)
 	cerr := f.Close()
+	if err == nil && n > expected {
+		err = fmt.Errorf("attachment grew beyond its %d-byte storage reservation", expected)
+	}
 	if err != nil || cerr != nil {
 		os.Remove(dst)
 		if err != nil {
@@ -109,6 +135,12 @@ func (a *app) archiveAttachments(id string) {
 	if _, err := os.Stat(src); err != nil {
 		return
 	}
+	releaseBudget, err := storagebudget.Lock(filepath.Dir(a.attachmentsDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive attachments for %s: %v\n", id, err)
+		return
+	}
+	defer releaseBudget()
 	dir := filepath.Join(a.attachmentsDir, "archive")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: archive attachments for %s: %v\n", id, err)
@@ -138,6 +170,12 @@ func (a *app) archiveAssets(id string) {
 	if _, err := os.Stat(src); err != nil {
 		return
 	}
+	releaseBudget, err := storagebudget.Lock(filepath.Dir(a.assetsDir))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scimux: archive assets for %s: %v\n", id, err)
+		return
+	}
+	defer releaseBudget()
 	dir := filepath.Join(a.assetsDir, "archive")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "scimux: archive assets for %s: %v\n", id, err)
@@ -255,7 +293,7 @@ func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "open upload: "+err.Error(), 400)
 		return
 	}
-	att, err := a.storeAttachment(n.ID, fh.Filename, fh.Header.Get("Content-Type"), src)
+	att, err := a.storeAttachmentSized(n.ID, fh.Filename, fh.Header.Get("Content-Type"), fh.Size, src)
 	src.Close()
 	if err != nil {
 		http.Error(w, "store upload: "+err.Error(), 500)
