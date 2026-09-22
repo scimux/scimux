@@ -71,6 +71,14 @@ current machine. Model and reasoning choices come from each CLI where it has a
 read-only discovery surface; otherwise scimux uses the harness default rather
 than opening a disposable session or guessing.
 
+The burger menu's **Check for harness updates** action refreshes that local
+inventory and those model catalogs, checks each harness's public release
+channel, and checks for a new scimux release. This is the way a long-running
+scimux notices a newly installed CLI, a changed pi/OpenCode configuration, or
+a newly published model such as a Grok model without being restarted. It does
+not install harness updates, and it still cannot enumerate dsh models because
+dsh has no read-only discovery surface.
+
 scimux starts Claude Code with [`--remote-control`](https://code.claude.com/docs/en/remote-control),
 so the same local session can also be continued from `claude.ai` or the Claude
 mobile app when your Anthropic account permits it.

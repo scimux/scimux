@@ -101,7 +101,10 @@ import {
   bookmarkClampState as bookmarkClampStateMod,
 } from "./bookmarks.js";
 import { createNotesFeature } from "./notes.js";
-import { harnessRowsHTML, harnessCheckNote, createSettingsController } from "./harness.js";
+import {
+  harnessRowsHTML, harnessCheckNote, createSettingsController,
+  createScimuxUpdateCheck, runUpdateChecks,
+} from "./harness.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
 import {
   makeReturnContext, returnAfterSelection, chatBackState, returnPillState,
@@ -1812,29 +1815,30 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      The check and the download run only on an explicit tap; the server never
      phones home on its own. The install is confirm-first, and the button walks
      through honest states (checking → available → updating → switching). */
-  let updateInfo = null;
-  $("#m_check").addEventListener("click", async () => {
-    const btn = $("#m_check"), tag = $("#m_version");
-    btn.disabled = true;
-    tag.textContent = "checking…";
-    try {
-      updateInfo = await api("/api/update/check");
-      tag.textContent = updateInfo.current;
-      $("#m_result").hidden = false;
-      $("#m_reltext").textContent = updateInfo.available
-        ? updateInfo.latest + " available" : "up to date (" + updateInfo.latest + ")";
-      $("#m_relurl").href = updateInfo.url || "https://github.com/scimux/scimux/releases";
-      $("#m_apply").hidden = !updateInfo.available;
-      $("#m_notes").innerHTML = updateInfo.available ? md(updateInfo.notes || "") : "";
-      $("#m_notes").hidden = !updateInfo.available || !updateInfo.notes;
-    } catch {
-      updateInfo = null;
-      tag.textContent = "check failed";
-    } finally {
-      btn.disabled = false;
-    }
+  function renderUpdateInfo(info){
+    const tag = $("#m_version");
+    tag.textContent = info.current;
+    $("#m_result").hidden = false;
+    $("#m_reltext").textContent = info.available
+      ? info.latest + " available" : "up to date (" + info.latest + ")";
+    $("#m_relurl").href = info.url || "https://github.com/scimux/scimux/releases";
+    $("#m_apply").hidden = !info.available;
+    $("#m_notes").innerHTML = info.available ? md(info.notes || "") : "";
+    $("#m_notes").hidden = !info.available || !info.notes;
+  }
+  const scimuxUpdate = createScimuxUpdateCheck({
+    read: () => api("/api/update/check"),
+    checking: () => { $("#m_version").textContent = "checking…"; },
+    result: renderUpdateInfo,
+    failed: () => {
+      $("#m_version").textContent = "check failed";
+      $("#m_apply").hidden = true;
+      $("#m_notes").hidden = true;
+    },
   });
+  $("#m_check").addEventListener("click", () => { void scimuxUpdate.runButton($("#m_check")); });
   $("#m_apply").addEventListener("click", async () => {
+    const updateInfo = scimuxUpdate.current();
     if (!updateInfo || !updateInfo.available) return;
     if (!confirm(`Download ${updateInfo.latest}, verify its checksum, and install the update?\n\n` +
       "Running agent sessions stay connected to their session workers while scimux switches over.")) return;
@@ -1860,11 +1864,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     }
   });
   /* ---- burger menu: which agent harnesses this computer has ----
-     The inventory is local and read when the menu opens; the server probes
-     `--version` once per process, so this is a cached answer and the panel is
-     populated before the human reads down to it. The upstream check is a
-     separate tap for the same reason the scimux one is: opening a menu must
-     not call seven registries, and "up to date" is a claim only a check makes. */
+     The inventory is local and read when the menu opens; the server caches it
+     so the panel is populated before the human reads down to it. The explicit
+     check refreshes installed versions and models, asks the public harness
+     channels, and checks scimux. Opening the menu itself phones nowhere. */
   let harnessRows = null, harnessLatest = null, usageChecks = false, museConsent = false;
   function renderHarnesses(){
     if (!harnessRows) return;
@@ -1909,19 +1912,26 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     if (museBox) settingsCtl.setMuseConsent(!!museBox.checked);
   });
   $("#m_hcheck").addEventListener("click", async () => {
-    const btn = $("#m_hcheck");
+    const btn = $("#m_hcheck"), scimuxBtn = $("#m_check");
     btn.disabled = true;
+    scimuxBtn.disabled = true;
     btn.textContent = "checking…";
-    try {
-      const d = await api("/api/harnesses/latest");
+    const checked = await runUpdateChecks({
+      harness: () => api("/api/harnesses/latest"),
+      scimux: scimuxUpdate.check,
+    });
+    if (checked.harness.status === "fulfilled"){
+      const d = checked.harness.value || {};
       harnessLatest = (d && d.latest) || {};
+      if (Array.isArray(d.harnesses)) harnessRows = d.harnesses;
+      if (d.agents && typeof d.agents === "object") sheetsFeature.applyAgents(d.agents);
       renderHarnesses();
       btn.textContent = "Check for harness updates";
-    } catch {
+    } else {
       btn.textContent = "check failed";
-    } finally {
-      btn.disabled = false;
     }
+    btn.disabled = false;
+    scimuxBtn.disabled = false;
   });
 
   /* license texts: fetched once on first tap, folded like everything else */

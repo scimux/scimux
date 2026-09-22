@@ -346,8 +346,11 @@ only its static fallback is available, omit `efforts`; the UI then uses its
 static per-agent list — for cursor that list is deliberately empty, because a
 row with no published level has none.
 
-Most catalogs are probed once per process and cached until restart. dsh has no
-list command and no read-only discovery surface: naming its models would mean
+Most catalogs are probed once and cached for cheap dialog opens. The explicit
+`GET /api/harnesses/latest` action replaces that cache from the installed
+CLIs, so newly installed harnesses, provider model releases, and user-edited
+pi/OpenCode configuration appear without restarting scimux. dsh has no list
+command and no read-only discovery surface: naming its models would mean
 opening an ACP session, which dsh flushes to its own durable history and offers
 no way to delete, so scimux never opens one for discovery. dsh's `model` and
 `effort` are therefore settable only through the API, and the strict
@@ -375,6 +378,8 @@ cache, starts a background
 refresh through `muse serve` initialization/model listing, without a session
 or prompt; the request does not wait for it. Refreshes are coalesced, the cache
 is fresh for two minutes, and a failed refresh preserves the last good answer.
+The explicit harness-update check bypasses that freshness window and waits for
+the same coalesced read before returning its catalog snapshot.
 Creating a Muse node rechecks the catalog before launch. Model availability
 does not grant the separate launch consent documented under `/api/settings`.
 
@@ -828,6 +833,8 @@ Queries the release feed. Returns `{current, latest, url, notes, available}`;
 `available` is never true for `dev` builds. `502` if the feed is
 unreachable. Cross-site and same-site browser GETs are rejected at the
 common request boundary (`Sec-Fetch-Site`).
+The browser calls this route both from the version-row refresh control and in
+parallel with an explicit harness update check.
 
 ### `POST /api/update`
 
@@ -871,17 +878,26 @@ when false, the UI shows the installed version without implying that an
 upstream check failed. `installed` is the first version-shaped token of
 `<bin> --version`, empty when the output does not carry one. `present` and
 `launchable` are separate facts: pi is installed as `pi` but launched through
-`pi-acp`. The probe runs once per process, so a harness installed while scimux
-runs appears after a restart.
+`pi-acp`. The probe is cached during ordinary menu use and replaced by the
+explicit harness-update check, so an installed or upgraded CLI appears without
+restarting scimux.
 For Muse, `launchable` is true when the `muse` executable is found on `PATH`.
 This inventory flag does not grant permission to create a chat: creation
 separately enforces approval-judge consent and model-catalog checks.
 
 ### `GET /api/harnesses/latest`
 
-What each harness publishes upstream: `{latest:{<agent>:{version, source}}}`.
-Reached only on an explicit tap, like the scimux update check — the server
-never polls the registries. There is no single lane: four sources are npm
+The explicit refresh response is
+`{latest:{<agent>:{version, source}}, harnesses:[…], agents:{…}}`. `latest` is
+what each harness publishes upstream; `harnesses` is the newly reprobed local
+inventory from `GET /api/harnesses`; and `agents` is the newly reprobed model
+catalog from `GET /api/agents`. The cache replacements are atomic, so launches
+after the response use the same catalog the browser displays.
+
+The full refresh is reached only on an explicit tap — the server never polls
+the registries or repeatedly reruns every CLI list command. Local probes, the
+scimux release check made by the browser, and the upstream requests run
+concurrently. There is no single upstream lane: four sources are npm
 packages (codex, pi, opencode and dsh), grok is a plain-text channel file, and
 Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not
@@ -891,6 +907,12 @@ is currently omitted from `latest` even when the channel is reachable.
 Sources are read concurrently and independently, and an agent whose source
 failed is simply absent from the
 map — "unknown" is what happened, and it is not the same claim as up to date.
+An upstream failure does not discard successful local inventory or model
+refreshes. Claude's model refresh remains zero-token and, on this explicit
+path, bypasses its ordinary version/age cache so a same-version server-side
+model release can appear; Muse uses initialization/model listing without
+creating a session or turn. No model or usage probe requiring paid work is
+introduced by this route.
 
 ## Remote pairing
 

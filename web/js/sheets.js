@@ -1070,18 +1070,28 @@ export function createSheetsFeature(deps = {}){
     fillEfforts();
   }
 
-  function probeAgents(){
-    if (probed || !api) return;
-    probed = true;
+  function refreshAgents(){
+    if (!api) return Promise.resolve(false);
     const generation = ++probeGeneration;
-    Promise.resolve(api("/api/agents")).then(j => {
-      if (!bound || generation !== probeGeneration) return;
-      const r = applyAgentsProbe(MODELS, MODEL_EFFORTS, j);
-      if (r.changed){
-        MUSE_MODELS = Array.isArray(r.museModels) ? r.museModels : [];
-        applyOpenSheetAfterCatalog();
-      }
-    }).catch(() => {});
+    return Promise.resolve(api("/api/agents")).then(j => {
+      return applyAgents(j, generation);
+    }).catch(() => false);
+  }
+
+  function applyAgents(j, generation = ++probeGeneration){
+    if (!bound || generation !== probeGeneration) return false;
+    const r = applyAgentsProbe(MODELS, MODEL_EFFORTS, j);
+    if (r.changed){
+      MUSE_MODELS = Array.isArray(r.museModels) ? r.museModels : [];
+      applyOpenSheetAfterCatalog();
+    }
+    return r.changed;
+  }
+
+  function probeAgents(){
+    if (probed) return;
+    probed = true;
+    void refreshAgents();
   }
 
   function on(el, type, fn, opts){
@@ -1130,5 +1140,6 @@ export function createSheetsFeature(deps = {}){
     forkFromTurn,
     forkFromStation,
     fieldError,
+    applyAgents,
   };
 }

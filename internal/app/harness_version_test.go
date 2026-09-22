@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -294,6 +295,7 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 }
 
 func TestHandleHarnessLatestDegradesPerAgent(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"version":"0.153.4"}`))
 	}))
@@ -331,6 +333,90 @@ func TestHandleHarnessLatestDegradesPerAgent(t *testing.T) {
 	// as an answer, and "unknown" is what actually happened.
 	if _, present := got.Latest["claude"]; present {
 		t.Errorf("claude present = %+v, want it omitted after a failed fetch", got.Latest["claude"])
+	}
+}
+
+// One explicit update check is also the cache-invalidation boundary for facts
+// learned from the local CLIs. This covers all three ways a long-lived scimux
+// can otherwise go stale: a newly installed harness, a provider publishing a
+// new model, and a user changing a harness's configured providers/models.
+// Every executable below is a private stub; the test never invokes a real CLI.
+func TestHandleHarnessLatestRefreshesLocalHarnessesAndModels(t *testing.T) {
+	binDir := t.TempDir()
+	writeScript(t, binDir, "grok", `
+if [ "$1" = "--version" ]; then printf '%s\n' 'grok 1.0.24'; exit; fi
+if [ "$1" = "models" ]; then printf '%s\n' 'Default model: grok-4.6' '* grok-4.6 (default)'; fi`)
+	writeScript(t, binDir, "opencode", `
+if [ "$1" = "--version" ]; then printf '%s\n' '1.18.23'; exit; fi
+if [ "$1" = "models" ]; then printf '%s\n' 'configured/old'; fi`)
+	t.Setenv("PATH", binDir)
+	restore := setHarnessSourcesForTest(map[string]harnessSource{})
+	t.Cleanup(restore)
+
+	check := func() struct {
+		Harnesses []harnessRow         `json:"harnesses"`
+		Agents    map[string]agentInfo `json:"agents"`
+	} {
+		t.Helper()
+		a := newTestApp(t, &fakeTmux{})
+		rec := httptest.NewRecorder()
+		a.handleHarnessLatest(rec, httptest.NewRequest(http.MethodGet, "/api/harnesses/latest", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var got struct {
+			Harnesses []harnessRow         `json:"harnesses"`
+			Agents    map[string]agentInfo `json:"agents"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	first := check()
+	if !reflect.DeepEqual(first.Agents["grok"].Models, []string{"grok-4.6"}) {
+		t.Fatalf("first Grok models = %v", first.Agents["grok"].Models)
+	}
+	if !reflect.DeepEqual(first.Agents["opencode"].Models, []string{"configured/old"}) {
+		t.Fatalf("first OpenCode models = %v", first.Agents["opencode"].Models)
+	}
+	if _, ok := first.Agents["pi"]; ok {
+		t.Fatal("pi appeared before its launcher was installed")
+	}
+
+	writeScript(t, binDir, "grok", `
+if [ "$1" = "--version" ]; then printf '%s\n' 'grok 1.0.25'; exit; fi
+if [ "$1" = "models" ]; then printf '%s\n' 'Default model: grok-4.7' '* grok-4.7 (default)'; fi`)
+	writeScript(t, binDir, "opencode", `
+if [ "$1" = "--version" ]; then printf '%s\n' '1.18.23'; exit; fi
+if [ "$1" = "models" ]; then printf '%s\n' 'configured/new'; fi`)
+	writeScript(t, binDir, "pi", `
+if [ "$1" = "--version" ]; then printf '%s\n' '0.85.1'; exit; fi
+if [ "$1" = "--list-models" ]; then
+  printf '%s\n' 'provider model' 'configured fresh-model'
+fi`)
+	writeScript(t, binDir, "pi-acp", `printf '%s\n' 'fake pi acp'`)
+
+	second := check()
+	if !reflect.DeepEqual(second.Agents["grok"].Models, []string{"grok-4.7"}) {
+		t.Fatalf("refreshed Grok models = %v, want grok-4.7", second.Agents["grok"].Models)
+	}
+	if !reflect.DeepEqual(second.Agents["opencode"].Models, []string{"configured/new"}) {
+		t.Fatalf("refreshed OpenCode models = %v", second.Agents["opencode"].Models)
+	}
+	if !reflect.DeepEqual(second.Agents["pi"].Models, []string{"configured/fresh-model"}) {
+		t.Fatalf("new pi models = %v", second.Agents["pi"].Models)
+	}
+	var pi harnessRow
+	for _, row := range second.Harnesses {
+		if row.Agent == "pi" {
+			pi = row
+			break
+		}
+	}
+	if !pi.Present || !pi.Launchable || pi.Installed != "0.85.1" {
+		t.Fatalf("new pi inventory row = %+v", pi)
 	}
 }
 
@@ -412,6 +498,7 @@ func TestMuseHarnessLaunchabilityReportsTheInstalledBinary(t *testing.T) {
 }
 
 func TestMuseStableChannelIsExplicitCheckOnly(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)

@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import {
   harnessState, harnessRowsHTML, harnessCheckNote,
   museConsentNote, computerSettingOn, createSettingsController,
+  createScimuxUpdateCheck, runUpdateChecks,
 } from "../js/harness.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -21,6 +22,69 @@ test("harness.js is pure; app wires it; index has the section", () => {
   assert.match(appSrc, /from "\.\/harness\.js"/);
   assert.match(indexSrc, /id="m_harnesses"/);
   assert.match(indexSrc, /id="m_hcheck"/);
+});
+
+test("combined update check starts both lanes and preserves partial results", async () => {
+  let startedHarness = false, startedScimux = false;
+  let releaseHarness;
+  const harness = new Promise(resolve => { releaseHarness = resolve; });
+  const pending = runUpdateChecks({
+    harness: async () => {
+      startedHarness = true;
+      return harness;
+    },
+    scimux: async () => {
+      startedScimux = true;
+      throw new Error("release feed down");
+    },
+  });
+  await Promise.resolve();
+  assert.equal(startedHarness, true);
+  assert.equal(startedScimux, true);
+
+  releaseHarness({
+    latest: { grok: { version: "1.0.25" } },
+    agents: { grok: { models: ["grok-4.7"] } },
+    harnesses: [{ agent: "grok", installed: "1.0.24" }],
+  });
+  const got = await pending;
+  assert.equal(got.harness.status, "fulfilled");
+  assert.equal(got.harness.value.agents.grok.models[0], "grok-4.7");
+  assert.equal(got.scimux.status, "rejected");
+});
+
+test("scimux update controller owns check state, errors, and button lifetime", async () => {
+  const events = [];
+  const button = { disabled: false };
+  const success = createScimuxUpdateCheck({
+    read: async () => ({ current: "1.0", latest: "2.0", available: true }),
+    checking: () => events.push("checking"),
+    result: info => events.push(`result:${info.latest}`),
+    failed: () => events.push("failed"),
+  });
+  const info = await success.runButton(button);
+  assert.equal(info.latest, "2.0");
+  assert.equal(success.current(), info);
+  assert.equal(button.disabled, false);
+  assert.deepEqual(events, ["checking", "result:2.0"]);
+
+  const failure = createScimuxUpdateCheck({
+    read: async () => { throw new Error("feed down"); },
+    checking: () => events.push("checking-failure"),
+    result: () => events.push("unexpected-result"),
+    failed: () => events.push("failed"),
+  });
+  await assert.rejects(failure.check(), /feed down/);
+  assert.equal(failure.current(), null);
+  assert.deepEqual(events.slice(-2), ["checking-failure", "failed"]);
+
+  const quiet = createScimuxUpdateCheck({ read: async () => ({ latest: "2.1" }) });
+  assert.equal((await quiet.runButton(button)).latest, "2.1");
+  const quietFailure = createScimuxUpdateCheck({
+    read: async () => { throw new Error("still down"); },
+  });
+  assert.equal(await quietFailure.runButton(button), null);
+  assert.equal(button.disabled, false);
 });
 
 test("state before any upstream check is unchecked, not up-to-date", () => {

@@ -345,3 +345,47 @@ export function harnessCheckNote(rows, latest){
   if (!missing.length) return "";
   return `no upstream answer for ${missing.join(", ")}`;
 }
+
+/* Run the independent local/harness and scimux release lanes together. A
+ * failed release feed must not discard a successful local catalog refresh,
+ * and one broken harness registry is already represented inside the harness
+ * response rather than rejecting the whole operation. */
+export async function runUpdateChecks(checks = {}){
+  const [harness, scimux] = await Promise.allSettled([
+    Promise.resolve().then(() => checks.harness()),
+    Promise.resolve().then(() => checks.scimux()),
+  ]);
+  return { harness, scimux };
+}
+
+/* Small stateful coordinator shared by the standalone scimux check and the
+ * combined harness check. The shell supplies rendering callbacks; keeping the
+ * async/error/button lifetime here makes those two entry points agree. */
+export function createScimuxUpdateCheck(deps = {}){
+  let info = null;
+  const checking = deps.checking || (() => {});
+  const result = deps.result || (() => {});
+  const failed = deps.failed || (() => {});
+
+  async function check(){
+    checking();
+    try {
+      info = await deps.read();
+      result(info);
+      return info;
+    } catch (err) {
+      info = null;
+      failed(err);
+      throw err;
+    }
+  }
+
+  async function runButton(button){
+    button.disabled = true;
+    try { return await check(); }
+    catch { return null; }
+    finally { button.disabled = false; }
+  }
+
+  return { check, runButton, current: () => info };
+}

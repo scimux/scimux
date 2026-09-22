@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -585,6 +586,82 @@ func TestRefreshClaudeModelsProbesAndCaches(t *testing.T) {
 	}
 	if c := readClaudeCache(a.claudeCachePath); c.IDs["opus"] != "claude-opus-9" {
 		t.Fatalf("probe was not cached: %+v", c)
+	}
+}
+
+func TestExplicitClaudeModelRefreshWaitsForTheCatalog(t *testing.T) {
+	called := false
+	a := refreshApp(t, func(context.Context) map[string]string {
+		called = true
+		return map[string]string{"opus": "claude-opus-10"}
+	})
+	if err := writeClaudeCache(a.claudeCachePath, "2.1.267", map[string]string{"opus": "claude-opus-9"}); err != nil {
+		t.Fatal(err)
+	}
+	a.refreshClaudeModelsNow(context.Background())
+	if !called {
+		t.Fatal("explicit refresh reused the fresh cache instead of checking for a newly released model")
+	}
+	if got := a.resolveClaudeModel("opus"); got != "claude-opus-10" {
+		t.Fatalf("opus = %q, want refreshed concrete id", got)
+	}
+}
+
+func TestExplicitClaudeModelRefreshFollowsCacheOnlyBackgroundRead(t *testing.T) {
+	var called atomic.Int32
+	a := refreshApp(t, func(context.Context) map[string]string {
+		called.Add(1)
+		return map[string]string{"opus": "claude-opus-10"}
+	})
+	// Model the narrow overlap where a normal background refresh owns the
+	// single-flight gate but accepts a fresh cache without probing.
+	a.claudeRefreshing.Store(true)
+	done := make(chan struct{})
+	go func() {
+		a.refreshClaudeModelsNow(context.Background())
+		close(done)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	a.claudeRefreshing.Store(false)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("explicit refresh did not continue after the background read")
+	}
+	if called.Load() != 1 {
+		t.Fatalf("resolver calls = %d, want 1 forced probe", called.Load())
+	}
+}
+
+func TestOverlappingExplicitClaudeModelRefreshesCoalesce(t *testing.T) {
+	var called atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	a := refreshApp(t, func(context.Context) map[string]string {
+		if called.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return map[string]string{"opus": "claude-opus-10"}
+	})
+	done := make(chan struct{}, 2)
+	go func() { a.refreshClaudeModelsNow(context.Background()); done <- struct{}{} }()
+	<-started
+	secondStarted := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		a.refreshClaudeModelsNow(context.Background())
+		done <- struct{}{}
+	}()
+	<-secondStarted
+	// Let the second caller observe the held single-flight gate before the
+	// resolver is released; starting a goroutine alone does not establish that.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	<-done
+	<-done
+	if called.Load() != 1 {
+		t.Fatalf("resolver calls = %d, want one coalesced probe", called.Load())
 	}
 }
 

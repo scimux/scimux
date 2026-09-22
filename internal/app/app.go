@@ -550,7 +550,11 @@ type app struct {
 	claudeVersion func(context.Context) string
 	// claudeRefreshing collapses overlapping refresh triggers into one run.
 	claudeRefreshing atomic.Bool
-	claudeCachePath  string // ~/.scimux/claude-models.json; empty disables caching
+	// claudeExplicitRefresh advances after a forced update-check probe. It lets
+	// an explicit check distinguish an overlapping cache-only background read
+	// from another explicit check whose result it can share.
+	claudeExplicitRefresh atomic.Uint64
+	claudeCachePath       string // ~/.scimux/claude-models.json; empty disables caching
 	// claudeProbeDir is the neutral cwd every claude probe runs in, so a
 	// throwaway session's transcript can never land in a node's
 	// ~/.claude/projects folder (claudeProbeWorkdir).
@@ -627,6 +631,11 @@ type app struct {
 	// returned map is always cloned before a request-specific Muse overlay, so
 	// the process-wide discovery cache remains immutable and race-safe.
 	agentCatalog func() map[string]agentInfo
+	// harnessInventory and harnessLatestSources keep generic HTTP/router tests
+	// away from real CLI binaries and public registries. Focused harness tests
+	// leave them nil and use private PATH executables and local HTTP servers.
+	harnessInventory     func(refresh bool) []harnessRow
+	harnessLatestSources func() map[string]harnessSource
 	// museClassify maps an exact model ID to "standard" or "discounted".
 	// Nil or any other result is "unknown". Tests leave it nil by default;
 	// the production serve path installs the maintainer-approved policy.

@@ -237,17 +237,49 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 	return rows
 }
 
-var harnessInventoryOnce sync.Once
-var harnessInventoryCache []harnessRow
+var (
+	harnessInventoryMu      sync.RWMutex
+	harnessInventoryProbeMu sync.Mutex
+	harnessInventoryLoaded  bool
+	harnessInventoryCache   []harnessRow
+)
 
-// harnessInventory probes once per process, like detectAgents: eight
-// subprocesses is not something to repeat on every menu open, and a harness
-// installed while scimux runs appears after a restart.
+// harnessInventory returns the latest complete local-version snapshot.
+// Ordinary menu opens remain cache-only; the explicit update check replaces
+// the snapshot so a newly installed or upgraded CLI appears without restart.
 func harnessInventory() []harnessRow {
-	harnessInventoryOnce.Do(func() {
-		harnessInventoryCache = probeHarnessVersions(harnesses)
-	})
-	return harnessInventoryCache
+	harnessInventoryMu.RLock()
+	if harnessInventoryLoaded {
+		out := harnessInventoryCache
+		harnessInventoryMu.RUnlock()
+		return out
+	}
+	harnessInventoryMu.RUnlock()
+
+	harnessInventoryProbeMu.Lock()
+	defer harnessInventoryProbeMu.Unlock()
+	harnessInventoryMu.RLock()
+	if harnessInventoryLoaded {
+		out := harnessInventoryCache
+		harnessInventoryMu.RUnlock()
+		return out
+	}
+	harnessInventoryMu.RUnlock()
+	return storeHarnessInventory(probeHarnessVersions(harnesses))
+}
+
+func refreshHarnessInventory() []harnessRow {
+	harnessInventoryProbeMu.Lock()
+	defer harnessInventoryProbeMu.Unlock()
+	return storeHarnessInventory(probeHarnessVersions(harnesses))
+}
+
+func storeHarnessInventory(fresh []harnessRow) []harnessRow {
+	harnessInventoryMu.Lock()
+	harnessInventoryCache = fresh
+	harnessInventoryLoaded = true
+	harnessInventoryMu.Unlock()
+	return fresh
 }
 
 // fetchHarnessLatest reads one upstream source. Bounded body, short timeout,
@@ -302,25 +334,65 @@ func (e errHarnessSource) Error() string { return "harness source: " + string(e)
 // handleHarnesses serves the local inventory. No network: the menu opens on
 // every tap and the answer is about this computer.
 func (a *app) handleHarnesses(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"harnesses": harnessInventory()})
+	writeJSON(w, map[string]any{"harnesses": a.harnessInventorySnapshot(false)})
 }
 
-// handleHarnessLatest asks each upstream what it publishes — only ever on an
-// explicit tap, like the scimux update check. Sources are read concurrently
-// and independently: one dead registry costs its own row, not the check.
+func (a *app) harnessInventorySnapshot(refresh bool) []harnessRow {
+	if a != nil && a.harnessInventory != nil {
+		return a.harnessInventory(refresh)
+	}
+	if refresh {
+		return refreshHarnessInventory()
+	}
+	return harnessInventory()
+}
+
+func (a *app) harnessSourcesSnapshot() map[string]harnessSource {
+	if a != nil && a.harnessLatestSources != nil {
+		return a.harnessLatestSources()
+	}
+	return activeHarnessSources()
+}
+
+// handleHarnessLatest asks each upstream what it publishes and refreshes every
+// local read-only discovery surface. It is reached only on an explicit tap.
+// Sources and local probes run independently: one dead registry costs its own
+// row, not the installed-harness or model-catalog answers.
 func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
-	// Tapping "check for updates" is a user saying the installed harnesses may
-	// have moved. The model list is keyed on claude's version, so this is the
-	// one tap that most deserves to invalidate it.
-	a.ensureClaudeModels()
 	type answer struct {
 		Version string `json:"version"`
 		Source  string `json:"source"`
 	}
-	src := activeHarnessSources()
+	src := a.harnessSourcesSnapshot()
 	out := map[string]answer{}
+	var inventory []harnessRow
+	var agents map[string]agentInfo
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	// The ordinary local catalogs and installed versions are independently
+	// cached so menu opens stay cheap. Replace both snapshots on this explicit
+	// action; the catalog swap also updates Cursor's server-side launch index.
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		inventory = a.harnessInventorySnapshot(true)
+	}()
+	go func() {
+		defer wg.Done()
+		if a != nil && a.agentCatalog != nil {
+			agents = a.agentCatalog()
+			return
+		}
+		agents = refreshAgents()
+	}()
+	go func() {
+		defer wg.Done()
+		a.refreshClaudeModelsNow(r.Context())
+	}()
+	go func() {
+		defer wg.Done()
+		a.refreshMuseCatalogNow(r.Context())
+	}()
 	for agent, s := range src {
 		wg.Add(1)
 		go func(agent string, s harnessSource) {
@@ -335,5 +407,9 @@ func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
 		}(agent, s)
 	}
 	wg.Wait()
-	writeJSON(w, map[string]any{"latest": out})
+	writeJSON(w, map[string]any{
+		"latest":    out,
+		"harnesses": inventory,
+		"agents":    a.agentCatalogSnapshot(agents),
+	})
 }

@@ -176,6 +176,19 @@ func TestNewHandlerValidationErrors(t *testing.T) {
 // app tests; fatals on construction error (call NewHandler raw when asserting failure).
 func newTestHandler(t *testing.T, a *app) http.Handler {
 	t.Helper()
+	// Generic route and boundary tests must never execute a developer's agent
+	// CLIs or contact public release feeds. Focused discovery tests call the
+	// handlers directly with private fakes and therefore retain production
+	// behavior.
+	if a.agentCatalog == nil {
+		a.agentCatalog = func() map[string]agentInfo { return map[string]agentInfo{} }
+	}
+	if a.harnessInventory == nil {
+		a.harnessInventory = func(bool) []harnessRow { return []harnessRow{} }
+	}
+	if a.harnessLatestSources == nil {
+		a.harnessLatestSources = func() map[string]harnessSource { return map[string]harnessSource{} }
+	}
 	h, err := NewHandler(a, webFS)
 	if err != nil {
 		t.Fatal(err)

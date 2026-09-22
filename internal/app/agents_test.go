@@ -1279,6 +1279,30 @@ func TestMuseCatalogRefreshFailureKeepsTheLastGoodAnswer(t *testing.T) {
 	}
 }
 
+func TestExplicitMuseCatalogRefreshBypassesFreshTTL(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	installMuseAgentBase(a)
+	a.museClassify = func(string) string { return museTierStandard }
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "old-model"}}, nil
+	}
+	a.refreshMuseCatalog(context.Background())
+	a.museCatalog = func(context.Context) ([]muse.Model, error) {
+		return []muse.Model{{ID: "new-model"}}, nil
+	}
+
+	a.refreshMuseCatalogNow(context.Background())
+	rec := httptest.NewRecorder()
+	a.handleAgents(rec, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	var out map[string]agentInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out["muse"].Models, []string{"new-model"}) {
+		t.Fatalf("models = %v, want explicit refresh despite fresh cache", out["muse"].Models)
+	}
+}
+
 // waitMuseCatalogForTest blocks until no background refresh is in flight. It
 // lives here rather than in agents.go because production never waits: the
 // whole point of the refresh is that nothing does.

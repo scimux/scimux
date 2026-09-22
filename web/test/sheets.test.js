@@ -821,6 +821,34 @@ test("agents probe success rebuilds catalogs; failure is silent", async () => {
   assert.match(ctx2.byId.nc_agent.innerHTML, /claude/);
 });
 
+test("explicit agents refresh replaces a live model catalog without reload", async () => {
+  let payload = {
+    grok: { models: ["grok-4.6"], efforts: {} },
+    opencode: { models: ["configured/old"] },
+  };
+  const ctx = createFeature();
+  ctx.setApi(async path => path === "/api/agents" ? payload : {});
+  ctx.feature.bind();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  ctx.byId.nc_agent.value = "grok";
+  ctx.byId.nc_agent.dispatch("change");
+  assert.match(ctx.byId.nc_model.innerHTML, /grok-4\.6/);
+
+  payload = {
+    grok: { models: ["grok-4.7"], efforts: {} },
+    opencode: { models: ["configured/new"] },
+    pi: { models: ["configured/fresh-model"] },
+  };
+  ctx.feature.applyAgents(payload);
+
+  assert.equal(ctx.byId.nc_agent.value, "grok");
+  assert.match(ctx.byId.nc_model.innerHTML, /grok-4\.7/);
+  assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /grok-4\.6/);
+  assert.match(ctx.byId.nc_agent.innerHTML, /pi/);
+});
+
 test("destroy prevents a delayed agents probe from mutating the feature", async () => {
   let release;
   const response = new Promise(resolve => { release = resolve; });
@@ -1499,10 +1527,11 @@ test("missing inherited agent/model remain selectable on seed", () => {
   assert.equal(ctx.byId.nc_model.value, "rare-model");
 });
 
-test("public factory API has no mutable test accessors", () => {
+test("public factory API exposes only user actions and catalog refresh", () => {
   const { feature } = createFeature();
   const keys = Object.keys(feature).sort();
   assert.deepEqual(keys, [
+    "applyAgents",
     "bind",
     "closeSheets",
     "destroy",

@@ -270,6 +270,10 @@ func (a *app) setClaudeIDs(ids map[string]string) {
 // answers nothing leaves any stale ids in place and writes nothing, so the
 // retry is simply the next trigger.
 func (a *app) refreshClaudeModels(ctx context.Context) {
+	a.refreshClaudeModelsWithCache(ctx, true)
+}
+
+func (a *app) refreshClaudeModelsWithCache(ctx context.Context, acceptFreshCache bool) {
 	cache := readClaudeCache(a.claudeCachePath)
 	serveCache := func() {
 		if len(cache.IDs) > 0 {
@@ -286,7 +290,7 @@ func (a *app) refreshClaudeModels(ctx context.Context) {
 	if a.claudeVersion != nil {
 		version = a.claudeVersion(ctx)
 	}
-	if claudeCacheUsable(cache, version, time.Now()) {
+	if acceptFreshCache && claudeCacheUsable(cache, version, time.Now()) {
 		a.setClaudeIDs(cache.IDs)
 		return
 	}
@@ -323,6 +327,38 @@ func (a *app) ensureClaudeModels() {
 		defer cancel()
 		a.refreshClaudeModels(ctx)
 	}()
+}
+
+// refreshClaudeModelsNow is the explicit-check form of ensureClaudeModels.
+// It bypasses the ordinary version/age cache and waits for the coalesced
+// zero-token catalog read so the update response is a completion boundary.
+// That is what lets an explicit tap discover a server-side model release even
+// when the installed CLI version has not changed.
+func (a *app) refreshClaudeModelsNow(ctx context.Context) {
+	if a == nil || a.claudeResolveModels == nil {
+		return
+	}
+	start := a.claudeExplicitRefresh.Load()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if a.claudeExplicitRefresh.Load() != start {
+			return
+		}
+		if a.claudeRefreshing.CompareAndSwap(false, true) {
+			func() {
+				defer a.claudeRefreshing.Store(false)
+				a.refreshClaudeModelsWithCache(ctx, false)
+				a.claudeExplicitRefresh.Add(1)
+			}()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // resolveNode validates a new-node request and resolves its launch

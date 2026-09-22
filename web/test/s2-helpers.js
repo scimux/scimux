@@ -123,6 +123,7 @@ export const CANNED = Object.freeze({
   },
   update: {},
   agents: {},
+  harnessCheck: { latest: {}, harnesses: [], agents: {} },
 });
 
 export function routeBody(path) {
@@ -134,6 +135,7 @@ export function routeBody(path) {
   if (p === "/api/update/check") return CANNED.updateCheck;
   if (p === "/api/update") return CANNED.update;
   if (p === "/api/agents") return CANNED.agents;
+  if (p === "/api/harnesses/latest") return CANNED.harnessCheck;
   return {};
 }
 
@@ -496,13 +498,16 @@ function makeEl(tag, id) {
       if (el.parentNode && el.parentNode.removeChild) el.parentNode.removeChild(el);
     },
     click() {
-      el.dispatchEvent({
+      const ev = {
         type: "click",
         target: el,
         currentTarget: el,
         preventDefault() {},
         stopPropagation() {},
-      });
+      };
+      const pending = [];
+      for (const fn of listeners.get("click") || []) pending.push(Promise.resolve(fn(ev)));
+      return Promise.allSettled(pending);
     },
     focus() {},
     blur() {},
@@ -694,7 +699,11 @@ async function triggerAppSites(host) {
   await flush(20);
   await new Promise(resolve => setTimeout(resolve, 0));
   const check = host.byId.get("m_check");
-  if (check && typeof check.click === "function") check.click();
+  if (check && typeof check.click === "function") await check.click();
+  await flush(20);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const harnessCheck = host.byId.get("m_hcheck");
+  if (harnessCheck && typeof harnessCheck.click === "function") await harnessCheck.click();
   await flush(20);
   await new Promise(resolve => setTimeout(resolve, 0));
   const feed = host.byId.get("searchfeed");

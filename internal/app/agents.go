@@ -155,19 +155,54 @@ var harnesses = []harness{
 	{bin: "muse"},
 }
 
-var agentsOnce sync.Once
-var agentsCache map[string]agentInfo
+var (
+	agentsCacheMu sync.RWMutex
+	agentsProbeMu sync.Mutex
+	agentsLoaded  bool
+	agentsCache   map[string]agentInfo
+)
 
-// detectAgents probes once per process (a warm-up goroutine in main runs it
-// at startup, so the first dialog open doesn't wait on subprocesses). A
-// harness installed while scimux runs appears after a restart — acceptable
-// for a tool that is itself restarted far more often than agents are
-// installed.
+// detectAgents returns the latest complete discovery snapshot. Startup warms
+// the first one so ordinary dialog opens never wait on subprocesses; the
+// explicit harness-update check can replace it atomically while readers keep
+// using the prior snapshot.
 func detectAgents() map[string]agentInfo {
-	agentsOnce.Do(func() {
-		agentsCache = probeAgents(harnesses)
-	})
-	return agentsCache
+	agentsCacheMu.RLock()
+	if agentsLoaded {
+		out := agentsCache
+		agentsCacheMu.RUnlock()
+		return out
+	}
+	agentsCacheMu.RUnlock()
+
+	agentsProbeMu.Lock()
+	defer agentsProbeMu.Unlock()
+	agentsCacheMu.RLock()
+	if agentsLoaded {
+		out := agentsCache
+		agentsCacheMu.RUnlock()
+		return out
+	}
+	agentsCacheMu.RUnlock()
+	return storeAgentsSnapshot(probeAgents(harnesses))
+}
+
+// refreshAgents performs the deliberate uncached pass behind "Check for
+// harness updates". Serializing probes prevents browser tabs from launching
+// duplicate CLI list commands; readers are never blocked and see the old
+// immutable map until the replacement is complete.
+func refreshAgents() map[string]agentInfo {
+	agentsProbeMu.Lock()
+	defer agentsProbeMu.Unlock()
+	return storeAgentsSnapshot(probeAgents(harnesses))
+}
+
+func storeAgentsSnapshot(fresh map[string]agentInfo) map[string]agentInfo {
+	agentsCacheMu.Lock()
+	agentsCache = fresh
+	agentsLoaded = true
+	agentsCacheMu.Unlock()
+	return fresh
 }
 
 // probeAgents performs one uncached discovery pass. Keeping the cache wrapper
@@ -776,12 +811,16 @@ func (a *app) handleAgents(w http.ResponseWriter, r *http.Request) {
 	} else {
 		base = detectAgents()
 	}
-	// detectAgents returns the process-wide cache. Never apply request/app
-	// overlays to that shared map: concurrent browsers must not race, and one
-	// failed probe must not inherit rows from an earlier request.
+	writeJSON(w, a.agentCatalogSnapshot(base))
+}
+
+// agentCatalogSnapshot applies per-app catalogs to a private copy. The base
+// discovery map is shared with launch resolution (notably Cursor's exact-id
+// index) and must remain immutable after publication.
+func (a *app) agentCatalogSnapshot(base map[string]agentInfo) map[string]agentInfo {
 	out := cloneAgentCatalog(base)
 	a.applyMuseCatalog(out)
-	writeJSON(w, out)
+	return out
 }
 
 func cloneAgentCatalog(in map[string]agentInfo) map[string]agentInfo {
@@ -970,6 +1009,30 @@ func (a *app) ensureMuseCatalog() {
 		defer cancel()
 		a.refreshMuseCatalog(ctx)
 	}()
+}
+
+// refreshMuseCatalogNow is the explicit-check form of ensureMuseCatalog: it
+// bypasses the ordinary two-minute freshness window and waits for the one
+// coalesced read to finish, so the response can carry the refreshed catalog.
+// If another trigger already owns the probe, waiting for it is sufficient.
+func (a *app) refreshMuseCatalogNow(ctx context.Context) {
+	if a == nil || a.museCatalog == nil {
+		return
+	}
+	if a.museRefreshing.CompareAndSwap(false, true) {
+		defer a.museRefreshing.Store(false)
+		a.refreshMuseCatalog(ctx)
+		return
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for a.museRefreshing.Load() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // applyMuseCatalog overlays the stored catalog onto one response. It reads and

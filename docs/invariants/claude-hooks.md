@@ -439,4 +439,8 @@ instrument, and it is deleted — `claudeModelPrompt`, `parseClaudeModels` and
   `installClaudeModelProbe` runs on the serve path only, so `ensureClaudeModels`
   is inert in every test and from every handler that has no resolver. That is
   what lets `handleAgents` and `handleHarnessLatest` ask for a refresh at all
-  without the suite ever launching a real `claude`.
+  without the suite ever launching a real `claude`. Ordinary agent reads start
+  a coalesced refresh in the background; the explicit harness-update check
+  bypasses the version/age cache and waits for a coalesced zero-token refresh,
+  so it is a completion boundary even for a server-side model release that did
+  not change the installed CLI version.
