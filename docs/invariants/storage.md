@@ -59,6 +59,15 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   Deterministic heuristics may read it. It must never be used to train,
   fine-tune, distill, or otherwise develop a model — do not turn it into a
   training dataset.
+  - Agent file imports record the file's actual basename and extension; link
+    labels and image alt text are descriptive only and never authorize inline
+    rendering. Failed explicit attachment references are durable additive
+    `asset_import` events keyed by their owning turn record and occurrence.
+    A later retry appends a normal asset event with an explicit earlier-turn
+    anchor; it never rewrites conversation text or moves the import to the
+    newest turn. Reference identity and asset identity remain first-record
+    wins. The retried snapshot contains the file's current bytes, not a claim
+    about bytes that existed when the original reference was written.
   - Cursor records two representations of the same launch choice: the node
     record keeps the model row and effort level the user selected, while the
     session-log meta header stores the joined cursor id as `model` and an empty

@@ -156,11 +156,13 @@ export function computerSettingOn(v){
 
 const CLAUDE_USAGE_KEY = "claude_usage_checks";
 const MUSE_CONSENT_KEY = "muse_approval_judge_consent";
+const EXTERNAL_ATTACHMENTS_KEY = "allow_external_attachments";
 
 function settingsSnapshot(s){
   return {
     claude_usage_checks: !!s.claude_usage_checks,
     muse_approval_judge_consent: !!s.muse_approval_judge_consent,
+    allow_external_attachments: !!s.allow_external_attachments,
   };
 }
 
@@ -177,7 +179,7 @@ export function createSettingsController(deps = {}){
   const read = typeof deps.read === "function" ? deps.read : async () => ({});
   const write = typeof deps.write === "function" ? deps.write : async () => ({});
   const render = typeof deps.render === "function" ? deps.render : () => {};
-  let confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false };
+  let confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false };
   let tail = Promise.resolve();
 
   function snapshot(){
@@ -192,14 +194,16 @@ export function createSettingsController(deps = {}){
     confirmed = {
       claude_usage_checks: computerSettingOn(raw && raw[CLAUDE_USAGE_KEY]),
       muse_approval_judge_consent: computerSettingOn(raw && raw[MUSE_CONSENT_KEY]),
+      allow_external_attachments: computerSettingOn(raw && raw[EXTERNAL_ATTACHMENTS_KEY]),
     };
   }
 
   function applyWrite(changedKey, raw){
     confirmed[changedKey] = flagFrom(raw, changedKey);
-    const other = changedKey === MUSE_CONSENT_KEY ? CLAUDE_USAGE_KEY : MUSE_CONSENT_KEY;
-    if (raw && typeof raw === "object" && other in raw)
-      confirmed[other] = computerSettingOn(raw[other]);
+    for (const key of [CLAUDE_USAGE_KEY, MUSE_CONSENT_KEY, EXTERNAL_ATTACHMENTS_KEY]){
+      if (key !== changedKey && raw && typeof raw === "object" && key in raw)
+        confirmed[key] = computerSettingOn(raw[key]);
+    }
   }
 
   function enqueue(work){
@@ -214,7 +218,7 @@ export function createSettingsController(deps = {}){
         const s = await read();
         applyRead(s);
       } catch {
-        confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false };
+        confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false };
       }
       paint();
       return snapshot();
@@ -238,8 +242,23 @@ export function createSettingsController(deps = {}){
     load,
     setMuseConsent(want){ return put(MUSE_CONSENT_KEY, want); },
     setClaudeUsage(want){ return put(CLAUDE_USAGE_KEY, want); },
+    setExternalAttachments(want){ return put(EXTERNAL_ATTACHMENTS_KEY, want); },
     getState(){ return snapshot(); },
   };
+}
+
+export function externalAttachmentNote(on){
+  void on;
+  return "Allow files referenced by agents outside a chat’s working directory to be copied into its history. Imported files are available to devices that can access that chat.";
+}
+
+export function openAttachmentSettings(burger, section){
+  burger?.click?.();
+  section?.scrollIntoView?.({ block: "center" });
+}
+
+export function applyExternalAttachmentChange(controller, event){
+  return controller.setExternalAttachments(!!event?.target?.checked);
 }
 
 export function museConsentNote(on){

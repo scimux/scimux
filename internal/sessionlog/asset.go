@@ -32,6 +32,30 @@ type AssetEvent struct {
 
 	SourceKind string `json:"sourceKind,omitempty"` // "upload" | "agent_path"
 	SourcePath string `json:"sourcePath,omitempty"`
+	// AnchorRecord binds a retry appended later to the earlier turn that owns
+	// the persisted reference. Nil retains the ordinary nearest-preceding-turn
+	// rule used by synchronous ingestion.
+	AnchorRecord *int `json:"anchorRecord,omitempty"`
+	// AnchorOccurrence narrows an explicitly anchored retry to one local-path
+	// occurrence in that turn. It is nil for ordinary synchronous imports.
+	AnchorOccurrence *int `json:"anchorOccurrence,omitempty"`
+	Retried          bool `json:"retried,omitempty"`
+}
+
+// AssetImportEvent records a local-file reference that could not be imported.
+// TurnRecord+Occurrence is the server-owned retry identity; Ref is never
+// accepted from an HTTP client.
+type AssetImportEvent struct {
+	TurnRecord int    `json:"turnRecord"`
+	Occurrence int    `json:"occurrence"`
+	Ref        string `json:"ref"`
+	Alt        string `json:"alt,omitempty"`
+	Image      bool   `json:"image,omitempty"`
+	Reason     string `json:"reason"`
+}
+
+func NewAssetImport(a AssetImportEvent) Event {
+	return Event{T: "asset_import", AssetImport: &a}
 }
 
 // NewAsset builds an "asset" record for a to-be-appended session asset.
@@ -165,9 +189,33 @@ func anchoredAssetsFromEvents(evs []Event) []AnchoredAsset {
 			}
 		case "asset":
 			if ev.Asset != nil && ev.Asset.SourcePath != "" {
-				out = append(out, AnchoredAsset{Anchor: lastTurn, Asset: *ev.Asset})
+				anchor := lastTurn
+				if ev.Asset.AnchorRecord != nil {
+					anchor = *ev.Asset.AnchorRecord
+				}
+				out = append(out, AnchoredAsset{Anchor: anchor, Asset: *ev.Asset})
 			}
 		}
+	}
+	return out
+}
+
+// ReadAssetImports returns the first persisted blocked reference for each
+// server-owned (turn, occurrence) identity. References are immutable; a later
+// retry succeeds by appending an explicitly anchored AssetEvent.
+func ReadAssetImports(path string) []AssetImportEvent {
+	seen := map[[2]int]bool{}
+	var out []AssetImportEvent
+	for _, ev := range ReadEvents(path) {
+		if ev.T != "asset_import" || ev.AssetImport == nil || ev.AssetImport.Ref == "" {
+			continue
+		}
+		key := [2]int{ev.AssetImport.TurnRecord, ev.AssetImport.Occurrence}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, *ev.AssetImport)
 	}
 	return out
 }

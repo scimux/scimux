@@ -54,6 +54,7 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("POST /api/nodes/{id}/attachments", a.handleUploadAttachments)
 	mux.HandleFunc("GET /api/nodes/{id}/attachments/{name}", a.handleAttachment)
 	mux.HandleFunc("GET /api/nodes/{id}/assets/{assetID}", a.handleAsset)
+	mux.HandleFunc("POST /api/nodes/{id}/asset-imports/retry", a.handleAssetImportRetry)
 	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)
 	mux.HandleFunc("POST /api/nodes/{id}/send/interrupt", a.handleSendInterrupt)
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)

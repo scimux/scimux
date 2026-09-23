@@ -102,9 +102,11 @@ import {
 } from "./bookmarks.js";
 import { createNotesFeature } from "./notes.js";
 import {
-  harnessRowsHTML, harnessCheckNote, createSettingsController,
+  harnessRowsHTML, harnessCheckNote, createSettingsController, externalAttachmentNote,
+  openAttachmentSettings, applyExternalAttachmentChange,
   createScimuxUpdateCheck, runUpdateChecks,
 } from "./harness.js";
+import { createAssetPreview, bindAssetPreviewLinks } from "./asset-preview.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
 import {
   makeReturnContext, returnAfterSelection, chatBackState, returnPillState,
@@ -778,6 +780,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   let notesFeature;
   let searchFeature;
   let sheetsFeature;
+  const assetPreview = own(createAssetPreview({
+    document,
+    overlay: $("#assetpreview"),
+  }));
   const chatFeature = own(createChatFeature({
     roots: {
       chathead: $("#chathead"),
@@ -816,6 +822,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     api,
     apiConditionalGet,
     assetURL,
+    openAssetPreview: assetPreview.open,
+    openAttachmentSettings: openAttachmentSettings.bind(null, $("#burger"), $("#m_attachment_settings")),
     nodes: () => nodes,
     sel: () => sel,
     selGen: () => selGen,
@@ -1765,6 +1773,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   $("#previewclose").addEventListener("click", closePreview);
   $("#previewscrim").addEventListener("click", closePreview);
   $("#previewopen").addEventListener("click", openPreviewChat);
+  own({ destroy: bindAssetPreviewLinks($("#previewbody"), assetPreview) });
   $("#previewview").addEventListener("keydown", e => {
     if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closePreview(); }
   });
@@ -1884,6 +1893,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     render: state => {
       usageChecks = !!state.claude_usage_checks;
       museConsent = !!state.muse_approval_judge_consent;
+      const external = !!state.allow_external_attachments;
+      $("#m_external_attachments").checked = external;
+      $("#m_external_attachments_note").textContent = externalAttachmentNote(external);
       renderHarnesses();
     },
   });
@@ -1911,6 +1923,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     }
     if (museBox) settingsCtl.setMuseConsent(!!museBox.checked);
   });
+  $("#m_external_attachments").addEventListener("change",
+    applyExternalAttachmentChange.bind(null, settingsCtl));
   $("#m_hcheck").addEventListener("click", async () => {
     const btn = $("#m_hcheck"), scimuxBtn = $("#m_check");
     btn.disabled = true;

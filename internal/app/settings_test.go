@@ -85,6 +85,9 @@ func TestSettingsHTTP(t *testing.T) {
 	if got := get()["claude_usage_checks"]; got != false {
 		t.Fatalf("default = %v, want false", got)
 	}
+	if got := get()["allow_external_attachments"]; got != false {
+		t.Fatalf("external attachments default = %v, want false", got)
+	}
 
 	put := func(body string) int {
 		rec := httptest.NewRecorder()
@@ -98,6 +101,21 @@ func TestSettingsHTTP(t *testing.T) {
 	}
 	if got := get()["claude_usage_checks"]; got != true {
 		t.Fatalf("after PUT = %v, want true", got)
+	}
+	if code := put(`{"allow_external_attachments":true}`); code != http.StatusOK {
+		t.Fatalf("external attachments PUT = %d", code)
+	}
+	if got := get()["allow_external_attachments"]; got != true {
+		t.Fatalf("external attachments after PUT = %v, want true", got)
+	}
+	if code := put(`{"allow_external_attachments":null}`); code != http.StatusOK {
+		t.Fatalf("null external attachments PUT = %d", code)
+	}
+	if got := get()["allow_external_attachments"]; got != true {
+		t.Fatalf("null external attachment update changed setting to %v", got)
+	}
+	if code := put(`{"allow_external_attachments":"yes"}`); code != http.StatusBadRequest {
+		t.Fatalf("string external attachment setting = %d, want 400", code)
 	}
 	if code := put(`not json`); code != http.StatusBadRequest {
 		t.Fatalf("malformed PUT = %d, want 400", code)

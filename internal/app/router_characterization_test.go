@@ -33,6 +33,7 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodPost, "/api/nodes/{id}/attachments", "/api/nodes/node-1/attachments", "handleUploadAttachments", "attachment_api.go"},                                               // extracted
 		{http.MethodGet, "/api/nodes/{id}/attachments/{name}", "/api/nodes/node-1/attachments/file.txt", "handleAttachment", "attachment_api.go"},                                       // extracted
 		{http.MethodGet, "/api/nodes/{id}/assets/{assetID}", "/api/nodes/node-1/assets/asset-1", "handleAsset", "attachment_api.go"},                                                    // extracted
+		{http.MethodPost, "/api/nodes/{id}/asset-imports/retry", "/api/nodes/node-1/asset-imports/retry", "handleAssetImportRetry", "asset_retry_api.go"},                               // additive retry of persisted references
 		{http.MethodPost, "/api/nodes/{id}/send/resolve", "/api/nodes/node-1/send/resolve", "handleSendResolve", "conversation_api.go"},                                                 // extracted
 		{http.MethodPost, "/api/nodes/{id}/send/interrupt", "/api/nodes/node-1/send/interrupt", "handleSendInterrupt", "conversation_api.go"},                                           // extracted
 		{http.MethodPost, "/api/nodes/{id}/key", "/api/nodes/node-1/key", "handleKey", "conversation_api.go"},                                                                           // extracted

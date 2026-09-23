@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -223,6 +224,95 @@ func TestOpenPinsEligibleDescriptorAcrossPathReplacement(t *testing.T) {
 	}
 	if string(buf) != "approved" {
 		t.Fatalf("descriptor read %q, want original approved bytes", buf)
+	}
+}
+
+func TestOpenExternalPinsRegularFileWithoutTreatingRootAsTrusted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "outside.txt")
+	writeFile(t, path, []byte("original"))
+	f, resolved, size, err := OpenExternal(path, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if resolved != path || size != 8 {
+		t.Fatalf("OpenExternal = %q, %d", resolved, size)
+	}
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, []byte("replacement"))
+	b, err := os.ReadFile(path + ".old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(b))
+	if _, err := f.Read(buf); err != nil || string(buf) != "original" {
+		t.Fatalf("pinned read = %q, %v", buf, err)
+	}
+}
+
+func TestOpenExternalRejectsNonregularAndMissing(t *testing.T) {
+	dir := t.TempDir()
+	if f, _, _, err := OpenExternal(dir, dir); f != nil || !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("directory = %v, %v", f, err)
+	}
+	if f, _, _, err := OpenExternal(filepath.Join(dir, "missing"), dir); f != nil || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing = %v, %v", f, err)
+	}
+}
+
+func TestOpenExternalRejectsFIFOWithoutWaitingForAWriter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pipe")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	if f, _, _, err := OpenExternal(path, dir); f != nil || !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("fifo = %v, %v", f, err)
+	}
+}
+
+func TestOpenExternalRelativeTraversalAndDanglingSymlink(t *testing.T) {
+	work := t.TempDir()
+	outside := t.TempDir()
+	path := filepath.Join(outside, "relative.txt")
+	writeFile(t, path, []byte("relative"))
+	ref, err := filepath.Rel(work, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, resolved, _, err := OpenExternal(ref, work)
+	if err != nil || resolved != path {
+		t.Fatalf("relative traversal = %q, %v", resolved, err)
+	}
+	f.Close()
+	dangling := filepath.Join(outside, "dangling")
+	if err := os.Symlink(filepath.Join(outside, "absent"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if f, _, _, err := OpenExternal(dangling, work); f != nil || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("dangling symlink = %v, %v", f, err)
+	}
+}
+
+func TestOpenExternalReportsUnreadablePath(t *testing.T) {
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked")
+	path := filepath.Join(locked, "file.txt")
+	writeFile(t, path, []byte("private"))
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(locked, 0o700)
+	f, _, _, err := OpenExternal(path, dir)
+	if f != nil {
+		f.Close()
+		t.Skip("current user can traverse mode-000 directories")
+	}
+	if !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("error = %v, want ErrUnreadable", err)
 	}
 }
 

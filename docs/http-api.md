@@ -549,6 +549,26 @@ path `/api/nodes/{id}/assets/{assetID}` and never embed inline `data:`
 URI content. The browser builds `href`/`src` from encoded node and asset
 ids only; recorded MIME is not interpolated into HTML.
 
+### `POST /api/nodes/{id}/asset-imports/retry`
+
+Retries one persisted, previously blocked agent file reference without sending
+an agent turn. The JSON body is
+`{"turn_record": <record index>, "occurrence": <zero-based reference index>}`.
+Clients cannot supply a path: the server looks up that exact reference in the
+append-only session log, validates that it belongs to the named node and turn,
+and rechecks current filesystem and settings eligibility. The usual mutation
+security checks apply.
+
+Success is `200` with `status` equal to `imported` (including `asset_id`,
+`name`, `turn_record`, `occurrence`, and `current_bytes:true`) or
+`already_imported`. Repeated and concurrent requests are idempotent. A disabled
+external-file setting or unavailable chat returns `409`; a missing recorded
+reference returns `404`; a missing, unreadable, nonregular, oversized, or
+storage-refused file returns `422` with a stable `reason` and explanatory
+`message`. A successful retry snapshots the file's bytes at retry time and
+binds the new asset explicitly to the earlier referenced turn, even after
+later turns or a `/clear` seam.
+
 ### `POST /api/nodes/{id}/send/resolve`
 
 Resolve an unconfirmed tmux delivery (the pane never acknowledged the
@@ -658,6 +678,7 @@ document, whose contents are opaque to the server.
 {
   "claude_usage_checks": false,
   "muse_approval_judge_consent": false,
+  "allow_external_attachments": false,
   "storage_global_limit_bytes": 0,
   "storage_node_limit_bytes": 0,
   "storage_min_free_bytes": 67108864
@@ -673,6 +694,14 @@ Muse nodes (including forks) and `/clear`. It does not disable the judge,
 grant a tool permission, or arm auto-approval. Turning it off prevents those
 new launches/session resets; it does not stop an existing Muse session.
 
+`allow_external_attachments` permits regular files referenced by an agent
+outside that chat's working directory to be copied into durable chat history
+under the scimux process's existing OS permissions. It defaults to false and
+missing, unreadable, or malformed settings fail closed. Workers read the
+server-owned setting for every import, so changes apply without restarting a
+chat. Turning it off blocks later imports and retries but does not remove
+already imported snapshots or automatically revisit older blocked references.
+
 The storage fields are non-negative integer byte counts. A zero global or
 per-node limit means unlimited; a zero minimum-free value disables that
 reserve. A missing `storage_min_free_bytes` uses the 64 MiB safety default.
@@ -682,8 +711,9 @@ attachments, and asset blobs. Before a managed write, all scimux processes
 serialize the usage check through an owner-only lock. A write that would cross
 a limit fails without truncating or deleting existing durable history.
 
-**Both consent fields default to off.** A missing, unreadable, empty,
-oversized, or invalid settings file is read as no consent.
+**Both consent fields and external attachments default to off.** A missing,
+unreadable, empty, oversized, or invalid settings file is read as no consent
+and no permission to import external attachments.
 
 PUT **merges the supplied JSON object** into the stored document. Omitted
 fields retain their current values, including unknown fields written by a

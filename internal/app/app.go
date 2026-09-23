@@ -567,8 +567,9 @@ type app struct {
 	skipHookCleanup bool
 	uiPath          string
 	// settingsPath is the computer's own settings (~/.scimux/settings.json),
-	// distinct from the opaque per-browser blob at uiPath. Empty disables them,
-	// which reads as every default — see settings.go.
+	// distinct from the opaque per-browser blob at uiPath. Workers read this
+	// path too so external-attachment policy changes take effect without a chat
+	// restart. Empty disables settings, which reads as every default.
 	settingsPath    string
 	storageMu       sync.Mutex
 	storageSnapshot storagebudget.Status
@@ -595,6 +596,10 @@ type app struct {
 	// SetAssetHook at startup) with each turn's scanned local-path candidates.
 	// See asset.IngestFunc and ingestAssetHook (agent_asset.go).
 	assetHook asset.IngestFunc
+	// assetImportMu serializes retry revalidation and append, making repeated
+	// or concurrent clicks idempotent without changing first-record-wins asset
+	// identity.
+	assetImportMu sync.Mutex
 	// logCache memoizes each node's poll-path session-log products (segment,
 	// fare+rides, anchored assets, asset index) under one (path, size, mtime)
 	// key. An unchanged log costs a stat; growth resumes from the last

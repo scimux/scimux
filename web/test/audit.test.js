@@ -60,6 +60,12 @@ const ALLOWLIST = [
    * because a dynamic href is exactly what a syntax audit cannot classify. */
   { file: "js/app.js", kind: "dom-url", detail: "prop:href:dynamic", count: 1 },
 
+  /* The preview receives URLs already produced by app.js/chat.js through the
+   * injected assetURL transport seam. It only assigns that opaque result to
+   * the dialog image and its two explicit actions. */
+  { file: "js/asset-preview.js", kind: "dom-url", detail: "prop:href:dynamic", count: 2 },
+  { file: "js/asset-preview.js", kind: "dom-url", detail: "prop:src:dynamic", count: 1 },
+
   /* Claude's URL-mode MCP elicitation renders a validated absolute http(s)
    * URL. The scanner cannot prove that runtime validation from the template,
    * so the dynamic target is recorded explicitly as external by contract. */
@@ -70,13 +76,13 @@ const ALLOWLIST = [
    * there is nothing to inject into. The ratchet is meant to fail if this
    * annotation outlives S8. */
   { file: "js/chat.js", kind: "nav-bypass", detail: "blank:local", count: 4 }, /* owed to S8 */
-  { file: "js/chat.js", kind: "nav-bypass", detail: "download:bare", count: 2 }, /* owed to S8 */
+  { file: "js/chat.js", kind: "nav-bypass", detail: "download:valued", count: 2 }, /* explicit filename required for blob URLs */
 
   /* index.html:400 — <a id="m_relurl" target="_blank"> with NO href in markup;
    * app.js assigns it (see prop:href:dynamic above). Allowlisted with that
    * cross-reference because the element alone carries no URL to classify.
    * Owed to S8. */
-  { file: "index.html", kind: "nav-bypass", detail: "blank:unknown", count: 1 }, /* owed to S8 */
+  { file: "index.html", kind: "nav-bypass", detail: "blank:unknown", count: 2 }, /* release link + preview external action */
 
   /* --- the boot document's own static references ---
    * These are not FR-42 findings against the application: they are the boot

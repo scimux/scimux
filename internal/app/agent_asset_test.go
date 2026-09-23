@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,8 +30,63 @@ func TestIngestAssetHook_IngestsRelativePathUnderDir(t *testing.T) {
 	if ev.SourceKind != "agent_path" {
 		t.Errorf("sourceKind = %q, want agent_path", ev.SourceKind)
 	}
-	if ev.Name != "the report" {
-		t.Errorf("name = %q, want %q (alt text)", ev.Name, "the report")
+	if ev.Name != "report.md" {
+		t.Errorf("name = %q, want actual basename %q (alt text must not rename it)", ev.Name, "report.md")
+	}
+}
+
+func TestIngestAssetHook_ExternalReferenceDefaultsBlockedAndIsRecorded(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	outside := t.TempDir()
+	path := filepath.Join(outside, "outside.pdf")
+	if err := os.WriteFile(path, []byte("pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[report](" + path + ")"}))
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: path, Alt: "report"}})
+	if len(sessionlog.ReadAssets(a.sessionLogPath("n1"))) != 0 {
+		t.Fatal("external path imported while the setting was off")
+	}
+	events := sessionlog.ReadEvents(a.sessionLogPath("n1"))
+	if len(events) != 2 || events[1].T != "asset_import" {
+		t.Fatalf("blocked reference was not persisted after its turn: %+v", events)
+	}
+	b, _ := json.Marshal(events[1])
+	if !strings.Contains(string(b), `"reason":"outside_workspace"`) || !strings.Contains(string(b), path) {
+		t.Fatalf("blocked reference record = %s", b)
+	}
+	seg := sessionlog.ReadSegment(a.sessionLogPath("n1"))
+	projected, _ := a.projectTurns("n1", seg.Turns)
+	if len(projected) != 1 || !strings.Contains(projected[0].Text, "scimux-import:0:0:outside_workspace") {
+		t.Fatalf("blocked reference projection = %+v", projected)
+	}
+}
+
+func TestIngestAssetHook_ExternalReferenceImportsWhenEnabled(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileForSettingsTest(a.settingsPath, `{"allow_external_attachments":true}`); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	outside := t.TempDir()
+	path := filepath.Join(outside, "outside.txt")
+	if err := os.WriteFile(path, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[description](" + path + ")"}))
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: path, Alt: "misleading.svg"}})
+	got := sessionlog.ReadAssetsByPath(a.sessionLogPath("n1"))[path]
+	if got.Name != "outside.txt" {
+		t.Fatalf("external asset name = %q, want actual basename", got.Name)
 	}
 }
 
@@ -250,7 +306,7 @@ func TestProjectTurns_RewritesAgentGeneratedImageAndDoc(t *testing.T) {
 	if len(assets) != 2 {
 		t.Fatalf("got %d assets, want 2: %#v", len(assets), assets)
 	}
-	for _, raw := range []string{"sketch.png", "notes.md"} {
+	for _, raw := range []string{"(sketch.png)", "(notes.md)"} {
 		if strings.Contains(out[0].Text, raw) {
 			t.Errorf("projected text still contains raw path %q: %q", raw, out[0].Text)
 		}

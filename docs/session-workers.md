@@ -57,7 +57,7 @@ each is required by at least one current harness path.
 | `Peek` | The existing Inspect surface reads a pane snapshot for Claude or a bounded structured-log tail for other harnesses. It is a snapshot, never a terminal stream. |
 | `SetAutoApprove` | Claude's one-turn lease lives beside its hook rendezvous; structured leases remain muxer policy. |
 | `RecordStartFailure` | Structured creation makes a failed first-turn delivery durable. |
-| `AppendSessionEvent` | Muxer-originated station, attention, and decision records still have exactly one physical session-log writer. |
+| `AppendSessionEvent` | Muxer-originated station, attention, decision, and retry-binding asset records still have exactly one physical session-log writer. |
 | `Stop` | Node deletion terminates the owned chat; whole-program shutdown retires Claude's wrapper without killing its tmux pane. |
 
 `State` is the bounded description the UI already polls. `Peek` is the existing

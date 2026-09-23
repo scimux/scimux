@@ -119,3 +119,55 @@ func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) str
 	}
 	return strings.Join(lines, "\n")
 }
+
+// ProjectAgentPathBindings projects occurrence-specific retry successes and
+// persisted failures in one pass over the original turn. Combining them keeps
+// occurrence numbering stable when an earlier reference has already become a
+// successful asset. Ordinary links, citations, and fenced examples remain
+// unchanged.
+func ProjectAgentPathBindings(text string, bound map[int]sessionlog.AssetEvent, imports []sessionlog.AssetImportEvent) string {
+	if len(bound) == 0 && len(imports) == 0 || !mdLinkRE.MatchString(text) {
+		return text
+	}
+	byOccurrence := map[int]sessionlog.AssetImportEvent{}
+	for _, ref := range imports {
+		byOccurrence[ref.Occurrence] = ref
+	}
+	lines := strings.Split(text, "\n")
+	inFence := false
+	occurrence := 0
+	for i, ln := range lines {
+		if fenceRE.MatchString(ln) {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		lines[i] = mdLinkRE.ReplaceAllStringFunc(ln, func(m string) string {
+			sub := mdLinkRE.FindStringSubmatch(m)
+			if !isLocalPathRef(sub[3]) {
+				return m
+			}
+			current := occurrence
+			occurrence++
+			if ev, ok := bound[current]; ok && ev.SourcePath == sub[3] {
+				name := ev.Name
+				if name == "" {
+					name = "asset"
+				}
+				return fmt.Sprintf("%s[%s](scimux-asset:%s)", sub[1], name, ev.ID)
+			}
+			ref, ok := byOccurrence[current]
+			if !ok || ref.Ref != sub[3] {
+				return m
+			}
+			return fmt.Sprintf("%s[%s](scimux-import:%d:%d:%s)", sub[1], sub[2], ref.TurnRecord, ref.Occurrence, ref.Reason)
+		})
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ProjectBlockedAgentPaths(text string, imports []sessionlog.AssetImportEvent) string {
+	return ProjectAgentPathBindings(text, nil, imports)
+}

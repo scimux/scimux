@@ -383,6 +383,11 @@ test("assetTileHTML image vs file and inline data", () => {
   assert.doesNotMatch(img, /data:image\/png/);
   const file = assetTileHTML("n1", "id2", "doc", { name: "a.pdf", mime: "application/pdf" }, { iconFile: "F" });
   assert.match(file, /attfile/);
+  assert.match(file, /download="a\.pdf"/);
+  const unicode = assetTileHTML("n1", "id3", "misleading.svg", { name: "résumé final.csv", mime: "image/svg+xml" }, { iconFile: "F" });
+  assert.match(unicode, /download="résumé final\.csv"/);
+  assert.doesNotMatch(unicode, /download="misleading\.svg"/);
+  assert.match(img, /data-asset-preview/);
 });
 
 test("assetTileHTML ignores record data and derives URLs from encoded ids", () => {
@@ -1694,6 +1699,9 @@ function el(tag, attrs = {}){
       if (sel.includes("[data-bmarker]") && this.dataset?.bmarker) return this;
       if (sel.includes("[data-dismiss-attention]") && this.dataset?.dismissAttention) return this;
       if (sel.includes("[data-open-terminal]") && this.dataset?.openTerminal) return this;
+      if (sel.includes("[data-asset-preview]") && this.dataset?.assetPreview) return this;
+      if (sel.includes("[data-asset-settings]") && this.dataset?.assetSettings) return this;
+      if (sel.includes("[data-asset-retry]") && this.dataset?.assetRetry) return this;
       if (sel.includes("[data-key]") && this.dataset?.key) return this;
       if (sel.includes(".turn") && this.classList.contains("turn")) return this;
       if (sel.includes(".attthumb") && this.classList.contains("attthumb")) return this;
@@ -1995,6 +2003,81 @@ test("factory bind is idempotent; destroy removes listeners", () => {
   feature.bind();
   assert.equal(roots.infobtn.listenerCount("click"), 1);
   feature.destroy();
+});
+
+test("delegated attachment actions open preview/settings and retry without sending a turn", async () => {
+  const previews = [], settings = [], alerts = [];
+  let failRetry = false;
+  const { feature, roots, apiCalls } = makeFeature({
+    api: async (path, opts) => {
+      if (path.includes("asset-imports/retry")) {
+        const turn = JSON.parse(opts.body).turn_record;
+        if (failRetry) throw turn === 8 ? new Error("still blocked") : "blocked string";
+        return { status: turn === 7 ? "already_imported" : "imported" };
+      }
+      if (path.includes("/chat")) return defaultChatPayload({});
+      return {};
+    },
+    deps: {
+      openAssetPreview: value => previews.push(value),
+      openAttachmentSettings: () => settings.push(true),
+      alert: value => alerts.push(value),
+    },
+  });
+  feature.bind();
+  const click = target => roots.msgs._listeners.get("click")[0].fn({ target, preventDefault(){} });
+
+  const image = el("a", { dataset: { assetPreview: "1", name: "photo.png" } });
+  image.href = "blob:photo";
+  click(image);
+  assert.deepEqual(previews, [{ url: "blob:photo", name: "photo.png" }]);
+  const titled = el("a", { dataset: { assetPreview: "1" } });
+  titled.href = "blob:titled";
+  titled.title = "title.png";
+  click(titled);
+  const unnamed = el("a", { dataset: { assetPreview: "1" } });
+  unnamed.href = "blob:unnamed";
+  click(unnamed);
+  assert.deepEqual(previews.slice(1), [
+    { url: "blob:titled", name: "title.png" },
+    { url: "blob:unnamed", name: "image" },
+  ]);
+
+  click(el("button", { dataset: { assetSettings: "1" } }));
+  assert.equal(settings.length, 1);
+
+  const retry = el("button", { dataset: { assetRetry: "1", node: "n1", turn: "7", occurrence: "2" } });
+  click(retry);
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  const call = apiCalls.find(c => c.path.includes("asset-imports/retry"));
+  assert.deepEqual(JSON.parse(call.opts.body), { turn_record: 7, occurrence: 2 });
+  assert.equal(retry.textContent, "Already imported");
+
+  const imported = el("button", { dataset: { assetRetry: "1", node: "", turn: "9", occurrence: "0" } });
+  click(imported);
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  assert.equal(imported.textContent, "Imported on retry");
+
+  failRetry = true;
+  const failed = el("button", { dataset: { assetRetry: "1", node: "n1", turn: "8", occurrence: "0" } });
+  click(failed);
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  assert.equal(failed.disabled, false);
+  assert.equal(failed.textContent, "Retry import");
+  assert.deepEqual(alerts, ["still blocked"]);
+  const failedString = el("button", { dataset: { assetRetry: "1", node: "n1", turn: "10", occurrence: "0" } });
+  click(failedString);
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  assert.deepEqual(alerts, ["still blocked", "blocked string"]);
+  assert.equal(apiCalls.some(c => c.path.endsWith("/send")), false);
+  feature.destroy();
+
+  const quiet = makeFeature({ deps: { openAssetPreview: null, openAttachmentSettings: null } });
+  quiet.feature.bind();
+  const quietClick = target => quiet.roots.msgs._listeners.get("click")[0].fn({ target, preventDefault(){} });
+  quietClick(image);
+  quietClick(el("button", { dataset: { assetSettings: "1" } }));
+  quiet.feature.destroy();
 });
 
 test("broken-thumbnail cleanup is one delegated error listener; rebuilds do not accumulate", async () => {

@@ -36,6 +36,11 @@ type settings struct {
 	// settings read as false. True never disables the judge and never emits a
 	// Muse CLI flag.
 	MuseApprovalJudgeConsent bool `json:"muse_approval_judge_consent"`
+	// AllowExternalAttachments permits agent-authored references outside the
+	// chat working directory to be copied into durable node history. It does
+	// not expose a filesystem-serving endpoint and defaults off on every read
+	// failure.
+	AllowExternalAttachments bool `json:"allow_external_attachments"`
 	// Storage limits are byte counts. Zero disables that particular limit;
 	// MinFreeBytes defaults to a conservative reserve on a missing setting.
 	StorageGlobalLimitBytes int64 `json:"storage_global_limit_bytes"`
@@ -54,6 +59,7 @@ func (s *settings) UnmarshalJSON(b []byte) error {
 	var known struct {
 		ClaudeUsageChecks        bool  `json:"claude_usage_checks"`
 		MuseApprovalJudgeConsent bool  `json:"muse_approval_judge_consent"`
+		AllowExternalAttachments bool  `json:"allow_external_attachments"`
 		StorageGlobalLimitBytes  int64 `json:"storage_global_limit_bytes"`
 		StorageNodeLimitBytes    int64 `json:"storage_node_limit_bytes"`
 		StorageMinFreeBytes      int64 `json:"storage_min_free_bytes"`
@@ -67,11 +73,13 @@ func (s *settings) UnmarshalJSON(b []byte) error {
 	}
 	s.ClaudeUsageChecks = known.ClaudeUsageChecks
 	s.MuseApprovalJudgeConsent = known.MuseApprovalJudgeConsent
+	s.AllowExternalAttachments = known.AllowExternalAttachments
 	s.StorageGlobalLimitBytes = known.StorageGlobalLimitBytes
 	s.StorageNodeLimitBytes = known.StorageNodeLimitBytes
 	s.StorageMinFreeBytes = known.StorageMinFreeBytes
 	delete(raw, "claude_usage_checks")
 	delete(raw, "muse_approval_judge_consent")
+	delete(raw, "allow_external_attachments")
 	delete(raw, "storage_global_limit_bytes")
 	delete(raw, "storage_node_limit_bytes")
 	delete(raw, "storage_min_free_bytes")
@@ -80,14 +88,16 @@ func (s *settings) UnmarshalJSON(b []byte) error {
 }
 
 func (s settings) MarshalJSON() ([]byte, error) {
-	raw := make(map[string]json.RawMessage, len(s.Extra)+5)
+	raw := make(map[string]json.RawMessage, len(s.Extra)+6)
 	for key, value := range s.Extra {
 		raw[key] = append(json.RawMessage(nil), value...)
 	}
 	claude, _ := json.Marshal(s.ClaudeUsageChecks)
 	museConsent, _ := json.Marshal(s.MuseApprovalJudgeConsent)
+	external, _ := json.Marshal(s.AllowExternalAttachments)
 	raw["claude_usage_checks"] = claude
 	raw["muse_approval_judge_consent"] = museConsent
+	raw["allow_external_attachments"] = external
 	for key, value := range map[string]int64{
 		"storage_global_limit_bytes": s.StorageGlobalLimitBytes,
 		"storage_node_limit_bytes":   s.StorageNodeLimitBytes,
@@ -208,20 +218,26 @@ func (a *app) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 		s.Extra = map[string]json.RawMessage{}
 	}
 	for key, raw := range patch {
-		if key == "claude_usage_checks" || key == "muse_approval_judge_consent" ||
+		if key == "claude_usage_checks" || key == "muse_approval_judge_consent" || key == "allow_external_attachments" ||
 			key == "storage_global_limit_bytes" || key == "storage_node_limit_bytes" || key == "storage_min_free_bytes" {
 			continue
 		}
 		s.Extra[key] = append(json.RawMessage(nil), raw...)
 	}
 	if raw, ok := patch["claude_usage_checks"]; ok {
-		if json.Unmarshal(raw, &s.ClaudeUsageChecks) != nil {
+		if string(raw) != "null" && json.Unmarshal(raw, &s.ClaudeUsageChecks) != nil {
 			http.Error(w, "settings must be valid JSON", 400)
 			return
 		}
 	}
 	if raw, ok := patch["muse_approval_judge_consent"]; ok {
-		if json.Unmarshal(raw, &s.MuseApprovalJudgeConsent) != nil {
+		if string(raw) != "null" && json.Unmarshal(raw, &s.MuseApprovalJudgeConsent) != nil {
+			http.Error(w, "settings must be valid JSON", 400)
+			return
+		}
+	}
+	if raw, ok := patch["allow_external_attachments"]; ok {
+		if string(raw) != "null" && json.Unmarshal(raw, &s.AllowExternalAttachments) != nil {
 			http.Error(w, "settings must be valid JSON", 400)
 			return
 		}

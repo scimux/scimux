@@ -433,7 +433,11 @@ func (c *LogCache) ingest(ev Event, i int) {
 				c.assetIdx[ev.Asset.ID] = *ev.Asset
 			}
 			if ev.Asset.SourcePath != "" {
-				c.anchAcc = append(c.anchAcc, AnchoredAsset{Anchor: c.lastTurnAnchor, Asset: *ev.Asset})
+				anchor := c.lastTurnAnchor
+				if ev.Asset.AnchorRecord != nil {
+					anchor = *ev.Asset.AnchorRecord
+				}
+				c.anchAcc = append(c.anchAcc, AnchoredAsset{Anchor: anchor, Asset: *ev.Asset})
 			}
 		}
 	}

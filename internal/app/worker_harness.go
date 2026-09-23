@@ -51,8 +51,9 @@ func newProductionSessionHarness(config sessionWorkerConfig) (sessionworker.Harn
 	}
 	sessionsDir := filepath.Join(config.DataDir, "sessions")
 	assetOwner := &app{
-		sessionsDir: sessionsDir,
-		assetsDir:   filepath.Join(config.DataDir, "assets"),
+		sessionsDir:  sessionsDir,
+		assetsDir:    filepath.Join(config.DataDir, "assets"),
+		settingsPath: filepath.Join(config.DataDir, "settings.json"),
 	}
 	var manager procManager
 	switch config.Identity.Agent {

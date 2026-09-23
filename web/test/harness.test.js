@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import {
   harnessState, harnessRowsHTML, harnessCheckNote,
   museConsentNote, computerSettingOn, createSettingsController,
+  openAttachmentSettings, applyExternalAttachmentChange,
   createScimuxUpdateCheck, runUpdateChecks,
 } from "../js/harness.js";
 
@@ -453,12 +454,13 @@ test("absent Muse is not installed; omitted latest stays unchecked; no Meta term
   assert.doesNotMatch(appSrc, /five registries/);
 });
 
-test("app settings wiring reads and writes both computer-owned flags without clobbering", () => {
+test("app settings wiring reads and writes computer-owned flags without clobbering", () => {
   assert.match(appSrc, /from "\.\/harness\.js"/);
   assert.match(appSrc, /createSettingsController/);
   assert.match(appSrc, /data-muse-consent/);
   assert.match(harnessSrc, /muse_approval_judge_consent/);
   assert.match(harnessSrc, /claude_usage_checks/);
+  assert.match(harnessSrc, /allow_external_attachments/);
   assert.doesNotMatch(harnessSrc, /document\.|innerHTML\s*=/);
 });
 
@@ -480,6 +482,7 @@ function makeSettingsHarness(opts = {}){
     render: state => { renders.push({
       claude_usage_checks: !!state.claude_usage_checks,
       muse_approval_judge_consent: !!state.muse_approval_judge_consent,
+      allow_external_attachments: !!state.allow_external_attachments,
     }); },
   });
   return {
@@ -499,7 +502,7 @@ test("settings read: booleans, missing, and malformed values fail closed", async
     read: async () => ({ claude_usage_checks: true, muse_approval_judge_consent: true }),
   });
   await h.controller.load();
-  assert.deepEqual(h.last(), { claude_usage_checks: true, muse_approval_judge_consent: true });
+  assert.deepEqual(h.last(), { claude_usage_checks: true, muse_approval_judge_consent: true, allow_external_attachments: false });
 
   const cases = [
     { claude_usage_checks: false, muse_approval_judge_consent: false },
@@ -511,7 +514,7 @@ test("settings read: booleans, missing, and malformed values fail closed", async
   for (const raw of cases){
     const c = makeSettingsHarness({ read: async () => raw });
     await c.controller.load();
-    assert.deepEqual(c.last(), { claude_usage_checks: false, muse_approval_judge_consent: false }, JSON.stringify(raw));
+    assert.deepEqual(c.last(), { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false }, JSON.stringify(raw));
   }
 });
 
@@ -522,7 +525,7 @@ test("settings read: failed read is both off, including after a previous true", 
   assert.equal(h.last().muse_approval_judge_consent, true);
   impl = async () => { throw new Error("down"); };
   await h.controller.load();
-  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false });
+  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false });
 });
 
 test("stale settings read cannot overwrite a newer result", async () => {
@@ -543,7 +546,7 @@ test("stale settings read cannot overwrite a newer result", async () => {
   assert.equal(n, 2);
   release2({ claude_usage_checks: false, muse_approval_judge_consent: false });
   await p2;
-  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false });
+  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false });
 });
 
 test("Muse consent write sends only that field and follows the server response", async () => {
@@ -624,7 +627,7 @@ test("failed settings write does not become an unhandled rejection", async () =>
     write: async () => { throw new Error("boom"); },
   });
   await h.controller.setClaudeUsage(true);
-  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false });
+  assert.deepEqual(h.last(), { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false });
 });
 
 test("settings writes serialize: true then false ends false and invokes writes in order", async () => {
@@ -713,6 +716,7 @@ test("cross-setting writes serialize Muse then Claude", async () => {
   assert.deepEqual(h.controller.getState(), {
     claude_usage_checks: true,
     muse_approval_judge_consent: false,
+    allow_external_attachments: false,
   });
 });
 
@@ -745,6 +749,7 @@ test("cross-setting writes serialize Claude then Muse", async () => {
   assert.deepEqual(h.controller.getState(), {
     claude_usage_checks: false,
     muse_approval_judge_consent: true,
+    allow_external_attachments: false,
   });
 });
 
@@ -771,6 +776,32 @@ test("a rejected queued write does not poison later writes", async () => {
   const s2 = await p2;
   assert.equal(s2.muse_approval_judge_consent, false);
   assert.equal(h.controller.getState().muse_approval_judge_consent, false);
+});
+
+test("a failed external-attachment save re-renders the last confirmed off state", async () => {
+  const h = makeSettingsHarness({
+    read: async () => ({ allow_external_attachments: false }),
+    write: async () => { throw new Error("disk full"); },
+  });
+  await h.controller.load();
+  const state = await h.controller.setExternalAttachments(true);
+  assert.equal(state.allow_external_attachments, false);
+  assert.equal(h.last().allow_external_attachments, false);
+  assert.deepEqual(h.writes, [{ allow_external_attachments: true }]);
+});
+
+test("attachment settings helpers navigate and forward the checkbox value", async () => {
+  let clicks = 0, scroll;
+  openAttachmentSettings({ click(){ clicks++; } }, { scrollIntoView(opts){ scroll = opts; } });
+  assert.equal(clicks, 1);
+  assert.deepEqual(scroll, { block: "center" });
+  openAttachmentSettings(null, null);
+  let value;
+  const result = await applyExternalAttachmentChange({
+    setExternalAttachments(v){ value = v; return "saved"; },
+  }, { target: { checked: true } });
+  assert.equal(value, true);
+  assert.equal(result, "saved");
 });
 
 test("writes wait for a pending read; a later read waits for a pending write", async () => {
@@ -821,6 +852,7 @@ test("failed read at queue head turns both off; a later write still runs", async
   await pLoad;
   assert.deepEqual(h.controller.getState(), {
     claude_usage_checks: false, muse_approval_judge_consent: false,
+    allow_external_attachments: false,
   });
   await micro();
   assert.equal(writes, 1);

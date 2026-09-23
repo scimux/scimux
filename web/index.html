@@ -415,6 +415,11 @@
     <button class="cta" id="m_hcheck">Check for harness updates</button>
     <div id="m_hnote" hidden></div>
   </div>
+  <div class="sect" id="m_attachment_settings">
+    <div class="k">Attachments</div>
+    <label class="hswitch"><input type="checkbox" id="m_external_attachments"> Allow agent attachments outside the workspace</label>
+    <div class="hnote" id="m_external_attachments_note">Allow files referenced by agents outside a chat’s working directory to be copied into its history. Imported files are available to devices that can access that chat.</div>
+  </div>
   <div class="sect">
     <div class="k">About</div>
     <!-- Said here and not only in the README because this is where a user
@@ -442,6 +447,22 @@
     <div class="item"><span>Nayuki QR generator (pairing)</span><button class="tag lic" data-lic="qrcodegen">MIT</button></div>
     <div class="item"><span>Font Awesome Free (interface icons)</span><button class="tag lic" data-lic="fontawesome">CC BY 4.0</button></div>
     <pre id="m_lictext" hidden></pre>
+  </div>
+</div>
+
+<div class="assetpreview" id="assetpreview" role="dialog" aria-modal="true" aria-labelledby="assetpreview_title" hidden>
+  <div class="assetpreview-head">
+    <strong id="assetpreview_title" data-preview-title>Image preview</strong>
+    <button type="button" data-preview-close aria-label="Close image preview">Close</button>
+  </div>
+  <div class="assetpreview-stage" data-preview-stage>
+    <div class="assetpreview-status" data-preview-status role="status">Loading image…</div>
+    <img data-preview-image alt="">
+  </div>
+  <div class="assetpreview-actions">
+    <button type="button" data-preview-reset>Reset to fit</button>
+    <a data-preview-download download>Download</a>
+    <a data-preview-external target="_blank" rel="noopener">Open externally</a>
   </div>
 </div>
 

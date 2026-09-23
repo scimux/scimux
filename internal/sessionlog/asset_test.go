@@ -134,6 +134,28 @@ func TestReadAnchoredAssets(t *testing.T) {
 	}
 }
 
+func TestRetryAssetUsesExplicitEarlierAnchorAndImportIdentityIsFirstWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "n.jsonl")
+	w := &Writer{Path: path}
+	w.Append(Event{T: "assistant", Text: "[report](/outside/report.txt)"}) // idx 0
+	w.Append(NewAssetImport(AssetImportEvent{TurnRecord: 0, Occurrence: 0, Ref: "/outside/report.txt", Reason: "outside_workspace"}))
+	w.Append(NewAssetImport(AssetImportEvent{TurnRecord: 0, Occurrence: 0, Ref: "/forged/later.txt", Reason: "not_found"}))
+	w.Append(Event{T: "source"})
+	w.Append(Event{T: "assistant", Text: "later"})
+	anchor := 0
+	occurrence := 0
+	w.Append(NewAsset(AssetEvent{ID: "a_retry", Name: "report.txt", Storage: "inline", SourcePath: "/outside/report.txt", AnchorRecord: &anchor, AnchorOccurrence: &occurrence, Retried: true}))
+
+	got := ReadAnchoredAssets(path)
+	if len(got) != 1 || got[0].Anchor != 0 || !got[0].Asset.Retried {
+		t.Fatalf("anchored retry = %+v, want record 0", got)
+	}
+	imports := ReadAssetImports(path)
+	if len(imports) != 1 || imports[0].Ref != "/outside/report.txt" {
+		t.Fatalf("imports = %+v, want first record for occurrence", imports)
+	}
+}
+
 func TestReadAssetsIgnoresNonAssetRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "n.jsonl")
 	w := &Writer{Path: path}

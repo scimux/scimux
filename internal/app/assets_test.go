@@ -54,6 +54,32 @@ func TestServeAssetInline(t *testing.T) {
 	}
 }
 
+func TestServeAssetSafeRasterExtensionMatrix(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.byID["n1"] = &Node{ID: "n1"}
+	for i, tc := range []struct{ name, contentType string }{
+		{"one.png", "image/png"}, {"two.jpg", "image/jpeg"}, {"three.jpeg", "image/jpeg"},
+		{"four.gif", "image/gif"}, {"five.webp", "image/webp"},
+	} {
+		id := "a_r" + string(rune('0'+i))
+		appendAsset(t, a, "n1", sessionlog.AssetEvent{ID: id, Name: tc.name, Mime: "text/html", Storage: "inline", Bytes: base64.StdEncoding.EncodeToString([]byte("bytes"))})
+		rec := serveAsset(a, "n1", id)
+		if rec.Code != 200 || rec.Header().Get("Content-Type") != tc.contentType || rec.Header().Get("Content-Disposition") != "" {
+			t.Errorf("%s headers = %d %q %q", tc.name, rec.Code, rec.Header().Get("Content-Type"), rec.Header().Get("Content-Disposition"))
+		}
+	}
+}
+
+func TestServeAssetDownloadFilenamePreservesUnicodeSpacesAndExtension(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.byID["n1"] = &Node{ID: "n1"}
+	appendAsset(t, a, "n1", sessionlog.AssetEvent{ID: "a_name", Name: "résumé final.csv", Mime: "image/png", Storage: "inline", Bytes: base64.StdEncoding.EncodeToString([]byte("a,b"))})
+	rec := serveAsset(a, "n1", "a_name")
+	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, "r%C3%A9sum%C3%A9%20final.csv") {
+		t.Fatalf("download filename = %q", got)
+	}
+}
+
 func TestServeAssetBlob(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	a.byID["n1"] = &Node{ID: "n1"}
@@ -79,10 +105,15 @@ func TestServeAssetBlob(t *testing.T) {
 
 // Only the raster whitelist renders inline; SVG/HTML/unknown always force a
 // download with an inert content type, mirroring the attachment endpoint.
-func TestServeAssetHeadersActiveContentForcedDownload(t *testing.T) {
+func TestServeAssetHeadersNonRasterForcedDownload(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	a.byID["n1"] = &Node{ID: "n1"}
 	for i, tc := range []struct{ name, mime string }{
+		{"readme.md", "text/markdown"},
+		{"notes.txt", "text/plain"},
+		{"report.pdf", "application/pdf"},
+		{"table.csv", "text/csv"},
+		{"archive.zip", "application/zip"},
 		{"evil.svg", "image/svg+xml"},
 		{"evil.html", "text/html"},
 		{"data.bin", "application/octet-stream"},

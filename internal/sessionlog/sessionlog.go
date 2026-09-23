@@ -52,20 +52,21 @@ import (
 // record types they don't know, so the schema can grow without breaking
 // old binaries or old files.
 type Event struct {
-	T          string          `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "station" | "error" | "asset" | "attention" | "decision"
-	Time       string          `json:"time"`
-	Text       string          `json:"text,omitempty"`       // user / assistant
-	Tool       *ToolEvent      `json:"tool,omitempty"`       // tool
-	Usage      *UsageEvent     `json:"usage,omitempty"`      // usage
-	Meta       *MetaEvent      `json:"meta,omitempty"`       // meta
-	Source     *SourceEvent    `json:"source,omitempty"`     // source
-	Mark       *MarkEvent      `json:"mark,omitempty"`       // mark
-	Asset      *AssetEvent     `json:"asset,omitempty"`      // asset
-	Station    *StationEvent   `json:"station,omitempty"`    // station
-	Attention  *AttentionEvent `json:"attention,omitempty"`  // attention (needs-input edge)
-	Decision   *DecisionEvent  `json:"decision,omitempty"`   // decision (auto-approval audit; P3)
-	StopReason string          `json:"stopReason,omitempty"` // stop
-	Error      string          `json:"error,omitempty"`      // error
+	T           string            `json:"t"` // "meta" | "source" | "user" | "assistant" | "tool" | "usage" | "mark" | "stop" | "station" | "error" | "asset" | "attention" | "decision"
+	Time        string            `json:"time"`
+	Text        string            `json:"text,omitempty"`        // user / assistant
+	Tool        *ToolEvent        `json:"tool,omitempty"`        // tool
+	Usage       *UsageEvent       `json:"usage,omitempty"`       // usage
+	Meta        *MetaEvent        `json:"meta,omitempty"`        // meta
+	Source      *SourceEvent      `json:"source,omitempty"`      // source
+	Mark        *MarkEvent        `json:"mark,omitempty"`        // mark
+	Asset       *AssetEvent       `json:"asset,omitempty"`       // asset
+	AssetImport *AssetImportEvent `json:"assetImport,omitempty"` // asset_import
+	Station     *StationEvent     `json:"station,omitempty"`     // station
+	Attention   *AttentionEvent   `json:"attention,omitempty"`   // attention (needs-input edge)
+	Decision    *DecisionEvent    `json:"decision,omitempty"`    // decision (auto-approval audit; P3)
+	StopReason  string            `json:"stopReason,omitempty"`  // stop
+	Error       string            `json:"error,omitempty"`       // error
 	// Prov is opaque JSON provenance attached to model output. Additive and
 	// omitempty: legacy records without it stay valid. It is not interpreted.
 	Prov json.RawMessage `json:"prov,omitempty"`

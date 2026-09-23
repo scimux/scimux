@@ -253,6 +253,7 @@ export function buildChatSignature(parts){
     p.termOpen,
     p.termFull,
     p.source,
+    p.externalAttachments ? "1" : "0",
     /* Transport failures can arrive without a new chat turn. Include the
        inline message so the status is inserted (and announced) immediately. */
     p.error || "",
@@ -567,9 +568,9 @@ export function attTileHTML(nodeId, leaf, isImage, {
   const name = leaf.replace(/^[0-9a-f]{8}-/, "");
   isImage = isImage && rasterRe.test(name);
   return isImage
-    ? `<a class="attthumb" data-tkey="${escape(leaf)}"${tileStyle(tileBox, leaf)} href="${url}" target="_blank" rel="noopener" title="${escape(name)}">` +
+    ? `<a class="attthumb" data-asset-preview data-name="${escape(name)}" data-tkey="${escape(leaf)}"${tileStyle(tileBox, leaf)} href="${url}" target="_blank" rel="noopener" title="${escape(name)}">` +
       `<img src="${url}" alt="${escape(name)}" loading="lazy"></a>`
-    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${escape(name)}">` +
+    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download="${escape(name)}" title="${escape(name)}">` +
       `${iconFile}<span>${escape(name)}</span></a>`;
 }
 
@@ -595,10 +596,45 @@ export function assetTileHTML(nodeId, id, alt, rec, {
   const name = rec.name || alt || "file";
   const isImage = rasterRe.test(name);
   return isImage
-    ? `<a class="attthumb" data-tkey="${escape(id)}"${tileStyle(tileBox, id)} href="${url}" target="_blank" rel="noopener" title="${escape(name)}">` +
+    ? `<a class="attthumb" data-asset-preview data-name="${escape(name)}" data-tkey="${escape(id)}"${tileStyle(tileBox, id)} href="${url}" target="_blank" rel="noopener" title="${escape(name)}">` +
       `<img src="${url}" alt="${escape(name)}" loading="lazy"></a>`
-    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download title="${escape(name)}">` +
+    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download="${escape(name)}" title="${escape(name)}">` +
       `${iconFile}<span>${escape(name)}</span></a>`;
+}
+
+const IMPORT_REF_RE = /(!?)\[([^\]]*)\]\(scimux-import:(\d+):(\d+):([a-z_]+)\)/g;
+
+export function importTileHTML(nodeId, turn, occurrence, reason, alt, isImage, {
+  escape = esc, iconFile = "", externalAllowed = false,
+} = {}){
+  const messages = {
+    outside_workspace: ["Attachment outside workspace", "External attachments are disabled."],
+    not_found: ["Attachment unavailable", "File no longer exists."],
+    unreadable: ["Attachment unavailable", "File cannot be read."],
+    not_regular: ["Attachment unavailable", "Unsupported filesystem object."],
+    too_large: ["Attachment unavailable", "File exceeds the import limit."],
+    storage: ["Attachment unavailable", "Storage budget or free-space limit prevented import."],
+    chat_unavailable: ["Attachment unavailable", "Chat is unavailable for this operation."],
+  };
+  const copy = messages[reason] || ["Attachment unavailable", "Attachment could not be imported."];
+  const retry = reason !== "outside_workspace" || externalAllowed;
+  const actions = (reason === "outside_workspace" && !externalAllowed)
+    ? `<button data-asset-settings>Open attachment settings</button>`
+    : (retry ? `<button data-asset-retry data-node="${escape(nodeId)}" data-turn="${turn}" data-occurrence="${occurrence}">Retry import</button>` : "");
+  return `<span class="assetblocked ${isImage ? "image" : "file"}" role="status">` +
+    `${isImage ? "" : iconFile}<span><strong>${copy[0]}</strong><span>${copy[1]}</span>` +
+    `<span class="assetblocked-name">${escape(alt || "file")}</span>${actions}</span></span>`;
+}
+
+export function splitImportRefs(text, nodeId, deps = {}){
+  IMPORT_REF_RE.lastIndex = 0;
+  if (!IMPORT_REF_RE.test(text || "")) return { clean: text || "", html: "" };
+  const tiles = [];
+  const clean = (text || "").replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason) => {
+    tiles.push(importTileHTML(nodeId, +turn, +occurrence, reason, alt, bang === "!", deps));
+    return "";
+  }).replace(/\n{3,}/g, "\n\n").trim();
+  return { clean, html: `<div class="attrow blockedrow">${tiles.join("")}</div>` };
 }
 
 export function splitAssetRefs(text, nodeId, assets, deps = {}){
@@ -1355,8 +1391,9 @@ export function createChatFeature(deps){
     autoapprove.innerHTML = autoApproveButtonInnerHTML(model, icons, { escape });
   }
 
-  function renderTurnHTML(t, { bk, hist = false, nodeId, assets } = {}){
+  function renderTurnHTML(t, { bk, hist = false, nodeId, assets, externalAllowed = false } = {}){
     const a = splitAssetRefs(t.text, nodeId, assets, tileDeps());
+	const blocked = splitImportRefs(a.clean, nodeId, { ...tileDeps(), externalAllowed });
     const bookmarkMarker = bookmarkMarkerModel(t, nodeId, g("bookmarks", []), g("noteUsages", []));
     const sentTo = sentToMarkerModel(t, nodeId, g("forwardLinks", []));
     const marker = { ...(bookmarkMarker || {}), sentTo };
@@ -1365,13 +1402,13 @@ export function createChatFeature(deps){
       iconInto: icons.ICON_INTO || "",
     }) : "";
     bubbleTurns[bk] = t;
-    const cls = turnRoleClass(t.role, { hist, media: !!(a.html && !a.clean) });
+    const cls = turnRoleClass(t.role, { hist, media: !!((a.html || blocked.html) && !blocked.clean) });
     const dataAttrs = hist
       ? `data-bk="${bk}" data-time="${escape(t.time || "")}" data-uid="${escape(t.uid || "")}" data-segment="${t.segment || 0}" data-record="${t.record || 0}"`
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
     return `
       <div class="${cls}" ${dataAttrs}>
-        <div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${markdown(a.clean)}${a.html}</div>
+		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${markdown(blocked.clean)}${a.html}${blocked.html}</div>
       </div>`;
   }
 
@@ -1392,7 +1429,7 @@ export function createChatFeature(deps){
       clearAwaitingForward(d.storage, nodeId);
   }
 
-  function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets } = {}){
+  function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets, externalAllowed = false } = {}){
     return mergeTimelineItems(turns, decisions).map(item => {
       if (item.kind === "decision"){
         return decisionRowHTML(item.decision, {
@@ -1400,7 +1437,7 @@ export function createChatFeature(deps){
         });
       }
       const bk = hist ? histBk(segIndex, item.index) : liveBk(item.index);
-      return renderTurnHTML(item.turn, { bk, hist, nodeId, assets });
+      return renderTurnHTML(item.turn, { bk, hist, nodeId, assets, externalAllowed });
     }).join("");
   }
 
@@ -1887,6 +1924,7 @@ export function createChatFeature(deps){
       delivery: data.delivery,
       turnsLength: turns.length,
       source: data.source,
+      externalAttachments: !!data.allow_external_attachments,
       priorTurns: data.prior_turns || 0,
       termOpen,
       fresh: !!data.fresh,
@@ -2020,6 +2058,7 @@ export function createChatFeature(deps){
         `<div class="chatseam histseam" data-seam="${escape(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${escape(whenFn(s.start))}</span></div>` +
         renderTimelineHTML(s.turns || [], s.decisions || [], {
           hist: true, segIndex: si, nodeId: n.id, assets,
+          externalAllowed: !!data.allow_external_attachments,
         })
       ).join("") +
       (data.chat_started
@@ -2033,6 +2072,7 @@ export function createChatFeature(deps){
         : "") +
       renderTimelineHTML(turns, liveDecisions, {
         hist: false, nodeId: n.id, assets,
+        externalAllowed: !!data.allow_external_attachments,
       }) +
       /* A transport error describes the just-finished turn. Keep it at the
          current end of the conversation where a bottom-pinned reader sees it,
@@ -2285,6 +2325,41 @@ export function createChatFeature(deps){
   }
 
   function onMsgsClick(e){
+    const preview = e.target.closest && e.target.closest("[data-asset-preview]");
+    if (preview){
+      e.preventDefault?.();
+      if (typeof d.openAssetPreview === "function")
+        d.openAssetPreview({ url: preview.href, name: preview.dataset?.name || preview.title || "image" });
+      return;
+    }
+    const settings = e.target.closest && e.target.closest("[data-asset-settings]");
+    if (settings){
+      if (typeof d.openAttachmentSettings === "function") d.openAttachmentSettings();
+      return;
+    }
+    const retry = e.target.closest && e.target.closest("[data-asset-retry]");
+    if (retry){
+      retry.disabled = true;
+      retry.textContent = "Importing…";
+      const node = retry.dataset.node || g("sel", "");
+      (async () => {
+        try {
+          const result = await api(`/api/nodes/${encodeURIComponent(node)}/asset-imports/retry`, {
+            method: "POST", body: JSON.stringify({
+              turn_record: Number(retry.dataset.turn), occurrence: Number(retry.dataset.occurrence),
+            }),
+          });
+          retry.textContent = result.status === "already_imported" ? "Already imported" : "Imported on retry";
+          chatSig = "";
+          await refreshChat();
+        } catch (err) {
+          retry.disabled = false;
+          retry.textContent = "Retry import";
+          if (typeof d.alert === "function") d.alert(err.message || String(err));
+        }
+      })();
+      return;
+    }
     const openTerm = e.target.closest && e.target.closest("[data-open-terminal]");
     if (openTerm){
       if (!termOpen) onTermToggle();

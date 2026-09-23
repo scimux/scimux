@@ -26,6 +26,9 @@ var (
 	// reference like /etc/passwd from being ingested: "resolves to a
 	// regular file" alone is not sufficient eligibility.
 	ErrOutsideRoot = errors.New("asset: outside allowed roots")
+	// ErrUnreadable means the path exists but could not be opened or inspected
+	// with the scimux process's current OS permissions.
+	ErrUnreadable = errors.New("asset: file cannot be read")
 )
 
 // Open decides whether ref is eligible for ingestion as a session asset and
@@ -95,7 +98,7 @@ func Open(ref, dir string, roots []string) (file *os.File, path string, size int
 		f, err := cap.Open(rel)
 		cap.Close()
 		if err != nil {
-			return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+			return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
 		}
 		fi, err := f.Stat()
 		if err != nil {
@@ -109,6 +112,56 @@ func Open(ref, dir string, roots []string) (file *os.File, path string, size int
 		return f, resolved, fi.Size(), nil
 	}
 	return nil, "", 0, fmt.Errorf("%w: %s", ErrOutsideRoot, ref)
+}
+
+// OpenExternal pins any referenced regular file the scimux process can open.
+// It is used only after the server-owned external-attachment setting is read
+// as true. The returned descriptor, not the pathname, is consumed by callers,
+// so replacement after open cannot substitute different bytes. This is not a
+// serving primitive and deliberately does not treat filesystem root as a
+// trusted containment boundary.
+func OpenExternal(ref, dir string) (file *os.File, path string, size int64, err error) {
+	p := ref
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	p, err = filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+	}
+	if _, err := os.Lstat(p); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		}
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+	}
+	// Reject known nonregular objects before open: opening a FIFO with ordinary
+	// blocking file semantics could otherwise stall a worker indefinitely.
+	before, err := os.Stat(resolved)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotRegularFile, ref)
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotRegularFile, ref)
+	}
+	return f, resolved, fi.Size(), nil
 }
 
 // Resolve is the metadata-only compatibility surface. Security-sensitive

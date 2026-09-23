@@ -643,6 +643,7 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp := map[string]any{"segments": segs}
+		resp["allow_external_attachments"] = a.settings().AllowExternalAttachments
 		if len(assets) > 0 {
 			resp["assets"] = assets
 		}
@@ -661,6 +662,7 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		"turns": turns, "last_change": lastMS,
 		"chat_started": seg.StartTime, "prior_turns": seg.PriorTurns,
 	}
+	resp["allow_external_attachments"] = a.settings().AllowExternalAttachments
 	// fresh: zero-turn current segment with prior history behind a source
 	// seam — a /clear'ed chat. The client trusts this over fallback so a
 	// cleared Claude node says "fresh chat — send a prompt" instead of
@@ -797,11 +799,17 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 	// segment/fare — an idle chat poll no longer re-walks the log every tick.
 	c := a.sessionLogCache(nodeID)
 	anchored := c.AnchoredAssets(logPath)
+	blockedByTurn := map[int][]sessionlog.AssetImportEvent{}
+	for _, ref := range sessionlog.ReadAssetImports(logPath) {
+		blockedByTurn[ref.TurnRecord] = append(blockedByTurn[ref.TurnRecord], ref)
+	}
 	out := make([]transcript.Turn, len(turns))
 	referenced := map[string]bool{}
 	for i, t := range turns {
 		byPath := assetsAsOf(anchored, t.Record)
+		bound := assetsBoundTo(anchored, t.Record)
 		t.Text = asset.Project(t.Text, byPath)
+		t.Text = asset.ProjectAgentPathBindings(t.Text, bound, blockedByTurn[t.Record])
 		t.Text = asset.ProjectAgentPaths(t.Text, byPath)
 		for _, id := range asset.ReferencedIDs(t.Text) {
 			referenced[id] = true
@@ -830,11 +838,21 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 func assetsAsOf(anchored []sessionlog.AnchoredAsset, record int) map[string]sessionlog.AssetEvent {
 	byPath := map[string]sessionlog.AssetEvent{}
 	for _, aa := range anchored {
-		if aa.Anchor <= record {
+		if aa.Anchor <= record && aa.Asset.AnchorOccurrence == nil {
 			byPath[aa.Asset.SourcePath] = aa.Asset
 		}
 	}
 	return byPath
+}
+
+func assetsBoundTo(anchored []sessionlog.AnchoredAsset, record int) map[int]sessionlog.AssetEvent {
+	bound := map[int]sessionlog.AssetEvent{}
+	for _, aa := range anchored {
+		if aa.Anchor == record && aa.Asset.AnchorOccurrence != nil {
+			bound[*aa.Asset.AnchorOccurrence] = aa.Asset
+		}
+	}
+	return bound
 }
 
 // assetSummary builds one entry of the chat response's "assets" map.

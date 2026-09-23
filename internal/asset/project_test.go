@@ -2,6 +2,7 @@ package asset
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/scimux/scimux/internal/sessionlog"
@@ -15,6 +16,15 @@ func TestProject_RewritesImageMarker(t *testing.T) {
 	want := "look at this\n\n![photo.png](scimux-asset:a_1)"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestProject_UsesFallbackName(t *testing.T) {
+	got := Project("[attached file: /tmp/n1/unnamed]", map[string]sessionlog.AssetEvent{
+		"/tmp/n1/unnamed": {ID: "a_unnamed"},
+	})
+	if got != "[asset](scimux-asset:a_unnamed)" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -165,5 +175,40 @@ func TestScanMarkdown_SkipsFragmentAndSchemeTargets(t *testing.T) {
 	want := []Candidate{{Ref: "./out.png", Alt: "real", IsImage: false}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want only the real local path %+v", got, want)
+	}
+}
+
+func TestProjectBlockedAgentPathsCountsOnlyLocalReferences(t *testing.T) {
+	text := "[source](https://example.test) ![chart](/outside/chart.png) [doc](/outside/report.pdf)"
+	imports := []sessionlog.AssetImportEvent{
+		{TurnRecord: 4, Occurrence: 0, Ref: "/outside/chart.png", Reason: "outside_workspace"},
+		{TurnRecord: 4, Occurrence: 1, Ref: "/outside/report.pdf", Reason: "not_found"},
+	}
+	got := ProjectBlockedAgentPaths(text, imports)
+	if !strings.Contains(got, "[source](https://example.test)") ||
+		!strings.Contains(got, "scimux-import:4:0:outside_workspace") ||
+		!strings.Contains(got, "scimux-import:4:1:not_found") {
+		t.Fatalf("projected = %q", got)
+	}
+}
+
+func TestProjectBlockedAgentPathsLeavesFencedExample(t *testing.T) {
+	text := "```md\n![example](/outside/example.png)\n```\n![real](/outside/real.png)"
+	imports := []sessionlog.AssetImportEvent{{TurnRecord: 3, Occurrence: 0, Ref: "/outside/real.png", Reason: "outside_workspace"}}
+	got := ProjectBlockedAgentPaths(text, imports)
+	if !strings.Contains(got, "![example](/outside/example.png)") || !strings.Contains(got, "scimux-import:3:0:outside_workspace") {
+		t.Fatalf("projected = %q", got)
+	}
+}
+
+func TestProjectAgentPathBindingsUsesFallbackNameAndRejectsMismatchedBinding(t *testing.T) {
+	text := "![one](/tmp/one.png) [two](/tmp/two.txt)"
+	bound := map[int]sessionlog.AssetEvent{
+		0: {ID: "a_one", SourcePath: "/tmp/one.png"},
+		1: {ID: "a_wrong", SourcePath: "/tmp/other.txt", Name: "other.txt"},
+	}
+	got := ProjectAgentPathBindings(text, bound, nil)
+	if !strings.Contains(got, "![asset](scimux-asset:a_one)") || !strings.Contains(got, "[two](/tmp/two.txt)") {
+		t.Fatalf("bindings = %q", got)
 	}
 }
