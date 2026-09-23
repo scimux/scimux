@@ -238,10 +238,11 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 }
 
 var (
-	harnessInventoryMu      sync.RWMutex
-	harnessInventoryProbeMu sync.Mutex
-	harnessInventoryLoaded  bool
-	harnessInventoryCache   []harnessRow
+	harnessInventoryMu         sync.RWMutex
+	harnessInventoryProbeMu    sync.Mutex
+	harnessInventoryLoaded     bool
+	harnessInventoryCache      []harnessRow
+	harnessInventoryGeneration uint64
 )
 
 // harnessInventory returns the latest complete local-version snapshot.
@@ -269,15 +270,32 @@ func harnessInventory() []harnessRow {
 }
 
 func refreshHarnessInventory() []harnessRow {
+	harnessInventoryMu.RLock()
+	observed := harnessInventoryGeneration
+	harnessInventoryMu.RUnlock()
+	return refreshHarnessInventoryFromGeneration(observed, func() []harnessRow {
+		return probeHarnessVersions(harnesses)
+	})
+}
+
+func refreshHarnessInventoryFromGeneration(observed uint64, probe func() []harnessRow) []harnessRow {
 	harnessInventoryProbeMu.Lock()
 	defer harnessInventoryProbeMu.Unlock()
-	return storeHarnessInventory(probeHarnessVersions(harnesses))
+	harnessInventoryMu.RLock()
+	if harnessInventoryGeneration != observed {
+		out := harnessInventoryCache
+		harnessInventoryMu.RUnlock()
+		return out
+	}
+	harnessInventoryMu.RUnlock()
+	return storeHarnessInventory(probe())
 }
 
 func storeHarnessInventory(fresh []harnessRow) []harnessRow {
 	harnessInventoryMu.Lock()
 	harnessInventoryCache = fresh
 	harnessInventoryLoaded = true
+	harnessInventoryGeneration++
 	harnessInventoryMu.Unlock()
 	return fresh
 }

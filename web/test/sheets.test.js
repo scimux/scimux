@@ -176,11 +176,10 @@ test("effortOptionsHTML marks default; preservedEffortValue", () => {
   assert.equal(seededEffortValue({ list: [], dflt: "", required: true, want: "" }), "");
 });
 
-test("applyAgentsProbe replaces catalogs; empty no-op", () => {
+test("applyAgentsProbe replaces catalogs; successful empty clears them", () => {
   const models = cloneDefaultModels();
   const me = {};
   assert.equal(applyAgentsProbe(models, me, null).changed, false);
-  assert.equal(applyAgentsProbe(models, me, {}).changed, false);
   assert.ok(models.claude);
   const r = applyAgentsProbe(models, me, {
     pi: { models: ["fast"], efforts: { fast: { levels: ["low"], default: "low" } } },
@@ -189,6 +188,11 @@ test("applyAgentsProbe replaces catalogs; empty no-op", () => {
   assert.equal(models.claude, undefined);
   assert.deepEqual(models.pi, ["", "fast"]);
   assert.deepEqual(me.pi.fast.levels, ["low"]);
+
+  const empty = applyAgentsProbe(models, me, {});
+  assert.equal(empty.changed, true);
+  assert.deepEqual(models, {});
+  assert.deepEqual(me, {});
 });
 
 /* ---------- pure: launch seed / lane ---------- */

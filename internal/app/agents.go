@@ -156,10 +156,11 @@ var harnesses = []harness{
 }
 
 var (
-	agentsCacheMu sync.RWMutex
-	agentsProbeMu sync.Mutex
-	agentsLoaded  bool
-	agentsCache   map[string]agentInfo
+	agentsCacheMu    sync.RWMutex
+	agentsProbeMu    sync.Mutex
+	agentsLoaded     bool
+	agentsCache      map[string]agentInfo
+	agentsGeneration uint64
 )
 
 // detectAgents returns the latest complete discovery snapshot. Startup warms
@@ -188,19 +189,36 @@ func detectAgents() map[string]agentInfo {
 }
 
 // refreshAgents performs the deliberate uncached pass behind "Check for
-// harness updates". Serializing probes prevents browser tabs from launching
-// duplicate CLI list commands; readers are never blocked and see the old
-// immutable map until the replacement is complete.
+// harness updates". Callers that observed the same generation share the
+// first completed probe; a later, non-overlapping check starts a fresh one.
+// Readers are never blocked and see the old immutable map until replacement.
 func refreshAgents() map[string]agentInfo {
+	agentsCacheMu.RLock()
+	observed := agentsGeneration
+	agentsCacheMu.RUnlock()
+	return refreshAgentsFromGeneration(observed, func() map[string]agentInfo {
+		return probeAgents(harnesses)
+	})
+}
+
+func refreshAgentsFromGeneration(observed uint64, probe func() map[string]agentInfo) map[string]agentInfo {
 	agentsProbeMu.Lock()
 	defer agentsProbeMu.Unlock()
-	return storeAgentsSnapshot(probeAgents(harnesses))
+	agentsCacheMu.RLock()
+	if agentsGeneration != observed {
+		out := agentsCache
+		agentsCacheMu.RUnlock()
+		return out
+	}
+	agentsCacheMu.RUnlock()
+	return storeAgentsSnapshot(probe())
 }
 
 func storeAgentsSnapshot(fresh map[string]agentInfo) map[string]agentInfo {
 	agentsCacheMu.Lock()
 	agentsCache = fresh
 	agentsLoaded = true
+	agentsGeneration++
 	agentsCacheMu.Unlock()
 	return fresh
 }

@@ -363,11 +363,12 @@ export async function runUpdateChecks(checks = {}){
  * async/error/button lifetime here makes those two entry points agree. */
 export function createScimuxUpdateCheck(deps = {}){
   let info = null;
+  let inFlight = null;
   const checking = deps.checking || (() => {});
   const result = deps.result || (() => {});
   const failed = deps.failed || (() => {});
 
-  async function check(){
+  async function perform(){
     checking();
     try {
       info = await deps.read();
@@ -378,6 +379,17 @@ export function createScimuxUpdateCheck(deps = {}){
       failed(err);
       throw err;
     }
+  }
+
+  function check(){
+    if (inFlight) return inFlight;
+    const pending = perform();
+    inFlight = pending;
+    const clear = () => {
+      if (inFlight === pending) inFlight = null;
+    };
+    pending.then(clear, clear);
+    return pending;
   }
 
   async function runButton(button){

@@ -87,6 +87,32 @@ test("scimux update controller owns check state, errors, and button lifetime", a
   assert.equal(button.disabled, false);
 });
 
+test("overlapping scimux checks share one request and one result", async () => {
+  let reads = 0, release;
+  const response = new Promise(resolve => { release = resolve; });
+  const events = [];
+  const check = createScimuxUpdateCheck({
+    read: () => { reads++; return response; },
+    checking: () => events.push("checking"),
+    result: info => events.push(`result:${info.latest}`),
+    failed: () => events.push("failed"),
+  });
+
+  const older = check.check();
+  const newer = check.check();
+  assert.equal(reads, 1);
+  assert.deepEqual(events, ["checking"]);
+
+  release({ current: "1.0", latest: "2.0", available: true });
+  const [a, b] = await Promise.all([older, newer]);
+  assert.equal(a, b);
+  assert.equal(check.current(), a);
+  assert.deepEqual(events, ["checking", "result:2.0"]);
+
+  await check.check();
+  assert.equal(reads, 2, "a later explicit check must start a fresh request");
+});
+
 test("state before any upstream check is unchecked, not up-to-date", () => {
   /* The check is a tap. Until it happens we know the installed version and
      nothing else, and "up to date" would be a claim nobody made. */

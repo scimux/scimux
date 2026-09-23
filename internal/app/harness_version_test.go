@@ -158,6 +158,44 @@ func TestProbeHarnessVersionsSurvivesABrokenCLI(t *testing.T) {
 	}
 }
 
+func TestRefreshHarnessInventoryCoalescesAWaitingGeneration(t *testing.T) {
+	harnessInventoryMu.RLock()
+	observed := harnessInventoryGeneration
+	oldLoaded, oldCache := harnessInventoryLoaded, harnessInventoryCache
+	harnessInventoryMu.RUnlock()
+	t.Cleanup(func() {
+		harnessInventoryMu.Lock()
+		harnessInventoryLoaded, harnessInventoryCache, harnessInventoryGeneration = oldLoaded, oldCache, observed
+		harnessInventoryMu.Unlock()
+	})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	probe := func() []harnessRow {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return []harnessRow{{Agent: "grok", Installed: "1.0.25", Present: true}}
+	}
+
+	first := make(chan []harnessRow, 1)
+	second := make(chan []harnessRow, 1)
+	go func() { first <- refreshHarnessInventoryFromGeneration(observed, probe) }()
+	<-started
+	go func() { second <- refreshHarnessInventoryFromGeneration(observed, probe) }()
+	close(release)
+
+	one, two := <-first, <-second
+	if calls.Load() != 1 {
+		t.Fatalf("harness probes = %d, want one shared refresh", calls.Load())
+	}
+	if !reflect.DeepEqual(one, two) {
+		t.Fatalf("waiting refresh = %#v, want completed result %#v", two, one)
+	}
+}
+
 func TestFetchHarnessLatest(t *testing.T) {
 	npm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

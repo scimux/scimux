@@ -365,6 +365,10 @@ version change or after one day;
 `GET /api/agents` can trigger that refresh. Its model probes submit no billed
 prompt and are independent of consent for the usage gauge.
 
+An empty top-level object is a successful, authoritative snapshot: no
+supported harness is currently launchable. Clients replace their catalog with
+it; only a failed request preserves the previous catalog.
+
 Muse additionally returns `muse_models`, an array of objects with `id`,
 `tier` (`standard`, `discounted`, or `unknown`), and `launchable`, plus
 optional `label`, `default`, `context_limit`, and `output_limit`. Its
@@ -897,7 +901,9 @@ after the response use the same catalog the browser displays.
 The full refresh is reached only on an explicit tap — the server never polls
 the registries or repeatedly reruns every CLI list command. Local probes, the
 scimux release check made by the browser, and the upstream requests run
-concurrently. There is no single upstream lane: four sources are npm
+concurrently. Overlapping refresh requests (for example, from two tabs) reuse
+the completed in-flight local inventory and model probes instead of running
+the CLI commands again. There is no single upstream lane: four sources are npm
 packages (codex, pi, opencode and dsh), grok is a plain-text channel file, and
 Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not

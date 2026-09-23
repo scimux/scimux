@@ -539,6 +539,44 @@ printf '%s\n' 'Available models' '' 'auto - Auto (current, default)' 'demo-high 
 	}
 }
 
+func TestRefreshAgentsCoalescesAWaitingGeneration(t *testing.T) {
+	agentsCacheMu.RLock()
+	observed := agentsGeneration
+	oldLoaded, oldCache := agentsLoaded, agentsCache
+	agentsCacheMu.RUnlock()
+	t.Cleanup(func() {
+		agentsCacheMu.Lock()
+		agentsLoaded, agentsCache, agentsGeneration = oldLoaded, oldCache, observed
+		agentsCacheMu.Unlock()
+	})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	probe := func() map[string]agentInfo {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return map[string]agentInfo{"grok": {Models: []string{"grok-4.7"}}}
+	}
+
+	first := make(chan map[string]agentInfo, 1)
+	second := make(chan map[string]agentInfo, 1)
+	go func() { first <- refreshAgentsFromGeneration(observed, probe) }()
+	<-started
+	go func() { second <- refreshAgentsFromGeneration(observed, probe) }()
+	close(release)
+
+	one, two := <-first, <-second
+	if calls.Load() != 1 {
+		t.Fatalf("agent probes = %d, want one shared refresh", calls.Load())
+	}
+	if !reflect.DeepEqual(one, two) {
+		t.Fatalf("waiting refresh = %#v, want completed result %#v", two, one)
+	}
+}
+
 func TestCodexManagerConflictAndPending(t *testing.T) {
 	// Verify the codexManager adapter methods (Conflict, Pending) are correct
 	// (finding 78 — the adapter methods were 0% covered).

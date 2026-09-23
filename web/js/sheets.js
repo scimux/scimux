@@ -139,11 +139,13 @@ function normalizeMuseModels(raw){
   return out;
 }
 
-/* Apply /api/agents payload into mutable catalogs. Empty/null payload is a no-op.
-   Structured Muse rows stay on the return value — never as keys of `models`,
-   which would make metadata or model ids appear as agents. */
+/* Apply a successful /api/agents payload into mutable catalogs. An empty
+   object is authoritative (the last harness may have been removed); only an
+   absent/malformed payload is a no-op. Structured Muse rows stay on the
+   return value — never as keys of `models`, which would make metadata or
+   model ids appear as agents. */
 export function applyAgentsProbe(models, modelEfforts, payload){
-  if (!payload || !Object.keys(payload).length)
+  if (!payload || typeof payload !== "object" || Array.isArray(payload))
     return { models, modelEfforts, changed: false, museModels: [] };
   for (const k of Object.keys(models)) delete models[k];
   for (const k of Object.keys(modelEfforts)) delete modelEfforts[k];
