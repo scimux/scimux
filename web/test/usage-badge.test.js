@@ -18,6 +18,12 @@ const LOCALE = "en-GB";
 const logo = (agent) => `LOGO:${agent}`;
 const deps = { agentLogo: logo, now: NOW, locales: LOCALE };
 
+test("available usage without provider windows renders an honest unavailable value", () => {
+  const html = usageBadge("codex", { available: true }, deps);
+  assert.match(html, />--</);
+  assert.match(html, /usage unavailable/);
+});
+
 const SAME_DAY_ISO = new Date(2026, 7, 14, 17, 42, 0).toISOString();
 const OTHER_DAY_ISO = new Date(2026, 7, 11, 17, 42, 0).toISOString(); /* Tue */
 

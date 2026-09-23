@@ -463,8 +463,9 @@ func TestEmbeddedAgentAssetsServe(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("asset code = %d body %q", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "Font Awesome") {
-		t.Fatal("openai asset does not look like the vendored Font Awesome SVG")
+	if !strings.Contains(rec.Body.String(), "<title id=\"title\">Codex</title>") ||
+		!strings.Contains(rec.Body.String(), ">Cdx</text>") {
+		t.Fatal("openai asset does not contain the neutral Codex badge")
 	}
 }
 

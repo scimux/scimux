@@ -42,20 +42,16 @@ export function agentLogo(agent, assetURL){
   case "openai":
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/openai.svg')}')" aria-hidden="true"></span>`;
   case "pi":
-    return `<img src="${assetURL('/assets/agents/pi.svg')}" alt="" aria-hidden="true">`;
+    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/pi.svg')}')" aria-hidden="true"></span>`;
   case "opencode":
-    return `<img src="${assetURL('/assets/agents/opencode.svg')}" alt="" aria-hidden="true">`;
+    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/opencode.svg')}')" aria-hidden="true"></span>`;
   case "grok":
-    // Mono mark (Lobe Icons / currentColor) via mask so it tracks light/dark ink.
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/grok.svg')}')" aria-hidden="true"></span>`;
   case "muse":
-    // Meta brand mark (Font Awesome Free 7.3.1 / currentColor).
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/meta.svg')}')" aria-hidden="true"></span>`;
   case "cursor":
-    // Mono mark (Lobe Icons / currentColor) via mask, as for grok.
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/cursor.svg')}')" aria-hidden="true"></span>`;
   case "dsh":
-    // Mono mark (Lobe Icons / currentColor) via mask so it tracks light/dark ink.
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/deepseek.svg')}')" aria-hidden="true"></span>`;
   default:
     return `<svg viewBox="0 0 24 24" aria-hidden="true">

@@ -11,14 +11,9 @@ The icons are licensed under the Creative Commons Attribution 4.0
 International License (CC BY 4.0):
 https://creativecommons.org/licenses/by/4.0/
 
-This notice covers the Claude, Meta, and OpenAI agent SVGs and the Font
-Awesome interface icons embedded in web/js/app.js. Some icon path data is
-reformatted into inline SVG templates and rendered with scimux's currentColor
-styling; standalone agent SVGs retain their upstream attribution comments.
-
-Brand icons are trademarks of their respective owners. Their use identifies
-the company, product, or service they represent and does not imply endorsement
-by either the trademark holder or Font Awesome.
+This notice covers the Font Awesome interface icons embedded in web/js/app.js.
+Some icon path data is reformatted into inline SVG templates and rendered with
+scimux's currentColor styling.
 
 ----------------------------------------------------------------------
 

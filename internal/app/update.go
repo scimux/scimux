@@ -50,13 +50,8 @@ var (
 	// embedded and served like the rest of the web tree. `go list -deps`
 	// cannot see it, so it is listed here by hand.
 	qrcodegenLicense = mustEmbeddedLicense("qrcodegen.LICENSE")
-	// Vendored Grok, Cursor, DeepSeek and Pi SVGs from Lobe Icons; also outside
-	// the Go module graph. One notice covers all four: same project and licence.
-	lobeIconsLicense = mustEmbeddedLicense("lobe-icons.LICENSE")
-	// The embedded OpenCode favicon comes from OpenCode's MIT-licensed tree.
-	openCodeLicense = mustEmbeddedLicense("opencode.LICENSE")
-	// Font Awesome agent SVGs and inline interface icon paths are CC BY 4.0.
-	// They are browser assets, so the Go module inventory cannot discover them.
+	// Font Awesome interface icon paths are CC BY 4.0. They are browser assets,
+	// so the Go module inventory cannot discover them.
 	fontAwesomeLicense = mustEmbeddedLicense("font-awesome.LICENSE")
 )
 
@@ -78,8 +73,6 @@ func handleLicenses(w http.ResponseWriter, r *http.Request) {
 		"uuid":        uuidLicense,
 		"anet":        anetLicense,
 		"qrcodegen":   qrcodegenLicense,
-		"lobeicons":   lobeIconsLicense,
-		"opencode":    openCodeLicense,
 		"fontawesome": fontAwesomeLicense,
 	})
 }
