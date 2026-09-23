@@ -18,9 +18,10 @@ import (
 var errNoSessionWorker = errors.New("no live session worker for node")
 
 type workerEntry struct {
-	client  *sessionworker.Client
-	process *sessionWorkerProcess
-	stopMu  sync.Mutex
+	client       *sessionworker.Client
+	process      *sessionWorkerProcess
+	capabilities map[string]bool
+	stopMu       sync.Mutex
 	// pid is retained for a worker reattached after an in-place muxer exec.
 	// The replacement has no exec.Cmd, but is still the OS parent and must reap
 	// the child when an explicit Stop makes it exit.
@@ -148,7 +149,10 @@ func (m *workerManager) launch(request sessionworker.LaunchRequest) (string, err
 		return "", err
 	}
 	m.mu.Lock()
-	m.entries[nodeID] = &workerEntry{client: process.client, process: process, identity: identity}
+	m.entries[nodeID] = &workerEntry{
+		client: process.client, process: process, identity: identity,
+		capabilities: process.capabilities,
+	}
 	m.mu.Unlock()
 	return sid, nil
 }
@@ -171,6 +175,11 @@ func (m *workerManager) resolveLaunchModel(request *sessionworker.LaunchRequest)
 }
 
 func (m *workerManager) manages(nodeID string) bool { return m.entry(nodeID) != nil }
+
+func (m *workerManager) supports(nodeID, capability string) bool {
+	entry := m.entry(nodeID)
+	return entry != nil && entry.capabilities[capability]
+}
 
 func (m *workerManager) entry(nodeID string) *workerEntry {
 	m.mu.Lock()
@@ -549,10 +558,10 @@ func (m *workerManager) Conflict(err error) bool {
 	return errors.Is(err, errNoSessionWorker) || errors.Is(err, sessionworker.ErrConflict)
 }
 
-func connectWorker(locator sessionworker.Locator) (*sessionworker.Client, error) {
+func connectWorker(locator sessionworker.Locator) (*sessionworker.Client, map[string]bool, error) {
 	client, err := sessionworker.NewClient(locator.Link)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	hello, err := client.Hello(ctx)
@@ -565,9 +574,17 @@ func connectWorker(locator sessionworker.Locator) (*sessionworker.Client, error)
 	}
 	if err != nil {
 		_ = client.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return client, nil
+	return client, capabilitySet(hello.Capabilities), nil
+}
+
+func capabilitySet(capabilities []string) map[string]bool {
+	set := make(map[string]bool, len(capabilities))
+	for _, capability := range capabilities {
+		set[capability] = true
+	}
+	return set
 }
 
 // RetireExternalController proves that a historical external node has no live
@@ -595,7 +612,7 @@ func (m *workerManager) RetireExternalController(node *Node) error {
 		}
 		return fmt.Errorf("session worker: cannot prove external controller absent: %w", discoverErr)
 	}
-	client, connectErr := connectWorker(locator)
+	client, capabilities, connectErr := connectWorker(locator)
 	if connectErr != nil {
 		if reapStaleWorkerLocator(m.dataDir, node.ID) {
 			return nil
@@ -609,7 +626,7 @@ func (m *workerManager) RetireExternalController(node *Node) error {
 
 	m.mu.Lock()
 	if m.entries[node.ID] == nil {
-		m.entries[node.ID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity}
+		m.entries[node.ID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity, capabilities: capabilities}
 		client = nil
 	}
 	m.mu.Unlock()
@@ -642,7 +659,7 @@ func (m *workerManager) Reconcile(nodes []*Node) error {
 			errs = append(errs, fmt.Errorf("%s: %w", node.ID, err))
 			continue
 		}
-		client, connectErr := connectWorker(locator)
+		client, capabilities, connectErr := connectWorker(locator)
 		if connectErr != nil {
 			if reapStaleWorkerLocator(m.dataDir, node.ID) {
 				continue
@@ -660,7 +677,7 @@ func (m *workerManager) Reconcile(nodes []*Node) error {
 		}
 		m.mu.Lock()
 		if m.entries[node.ID] == nil {
-			m.entries[node.ID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity}
+			m.entries[node.ID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity, capabilities: capabilities}
 			client = nil
 		}
 		m.mu.Unlock()
@@ -699,7 +716,7 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 		if known && !ended && !adopted {
 			continue
 		}
-		client, err := connectWorker(locator)
+		client, capabilities, err := connectWorker(locator)
 		if err != nil {
 			if reapStaleWorkerLocator(m.dataDir, locator.NodeID) {
 				continue
@@ -713,7 +730,7 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 			continue
 		}
 		m.mu.Lock()
-		m.entries[locator.NodeID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity}
+		m.entries[locator.NodeID] = &workerEntry{client: client, pid: locator.PID, identity: locator.Identity, capabilities: capabilities}
 		m.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		state, stateErr := client.State(ctx)

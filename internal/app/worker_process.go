@@ -66,11 +66,12 @@ type sessionWorkerStartOptions struct {
 }
 
 type sessionWorkerProcess struct {
-	pid    int
-	client *sessionworker.Client
-	wait   chan struct{}
-	mu     sync.Mutex
-	err    error
+	pid          int
+	client       *sessionworker.Client
+	capabilities map[string]bool
+	wait         chan struct{}
+	mu           sync.Mutex
+	err          error
 }
 
 // startSessionWorker uses inherited pipes for startup configuration and the
@@ -187,6 +188,7 @@ func startSessionWorker(ctx context.Context, executable string, config sessionWo
 		return nil, errors.New("session worker: hello identity mismatch")
 	}
 	p.client = client
+	p.capabilities = capabilitySet(hello.Capabilities)
 	return p, nil
 }
 

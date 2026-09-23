@@ -331,6 +331,13 @@ func TestWorkerManagerRejectsInvalidAndDuplicateLaunches(t *testing.T) {
 	}
 }
 
+func TestConnectWorkerRejectsIncompleteLocator(t *testing.T) {
+	client, capabilities, err := connectWorker(sessionworker.Locator{})
+	if err == nil || client != nil || capabilities != nil {
+		t.Fatalf("incomplete locator = client %#v capabilities %#v error %v", client, capabilities, err)
+	}
+}
+
 func TestWorkerManagerOwnsOneProcessPerSessionAndReconciles(t *testing.T) {
 	data := t.TempDir()
 	if err := os.Chmod(data, 0o700); err != nil {
@@ -376,6 +383,9 @@ func TestWorkerManagerOwnsOneProcessPerSessionAndReconciles(t *testing.T) {
 	node := &Node{ID: "chat-one", Agent: "opencode", Transport: "acp"}
 	if err := replacement.Reconcile([]*Node{node}); err != nil {
 		t.Fatal(err)
+	}
+	if !replacement.supports("chat-one", sessionworker.CapabilityAssetBackingV1) {
+		t.Fatal("worker reconnect did not retain asset-backing capability")
 	}
 	locator, err = sessionworker.Discover(data, "chat-one")
 	if err != nil || locator.PID != workerPID {

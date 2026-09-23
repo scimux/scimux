@@ -506,13 +506,17 @@ func TestHelloCompatibilityRequiresOnlyTheVersionOneCommonDenominator(t *testing
 	if err := CheckCompatibility(wrongMajor); err == nil {
 		t.Fatal("mismatched major accepted")
 	}
-	for i, capability := range base.Capabilities {
+	for i, capability := range versionOneCapabilities {
 		missing := base
-		missing.Capabilities = append([]string(nil), base.Capabilities[:i]...)
-		missing.Capabilities = append(missing.Capabilities, base.Capabilities[i+1:]...)
+		missing.Capabilities = append([]string(nil), versionOneCapabilities[:i]...)
+		missing.Capabilities = append(missing.Capabilities, versionOneCapabilities[i+1:]...)
 		if err := CheckCompatibility(missing); err == nil || !strings.Contains(err.Error(), capability) {
 			t.Fatalf("missing %q = %v", capability, err)
 		}
+	}
+	oldWorker := Hello{Major: ProtocolMajor, Minor: ProtocolMinor - 1, Capabilities: append([]string(nil), versionOneCapabilities...)}
+	if err := CheckCompatibility(oldWorker); err != nil {
+		t.Fatalf("worker without optional %q capability rejected: %v", CapabilityAssetBackingV1, err)
 	}
 }
 

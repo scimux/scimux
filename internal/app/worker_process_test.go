@@ -255,6 +255,9 @@ func TestSyntheticSessionWorkerSurvivesClientLossAndReattaches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !process.capabilities[sessionworker.CapabilityAssetBackingV1] {
+		t.Fatal("new worker launch did not retain asset-backing capability")
+	}
 	t.Cleanup(func() {
 		if process.client != nil {
 			_ = process.client.Stop(context.Background(), true)

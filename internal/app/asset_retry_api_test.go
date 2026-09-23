@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,54 @@ import (
 	"testing"
 
 	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
+
+// legacyAssetWorkerHarness reproduces the pre-backingId worker's real JSON
+// boundary: unknown asset fields are discarded before the event is appended.
+type legacyAssetWorkerHarness struct {
+	syntheticSessionHarness
+	path string
+}
+
+func (h *legacyAssetWorkerHarness) AppendSessionEvent(_ context.Context, event sessionlog.Event) error {
+	type legacyAsset struct {
+		ID               string `json:"id"`
+		Name             string `json:"name,omitempty"`
+		Mime             string `json:"mime,omitempty"`
+		Size             int64  `json:"size,omitempty"`
+		SHA256           string `json:"sha256,omitempty"`
+		Storage          string `json:"storage"`
+		Bytes            string `json:"bytes,omitempty"`
+		BlobPath         string `json:"blobPath,omitempty"`
+		SourceKind       string `json:"sourceKind,omitempty"`
+		SourcePath       string `json:"sourcePath,omitempty"`
+		AnchorRecord     *int   `json:"anchorRecord,omitempty"`
+		AnchorOccurrence *int   `json:"anchorOccurrence,omitempty"`
+		Retried          bool   `json:"retried,omitempty"`
+	}
+	var legacy struct {
+		T     string       `json:"t"`
+		Time  string       `json:"time"`
+		Asset *legacyAsset `json:"asset,omitempty"`
+	}
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return err
+	}
+	stripped, err := json.Marshal(legacy)
+	if err != nil {
+		return err
+	}
+	var persisted sessionlog.Event
+	if err := json.Unmarshal(stripped, &persisted); err != nil {
+		return err
+	}
+	return (&sessionlog.Writer{Path: h.path}).Append(persisted)
+}
 
 func TestAssetImportRetryBindsEarlierReferenceAndIsIdempotent(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
@@ -120,6 +168,58 @@ func TestAssetImportRetryDedupPreservesRetriedFilename(t *testing.T) {
 	}
 	if second.BackingID != first.ID || second.Bytes != "" || second.BlobPath != "" {
 		t.Fatalf("retry did not reuse content backing: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestAssetImportRetryFallsBackForOlderWorkerAndDownloadsBytes(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	must(t, os.MkdirAll(a.sessionsDir, 0o700))
+	outside := t.TempDir()
+	firstPath := filepath.Join(outside, "first.txt")
+	secondPath := filepath.Join(outside, "second.md")
+	data := []byte("bytes shared across the update")
+	must(t, os.WriteFile(firstPath, data, 0o600))
+	must(t, os.WriteFile(secondPath, data, 0o600))
+	n := &Node{ID: "n1", Title: "n1", Agent: "codex", Dir: t.TempDir()}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[first](" + firstPath + ")"}))
+	_, err := a.ingestAssetBytes(n.ID, "first.txt", "", "agent_path", firstPath, data)
+	must(t, err)
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[second](" + secondPath + ")"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
+		TurnRecord: 2, Occurrence: 0, Ref: secondPath, Alt: "second", Reason: "outside_workspace",
+	})))
+	must(t, writeFileForSettingsTest(a.settingsPath, `{"allow_external_attachments":true}`))
+
+	identity := sessionworker.Identity{WorkerID: "worker-old", Agent: "codex", Build: "previous"}
+	legacy := &legacyAssetWorkerHarness{path: a.sessionLogPath(n.ID)}
+	server, err := sessionworker.Listen("", identity, legacy)
+	must(t, err)
+	t.Cleanup(func() { _ = server.Close() })
+	client, err := sessionworker.NewClient(server.Link())
+	must(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	// The reconnect handshake recorded no asset-backing capability, as a
+	// worker from the previous release would advertise.
+	a.workers = &workerManager{entries: map[string]*workerEntry{
+		n.ID: {client: client, identity: identity, capabilities: map[string]bool{}},
+	}, dataDir: t.TempDir()}
+
+	rec := routeRequest(newTestHandler(t, a), http.MethodPost, "/api/nodes/n1/asset-imports/retry", `{"turn_record":2,"occurrence":0}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry through old worker = %d %s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	must(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	id, _ := response["asset_id"].(string)
+	persisted := sessionlog.ReadAssets(a.sessionLogPath(n.ID))[id]
+	if persisted.BackingID != "" || (persisted.Bytes == "" && persisted.BlobPath == "") {
+		t.Fatalf("old-worker fallback was not self-contained: %+v", persisted)
+	}
+	download := serveAsset(a, n.ID, id)
+	if download.Code != http.StatusOK || download.Body.String() != string(data) {
+		t.Fatalf("download after old-worker write = %d %q", download.Code, download.Body.String())
 	}
 }
 

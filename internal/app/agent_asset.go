@@ -7,6 +7,7 @@ import (
 
 	"github.com/scimux/scimux/internal/asset"
 	"github.com/scimux/scimux/internal/sessionlog"
+	"github.com/scimux/scimux/internal/sessionworker"
 )
 
 // agentAssetMaxBytes bounds how large an agent-referenced file scimux will
@@ -171,6 +172,20 @@ func (a *app) ingestAgentPathAssetAt(nodeID, ref, name string, data []byte, bySH
 	sha := sessionlog.SHA256Hex(data)
 	if rec, ok := bySHA[sha]; ok {
 		if !havePath[ref] {
+			// A worker from before asset-backing-v1 would accept this event but
+			// silently discard BackingID while decoding it. Fall back to an
+			// ordinary self-contained asset so update-without-stopping-chats
+			// cannot acknowledge an attachment whose content was lost.
+			if a.workers != nil && a.workers.manages(nodeID) &&
+				!a.workers.supports(nodeID, sessionworker.CapabilityAssetBackingV1) {
+				ev, err := a.ingestAssetBytesAt(nodeID, name, "", "agent_path", ref, data, anchor, occurrence, retried)
+				if err != nil {
+					return sessionlog.AssetEvent{}, err
+				}
+				bySHA[sha] = ev
+				havePath[ev.SourcePath] = true
+				return ev, nil
+			}
 			alias := rec
 			alias.ID = sessionlog.NewAssetID()
 			alias.Name = sessionlog.SanitizeAssetName(name)

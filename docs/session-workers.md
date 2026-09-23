@@ -71,6 +71,11 @@ readiness. Minor versions and new capabilities are additive: future muxers must
 feature-gate an optional operation instead of requiring an old live worker to
 gain it. Unknown response fields are ignored by normal Go JSON decoding.
 
+`asset-backing-v1` advertises that `AppendSessionEvent` preserves an asset
+record's `backingId` content reference. A replacement muxer reconnecting to an
+older worker must append a self-contained asset record instead; an older JSON
+decoder legitimately ignores the unknown field before its sole-writer append.
+
 Workers do not broadcast. Broadcast discovery would add races, spoofing, and
 platform-specific behavior without identifying ownership. Each worker instead
 holds a kernel lock for its node lifetime and atomically publishes an

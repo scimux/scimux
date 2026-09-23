@@ -28,7 +28,12 @@ import (
 
 const (
 	ProtocolMajor = 1
-	ProtocolMinor = 1
+	ProtocolMinor = 2
+
+	// CapabilityAssetBackingV1 means AppendSessionEvent preserves AssetEvent's
+	// backingId field. Muxers must send self-contained asset records to workers
+	// that do not advertise it, because older JSON decoders discard the field.
+	CapabilityAssetBackingV1 = "asset-backing-v1"
 
 	headerToken = "X-Scimux-Worker-Token"
 	headerMajor = "X-Scimux-Worker-Major"
@@ -52,7 +57,7 @@ var versionOneCapabilities = []string{
 	"append-session-event-v1", "resolve-delivery-v1", "auto-approve-v1",
 }
 
-var capabilities = append([]string(nil), versionOneCapabilities...)
+var capabilities = append(append([]string(nil), versionOneCapabilities...), CapabilityAssetBackingV1)
 
 // CurrentCapabilities returns a copy so callers cannot alter the protocol's
 // compatibility declaration.
