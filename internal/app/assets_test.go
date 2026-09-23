@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/base64"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -51,6 +52,44 @@ func TestServeAssetInline(t *testing.T) {
 	}
 	if cd := rec.Header().Get("Content-Disposition"); cd != "" {
 		t.Errorf("raster should render inline, got Content-Disposition %q", cd)
+	}
+}
+
+func TestServeAssetDedupBackingUsesAliasServingMetadata(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.byID["n1"] = &Node{ID: "n1"}
+	encoded := base64.StdEncoding.EncodeToString([]byte("shared"))
+	appendAsset(t, a, "n1", sessionlog.AssetEvent{
+		ID: "a_content", Name: "first.txt", Mime: "text/plain", Size: 6, SHA256: "same",
+		Storage: "inline", Bytes: encoded,
+	})
+	appendAsset(t, a, "n1", sessionlog.AssetEvent{
+		ID: "a_alias", Name: "second.png", Mime: "image/png", Size: 6, SHA256: "same",
+		Storage: "inline", BackingID: "a_content",
+	})
+	rec := serveAsset(a, "n1", "a_alias")
+	if rec.Code != http.StatusOK || rec.Body.String() != "shared" {
+		t.Fatalf("alias response = %d %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Fatalf("alias content type = %q", got)
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != "" {
+		t.Fatalf("alias unexpectedly forced download: %q", got)
+	}
+}
+
+func TestServeAssetRejectsInvalidDedupBacking(t *testing.T) {
+	for _, backing := range []sessionlog.AssetEvent{
+		{ID: "a_alias", Name: "x.txt", Size: 1, SHA256: "x", Storage: "inline", BackingID: "missing"},
+		{ID: "a_alias", Name: "x.txt", Size: 1, SHA256: "x", Storage: "inline", BackingID: "a_alias"},
+	} {
+		a := newTestApp(t, &fakeTmux{})
+		a.byID["n1"] = &Node{ID: "n1"}
+		appendAsset(t, a, "n1", backing)
+		if rec := serveAsset(a, "n1", backing.ID); rec.Code != http.StatusNotFound {
+			t.Errorf("backing %q = %d, want 404", backing.BackingID, rec.Code)
+		}
 	}
 }
 

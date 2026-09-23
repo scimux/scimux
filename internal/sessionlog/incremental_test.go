@@ -56,6 +56,11 @@ func assertProductsEqual(t *testing.T, c *LogCache, path, label string) {
 	if !reflect.DeepEqual(gotAssets, wantAssets) {
 		t.Errorf("%s Assets:\n got = %+v\nwant = %+v", label, gotAssets, wantAssets)
 	}
+	gotImports := c.AssetImports(path)
+	wantImports := ReadAssetImports(path)
+	if !reflect.DeepEqual(gotImports, wantImports) {
+		t.Errorf("%s AssetImports:\n got = %+v\nwant = %+v", label, gotImports, wantImports)
+	}
 }
 
 // B1. Byte accounting: after a warm load, appending one record must parse
@@ -314,7 +319,7 @@ func TestLogCache_ReplacementAndShrink(t *testing.T) {
 }
 
 // B7. Equivalence property: pseudo-random log from the full record-type
-// alphabet, fed in K random append chunks; after every chunk all four
+// alphabet, fed in K random append chunks; after every chunk all five
 // products deep-equal a cold read.
 func TestLogCache_EquivalenceProperty(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
@@ -395,6 +400,7 @@ func propertyAlphabet() []Event {
 		{T: "attention", Time: "2026-02-01T00:00:08Z", Attention: &AttentionEvent{Kind: "approval", Status: "end"}},
 		{T: "asset", Time: "2026-02-01T00:00:09Z", Asset: &AssetEvent{ID: "a_p", Name: "f.png", Mime: "image/png", Size: 2, Storage: "inline", Bytes: "AAA=", SourcePath: "/p/f.png"}},
 		{T: "asset", Time: "2026-02-01T00:00:10Z", Asset: &AssetEvent{ID: "a_np", Name: "g.bin", Mime: "application/octet-stream", Size: 1, Storage: "blob", BlobPath: "x/g"}},
+		NewAssetImport(AssetImportEvent{TurnRecord: 1, Occurrence: 0, Ref: "/outside/f.png", Reason: "outside_workspace"}),
 		NewClearSource("c1"),
 		NewSource("/t/x.jsonl", "x"),
 		{T: "station", Time: "2026-02-01T00:00:11Z", Station: &StationEvent{Seam: "s1", Title: "T", Desc: "D"}},

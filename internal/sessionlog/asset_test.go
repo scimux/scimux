@@ -235,6 +235,7 @@ func TestDetectMIME(t *testing.T) {
 		{"sketch.png", png, "image/png"},
 		{"report.pdf", []byte("%PDF-1.4"), "application/pdf"},
 		{"notes.md", []byte("# hi"), "text/markdown; charset=utf-8"},
+		{"README", []byte("plain text without an extension"), "text/plain; charset=utf-8"},
 		{"unknownext.xyz123", []byte("\x00\x01binary"), "application/octet-stream"},
 	}
 	for _, c := range cases {

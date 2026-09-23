@@ -2080,6 +2080,148 @@ test("delegated attachment actions open preview/settings and retry without sendi
   quiet.feature.destroy();
 });
 
+test("external-attachment setting toggle rebuilds an existing blocked card", async () => {
+  let externalAllowed = false;
+  const blockedTurn = {
+    role: "assistant",
+    text: "![report](scimux-import:7:0:outside_workspace)",
+    time: "2026-01-01T00:01:00Z",
+  };
+  const ctx = makeFeature({
+    api: async path => {
+      if (path.includes("/chat")) return defaultChatPayload({
+        chatPayload: {
+          turns: [blockedTurn], live: "quiet", delivery: "ok", source: "tmux",
+          chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+          allow_external_attachments: externalAllowed,
+        },
+      });
+      return {};
+    },
+  });
+
+  await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /Open attachment settings/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Retry import/);
+
+  externalAllowed = true;
+  await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /Retry import/,
+    "a settings-only response change must rebuild the blocked card");
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Open attachment settings/);
+  ctx.feature.destroy();
+});
+
+test("successful retry refreshes loaded history without moving the reader", async () => {
+  let imported = false;
+  let historyReads = 0;
+  const ctx = makeFeature({
+    api: async (path) => {
+      if (path.includes("asset-imports/retry")) {
+        imported = true;
+        return { status: "imported", asset_id: "a_report", name: "report.txt" };
+      }
+      if (path.includes("/chat?history=1")) {
+        historyReads++;
+        return {
+          segments: [{
+            start: "2025-12-31T00:00:00Z", seam: "2025-12-31T00:00:00Z",
+            reason: "clear",
+            turns: [{
+              role: "assistant", time: "2025-12-31T00:01:00Z",
+              text: imported
+                ? "[report](scimux-asset:a_report)"
+                : "[report](scimux-import:0:0:not_found)",
+            }],
+          }],
+          assets: imported ? { a_report: { name: "report.txt" } } : {},
+        };
+      }
+      if (path.includes("/chat")) return {
+        turns: [{ role: "assistant", text: "current", time: "2026-01-01T00:01:00Z" }],
+        live: "quiet", delivery: "ok", source: "tmux",
+        chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
+        allow_external_attachments: true,
+      };
+      return {};
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.loadHistory("n1", "");
+  assert.match(ctx.roots.msgs.innerHTML, /Retry import/);
+  ctx.roots.msgs.scrollHeight = 2400;
+  ctx.roots.msgs.clientHeight = 400;
+  ctx.roots.msgs.scrollTop = 275;
+
+  const retry = el("button", {
+    dataset: { assetRetry: "1", node: "n1", turn: "0", occurrence: "0" },
+  });
+  firstListener(ctx.roots.msgs, "click")({ target: retry });
+  for (let i = 0; i < 16; i++) await Promise.resolve();
+
+  assert.equal(historyReads, 2, "retry must re-fetch the loaded historical segments");
+  assert.match(ctx.roots.msgs.innerHTML, /report\.txt/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Retry import/);
+  assert.equal(ctx.roots.msgs.scrollTop, 275,
+    "refreshing an earlier segment must preserve the reader's position");
+  ctx.feature.destroy();
+});
+
+test("historical retry completion cannot repaint a newly selected chat", async () => {
+  let finishRetry;
+  let historyReads = 0;
+  const retryDone = new Promise(resolve => { finishRetry = resolve; });
+  const ctx = makeFeature({
+    nodes: [
+      { id: "n1", title: "One", agent: "claude", live: "quiet", attention: "" },
+      { id: "n2", title: "Two", agent: "claude", live: "quiet", attention: "" },
+    ],
+    api: async path => {
+      if (path.includes("asset-imports/retry")) return retryDone;
+      if (path.includes("/chat?history=1")) {
+        historyReads++;
+        return {
+          segments: [{
+            start: "2025-12-31T00:00:00Z",
+            turns: [{ role: "assistant", text: "[old](scimux-import:0:0:not_found)" }],
+          }],
+          assets: {},
+        };
+      }
+      if (path.includes("/api/nodes/n2/chat")) return {
+        turns: [{ role: "assistant", text: "selected chat two" }],
+        live: "quiet", delivery: "ok", source: "tmux",
+        chat_started: "2026-01-02T00:00:00Z", prior_turns: 0, assets: {},
+      };
+      if (path.includes("/chat")) return {
+        turns: [{ role: "assistant", text: "chat one" }],
+        live: "quiet", delivery: "ok", source: "tmux",
+        chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
+      };
+      return {};
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.loadHistory("n1", "");
+  const retry = el("button", {
+    dataset: { assetRetry: "1", node: "n1", turn: "0", occurrence: "0" },
+  });
+  firstListener(ctx.roots.msgs, "click")({ target: retry });
+
+  ctx.setSel("n2");
+  ctx.setSelGen(2);
+  ctx.feature.onSelectChange();
+  await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /selected chat two/);
+
+  finishRetry({ status: "imported", asset_id: "a_old", name: "old.txt" });
+  for (let i = 0; i < 16; i++) await Promise.resolve();
+  assert.equal(historyReads, 1, "stale retry must not load history into the new selection");
+  assert.match(ctx.roots.msgs.innerHTML, /selected chat two/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /old\.txt/);
+  ctx.feature.destroy();
+});
+
 test("broken-thumbnail cleanup is one delegated error listener; rebuilds do not accumulate", async () => {
   const { feature, roots } = makeFeature({
     chatPayload: {

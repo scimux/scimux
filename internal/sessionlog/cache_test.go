@@ -11,9 +11,9 @@ import (
 )
 
 // Stage A tests for LogCache: one walk per (path, size, mtime) feeding all
-// four poll products. Behaviour must match the standalone readers.
+// five poll products. Behaviour must match the standalone readers.
 
-// richLog writes a log exercising every record type the four products care
+// richLog writes a log exercising every record type the five products care
 // about: meta, user, assistant, clear source, mechanical source, usage with
 // and without TurnID, station, asset with and without SourcePath.
 func richLog(t *testing.T) string {
@@ -36,6 +36,13 @@ func richLog(t *testing.T) string {
 			ID: "a_nopath", Name: "blob.bin", Mime: "application/octet-stream", Size: 4,
 			Storage: "blob", BlobPath: "n1/a_nopath",
 		}},
+		NewAssetImport(AssetImportEvent{
+			TurnRecord: 2, Occurrence: 0, Ref: "/outside/report.md", Alt: "report", Reason: "outside_workspace",
+		}),
+		// The durable identity is first-wins, including in the cache product.
+		NewAssetImport(AssetImportEvent{
+			TurnRecord: 2, Occurrence: 0, Ref: "/forged/later.md", Reason: "not_found",
+		}),
 		NewClearSource("s2"),
 		{T: "user", Time: "2026-07-15T10:00:00Z", Text: "after clear"},
 		{T: "usage", Time: "2026-07-15T10:00:01Z", Usage: &UsageEvent{
@@ -60,19 +67,20 @@ func richLog(t *testing.T) string {
 	return path
 }
 
-// A1. One walk per change. All four products share one parse; unchanged
+// A1. One walk per change. All five products share one parse; unchanged
 // re-reads cost zero additional walks; an append costs exactly one more.
 func TestLogCache_OneWalkPerChange(t *testing.T) {
 	path := richLog(t)
 	c := &LogCache{}
 
-	// First round: all four products → one walk.
+	// First round: all five products → one walk.
 	_ = c.Segment(path)
 	_, _ = c.FareAndRides(path)
 	_ = c.AnchoredAssets(path)
 	_ = c.Assets(path)
+	_ = c.AssetImports(path)
 	if got := c.Walks(); got != 1 {
-		t.Fatalf("after first four products: Walks() = %d, want 1", got)
+		t.Fatalf("after first five products: Walks() = %d, want 1", got)
 	}
 
 	// Unchanged: still one walk.
@@ -80,6 +88,7 @@ func TestLogCache_OneWalkPerChange(t *testing.T) {
 	_, _ = c.FareAndRides(path)
 	_ = c.AnchoredAssets(path)
 	_ = c.Assets(path)
+	_ = c.AssetImports(path)
 	if got := c.Walks(); got != 1 {
 		t.Fatalf("after unchanged re-read: Walks() = %d, want 1", got)
 	}
@@ -93,6 +102,7 @@ func TestLogCache_OneWalkPerChange(t *testing.T) {
 	_, _ = c.FareAndRides(path)
 	_ = c.AnchoredAssets(path)
 	_ = c.Assets(path)
+	_ = c.AssetImports(path)
 	if got := c.Walks(); got != 2 {
 		t.Fatalf("after append: Walks() = %d, want 2", got)
 	}
@@ -131,6 +141,12 @@ func TestLogCache_ProductEquivalence(t *testing.T) {
 	if !reflect.DeepEqual(gotAssets, wantAssets) {
 		t.Errorf("Assets mismatch:\n got = %+v\nwant = %+v", gotAssets, wantAssets)
 	}
+
+	gotImports := c.AssetImports(path)
+	wantImports := ReadAssetImports(path)
+	if !reflect.DeepEqual(gotImports, wantImports) {
+		t.Errorf("AssetImports mismatch:\n got = %+v\nwant = %+v", gotImports, wantImports)
+	}
 }
 
 // A4. Missing / unreadable / empty log yields the same defensive zero values
@@ -158,6 +174,9 @@ func TestLogCache_MissingEmptyDefensive(t *testing.T) {
 	if m := c.Assets(missing); m == nil || len(m) != 0 {
 		t.Errorf("missing assets = %v, want empty non-nil map", m)
 	}
+	if imports := c.AssetImports(missing); imports != nil {
+		t.Errorf("missing asset imports = %v, want nil", imports)
+	}
 	if got := c.Walks(); got != 0 {
 		t.Errorf("missing file Walks() = %d, want 0 (nothing to parse)", got)
 	}
@@ -182,6 +201,9 @@ func TestLogCache_MissingEmptyDefensive(t *testing.T) {
 	}
 	if m := c2.Assets(empty); !reflect.DeepEqual(m, ReadAssets(empty)) {
 		t.Errorf("empty assets = %v, want cold %v", m, ReadAssets(empty))
+	}
+	if imports := c2.AssetImports(empty); !reflect.DeepEqual(imports, ReadAssetImports(empty)) {
+		t.Errorf("empty asset imports = %v, want cold %v", imports, ReadAssetImports(empty))
 	}
 
 	// Cross-check: cold readers agree on missing.

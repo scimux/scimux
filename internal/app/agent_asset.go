@@ -141,10 +141,11 @@ func agentAssetRoots(dir string) []string {
 }
 
 // ingestAgentPathAsset ingests one already-resolved local file as an
-// agent_path asset. It deduplicates by SHA-256 within the node (Deduplication,
-// upload-design.md): identical bytes reuse the existing asset id instead of
-// minting a duplicate record, while a path reused with changed bytes (a
-// different hash) is not a dedup hit and mints a new one, as designed. ref is
+// agent_path asset. It deduplicates content by SHA-256 within the node
+// (Deduplication, upload-design.md): identical bytes reuse the existing
+// inline bytes or blob path, while retaining a distinct asset id and metadata
+// for each attachment. A path reused with changed bytes (a different hash) is
+// not a dedup hit and stores new content, as designed. ref is
 // recorded verbatim as SourcePath — the exact text the candidate scan found
 // in the turn, not the resolved absolute path — so render-time projection
 // (internal/asset.Project) can match it back by simple string equality, the
@@ -153,9 +154,11 @@ func agentAssetRoots(dir string) []string {
 // bySHA/havePath are the caller's once-read, kept-current indexes (see
 // ingestAssetHook). On a dedup hit whose stored SourcePath differs from THIS
 // ref — the same bytes referenced under a different spelling, or an upload of
-// the same file — a path-alias record is appended: same id and storage (so no
-// second copy of the bytes is served; ReadAssets keeps the first record as
-// durable), carrying this ref as SourcePath. Without it, render-time
+// the same file — an attachment record is appended with a fresh id, the
+// supplied filename/MIME classification, and the existing content backing.
+// A fresh identity is necessary because serving metadata is indexed by id;
+// reusing the first id would make second.md download as first.txt. Without the
+// SourcePath alias, render-time
 // projection (keyed on SourcePath) would miss the ref and paint an
 // "unavailable" chip for a file that is present. The havePath guard keeps a
 // re-poll of the same turn idempotent — the alias is written at most once per
@@ -169,6 +172,15 @@ func (a *app) ingestAgentPathAssetAt(nodeID, ref, name string, data []byte, bySH
 	if rec, ok := bySHA[sha]; ok {
 		if !havePath[ref] {
 			alias := rec
+			alias.ID = sessionlog.NewAssetID()
+			alias.Name = sessionlog.SanitizeAssetName(name)
+			alias.Mime = sessionlog.DetectMIME(alias.Name, data)
+			alias.BackingID = rec.ID
+			if rec.BackingID != "" {
+				alias.BackingID = rec.BackingID
+			}
+			alias.Bytes = ""
+			alias.BlobPath = ""
 			alias.SourceKind = "agent_path"
 			alias.SourcePath = ref
 			alias.AnchorRecord = anchor
@@ -178,6 +190,7 @@ func (a *app) ingestAgentPathAssetAt(nodeID, ref, name string, data []byte, bySH
 				return sessionlog.AssetEvent{}, err
 			}
 			havePath[ref] = true
+			return alias, nil
 		}
 		return rec, nil
 	}

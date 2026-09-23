@@ -800,7 +800,7 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 	c := a.sessionLogCache(nodeID)
 	anchored := c.AnchoredAssets(logPath)
 	blockedByTurn := map[int][]sessionlog.AssetImportEvent{}
-	for _, ref := range sessionlog.ReadAssetImports(logPath) {
+	for _, ref := range c.AssetImports(logPath) {
 		blockedByTurn[ref.TurnRecord] = append(blockedByTurn[ref.TurnRecord], ref)
 	}
 	out := make([]transcript.Turn, len(turns))

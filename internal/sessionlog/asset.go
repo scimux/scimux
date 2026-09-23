@@ -29,6 +29,11 @@ type AssetEvent struct {
 	Storage  string `json:"storage"`
 	Bytes    string `json:"bytes,omitempty"`
 	BlobPath string `json:"blobPath,omitempty"`
+	// BackingID points at an earlier asset record that owns Bytes or BlobPath.
+	// It lets content deduplication retain per-attachment names and serving
+	// classification without repeating inline payloads. Empty on historical
+	// and content-owning records.
+	BackingID string `json:"backingId,omitempty"`
 
 	SourceKind string `json:"sourceKind,omitempty"` // "upload" | "agent_path"
 	SourcePath string `json:"sourcePath,omitempty"`

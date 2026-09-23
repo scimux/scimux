@@ -121,6 +121,13 @@ func Open(ref, dir string, roots []string) (file *os.File, path string, size int
 // serving primitive and deliberately does not treat filesystem root as a
 // trusted containment boundary.
 func OpenExternal(ref, dir string) (file *os.File, path string, size int64, err error) {
+	return openExternal(ref, dir, nil)
+}
+
+// openExternal exposes the instant immediately before opening only to the
+// package regression test, which deterministically replaces a checked regular
+// file with a FIFO. Production callers always enter through OpenExternal.
+func openExternal(ref, dir string, beforeOpen func()) (file *os.File, path string, size int64, err error) {
 	p := ref
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(dir, p)
@@ -148,7 +155,10 @@ func OpenExternal(ref, dir string) (file *os.File, path string, size int64, err 
 	if !before.Mode().IsRegular() {
 		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotRegularFile, ref)
 	}
-	f, err := os.Open(resolved)
+	if beforeOpen != nil {
+		beforeOpen()
+	}
+	f, err := openNonblocking(resolved)
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
 	}

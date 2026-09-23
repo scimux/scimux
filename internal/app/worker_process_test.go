@@ -26,6 +26,7 @@ type syntheticSessionHarness struct {
 	stopErr   error
 	terminate bool
 	events    []sessionlog.Event
+	appendErr error
 	peekMode  string
 }
 
@@ -105,6 +106,9 @@ func (h *syntheticSessionHarness) RecordStartFailure(context.Context, string) er
 func (h *syntheticSessionHarness) AppendSessionEvent(_ context.Context, event sessionlog.Event) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.appendErr != nil {
+		return h.appendErr
+	}
 	h.events = append(h.events, event)
 	return nil
 }

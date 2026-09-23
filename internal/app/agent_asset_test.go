@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,30 @@ import (
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/transcript"
 )
+
+func TestIngestAssetHookWithoutSessionStoreIsNoop(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	a.sessionsDir = ""
+	a.ingestAssetHook("n1", t.TempDir(), []asset.Candidate{{Ref: "missing.txt"}})
+}
+
+func TestAssetImportReasonUnreadableAndUnknown(t *testing.T) {
+	if got := assetImportReason(asset.ErrUnreadable); got != "unreadable" {
+		t.Fatalf("unreadable reason = %q", got)
+	}
+	if got := assetImportReason(errors.New("unexpected")); got != "unreadable" {
+		t.Fatalf("unknown reason = %q", got)
+	}
+}
+
+func TestRecordAssetImportFailureKeepsFirstIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	existing := map[[2]int]bool{{3, 1}: true}
+	a.recordAssetImportFailure("n1", 3, 1, asset.Candidate{Ref: "missing.txt"}, "not_found", existing)
+	if events := sessionlog.ReadEvents(a.sessionLogPath("n1")); len(events) != 0 {
+		t.Fatalf("duplicate import identity appended events: %+v", events)
+	}
+}
 
 func TestIngestAssetHook_IngestsRelativePathUnderDir(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
@@ -134,9 +159,8 @@ func TestIngestAssetHook_OversizeFileSkipped(t *testing.T) {
 	}
 }
 
-// Deduplication: the same bytes referenced twice within a node must reuse
-// the existing asset id, not mint a second record (upload-design.md
-// "Deduplication").
+// Deduplication: the same bytes referenced twice within a node retain separate
+// attachment identities but reuse the existing content backing.
 func TestIngestAssetHook_DedupsIdenticalBytes(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
@@ -151,9 +175,48 @@ func TestIngestAssetHook_DedupsIdenticalBytes(t *testing.T) {
 	}
 	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "a.png"}})
 	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "b.png"}})
-	idx := sessionlog.ReadAssets(a.sessionLogPath("n1"))
-	if len(idx) != 1 {
-		t.Fatalf("got %d asset records, want 1 (dedup by sha256)", len(idx))
+	byPath := sessionlog.ReadAssetsByPath(a.sessionLogPath("n1"))
+	first, second := byPath["a.png"], byPath["b.png"]
+	if first.ID == "" || second.ID == "" || first.ID == second.ID {
+		t.Fatalf("attachment identities = %q, %q", first.ID, second.ID)
+	}
+	if second.BackingID != first.ID || second.Bytes != "" || second.BlobPath != "" {
+		t.Fatalf("content backing differs: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestIngestAssetHook_DedupPreservesPerAttachmentNameAndServingClass(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	data := []byte("identical content")
+	if err := os.WriteFile(filepath.Join(dir, "first.txt"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "second.md"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "first.txt"}, {Ref: "second.md"}})
+
+	byPath := sessionlog.ReadAssetsByPath(a.sessionLogPath("n1"))
+	first, firstOK := byPath["first.txt"]
+	second, secondOK := byPath["second.md"]
+	if !firstOK || !secondOK {
+		t.Fatalf("dedup paths missing: first=%v second=%v", firstOK, secondOK)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("attachment identities were collapsed to %q", first.ID)
+	}
+	if first.Name != "first.txt" || first.Mime != "text/plain; charset=utf-8" {
+		t.Fatalf("first metadata = %q, %q", first.Name, first.Mime)
+	}
+	if second.Name != "second.md" || second.Mime != "text/markdown; charset=utf-8" {
+		t.Fatalf("second metadata = %q, %q", second.Name, second.Mime)
+	}
+	if second.BackingID != first.ID || second.Bytes != "" || second.BlobPath != "" {
+		t.Fatalf("content backing not reused: first=%+v second=%+v", first, second)
 	}
 }
 
@@ -202,9 +265,8 @@ func TestIngestAssetHook_RepeatedCallsIdempotent(t *testing.T) {
 
 // Regression: identical bytes referenced under two different ref spellings
 // (dedup hit) must BOTH project to the real asset — not leave the second
-// reference as an "unavailable" chip. The dedup keeps a single stored asset
-// (one id), but a path-alias record makes the second ref resolvable at render
-// time. See ingestAgentPathAsset.
+// reference as an "unavailable" chip. Dedup shares content storage while each
+// path keeps a serving identity. See ingestAgentPathAsset.
 func TestIngestAssetHook_DedupAliasesSecondPath(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
@@ -220,9 +282,10 @@ func TestIngestAssetHook_DedupAliasesSecondPath(t *testing.T) {
 	}
 	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "a.png"}, {Ref: "b.png"}})
 
-	// Still one stored asset (dedup held), but both paths resolve to it.
-	if n := len(sessionlog.ReadAssets(a.sessionLogPath("n1"))); n != 1 {
-		t.Fatalf("stored assets = %d, want 1 (dedup)", n)
+	// Both attachment identities are durable, but their content backing is
+	// shared and both paths resolve.
+	if n := len(sessionlog.ReadAssets(a.sessionLogPath("n1"))); n != 2 {
+		t.Fatalf("stored attachment identities = %d, want 2", n)
 	}
 	byPath := sessionlog.ReadAssetsByPath(a.sessionLogPath("n1"))
 	evA, okA := byPath["a.png"]
@@ -230,8 +293,11 @@ func TestIngestAssetHook_DedupAliasesSecondPath(t *testing.T) {
 	if !okA || !okB {
 		t.Fatalf("both refs must resolve: a.png=%v b.png=%v", okA, okB)
 	}
-	if evA.ID != evB.ID {
-		t.Fatalf("aliased ref must share the id: %q vs %q", evA.ID, evB.ID)
+	if evA.ID == evB.ID {
+		t.Fatalf("aliased refs collapsed to one identity: %q", evA.ID)
+	}
+	if evB.BackingID != evA.ID || evB.Bytes != "" || evB.BlobPath != "" {
+		t.Fatalf("aliased refs did not share content: a=%+v b=%+v", evA, evB)
 	}
 
 	// A turn referencing both must project both to the same real asset, with
@@ -242,8 +308,8 @@ func TestIngestAssetHook_DedupAliasesSecondPath(t *testing.T) {
 		t.Fatalf("a deduped-but-present file rendered as unavailable: %q", out[0].Text)
 	}
 	ids := asset.ReferencedIDs(out[0].Text)
-	if len(ids) != 1 || len(assets) != 1 {
-		t.Fatalf("want 1 shared asset id, got ids=%v assets=%d", ids, len(assets))
+	if len(ids) != 2 || len(assets) != 2 {
+		t.Fatalf("want 2 attachment ids, got ids=%v assets=%d", ids, len(assets))
 	}
 }
 

@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,6 +80,49 @@ func TestAssetImportRetryBindsEarlierReferenceAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestAssetImportRetryDedupPreservesRetriedFilename(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	must(t, os.MkdirAll(a.sessionsDir, 0o700))
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.txt")
+	secondPath := filepath.Join(dir, "second.md")
+	data := []byte("same retry bytes")
+	must(t, os.WriteFile(firstPath, data, 0o600))
+	must(t, os.WriteFile(secondPath, data, 0o600))
+	n := &Node{ID: "n1", Title: "n1", Agent: "codex", Dir: t.TempDir()}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[first](" + firstPath + ")"}))
+	first, err := a.ingestAssetBytes(n.ID, "first.txt", "", "agent_path", firstPath, data)
+	must(t, err)
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[second](" + secondPath + ")"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
+		TurnRecord: 2, Occurrence: 0, Ref: secondPath, Alt: "second", Reason: "outside_workspace",
+	})))
+	must(t, writeFileForSettingsTest(a.settingsPath, `{"allow_external_attachments":true}`))
+
+	rec := routeRequest(newTestHandler(t, a), http.MethodPost, "/api/nodes/n1/asset-imports/retry", `{"turn_record":2,"occurrence":0}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry = %d %s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	must(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	if response["name"] != "second.md" {
+		t.Fatalf("retry response name = %q, want second.md", response["name"])
+	}
+	secondID, _ := response["asset_id"].(string)
+	if secondID == "" || secondID == first.ID {
+		t.Fatalf("retry identity = %q, original = %q", secondID, first.ID)
+	}
+	second := sessionlog.ReadAssets(a.sessionLogPath(n.ID))[secondID]
+	if second.Name != "second.md" || second.Mime != "text/markdown; charset=utf-8" {
+		t.Fatalf("retry metadata = %q, %q", second.Name, second.Mime)
+	}
+	if second.BackingID != first.ID || second.Bytes != "" || second.BlobPath != "" {
+		t.Fatalf("retry did not reuse content backing: first=%+v second=%+v", first, second)
+	}
+}
+
 func TestAssetImportRetryFailsClosedWhenSettingOff(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
@@ -119,6 +163,51 @@ func TestAssetImportRetryRejectsClientPathAndTrailingJSON(t *testing.T) {
 		if rec := routeRequest(h, http.MethodPost, "/api/nodes/n1/asset-imports/retry", body, true); rec.Code != http.StatusBadRequest {
 			t.Errorf("body %q = %d, want 400", body, rec.Code)
 		}
+	}
+}
+
+func TestAssetImportRetryValidatesNodeBodyAndRecordedTurn(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	must(t, os.MkdirAll(a.sessionsDir, 0o700))
+	h := newTestHandler(t, a)
+	if rec := routeRequest(h, http.MethodPost, "/api/nodes/missing/asset-imports/retry", `{"turn_record":0,"occurrence":0}`, true); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing node = %d", rec.Code)
+	}
+	n := &Node{ID: "n1", Dir: t.TempDir()}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	for _, body := range []string{``, `{}`, `{"turn_record":-1,"occurrence":0}`, `{"turn_record":0,"occurrence":-1}`} {
+		if rec := routeRequest(h, http.MethodPost, "/api/nodes/n1/asset-imports/retry", body, true); rec.Code != http.StatusBadRequest {
+			t.Errorf("body %q = %d, want 400", body, rec.Code)
+		}
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "no recorded file"}))
+	if rec := routeRequest(h, http.MethodPost, "/api/nodes/n1/asset-imports/retry", `{"turn_record":0,"occurrence":0}`, true); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing import record = %d", rec.Code)
+	}
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{TurnRecord: 1, Occurrence: 0, Ref: "file.txt", Alt: "file"})))
+	if rec := routeRequest(h, http.MethodPost, "/api/nodes/n1/asset-imports/retry", `{"turn_record":1,"occurrence":0}`, true); rec.Code != http.StatusNotFound {
+		t.Fatalf("non-turn record = %d", rec.Code)
+	}
+}
+
+func TestAssetImportRetryReportsStorageAppendFailure(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	must(t, os.MkdirAll(a.sessionsDir, 0o700))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "retry.txt")
+	must(t, os.WriteFile(path, []byte("retry"), 0o600))
+	n := &Node{ID: "n1", Title: "n1", Agent: "codex", Dir: t.TempDir()}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[retry](" + path + ")"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{TurnRecord: 0, Occurrence: 0, Ref: path, Alt: "retry", Reason: "outside_workspace"})))
+	must(t, writeFileForSettingsTest(a.settingsPath, `{"allow_external_attachments":true}`))
+	attachSyntheticWorker(t, a, n.ID, &syntheticSessionHarness{launched: true, appendErr: errors.New("append refused")})
+
+	rec := routeRequest(newTestHandler(t, a), http.MethodPost, "/api/nodes/n1/asset-imports/retry", `{"turn_record":0,"occurrence":0}`, true)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `"reason":"storage"`) {
+		t.Fatalf("append failure = %d %q", rec.Code, rec.Body.String())
 	}
 }
 

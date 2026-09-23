@@ -393,18 +393,23 @@ func (a *app) handleAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	content, ok := resolveAssetBacking(idx, rec)
+	if !ok {
+		http.Error(w, "not found", 404)
+		return
+	}
 	var data []byte
 	var servePath string
-	switch rec.Storage {
+	switch content.Storage {
 	case "inline":
-		b, err := base64.StdEncoding.DecodeString(rec.Bytes)
+		b, err := base64.StdEncoding.DecodeString(content.Bytes)
 		if err != nil {
 			http.Error(w, "not found", 404)
 			return
 		}
 		data = b
 	case "blob":
-		full, err := asset.ResolveBlobPath(a.assetsDir, n.ID, rec.BlobPath)
+		full, err := asset.ResolveBlobPath(a.assetsDir, n.ID, content.BlobPath)
 		if err != nil {
 			http.Error(w, "not found", 404)
 			return
@@ -434,6 +439,22 @@ func (a *app) handleAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
+}
+
+func resolveAssetBacking(idx map[string]sessionlog.AssetEvent, rec sessionlog.AssetEvent) (sessionlog.AssetEvent, bool) {
+	seen := map[string]bool{rec.ID: true}
+	for rec.BackingID != "" {
+		if seen[rec.BackingID] || len(seen) > len(idx) {
+			return sessionlog.AssetEvent{}, false
+		}
+		backing, ok := idx[rec.BackingID]
+		if !ok || rec.SHA256 == "" || backing.SHA256 != rec.SHA256 || backing.Size != rec.Size {
+			return sessionlog.AssetEvent{}, false
+		}
+		seen[rec.BackingID] = true
+		rec = backing
+	}
+	return rec, true
 }
 
 // inlineImageTypes maps the file extensions served inline (as an <img> or a

@@ -1588,7 +1588,8 @@ export function createChatFeature(deps){
     }
   }
 
-  async function loadHistory(id, scrollTo){
+  async function loadHistory(id, scrollTo, { preserveScroll = false } = {}){
+    const savedScrollTop = preserveScroll && msgs ? msgs.scrollTop : null;
     try {
       const data = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
       if (g("sel", "") !== id) return;
@@ -1596,6 +1597,10 @@ export function createChatFeature(deps){
       chatScrollBottom = false;
       chatSig = "";
       await refreshChat();
+      if (savedScrollTop != null && g("sel", "") === id && msgs){
+        msgs.scrollTop = savedScrollTop;
+        clampChatScroll(msgs);
+      }
     } catch (err) {
       if (typeof d.alert === "function") d.alert(err.message);
     }
@@ -1989,6 +1994,7 @@ export function createChatFeature(deps){
       delivery: data.delivery,
       showPeek, termOpen, termFull,
       source: data.source,
+      externalAttachments: !!data.allow_external_attachments,
       error: data.error || "",
       permTitle: data.perm_title,
       permReason: data.perm_reason || "",
@@ -2350,8 +2356,19 @@ export function createChatFeature(deps){
             }),
           });
           retry.textContent = result.status === "already_imported" ? "Already imported" : "Imported on retry";
-          chatSig = "";
-          await refreshChat();
+          /* A retry can target a bubble in an on-demand historical segment.
+             The ordinary chat poll only projects the current segment, so it
+             cannot replace that segment's persisted blocked marker or stale
+             asset map. Re-read loaded history while this same chat remains
+             selected, and restore the reader's exact scroll position after
+             the rebuild. A selection change during the POST owns the screen
+             and must not be repainted by this stale completion. */
+          if (g("sel", "") === node && chatHist.node === node && chatHist.segs){
+            await loadHistory(node, "", { preserveScroll: true });
+          } else if (g("sel", "") === node){
+            chatSig = "";
+            await refreshChat();
+          }
         } catch (err) {
           retry.disabled = false;
           retry.textContent = "Retry import";

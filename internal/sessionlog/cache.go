@@ -12,10 +12,10 @@ import (
 	"github.com/scimux/scimux/internal/transcript"
 )
 
-// LogCache memoizes all four poll-path products of one session log under a
+// LogCache memoizes all five poll-path products of one session log under a
 // single (path, size, mtime) key: the current Segment, whole-journey fare
 // totals + per-segment rides, path-anchored assets, and the ID-keyed asset
-// index.
+// index, plus blocked asset-import references.
 //
 // Session logs are append-only (AGENTS.md). Between calls the cache retains
 // accumulator state and a watermark — the byte offset immediately after the
@@ -44,6 +44,7 @@ type LogCache struct {
 	rides    []fare.Ride
 	anchored []AnchoredAsset
 	assets   map[string]AssetEvent
+	imports  []AssetImportEvent
 
 	// Incremental parse state.
 	watermark int64 // byte offset after last consumed '\n'
@@ -79,6 +80,8 @@ type LogCache struct {
 	lastTurnAnchor int // record index of last non-whitespace turn; -1 = none
 	anchAcc        []AnchoredAsset
 	assetIdx       map[string]AssetEvent
+	importAcc      []AssetImportEvent
+	importSeen     map[[2]int]bool
 
 	walks       int   // test spy: times the file was actually parsed
 	bytesParsed int64 // test spy: bytes read from the file on the last parse
@@ -163,6 +166,17 @@ func (c *LogCache) Assets(path string) map[string]AssetEvent {
 	return c.assets
 }
 
+// AssetImports returns the first persisted blocked reference for each
+// server-owned (turn, occurrence) identity.
+func (c *LogCache) AssetImports(path string) []AssetImportEvent {
+	if !c.ensure(path) {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]AssetImportEvent(nil), c.imports...)
+}
+
 // Walks is the number of times this cache actually parsed the file.
 func (c *LogCache) Walks() int {
 	c.mu.Lock()
@@ -178,7 +192,7 @@ func (c *LogCache) BytesParsed() int64 {
 	return c.bytesParsed
 }
 
-// ensure loads or refreshes the four products when the file's identity key
+// ensure loads or refreshes the five products when the file's identity key
 // (path, size, mtime) has changed. Returns false when the path is missing or
 // unreadable — callers then return the same defensive zeros as the standalone
 // readers, without counting a walk.
@@ -318,6 +332,8 @@ func (c *LogCache) resetAccum() {
 	c.lastTurnAnchor = -1
 	c.anchAcc = c.anchAcc[:0]
 	c.assetIdx = map[string]AssetEvent{}
+	c.importAcc = c.importAcc[:0]
+	c.importSeen = map[[2]int]bool{}
 }
 
 // consume reads newline-terminated records from r starting at baseOff,
@@ -440,6 +456,14 @@ func (c *LogCache) ingest(ev Event, i int) {
 				c.anchAcc = append(c.anchAcc, AnchoredAsset{Anchor: anchor, Asset: *ev.Asset})
 			}
 		}
+	case "asset_import":
+		if ev.AssetImport != nil && ev.AssetImport.Ref != "" {
+			key := [2]int{ev.AssetImport.TurnRecord, ev.AssetImport.Occurrence}
+			if !c.importSeen[key] {
+				c.importSeen[key] = true
+				c.importAcc = append(c.importAcc, *ev.AssetImport)
+			}
+		}
 	}
 }
 
@@ -549,6 +573,7 @@ func (c *LogCache) snapshotProducts() {
 	for k, v := range c.assetIdx {
 		c.assets[k] = v
 	}
+	c.imports = append([]AssetImportEvent(nil), c.importAcc...)
 }
 
 // foldFareFromHits is markCounted + addCanonical over a retained hit list.

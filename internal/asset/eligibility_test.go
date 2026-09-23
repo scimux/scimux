@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, path string, data []byte) {
@@ -271,6 +272,41 @@ func TestOpenExternalRejectsFIFOWithoutWaitingForAWriter(t *testing.T) {
 	}
 	if f, _, _, err := OpenExternal(path, dir); f != nil || !errors.Is(err, ErrNotRegularFile) {
 		t.Fatalf("fifo = %v, %v", f, err)
+	}
+}
+
+func TestOpenExternalRejectsFIFOReplacementWithoutWaitingForAWriter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "replace-me")
+	writeFile(t, path, []byte("regular before open"))
+	done := make(chan error, 1)
+	go func() {
+		var replaceErr error
+		f, _, _, err := openExternal(path, dir, func() {
+			if removeErr := os.Remove(path); removeErr != nil {
+				replaceErr = removeErr
+				return
+			}
+			if fifoErr := syscall.Mkfifo(path, 0o600); fifoErr != nil {
+				replaceErr = fifoErr
+			}
+		})
+		if f != nil {
+			f.Close()
+		}
+		if replaceErr != nil {
+			done <- replaceErr
+			return
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNotRegularFile) {
+			t.Fatalf("replacement error = %v, want ErrNotRegularFile", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OpenExternal blocked opening a FIFO replacement")
 	}
 }
 

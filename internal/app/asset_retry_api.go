@@ -12,8 +12,8 @@ import (
 )
 
 type assetRetryRequest struct {
-	TurnRecord int `json:"turn_record"`
-	Occurrence int `json:"occurrence"`
+	TurnRecord *int `json:"turn_record"`
+	Occurrence *int `json:"occurrence"`
 }
 
 func (a *app) handleAssetImportRetry(w http.ResponseWriter, r *http.Request) {
@@ -30,7 +30,7 @@ func (a *app) handleAssetImportRetry(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil || req.TurnRecord < 0 || req.Occurrence < 0 {
+	if err := dec.Decode(&req); err != nil || req.TurnRecord == nil || req.Occurrence == nil || *req.TurnRecord < 0 || *req.Occurrence < 0 {
 		http.Error(w, "invalid recorded reference", http.StatusBadRequest)
 		return
 	}
@@ -41,10 +41,11 @@ func (a *app) handleAssetImportRetry(w http.ResponseWriter, r *http.Request) {
 
 	a.assetImportMu.Lock()
 	defer a.assetImportMu.Unlock()
+	turnRecord, occurrence := *req.TurnRecord, *req.Occurrence
 	logPath := a.sessionLogPath(n.ID)
 	var ref *sessionlog.AssetImportEvent
 	for _, candidate := range sessionlog.ReadAssetImports(logPath) {
-		if candidate.TurnRecord == req.TurnRecord && candidate.Occurrence == req.Occurrence {
+		if candidate.TurnRecord == turnRecord && candidate.Occurrence == occurrence {
 			copy := candidate
 			ref = &copy
 			break
@@ -55,19 +56,19 @@ func (a *app) handleAssetImportRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events := sessionlog.ReadEvents(logPath)
-	if req.TurnRecord >= len(events) || (events[req.TurnRecord].T != "user" && events[req.TurnRecord].T != "assistant") {
+	if turnRecord >= len(events) || (events[turnRecord].T != "user" && events[turnRecord].T != "assistant") {
 		http.Error(w, "recorded reference not found", http.StatusNotFound)
 		return
 	}
-	candidates := asset.ScanMarkdown(events[req.TurnRecord].Text)
-	if req.Occurrence >= len(candidates) || candidates[req.Occurrence].Ref != ref.Ref ||
-		candidates[req.Occurrence].Alt != ref.Alt || candidates[req.Occurrence].IsImage != ref.Image {
+	candidates := asset.ScanMarkdown(events[turnRecord].Text)
+	if occurrence >= len(candidates) || candidates[occurrence].Ref != ref.Ref ||
+		candidates[occurrence].Alt != ref.Alt || candidates[occurrence].IsImage != ref.Image {
 		http.Error(w, "recorded reference not found", http.StatusNotFound)
 		return
 	}
 	for _, bound := range sessionlog.ReadAnchoredAssets(logPath) {
-		if bound.Anchor == req.TurnRecord && bound.Asset.AnchorOccurrence != nil &&
-			*bound.Asset.AnchorOccurrence == req.Occurrence && bound.Asset.SourcePath == ref.Ref {
+		if bound.Anchor == turnRecord && bound.Asset.AnchorOccurrence != nil &&
+			*bound.Asset.AnchorOccurrence == occurrence && bound.Asset.SourcePath == ref.Ref {
 			writeJSON(w, map[string]any{"status": "already_imported", "asset_id": bound.Asset.ID, "name": bound.Asset.Name})
 			return
 		}
@@ -113,8 +114,7 @@ func (a *app) handleAssetImportRetry(w http.ResponseWriter, r *http.Request) {
 	// The exact turn+occurrence binding is new even when this path or these
 	// bytes were imported elsewhere. Force the dedup branch to append its
 	// zero-copy alias; the idempotency check above prevents duplicates.
-	anchor := req.TurnRecord
-	occurrence := req.Occurrence
+	anchor := turnRecord
 	ev, err := a.ingestAgentPathAssetAt(n.ID, ref.Ref, filepath.Base(resolved), data, bySHA, havePath, &anchor, &occurrence, true)
 	if err != nil {
 		retryFailure(w, "storage")
@@ -127,7 +127,7 @@ func (a *app) handleAssetImportRetry(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	writeJSON(w, map[string]any{
 		"status": "imported", "asset_id": ev.ID, "name": ev.Name,
-		"turn_record": req.TurnRecord, "occurrence": req.Occurrence,
+		"turn_record": turnRecord, "occurrence": occurrence,
 		"current_bytes": true,
 	})
 }
