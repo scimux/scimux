@@ -115,6 +115,7 @@ import { hashStr as hashStrDefault } from "./lanes.js";
 import { sendableNodes } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
 import { addPendingForward } from "./storage.js";
+import { mediaTextAndTiles, legacyMediaTextAndTiles, hasSupportedImageMarker } from "./reference-media.js";
 import {
   createPopoverMenu,
   menuButtonHTML,
@@ -231,10 +232,13 @@ export function bookmarkListHTML(opts){
   return list.map(nt => {
     const nd = nt.node && typeof nodeById === "function" ? nodeById(nt.node) : null;
     const src = nd ? " · " + e(nd.title) : "";
+    const rendered = nt.media
+      ? mediaTextAndTiles(nt.text || "", nt.media, { esc: e, assetURL: opts.assetURL })
+      : (hasSupportedImageMarker(nt.text) ? legacyMediaTextAndTiles(nt, opts.legacyMedia, { esc:e, assetURL:opts.assetURL }) : { clean: nt.text || "", html: "" });
     return `
     <div class="bookmark ${nt.anchor ? "comment" : ""}" data-t="${e(nt.t)}">
       <div class="when">${e(when(nt.t))}${src}</div>
-      <div class="nbubble" style="border-left-color:${color}">${renderMd(nt.text || "")}</div>
+      <div class="nbubble" style="border-left-color:${color}">${renderMd(rendered.clean)}${rendered.html}</div>
       <button class="nmore" data-nmore hidden></button>
       ${openBookmarkT === nt.t
         ? bookmarkActionsHTML(nt, { icons, context: "pane", workspaceOpen, singleZone, overflow }) : ""}
@@ -596,6 +600,8 @@ export function createBookmarksFeature(deps){
       fmtWhen,
       laneColor,
       icons,
+      assetURL: d.assetURL,
+      legacyMedia: d.legacyMedia,
       /* "use in note" only exists while its placement targets do (item 4),
          except on the single-zone phone layout where it is the way in */
       workspaceOpen: typeof d.wsOpen === "function" && d.wsOpen(),

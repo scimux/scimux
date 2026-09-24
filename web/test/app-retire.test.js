@@ -16,7 +16,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { installHost, identityAssetURL } from "./s2-helpers.js";
+import { installHost, identityAssetURL, jsonResponse } from "./s2-helpers.js";
 import { APP_SLOT } from "../js/lifecycle.js";
 
 const flush = async (n = 30) => { for (let i = 0; i < n; i++) await Promise.resolve(); };
@@ -167,4 +167,42 @@ test("app: retire() leaves nothing registered behind", async (t) => {
   assert.deepEqual(rec.liveListeners().map(l => `${l.where} ${l.type}`), []);
   assert.deepEqual(rec.liveTimers().map(x => `${x.kind} ${x.ms}`), []);
   app.retire();  /* idempotent */
+});
+
+test("app: legacy media resolution runs the composed bookmark and Notes refresh callback", async () => {
+  const host = installHost({});
+  const calls = [];
+  let failCapture = false;
+  let circularProv = false;
+  const fetchImpl = async (path, opts = {}) => {
+    calls.push(String(path));
+    if (String(path).startsWith("/api/ui")) return jsonResponse({lanes:[],groups:[],archived:[],pinned:[],bookmarks:[{
+      t:"T",uid:"u",segment:0,record:0,text:"![one](scimux-asset:a_1)",
+    }]});
+    if (String(path).startsWith("/api/preview")) return jsonResponse({uid:"u",node:"n1",anchor:0,turns:[{uid:"u",segment:0,record:0}],assets:{a_1:{name:"one.png"}}});
+    if (String(path).startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"One",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
+    if (String(path).startsWith("/api/nodes/n1/chat")) {
+      const prov = circularProv ? {} : {source:"synthetic"}; if (circularProv) prov.self = prov;
+      return jsonResponse({turns:[{role:"assistant",agent:"codex",prov,text:"![one](scimux-asset:a_1)",time:"T",uid:"u",segment:0,record:0}],segments:[],assets:{a_1:{name:"one.png"}}});
+    }
+    if (String(path) === "/api/reference-media") {
+      if (failCapture) throw new Error("budget");
+      return jsonResponse({text:"![one](scimux-asset:a_1)",media:{version:1,capture_id:"a".repeat(64),items:[{id:"0",key:"asset:a_1",name:"one.png",state:"ready"}]}});
+    }
+    return host.trapFetch(path, opts);
+  };
+  const { createApp } = await import("../js/app.js");
+  const app = await createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  await flush();
+  host.byId.get("bookmarksbtn").dispatchEvent({type:"click",preventDefault(){},stopPropagation(){}});
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(calls.some(x => x.startsWith("/api/preview")), calls.join(","));
+  const station = {dataset:{forkbookmark:"n1"},closest:sel=>sel === "[data-forkbookmark]" ? station : null};
+  host.byId.get("maptoolbar").dispatchEvent({type:"click",target:station,preventDefault(){},stopPropagation(){}});
+  await flush();
+  assert.ok(calls.includes("/api/reference-media"), calls.join(","));
+  failCapture = true; circularProv = true;
+  host.byId.get("maptoolbar").dispatchEvent({type:"click",target:station,preventDefault(){},stopPropagation(){}});
+  await flush();
+  app.retire();
 });

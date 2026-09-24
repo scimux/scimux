@@ -109,6 +109,11 @@ func (a *app) handlePreview(w http.ResponseWriter, r *http.Request) {
 		beforeTruncated = lo > 0
 		afterTruncated = hi < len(turns)
 	}
+	if resolved && haveSeg && haveRec && anchor >= 0 && anchor < len(window) {
+		window[anchor].UID = uid
+		window[anchor].Segment = seg
+		window[anchor].Record = rec
+	}
 
 	// Assets. A live node's blobs are still served, so the window gets the same
 	// projection the chat read path applies — otherwise the identical turn would

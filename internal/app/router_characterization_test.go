@@ -49,6 +49,8 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodDelete, "/api/notes/{id}/sections/{sectionID}/references/{refID}", "/api/notes/note-1/sections/section-1/references/ref-1", "handleNoteTrashReference", "notes.go"}, // retained
 		{http.MethodGet, "/api/search", "/api/search", "handleSearch", "search.go"},                                                                                                     // retained
 		{http.MethodGet, "/api/preview", "/api/preview", "handlePreview", "preview.go"},                                                                                                 // retained
+		{http.MethodPost, "/api/reference-media", "/api/reference-media", "handleReferenceMediaCapture", "reference_media.go"},
+		{http.MethodGet, "/api/reference-media/{captureID}/assets/{itemID}", "/api/reference-media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/assets/0", "handleReferenceMediaAsset", "reference_media.go"},
 		{http.MethodGet, "/api/agents", "/api/agents", "handleAgents", "agents.go"},                                                                                                     // retained
 		{http.MethodGet, "/api/ui", "/api/ui", "handleUIGet", "ui_state_api.go"},                                                                                                        // extracted
 		{http.MethodPut, "/api/ui", "/api/ui", "handleUIPut", "ui_state_api.go"},                                                                                                        // extracted

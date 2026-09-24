@@ -4887,6 +4887,72 @@ test("P3C: bookmark add calls uiMutate bookmark-add", async () => {
   ctx.feature.destroy();
 });
 
+test("image bookmark waits for capture and ignores a late response after selection changes", async () => {
+  const ops = [];
+  let finish;
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [
+        {role:"assistant",text:"![one](scimux-asset:a_1)",time:"T1",uid:"u",segment:0,record:1},
+        {role:"assistant",text:"new selection",time:"T2",uid:"u",segment:0,record:2},
+      ],
+      live:"quiet",delivery:"ok",source:"acp",chat_started:"T0",prior_turns:0,
+      assets:{a_1:{name:"one.png"}},
+    },
+    deps:{
+      bookmarks:()=>[],
+      uiMutate:op=>ops.push(op),
+      captureBookmark:()=>new Promise(resolve=>{ finish=resolve; }),
+    },
+  });
+  ctx.feature.bind(); await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0");
+  const button = clickBact(ctx, "bookmark");
+  assert.equal(button.textContent, "capturing…");
+  assert.equal(ops.length, 0);
+  ctx.setSel("n2");
+  finish({text:"durable",uid:"u",segment:0,record:1,media:{version:1,capture_id:"a".repeat(64),items:[]}});
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(ops.length, 0);
+  ctx.feature.destroy();
+});
+
+test("image bookmark capture failure is retryable through the real bubble action", async () => {
+  const ops = [], toasts = [];
+  let attempts = 0;
+  const turn = {role:"assistant",text:"![one](scimux-asset:a_1)",time:"T1",uid:"u",segment:0,record:1};
+  const ctx = makeFeature({
+    chatPayload:{turns:[turn],live:"quiet",delivery:"ok",source:"acp",chat_started:"T0",prior_turns:0,assets:{a_1:{name:"one.png"}}},
+    deps:{bookmarks:()=>[],uiMutate:op=>ops.push(op),toast:x=>toasts.push(x),captureBookmark:async bm=>{
+      attempts++;
+      if (attempts === 1) throw new Error("budget");
+      return {...bm,text:"durable",media:{version:1,capture_id:"b".repeat(64),items:[{id:"0",key:"asset:a_1",name:"one.png",state:"ready"}]}};
+    }},
+  });
+  ctx.feature.bind(); await ctx.feature.render();
+  tapBubbleTurn(ctx, "i:0"); clickBact(ctx, "bookmark");
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(ops.length, 0); assert.equal(toasts.length, 1);
+  clickBact(ctx, "bookmark");
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(ops.length, 1); assert.equal(ops[0].bookmark.text, "durable");
+  ctx.feature.destroy();
+});
+
+test("bubble bookmark handles synchronous capture success and failure", async () => {
+  for (const failing of [true,false]) {
+    const ops=[], toasts=[];
+    const turn={role:"assistant",text:"![one](scimux-asset:a_1)",time:"T",uid:"u",segment:0,record:1};
+    const ctx=makeFeature({chatPayload:{turns:[turn],live:"quiet",delivery:"ok",source:"acp",chat_started:"T0",prior_turns:0,assets:{a_1:{name:"one.png"}}},deps:{
+      bookmarks:()=>[],uiMutate:op=>ops.push(op),toast:x=>toasts.push(x),
+      captureBookmark:bm=>{if(failing) throw new Error("sync"); return {...bm,text:"sync durable"};},
+    }});
+    ctx.feature.bind(); await ctx.feature.render(); tapBubbleTurn(ctx,"i:0"); clickBact(ctx,"bookmark");
+    assert.equal(ops.length,failing?0:1); assert.equal(toasts.length,failing?1:0);
+    ctx.feature.destroy();
+  }
+});
+
 test("hashTurnAttrs distinguishes absent prov from explicit null", () => {
   const absent = [{ role: "assistant", text: "same", agent: "grok" }];
   const explicitNull = [{ role: "assistant", text: "same", agent: "grok", prov: null }];

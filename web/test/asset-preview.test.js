@@ -128,6 +128,16 @@ test("preview link delegation is removable and uses the supplied transport URL",
   noop();
 });
 
+test("preview link delegation can stop bubbling in capture mode", () => {
+  const root = target();
+  let stopped = 0;
+  const destroy = bindAssetPreviewLinks(root, {open(){}}, {capture:true, stop:true});
+  const link = {href:"/image",dataset:{name:"image.png"}};
+  root.dispatch("click", {target:{closest:()=>link},preventDefault(){},stopPropagation(){stopped++;}});
+  assert.equal(stopped, 1);
+  destroy();
+});
+
 test("preview default no-op revoker safely handles an owned URL", () => {
   const preview = createAssetPreview({ document: target(), overlay: null });
   preview.open({ url: "blob:private", ownedURL: true });

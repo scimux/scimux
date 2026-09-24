@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/scimux/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/referencemedia"
 )
 
 // patchNote drives handleNotePatch with the id path value set (the mux would
@@ -345,6 +346,41 @@ func TestNoteAddReference(t *testing.T) {
 	}
 	if rec := addReference(a, sh.ID, "nope", `{}`); rec.Code != 400 {
 		t.Errorf("malformed section id: code = %d, want 400", rec.Code)
+	}
+}
+
+func TestNoteAddReferenceCanonicalizesAndValidatesMediaBeforeSave(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	sh := createNote(t, a)
+	media, err := a.referenceMedia.Capture(referencemedia.Source{UID: "u1", Segment: 0, Record: 0}, "![x](scimux-asset:x)", []referencemedia.CaptureItem{{Key: "asset:x", Name: "x.png", MIME: "image/png", Data: referencePNG}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := media
+	forged.Items[0].Name = "forged.png"
+	body, _ := json.Marshal(map[string]any{"source": map[string]any{"uid": "u1", "segment": 0, "record": 0}, "snapshot": map[string]any{"text": "saved", "media": forged}})
+	rec := addReference(a, sh.ID, sh.Sections[0].ID, string(body))
+	if rec.Code != 200 {
+		t.Fatalf("canonical add = %d %s", rec.Code, rec.Body.String())
+	}
+	var got notestore.Note
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	stored := got.Sections[0].References[0].Snapshot.Media
+	if stored == nil || stored.Items[0].Name != "x.png" {
+		t.Fatalf("forged media persisted: %#v", stored)
+	}
+
+	badBody := strings.ReplaceAll(string(body), `"uid":"u1"`, `"uid":"other"`)
+	if bad := addReference(a, sh.ID, sh.Sections[0].ID, badBody); bad.Code != 400 {
+		t.Fatalf("source mismatch = %d %s", bad.Code, bad.Body.String())
+	}
+	after := createGet(t, a, sh.ID)
+	if len(after.Sections[0].References) != 1 {
+		t.Fatalf("invalid media committed: %#v", after.Sections[0].References)
+	}
+	unknownVersion := strings.Replace(string(body), `"version":1`, `"version":2`, 1)
+	if bad := addReference(a, sh.ID, sh.Sections[0].ID, unknownVersion); bad.Code != 400 {
+		t.Fatalf("unknown media version = %d %s", bad.Code, bad.Body.String())
 	}
 }
 

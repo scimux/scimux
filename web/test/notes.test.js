@@ -1470,6 +1470,46 @@ test("usage generation changes only when the sparse destination index changes", 
   assert.equal(ctx.feature.usagesVersion(), 2, "same-size replacements still invalidate markers");
 });
 
+test("legacy reference refresh is targeted and preserves draft focus, caret, and scroll", async () => {
+  let state = { state:"pending" };
+  const legacyMedia = { view: () => state };
+  const docs = {
+    n1: { id:"n1", title:"Research", sections:[{
+      id:"s1", title:"Findings", body:"draft", order:0,
+      references:[{id:"r1", source:{uid:"u",segment:0,record:0}, snapshot:{text:"![one](scimux-asset:a_1)"}}],
+    }] },
+  };
+  const ctx = createFeature({ docs, deps:{ legacyMedia, assetURL:p=>`remote:${p}` } });
+  ctx.feature.bind();
+  ctx.feature.refreshReferenceMedia();
+  assert.equal(await ctx.feature.openAt({note_id:"n1"}), true);
+
+  const ref = el("div", {className:"wsref", dataset:{ref:"r1"}});
+  const body = el("div", {className:"wsrefbody", innerHTML:"pending"});
+  const more = el("button", {className:"wsrefmore"});
+  ref.appendChild(body); ref.appendChild(more);
+  const draft = el("textarea", {value:"unsaved draft"});
+  draft.selectionStart = 3; draft.selectionEnd = 7;
+  ctx.roots.wssections.children = [];
+  ctx.roots.wssections.appendChild(ref);
+  ctx.roots.wssections.appendChild(draft);
+  ctx.roots.wssections.scrollTop = 91;
+  draft.focus();
+
+  state = {state:"ready", node:"live", assets:{a_1:{name:"one.png"}}};
+  ctx.feature.refreshReferenceMedia();
+  assert.match(body.innerHTML, /remote:\/api\/nodes\/live\/assets\/a_1/);
+  assert.equal(draft.value, "unsaved draft");
+  assert.equal(ctx.document.activeElement, draft);
+  assert.deepEqual(draft._range, [3, 7]);
+  assert.equal(ctx.roots.wssections.scrollTop, 91);
+
+  ctx.document.contains = () => false;
+  ref.children = [];
+  ctx.feature.refreshReferenceMedia();
+  assert.equal(ctx.document.activeElement, draft);
+});
+
 /* ---------- debounce / flush / serialize via factory ---------- */
 async function settle(n = 8){
   for (let i = 0; i < n; i++) await Promise.resolve();

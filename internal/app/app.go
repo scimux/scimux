@@ -15,6 +15,7 @@ import (
 	"github.com/scimux/scimux/internal/agentperm"
 	"github.com/scimux/scimux/internal/asset"
 	"github.com/scimux/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/referencemedia"
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/storagebudget"
 	"github.com/scimux/scimux/internal/tmuxsession"
@@ -84,6 +85,7 @@ func newApp(cfg Config, deps appDeps) (*app, error) {
 		sessionsDir:     sessionsDir,
 		attachmentsDir:  filepath.Join(cfg.DataDir, "attachments"),
 		assetsDir:       filepath.Join(cfg.DataDir, "assets"),
+		referenceMedia:  referencemedia.New(filepath.Join(cfg.DataDir, "reference-media")),
 		assetHook:       nil,
 		notes:           notestore.New(notesDir),
 		home:            cfg.Home,
@@ -591,6 +593,10 @@ type app struct {
 	// event carrying id/name/mime/sha256/blobPath — this directory holds only
 	// the bytes for assets too large to inline. See upload-design.md.
 	assetsDir string
+	// referenceMedia owns immutable bookmark/note image captures. It is global
+	// rather than node-scoped: deleting a source must not delete captured bytes.
+	referenceMedia            *referencemedia.Store
+	referenceCaptureItemsHook func(string, string, string) ([]referencemedia.CaptureItem, error)
 	// assetHook is the Phase 4 turn-append ingestion hook, called by every
 	// transport (mirror.go for tmux, a.acp/a.codex for ACP/codex — wired via
 	// SetAssetHook at startup) with each turn's scanned local-path candidates.

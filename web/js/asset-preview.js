@@ -148,14 +148,15 @@ export function createAssetPreview(deps = {}){
   return { open, close, reset, zoomBy, panBy, destroy, state };
 }
 
-export function bindAssetPreviewLinks(root, preview){
+export function bindAssetPreviewLinks(root, preview, { capture = false, stop = false } = {}){
   if (!root?.addEventListener || !preview?.open) return () => {};
   const click = ev => {
     const link = ev.target?.closest?.("[data-asset-preview]");
     if (!link) return;
     ev.preventDefault?.();
+    if (stop) ev.stopPropagation?.();
     preview.open({ url: link.href, name: link.dataset?.name || link.title || "image" });
   };
-  root.addEventListener("click", click);
-  return () => root.removeEventListener("click", click);
+  root.addEventListener("click", click, capture);
+  return () => root.removeEventListener("click", click, capture);
 }

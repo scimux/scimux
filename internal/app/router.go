@@ -70,6 +70,8 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("DELETE /api/notes/{id}/sections/{sectionID}/references/{refID}", a.handleNoteTrashReference)
 	mux.HandleFunc("GET /api/search", a.handleSearch)
 	mux.HandleFunc("GET /api/preview", a.handlePreview)
+	mux.HandleFunc("POST /api/reference-media", a.handleReferenceMediaCapture)
+	mux.HandleFunc("GET /api/reference-media/{captureID}/assets/{itemID}", a.handleReferenceMediaAsset)
 	mux.HandleFunc("GET /api/agents", a.handleAgents)
 	mux.HandleFunc("GET /api/ui", a.handleUIGet)
 	mux.HandleFunc("PUT /api/ui", a.handleUIPut)

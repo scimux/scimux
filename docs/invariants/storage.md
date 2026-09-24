@@ -46,6 +46,21 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   limit is an explicit write error and an observable `/api/state` storage
   condition; scimux never silently truncates or deletes durable history to get
   back under budget.
+- **Reference media is immutable global storage.** A new bookmark containing
+  managed raster-image markers first publishes content-addressed blobs and a
+  canonical capture manifest under `reference-media/`. The manifest freezes
+  the exact source `(uid, segment, record)`, projected turn text, and ordered
+  media descriptors; note snapshots carry only the public capture descriptor,
+  never bytes, paths, or blob digests. Captures are charged to the global
+  storage budget (including staging overhead), never a source node's budget.
+  Source, bookmark, reference, and note deletion deliberately do not collect
+  these immutable files: another bookmark, note version, or copy may still
+  refer to them. Content deduplication and global limits bound new growth, but
+  interrupted work may retain an unreferenced blob. A complete backup of notes
+  with captured images includes `reference-media/`; a copied `note.json` is not
+  independently portable media. Historical records without a capture may use
+  an exact-address, read-only live preview for display, but that is best-effort
+  compatibility rather than retroactive durability.
 - **One session-log store, one schema.** Every transport writes its per-node
   history to `~/.scimux/sessions/<node-id>.jsonl` as `internal/sessionlog`
   events — plain JSONL, because the corpus must stay grep/sed/awk-able. The

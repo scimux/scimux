@@ -40,7 +40,8 @@ env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux
 - A metro-map view of journeys, forks, page turns, and token usage (where
   supported).
 - Search across live and archived chats, plus immutable bookmarks that jump
-  back to their source.
+  back to their source. Images captured by new bookmarks remain available
+  after the source chat is removed.
 - Mutable notes with sections and embedded chat references, so conclusions
   stay attached to evidence.
 - File and image attachments, auditable approval decisions, conversation
@@ -151,6 +152,13 @@ scimux's own records stay under `~/.scimux`:
 - `sessions/<node>.jsonl` — one plain-JSONL conversation log per chat.
 - `sessions/archive/` — logs of deleted activities.
 - `notes/<id>/note.json` — mutable synthesis notes and their references.
+- `reference-media/blobs/<sha256>` and `reference-media/captures/<sha256>.json`
+  — immutable, deduplicated image bytes and manifests captured for bookmarks
+  and embedded note references.
+
+Backups intended to preserve durable notes with images must include the
+`reference-media/` directory as well as `notes/`; copying `note.json` alone is
+not a media export.
 
 The scimux project does not use your conversation history to train, fine-tune,
 or distill models. Your selected provider's processing and training practices

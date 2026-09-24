@@ -110,6 +110,7 @@ import {
   bookmarkActionsHTML as bookmarkActionsHTMLDefault,
   bookmarkMenuHTML as bookmarkMenuHTMLDefault,
 } from "./bookmarks.js";
+import { mediaTextAndTiles, legacyMediaTextAndTiles, hasSupportedImageMarker } from "./reference-media.js";
 import {
   captureNotesTouchStart as captureNotesTouchStartDefault,
   notesSwipeBackDecision as notesSwipeBackDecisionDefault,
@@ -572,6 +573,10 @@ export function buildBookmarkSnapshot(nt, deps = {}){
     const cloned = cloneJSONValue(nt.prov);
     if (cloned !== undefined) snap.prov = cloned;
   }
+  if (nt && Object.prototype.hasOwnProperty.call(nt, "media") && nt.media !== undefined){
+    const cloned = cloneJSONValue(nt.media);
+    if (cloned !== undefined) snap.media = cloned;
+  }
   return snap;
 }
 
@@ -632,7 +637,6 @@ export function sectionHTML(s, folded, deps = {}){
 
 export function referenceHTML(r, deps = {}){
   const esc = deps.esc || escDefault;
-  const mdFn = deps.md || escDefault;
   const whenFn = deps.fmtWhen || (t => String(t ?? ""));
   const icons = deps.icons || {};
   const snap = r.snapshot || {};
@@ -647,7 +651,7 @@ export function referenceHTML(r, deps = {}){
      .danger and confirms before deleting (see referenceAction). */
   return `<div class="wsref" data-ref="${esc(r.id)}" style="border-left-color:${esc(color)}">
     <div class="wsrefhead"><span class="wsrefdot" style="background:${esc(color)}"></span><span class="wsrefprov">${label}</span></div>
-    <div class="wsrefbody">${mdFn(snap.text || "")}</div>
+    <div class="wsrefbody">${referenceBodyHTML(r, deps)}</div>
     <button class="wsrefmore" data-refmore hidden></button>
     <div class="actionbar tear">
       <button class="btn-plain" data-refact="jump" aria-label="jump to chat">${icons.ICON_JUMP || ""}</button>
@@ -656,6 +660,16 @@ export function referenceHTML(r, deps = {}){
       <button class="btn-plain danger" data-refact="trash" aria-label="remove">${icons.ICON_TRASH || ""}</button>
     </div>
   </div>`;
+}
+
+export function referenceBodyHTML(r, deps = {}){
+  const esc = deps.esc || escDefault;
+  const mdFn = deps.md || escDefault;
+  const snap = r.snapshot || {};
+  const rendered = snap.media
+    ? mediaTextAndTiles(snap.text || "", snap.media, { esc, assetURL: deps.assetURL })
+    : (hasSupportedImageMarker(snap.text) ? legacyMediaTextAndTiles({ ...r.source, text:snap.text }, deps.legacyMedia, { esc, assetURL:deps.assetURL }) : { clean: snap.text || "", html: "" });
+  return mdFn(rendered.clean) + rendered.html;
 }
 
 /** Card stays grab-draggable only when not mid-rename (drag would steal the gesture). */
@@ -746,9 +760,12 @@ export function inboxItemHTML(nt, color, deps = {}){
   const nodeById = deps.nodeById || (() => null);
   const nd = nt.node ? nodeById(nt.node) : null;
   const src = nd ? " · " + esc(nd.title) : "";
+  const rendered = nt.media
+    ? mediaTextAndTiles(nt.text || "", nt.media, { esc, assetURL: deps.assetURL })
+    : (hasSupportedImageMarker(nt.text) ? legacyMediaTextAndTiles(nt, deps.legacyMedia, { esc, assetURL:deps.assetURL }) : { clean: nt.text || "", html: "" });
   return `<div class="wsibookmark" data-t="${esc(nt.t)}">
       <div class="wsiwhen">${esc(whenFn(nt.t))}${src}</div>
-      <div class="wsibubble" style="border-left-color:${color}">${mdFn(nt.text || "")}</div>
+      <div class="wsibubble" style="border-left-color:${color}">${mdFn(rendered.clean)}${rendered.html}</div>
       <button class="wsimore" data-wsimore hidden></button>
       ${deps.open ? actions(nt, {
         icons, context: "inbox",
@@ -793,7 +810,7 @@ export function createNotesFeature(deps){
   const CSSObj = d.CSS || (typeof CSS !== "undefined" ? CSS : null);
   const api = typeof d.api === "function" ? d.api : async () => null;
 
-  const htmlDeps = () => ({ esc, md, fmtWhen, fmtNoteMeta, icons });
+  const htmlDeps = () => ({ esc, md, fmtWhen, fmtNoteMeta, icons, assetURL: d.assetURL, legacyMedia:d.legacyMedia });
 
   /* ---- view state ---- */
   let wsNotes = [];
@@ -1133,6 +1150,8 @@ export function createNotesFeature(deps){
         esc, md, fmtWhen, icons, nodeById, open: nt.t === wsInboxOpenT,
         /* P5 width guard: flat row below isDesktop() keeps the more menu. */
         overflow: typeof d.isDesktop === "function" ? !d.isDesktop() : false,
+        assetURL: d.assetURL,
+        legacyMedia: d.legacyMedia,
       })).join("")
       : `<div class="empty">No bookmarks yet — tap a bubble and “bookmark” it.</div>`;
     const sig = hashStr(tabsHtml + "|" + listHtml);
@@ -1275,6 +1294,30 @@ export function createNotesFeature(deps){
       btn.hidden = !st.showBtn;
       btn.textContent = st.label;
     });
+  }
+
+  function refreshReferenceMedia(){
+    const secWrap = root("wssections");
+    if (!wsActive || !secWrap || !secWrap.querySelectorAll) return;
+    const refs = new Map();
+    for (const section of wsActive.sections || []) {
+      for (const ref of section.references || []) refs.set(String(ref.id), ref);
+    }
+    const focused = doc?.activeElement || null;
+    const selection = focused && Number.isInteger(focused.selectionStart) && Number.isInteger(focused.selectionEnd)
+      ? [focused.selectionStart, focused.selectionEnd] : null;
+    const scrollTop = secWrap.scrollTop;
+    secWrap.querySelectorAll(".wsref").forEach(el => {
+      const ref = refs.get(String(el.dataset?.ref || ""));
+      const body = el.querySelector?.(".wsrefbody");
+      if (ref && body) body.innerHTML = referenceBodyHTML(ref, htmlDeps());
+    });
+    secWrap.scrollTop = scrollTop;
+    if (focused && (!doc?.contains || doc.contains(focused))) {
+      focused.focus?.({ preventScroll:true });
+      if (selection && focused.setSelectionRange) focused.setSelectionRange(selection[0], selection[1]);
+    }
+    applyRefClamps(secWrap);
   }
 
   /* --- persistence ---
@@ -2258,6 +2301,7 @@ export function createNotesFeature(deps){
     endPlacement,
     renderInbox,
     invalidateInbox,
+    refreshReferenceMedia,
     applyLayout,
   };
 }

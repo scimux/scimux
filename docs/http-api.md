@@ -308,6 +308,42 @@ This surface does not describe forkability (`forkable`, `dir`, and `effort` are
 not returned). Missing `uid` is `400`; every other failure (unknown uid,
 unreadable log, traversal attempt) degrades to `404`.
 
+### `POST /api/reference-media`
+
+Durably capture supported managed raster images referenced by one exact stored
+turn. The body is:
+
+```json
+{"source":{"uid":"a1b2c3","segment":0,"record":7}}
+```
+
+All three fields are required; zero is a valid explicit ordinal. The server
+resolves the stored turn and its time-correct asset bindings. Callers cannot
+supply text, a path, URL, MIME authority, bytes, or a blob digest. Success
+returns the server-projected `text` and a versioned `media` descriptor whose
+items are ordered and whose ids are decimal indexes. Ready items contain only
+`id`, namespaced `key`, display `name`, and `state`; unavailable source items
+are explicit. Images are limited to PNG, JPEG, GIF, and WebP, at most 32
+distinct descriptors, 50 MiB per image, 50 MiB total image bytes, and a 64 KiB
+manifest. A limit failure rejects the complete capture with `413`; storage
+budget exhaustion is `507`; invalid input is `400`; an absent exact source is
+`404`; unexpected storage I/O is `500` without local path disclosure.
+
+New captures are immutable and remain byte-identical after source deletion,
+slug reuse, `/clear`, log rotation, restart, and browser reopen. Historical
+bookmarks without `media` are not migrated; the browser may perform one
+bounded exact-address `/api/preview` lookup while the source remains live.
+
+### `GET /api/reference-media/{captureID}/assets/{itemID}`
+
+Serve one ready capture item. `captureID` is exactly 64 lowercase hexadecimal
+characters and `itemID` is canonical non-negative decimal. Malformed ids are
+`400`; unknown, unavailable, missing, or corrupt entries are `404`. Successful
+responses preserve the original encoded bytes, use the canonical safe raster
+Content-Type, and carry `nosniff` plus the common browser security headers.
+`HEAD` has the same routing and headers without a response body. There is no
+general blob or filesystem download route.
+
 ### `GET /api/agents`
 
 Detected agent CLIs and what they offer the new-activity dialog, keyed by
@@ -858,13 +894,18 @@ unknown well-formed note or section is `404`; bad JSON is `400`.
   "snapshot": {
     "lane": "#c0392b", "station": "my-node",
     "speaker": "assistant", "time": "2026-07-28T10:00:00Z",
-    "text": "the cited turn"
+    "text": "the cited turn",
+    "media": {"version":1,"capture_id":"<64 lowercase hex>","items":[]}
   }
 }
 ```
 
-The reference is self-contained: it still renders after the source node is
-deleted.
+The optional media field is accepted only when its capture exists and its
+manifest source exactly matches `source`; the server persists the canonical
+stored descriptor rather than caller-supplied item fields. The reference is
+self-contained when it carries captured media and still renders after the
+source node is deleted. Older references without media retain read-only,
+best-effort live-source compatibility and are not retroactively durable.
 
 ### `DELETE /api/notes/{id}/sections/{sectionID}/references/{refID}`
 

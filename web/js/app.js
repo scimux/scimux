@@ -120,6 +120,8 @@ import { installInsetRefresh } from "./insets.js";
 import { claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
 import { focusAtEnd } from "./caret.js";
 import { createStorage } from "./storage.js";
+import { createBookmarkCapture } from "./bookmark-capture.js";
+import { createLegacyMediaResolver } from "./reference-media.js";
 
 
 /* FR-42 transport seam: the composition root takes fetchImpl and assetURL as
@@ -247,6 +249,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const api = (path, opts) => apiMod(path, opts, { fetchImpl, csrf: CSRF });
   const apiConditionalGet = (path, etag) =>
     apiConditionalGetMod(path, etag, { fetchImpl, csrf: CSRF });
+  const bookmarkCapture = createBookmarkCapture({ api });
+  teardown.add(() => bookmarkCapture.clear());
 
   /* UI document + state tick live in createPollingFeature (Packet 7I).
      Shell reaches the shared document via getUI() / uiMutate / isUILoaded. */
@@ -780,6 +784,13 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   let notesFeature;
   let searchFeature;
   let sheetsFeature;
+  const legacyMedia = own(createLegacyMediaResolver({
+    api,
+    onUpdate: () => setTimeout(() => {
+      if (bookmarksFeature){ bookmarksFeature.invalidate(); bookmarksFeature.render(); }
+      if (notesFeature){ notesFeature.invalidateInbox(); notesFeature.renderInbox(); notesFeature.refreshReferenceMedia(); }
+    }, 0),
+  }));
   const assetPreview = own(createAssetPreview({
     document,
     overlay: $("#assetpreview"),
@@ -822,6 +833,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     api,
     apiConditionalGet,
     assetURL,
+    captureBookmark: (bookmark, turn) => bookmarkCapture.capture(bookmark, turn),
     openAssetPreview: assetPreview.open,
     openAttachmentSettings: openAttachmentSettings.bind(null, $("#burger"), $("#m_attachment_settings")),
     nodes: () => nodes,
@@ -956,6 +968,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     md,
     fmtWhen,
     hashStr,
+    assetURL,
+    legacyMedia,
     icons: {
       ICON_JUMP, ICON_COMMENT, ICON_COPY, ICON_CLIP, ICON_TRASH, ICON_SEND,
       ICON_INTO, ICON_MENU_DOTS,
@@ -1038,6 +1052,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       ICON_INTO,
     },
     api,
+    assetURL,
+    legacyMedia,
     bookmarks: () => getUI().bookmarks,
     nodeById: id => nodeById(id),
     laneList: () => laneList(),
@@ -1446,14 +1462,26 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     } catch (err) { turn = null; }
     const clean = ((turn && turn.text) || "").trim();
     if (!clean){ toast("Nothing to bookmark here yet."); return; }
-    const bookmark = { t: new Date().toISOString(), text: clean, node: id };
+    let bookmark = { t: new Date().toISOString(), text: clean, node: id };
     if (turn.time) bookmark.turnTime = turn.time;
     /* Same reason as the bubble bookmark in chat.js: role is unrecoverable
        later and send-to's AI disclosure keys on it. */
     if (turn.role === "user" || turn.role === "assistant")
       bookmark.role = turn.role;
+    if (turn.agent) bookmark.agent = turn.agent;
+    if (Object.prototype.hasOwnProperty.call(turn, "prov") && turn.prov !== undefined){
+      try { bookmark.prov = JSON.parse(JSON.stringify(turn.prov)); } catch {}
+    }
     if (n.lane_id) bookmark.lane = n.lane_id;
     stampAddress(bookmark, turn);
+    try {
+      bookmark = await bookmarkCapture.capture(bookmark, turn);
+    } catch (err) {
+      toast("Bookmark capture failed — try again.");
+      return;
+    }
+    const duplicate = (getUI().bookmarks || []).some(nt => nt.uid && nt.uid === bookmark.uid && nt.segment === bookmark.segment && nt.record === bookmark.record);
+    if (duplicate) return;
     uiMutate({ k: "bookmark-add", bookmark });
     bookmarksFeature.pinBottom();
     renderBookmarksPane();
@@ -1774,6 +1802,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   $("#previewscrim").addEventListener("click", closePreview);
   $("#previewopen").addEventListener("click", openPreviewChat);
   own({ destroy: bindAssetPreviewLinks($("#previewbody"), assetPreview) });
+  own({ destroy: bindAssetPreviewLinks($("#bookmarkspane"), assetPreview, { capture:true, stop:true }) });
+  own({ destroy: bindAssetPreviewLinks($("#notesworkspace"), assetPreview, { capture:true, stop:true }) });
   $("#previewview").addEventListener("keydown", e => {
     if (e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); closePreview(); }
   });

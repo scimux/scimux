@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/scimux/scimux/internal/notestore"
+	"github.com/scimux/scimux/internal/referencemedia"
 )
 
 // Notes HTTP API (phase 1b of the notes/notes feature). Thin handlers over
@@ -315,6 +316,19 @@ func (a *app) handleNoteAddReference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref.ID = "" // force a server-minted id; ignore anything the client sent
+	if ref.Snapshot.Media != nil {
+		media := ref.Snapshot.Media
+		if media.Version != referencemedia.Version {
+			http.Error(w, "unsupported reference media version", http.StatusBadRequest)
+			return
+		}
+		canonical, _, source, err := a.referenceMedia.Load(media.CaptureID)
+		if err != nil || source.UID != ref.Source.UID || source.Segment != ref.Source.Segment || source.Record != ref.Source.Record {
+			http.Error(w, "invalid reference media", http.StatusBadRequest)
+			return
+		}
+		ref.Snapshot.Media = &canonical
+	}
 	a.noteMu.Lock()
 	defer a.noteMu.Unlock()
 	sh, err := a.notes.Get(id)

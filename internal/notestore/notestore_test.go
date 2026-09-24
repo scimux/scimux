@@ -11,7 +11,32 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/scimux/scimux/internal/referencemedia"
 )
+
+func TestSnapshotMediaRoundTripAndDeepValue(t *testing.T) {
+	store := New(t.TempDir())
+	note, err := store.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	media := &referencemedia.Media{Version: 1, CaptureID: strings.Repeat("a", 64), Items: []referencemedia.Item{{ID: "0", Key: "asset:a", Name: "a.png", State: "ready"}}}
+	_, err = note.AddReference(note.Sections[0].ID, Reference{Source: Source{UID: "u"}, Snapshot: Snapshot{Text: "image", Media: media}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(note); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(note.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Sections[0].References[0].Snapshot.Media == nil || got.Sections[0].References[0].Snapshot.Media.CaptureID != media.CaptureID {
+		t.Fatalf("media lost: %#v", got)
+	}
+}
 
 // A fresh note gets an auto title, one starter section, and an opaque id.
 func TestCreateStarterShape(t *testing.T) {

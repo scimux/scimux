@@ -77,6 +77,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 	wantImports := []string{
 		`from "./api.js"`,
 		`from "./bookmarks.js"`,
+		`from "./bookmark-capture.js"`,
 		`from "./cards.js"`,
 		`from "./chat.js"`,
 		`from "./composer.js"`,
@@ -88,6 +89,7 @@ func TestWebIndexScriptsParse(t *testing.T) {
 		`from "./navigation.js"`,
 		`from "./notes.js"`,
 		`from "./polling.js"`,
+		`from "./reference-media.js"`,
 		`from "./search.js"`,
 		`from "./sheets.js"`,
 		`from "./usage.js"`,

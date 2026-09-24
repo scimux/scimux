@@ -2471,8 +2471,32 @@ export function createChatFeature(deps){
             if (cloned !== undefined) bookmark.prov = cloned;
           }
           if (typeof d.stampAddress === "function") d.stampAddress(bookmark, turn);
-          if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-add", bookmark });
-          chatSig = "";
+          const commit = captured => {
+            if (g("sel", "") !== sel) return;
+            const exists = (g("bookmarks", []) || []).some(nt =>
+              captured.uid && nt.uid === captured.uid && nt.segment === captured.segment && nt.record === captured.record);
+            if (exists) return;
+            if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-add", bookmark: captured });
+            chatSig = "";
+            ba.innerHTML = "&#10003; noted";
+            setTimeoutFn(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
+          };
+          let captured = bookmark;
+          try {
+            if (typeof d.captureBookmark === "function") captured = d.captureBookmark(bookmark, turn);
+          } catch (_err) {
+            if (typeof d.toast === "function") d.toast("Bookmark capture failed — try again.");
+            return;
+          }
+          if (captured && typeof captured.then === "function") {
+            ba.textContent = "capturing…";
+            captured.then(commit, () => {
+              if (g("sel", "") === sel && typeof d.toast === "function") d.toast("Bookmark capture failed — try again.");
+            });
+            return;
+          }
+          commit(captured);
+          return;
         }
         ba.innerHTML = "&#10003; noted";
         setTimeoutFn(() => { tappedTurn = ""; renderBubbleActions(); }, 700);

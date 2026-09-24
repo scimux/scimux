@@ -27,10 +27,24 @@ type previewResp struct {
 	BeforeTruncated bool           `json:"before_truncated"`
 	AfterTruncated  bool           `json:"after_truncated"`
 	Turns           []struct {
-		Role string `json:"role"`
-		Text string `json:"text"`
-		Time string `json:"time"`
+		UID     string `json:"uid"`
+		Segment int    `json:"segment"`
+		Record  int    `json:"record"`
+		Role    string `json:"role"`
+		Text    string `json:"text"`
+		Time    string `json:"time"`
 	} `json:"turns"`
+}
+
+func TestPreviewDoesNotCertifyFallbackAsExactOrdinal(t *testing.T) {
+	a, uid := referenceFixture(t)
+	code, out := doPreviewSegRec(t, a, uid, 0, 99, "2026-09-24T01:00:00Z")
+	if code != 200 || len(out.Turns) != 1 {
+		t.Fatalf("preview = %d %#v", code, out.Turns)
+	}
+	if got := out.Turns[out.Anchor]; got.UID != "" || got.Segment != 0 || got.Record != 0 {
+		t.Fatalf("fallback turn falsely certified requested address: %#v", got)
+	}
 }
 
 func doPreview(t *testing.T, a *app, uid, at string) (int, previewResp) {

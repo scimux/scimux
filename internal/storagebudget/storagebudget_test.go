@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -148,5 +149,21 @@ func TestInspectReportsAggregateAndPerNodeUsage(t *testing.T) {
 	}
 	if !status.Writable || status.GlobalLimitBytes != 100 || status.NodeLimitBytes != 20 {
 		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestReferenceMediaCountsGloballyButNeverAsNodeUsage(t *testing.T) {
+	data := t.TempDir()
+	writeManaged(t, filepath.Join(data, "reference-media", "blobs", strings.Repeat("a", 64)), "1234")
+	writeManaged(t, filepath.Join(data, "reference-media", "captures", strings.Repeat("b", 64)+".json"), "123")
+	status, err := Inspect(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.UsedBytes != 7 {
+		t.Fatalf("global reference-media bytes = %d, want 7", status.UsedBytes)
+	}
+	if len(status.Nodes) != 0 {
+		t.Fatalf("reference media acquired node charge: %#v", status.Nodes)
 	}
 }
