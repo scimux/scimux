@@ -13,7 +13,7 @@ internal/acp/testdata/real-*.ndjson
 internal/acp/muse/testdata/real-*.ndjson
 internal/acp/muse/schema/
 
-# Only README.md, AGENTS.md, CLAUDE.md, SECURITY.md, and the published docs/
+# Only README.md, AGENTS.md, CLAUDE.md, SECURITY.md, PRIVACY.md, and the published docs/
 # set are tracked. Every other markdown file (design/planning intermediates,
 # working notes) is a local or in-repo-but-unpublished document — keep them
 # all out of git. The list below must name every tracked .md: this is a
@@ -28,6 +28,7 @@ internal/acp/muse/schema/
 !AGENTS.md
 !CLAUDE.md
 !SECURITY.md
+!PRIVACY.md
 !docs/http-api.md
 !docs/rendezvous-protocol-sync.md
 !docs/session-workers.md

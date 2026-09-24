@@ -2867,6 +2867,18 @@ test("dsh reaches the new-chat dropdown from the probe, with no model menu of it
 });
 
 
+test("Contributor notice explains submitted context and the Standard alternative before acknowledgment", () => {
+  const index = readFileSync(join(__dirname, "../index.html"), "utf8");
+  const notice = index.match(/<p\b[^>]*id="nc_muse_privacy_note"[^>]*>([\s\S]*?)<\/p>/)?.[1];
+  assert.ok(notice, "acknowledgment must have an accessible data-use notice");
+  assert.match(notice, /retain[\s\S]*train/i);
+  assert.match(notice, /confidential, sensitive, or personal information/);
+  assert.match(notice, /prompts, files, and tool results/);
+  assert.match(notice, /Choose a Standard model if your content must not be used for training/);
+  assert.match(index, /id="nc_muse_ack"[^>]*aria-describedby="nc_muse_privacy_note"/);
+  assert.doesNotMatch(index.match(/<input\b[^>]*id="nc_muse_ack"[^>]*>/)?.[0] || "", /\bchecked\b/);
+});
+
 test("Contributor acknowledgment gates creation, resets on model change and reopening", async () => {
   const ctx = createFeature({ agentsPayload: museAgentsPayload([MUSE_STD, MUSE_DISC]) });
   ctx.feature.bind();

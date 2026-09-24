@@ -287,3 +287,10 @@
 .assetpreview-actions{justify-content:center;padding:12px 16px calc(12px + env(safe-area-inset-bottom))}
 .assetblocked{display:flex;gap:8px;max-width:320px;padding:10px;border:1px solid var(--hairline);border-radius:10px;background:var(--surface)}
 .assetblocked>span{display:grid;gap:4px}.assetblocked-name{color:var(--dim);overflow-wrap:anywhere}.assetblocked button{justify-self:start}
+.privacy-policy { margin: 12px 0; font-size: 14px; color: var(--ink); }
+.privacy-policy summary { cursor: pointer; min-height: 44px; padding: 12px 0; color: var(--work); }
+.privacy-policy-body { line-height: 1.5; overflow-wrap: anywhere; }
+.privacy-policy-body h1 { font-size: 19px; margin: 12px 0; }
+.privacy-policy-body h2 { font-size: 16px; margin: 20px 0 8px; }
+.privacy-policy-body p { margin: 8px 0; }
+.privacy-policy-body ul { margin: 8px 0; padding-left: 24px; }

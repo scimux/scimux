@@ -132,6 +132,9 @@ for recovery.
 
 ## Data, accounts, and security
 
+Read the [scimux privacy policy](PRIVACY.md) for data use, sharing, and
+retention. It is also available offline in About and the Muse Contributor notice.
+
 By default scimux listens only on `127.0.0.1:8787`. The web UI has no login:
 anyone who can reach the listener can read conversations and answer approval
 prompts. Do not bind it to an untrusted network. See [SECURITY.md](SECURITY.md)
@@ -149,7 +152,9 @@ scimux's own records stay under `~/.scimux`:
 - `sessions/archive/` — logs of deleted activities.
 - `notes/<id>/note.json` — mutable synthesis notes and their references.
 
-User history is never used for model training, fine-tuning, or distillation.
+The scimux project does not use your conversation history to train, fine-tune,
+or distill models. Your selected provider's processing and training practices
+depend on its terms, your plan, and settings.
 scimux does not publish comparative harness benchmarks.
 
 Two optional operations can spend account quota and therefore default off:
