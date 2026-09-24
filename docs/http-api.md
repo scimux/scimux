@@ -376,6 +376,10 @@ optional `label`, `default`, `context_limit`, and `output_limit`. Its
 rows to display labels and availability. Unknown-tier or conflicting
 duplicate catalog entries are not launchable. An empty catalog is a valid
 response, not a guessed static model list.
+The browser omits unlaunchable rows and displays model names without tier badges.
+Production classification uses the reviewed exact Muse Spark 1.1, 1.2, and 1.3
+IDs and the 1.2/1.3 Contributor IDs; new IDs remain unknown until their terms
+are reviewed. Live catalog membership is still required.
 
 Muse's catalog is read from cache. A stale cache, including the initial empty
 cache, starts a background
@@ -416,6 +420,16 @@ the server chooses an eligible Standard model; IDs ending in `-contributor`
 require an explicit choice and are never an implicit default. The stored
 node retains the user's model choice (including an empty default choice),
 while the launch receives the resolved concrete ID.
+Contributor creation also requires `muse_contributor_acknowledged: true` in
+this request, acknowledging Meta's retention/training terms and the prohibition
+on submitting confidential, sensitive, or personal information. Missing or false
+acknowledgment is `400`, before any session or prompt. Forks require a fresh
+acknowledgment even when the model is inherited. The field is request-only:
+it is neither a stored node field nor a computer setting. It does not replace
+the separate approval-judge consent. The browser shows the notice and an unchecked
+checkbox above Start, resets it when the model changes or a new dialog opens,
+and disables Start until acknowledged. Existing chats and `/clear` retain their
+existing session policy; this acknowledgment gates new node creation.
 
 A dsh create carries its model over the wire rather than on argv, and dsh is
 the one agent for which that application is authoritative: if the live agent

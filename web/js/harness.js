@@ -74,16 +74,26 @@ const HARNESS_TERMS = Object.freeze({
   grok: `<a href="https://x.ai/legal/terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
   cursor: `<a href="https://cursor.com/terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
   dsh: `<a href="https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html" target="_blank" rel="noopener">Terms of Use</a>`,
+  muse: `<a href="https://dev.meta.ai/legal/terms-of-service" target="_blank" rel="noopener">Terms of Service &amp; data use</a>`,
+});
+
+const HARNESS_PRIVACY = Object.freeze({
+  claude: `<a href="https://www.anthropic.com/legal/privacy" target="_blank" rel="noopener noreferrer">Privacy</a>`,
+  codex: `<a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener noreferrer">Privacy</a>`,
+  grok: `<a href="https://x.ai/legal/privacy-policy" target="_blank" rel="noopener noreferrer">Privacy</a>`,
+  cursor: `<a href="https://cursor.com/data-use" target="_blank" rel="noopener noreferrer">Privacy</a>`,
+  dsh: `<a href="https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html" target="_blank" rel="noopener noreferrer">Privacy</a>`,
+  muse: `<a href="https://www.facebook.com/privacy/policy/" target="_blank" rel="noopener noreferrer">Privacy</a>`,
 });
 
 const BYO_PROVIDER_NOTE =
-  "Terms are your model provider's — scimux cannot see which one you configured.";
+  "Terms and privacy depend on your configured model provider — scimux cannot see which one you configured.";
 
 /* Said after the link, not instead of it: the link names the terms that apply
    when dsh runs DeepSeek's own models, and this names what happens when it
    does not. */
 const DSH_PROVIDER_NOTE =
-  "DeepSeek's terms cover its own models; a provider you configure yourself is under that provider's.";
+  "DeepSeek's terms and privacy cover its own service; other configured providers have their own policies.";
 
 /* The terms line for one row. Absent harnesses keep it: someone deciding
  * whether to install a harness is exactly the reader who wants the terms
@@ -92,7 +102,7 @@ export function harnessTermsHTML(agent){
   const link = HARNESS_TERMS[agent];
   if (link){
     const caveat = agent === "dsh" ? ` ${esc(DSH_PROVIDER_NOTE)}` : "";
-    return `<span class="hnote hterms">${link}${caveat}</span>`;
+    return `<span class="hnote hterms">${link} · ${HARNESS_PRIVACY[agent]}${caveat}</span>`;
   }
   if (agent === "pi" || agent === "opencode"){
     return `<span class="hnote hterms">${esc(BYO_PROVIDER_NOTE)}</span>`;

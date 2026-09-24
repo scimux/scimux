@@ -323,6 +323,14 @@
       <b>new lane</b> branches a new topic, another <b>existing lane</b> crosses
       over onto it. To just continue this thread, close and use <b>/clear</b> instead.</div>
   </div>
+  <div class="sect nc-create-only" id="nc_muse_privacy" hidden>
+    <div class="k">Contributor model data use</div>
+    <p class="nc-hint" id="nc_muse_privacy_note">Meta may retain submitted content and use it to train its models.
+      Do not submit confidential, sensitive, or personal information, including in files the agent can read.
+      <a href="https://dev.meta.ai/legal/terms-of-service" target="_blank" rel="noopener noreferrer">Meta’s data-use terms</a>.</p>
+    <label class="nc-ack"><input type="checkbox" id="nc_muse_ack" aria-describedby="nc_muse_privacy_note">
+      I understand and want to use this Contributor model.</label>
+  </div>
   <!-- structure mirrors sheets.js submitButtonHTML; the busy state adds
        .ctadots and flips aria-busy, the visible title never changes -->
   <button class="cta" id="nc_start" aria-busy="false" aria-label="Start"><span class="ctalabel">Start</span></button>
@@ -411,6 +419,7 @@
        registries or rerun every CLI discovery command. -->
   <div class="sect">
     <div class="k">Agent harnesses</div>
+    <div class="hnote">Provider data use and retention depend on your plan and privacy settings. Review the links below; Grok CLI also offers <code>/privacy</code> controls.</div>
     <div id="m_harnesses"></div>
     <button class="cta" id="m_hcheck">Check for harness updates</button>
     <div id="m_hnote" hidden></div>

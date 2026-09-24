@@ -193,21 +193,13 @@ export function museFreshDefaultId(rows){
   return "";
 }
 
-function museTierSuffix(tier){
-  if (tier === "standard") return " \u2014 Standard";
-  if (tier === "discounted") return " \u2014 Discounted";
-  return " \u2014 tier unavailable";
-}
-
 export function museModelOptionsHTML(rows, esc = escDefault){
   const list = Array.isArray(rows) ? rows : [];
   let html = `<option value=""></option>`;
   for (const row of list){
-    if (!row || typeof row !== "object") continue;
-    if (typeof row.id !== "string" || !row.id) continue;
+    if (!museModelSelectable(row)) continue;
     const label = (typeof row.label === "string" && row.label.trim()) ? row.label : row.id;
-    const disabled = museModelSelectable(row) ? "" : " disabled";
-    html += `<option value="${esc(row.id)}"${disabled}>${esc(label)}${museTierSuffix(row.tier)}</option>`;
+    html += `<option value="${esc(row.id)}">${esc(label)}</option>`;
   }
   return html;
 }
@@ -440,6 +432,7 @@ export function createSheetsFeature(deps = {}){
   let ncParent = "";
   let ncRationale = "";
   let ncMuseInherit = false;
+  let contributorChoice = "";
   /* An inherited effort the menus could not hold yet, kept until the agents
      probe answers. Cursor publishes its levels only per model, so a fork opened
      while the probe is in flight has no menu to put the parent's level on. */
@@ -588,6 +581,24 @@ export function createSheetsFeature(deps = {}){
     return MUSE_MODELS.find(r => r && r.id === id) || null;
   }
 
+  function contributorSelected(){
+    const agent = root("nc_agent")?.value;
+    const row = museRowById(root("nc_model")?.value);
+    return !ncEdit && agent === "muse" && museModelSelectable(row) && row.tier === "discounted";
+  }
+
+  function syncContributorNotice(reset = false){
+    const required = contributorSelected();
+    const choice = required ? root("nc_model").value : "";
+    const ack = root("nc_muse_ack");
+    if (ack && (reset || choice !== contributorChoice)) ack.checked = false;
+    contributorChoice = choice;
+    const notice = root("nc_muse_privacy");
+    if (notice) notice.hidden = !required;
+    const start = root("nc_start");
+    if (start) start.disabled = newActivitySubmitting || (required && !ack?.checked);
+  }
+
   function applyMuseModelValue(mo, { prev = "", preserveSelection = false } = {}){
     const p = nodeById(ncParent);
     const inherited = ncMuseInherit && p && p.agent === "muse" ? (p.model || "") : "";
@@ -622,6 +633,7 @@ export function createSheetsFeature(deps = {}){
       if (opts.preserveSelection && prev && (MODELS[agent] || [""]).includes(prev))
         mo.value = prev;
     }
+    syncContributorNotice();
   }
 
   function newchatIsOpen(){
@@ -661,6 +673,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function prepareLaunchConfig(cfg){
+    syncContributorNotice(true);
     fillAgents(); fillModels(); fillEfforts();
     const p = cfg || nodeById(ncParent);
     if (p){
@@ -740,7 +753,7 @@ export function createSheetsFeature(deps = {}){
     newActivitySubmitting = !!active;
     const btn = root("nc_start");
     if (!btn) return;
-    btn.disabled = newActivitySubmitting;
+    syncContributorNotice();
     renderStartButton({ editing: !!ncEdit, submitting: newActivitySubmitting });
   }
 
@@ -955,10 +968,15 @@ export function createSheetsFeature(deps = {}){
     const model = root("nc_model") ? root("nc_model").value : "";
     if (agent === "muse" && !museModelSelectable(museRowById(model))){
       const mo = root("nc_model");
-      fieldError(mo, "No launchable Standard Muse model is selected. Pick a Standard or Discounted row.");
+      fieldError(mo, "Select an available Muse model before starting.");
       if (mo && typeof mo.focus === "function") mo.focus();
       if (mo && typeof mo.scrollIntoView === "function")
         mo.scrollIntoView({ block: "center" });
+      return;
+    }
+    if (contributorSelected() && !root("nc_muse_ack")?.checked){
+      syncContributorNotice();
+      root("nc_muse_ack")?.focus?.();
       return;
     }
     const payload = buildCreatePayload({
@@ -972,6 +990,7 @@ export function createSheetsFeature(deps = {}){
       rationale: ncRationale,
       laneID: laneChoice.laneID,
     });
+    if (contributorSelected()) payload.muse_contributor_acknowledged = true;
     if (!payload.title){
       fieldError(titleEl, "Enter a title before starting.");
       if (titleEl && typeof titleEl.focus === "function") titleEl.focus();
@@ -1058,6 +1077,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function onAgentChange(){
+    syncContributorNotice(true);
     ncMuseInherit = false;
     /* The user has moved off the row the seed belonged to, so it is no longer
        an inheritance waiting for a menu -- and on an agent where blank is a
@@ -1068,6 +1088,7 @@ export function createSheetsFeature(deps = {}){
     fillModels(); fillEfforts();
   }
   function onModelChange(){
+    syncContributorNotice(true);
     ncSeedEffort = "";
     fillEfforts();
   }
@@ -1115,6 +1136,7 @@ export function createSheetsFeature(deps = {}){
     on(root("plusbtn"), "click", () => openNewActivity());
     on(root("nc_agent"), "change", onAgentChange);
     on(root("nc_model"), "change", onModelChange);
+    on(root("nc_muse_ack"), "change", () => syncContributorNotice());
     on(root("nc_start"), "click", () => { onStartClick(); });
     probeAgents();
   }

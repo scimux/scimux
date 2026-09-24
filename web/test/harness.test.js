@@ -324,7 +324,7 @@ test("every single-vendor harness row links its vendor's terms", () => {
   assert.match(html, /href="https:\/\/cursor\.com\/terms-of-service"/);
   /* Leaving scimux must not navigate away from a live supervision page, and
      an opener handle to a third-party tab is a needless one. */
-  assert.equal((html.match(/target="_blank"/g) || []).length, 4);
+  assert.equal((html.match(/target="_blank"/g) || []).length, 8);
   assert.equal((html.match(/rel="noopener"/g) || []).length, 4);
 });
 
@@ -338,7 +338,7 @@ test("a BYO-provider harness says whose terms apply instead of guessing", () => 
   ], null);
 
   assert.doesNotMatch(html, /href="http/);
-  assert.match(html, /your model provider/i);
+  assert.match(html, /configured model provider/i);
 });
 
 test("an absent harness still shows whose terms it would be under", () => {
@@ -434,7 +434,7 @@ test("six harness rows render alphabetically and installed Muse is launchable", 
   assert.match(html, /You cannot start a Muse session/);
 });
 
-test("absent Muse is not installed; omitted latest stays unchecked; no Meta terms", () => {
+test("absent Muse is not installed; omitted latest stays unchecked; Meta terms remain accessible", () => {
   const absent = harnessState({ agent: "muse", present: false, launchable: false }, null);
   assert.equal(absent.state, "absent");
   assert.match(absent.note, /not installed/i);
@@ -448,8 +448,8 @@ test("absent Muse is not installed; omitted latest stays unchecked; no Meta term
     { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
   ], {});
   assert.doesNotMatch(html, /up to date/);
-  assert.doesNotMatch(html, /href="http/);
-  assert.doesNotMatch(html, /meta\.com|facebook\.com/i);
+  assert.match(html, /href="https:\/\/dev\.meta\.ai\/legal\/terms-of-service"/);
+  assert.match(html, /href="https:\/\/www\.facebook\.com\/privacy\/policy\/"/);
   assert.doesNotMatch(indexSrc, /five registries/);
   assert.doesNotMatch(appSrc, /five registries/);
 });
@@ -986,7 +986,7 @@ test("dsh carries both its vendor's terms and the BYO caveat", () => {
   assert.match(html, /href="https:\/\/cdn\.deepseek\.com\/policies\/en-US\/deepseek-terms-of-use\.html"/);
   assert.match(html, /target="_blank"/);
   assert.match(html, /rel="noopener"/);
-  assert.match(html, /provider you configure yourself/i);
+  assert.match(html, /other configured providers/i);
 });
 
 test("the BYO-only harnesses did not inherit dsh's link", () => {
@@ -998,4 +998,19 @@ test("the BYO-only harnesses did not inherit dsh's link", () => {
   ], null);
   assert.doesNotMatch(html, /href="http/);
   assert.doesNotMatch(html, /deepseek/i);
+});
+
+
+test("provider privacy links accompany terms in the burger menu", () => {
+  for (const agent of ["claude", "codex", "grok", "cursor", "dsh", "muse"]){
+    const html = harnessRowsHTML([{ agent, present: true, launchable: true }], null);
+    assert.match(html, /href="https:[^"]+" target="_blank" rel="noopener noreferrer">Privacy<\/a>/);
+  }
+  const muse = harnessRowsHTML([{ agent: "muse", present: true }], null);
+  assert.match(muse, /https:\/\/dev\.meta\.ai\/legal\/terms-of-service/);
+  for (const agent of ["pi", "opencode"]){
+    const html = harnessRowsHTML([{ agent, present: true }], null);
+    assert.match(html, /Terms and privacy depend on your configured model provider/);
+    assert.doesNotMatch(html, /href=/);
+  }
 });

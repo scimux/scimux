@@ -156,6 +156,14 @@ Two optional operations can spend account quota and therefore default off:
 the Claude usage probe and the Muse approval judge. Their switches are
 computer-owned settings in the burger menu, not browser-local preferences.
 
+The burger menu links each provider's privacy information beside its terms.
+Provider retention and training depend on your account and settings. For
+pi, opencode, and custom dsh providers, consult the provider you configured.
+Starting a Muse Contributor chat or fork requires acknowledging its data-use
+notice: Meta may retain content and use it for training, and confidential,
+sensitive, or personal information must not be submitted. Contributor models
+are never the automatic default.
+
 scimux is independent and is not affiliated with or endorsed by Anthropic,
 OpenAI, xAI, Meta, Anysphere, DeepSeek, or the pi and opencode projects. Their
 names and marks identify compatible tools only. Your use of each harness and

@@ -107,8 +107,8 @@ func TestMuseBoundaryAntiVacuity(t *testing.T) {
 	if classifierOwner != "main.go" {
 		t.Fatalf("production Muse tier classifier owner = %q, want main.go", classifierOwner)
 	}
-	if !strings.Contains(files["main.go"], "a.museClassify = classifyMuseStandard") {
-		t.Fatal("main.go must install exactly the maintainer-approved all-Standard classifier")
+	if !strings.Contains(files["main.go"], "a.museClassify = classifyMuseTier") {
+		t.Fatal("main.go must install the reviewed Muse model-tier classifier")
 	}
 	if strings.Contains(joined, "this planted token must not appear in production") {
 		t.Fatal("scan included test files")
@@ -603,8 +603,7 @@ func museAppForbiddenHits(file, src string) []string {
 		}},
 		{"hardcoded muse tier map", func() bool {
 			return strings.Contains(src, "museTiers") ||
-				(strings.Contains(src, `map[string]string{`) && strings.Contains(src, `"standard"`) &&
-					strings.Contains(src, "spark"))
+				regexp.MustCompile(`(?s)map\[string\]string\s*\{[^}]*spark`).MatchString(src)
 		}},
 		{"muse update authorization", func() bool {
 			if file != "harness_version.go" {

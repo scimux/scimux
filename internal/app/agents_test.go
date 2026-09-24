@@ -1083,15 +1083,20 @@ func TestHandleAgentsNonExactClassifierIsUnlaunchable(t *testing.T) {
 	}
 }
 
-func TestMuseStandardTierAuthority(t *testing.T) {
-	for _, id := range []string{"model-a", "future-model", "standard-looking-is-not-required"} {
-		if got := classifyMuseStandard(id); got != museTierStandard {
-			t.Errorf("classifyMuseStandard(%q) = %q, want %q", id, got, museTierStandard)
+func TestMuseReviewedTierAuthority(t *testing.T) {
+	for _, id := range []string{"muse-spark-1.1", "muse-spark-1.2", "muse-spark-1.3"} {
+		if got := classifyMuseTier(id); got != museTierStandard {
+			t.Errorf("%q: tier = %q", id, got)
 		}
 	}
-	for _, id := range []string{"", " ", "\n"} {
-		if got := classifyMuseStandard(id); got != museTierUnknown {
-			t.Errorf("classifyMuseStandard(%q) = %q, want %q", id, got, museTierUnknown)
+	for _, id := range []string{"muse-spark-1.2-contributor", "muse-spark-1.3-contributor"} {
+		if got := classifyMuseTier(id); got != museTierDiscounted {
+			t.Errorf("%q: tier = %q", id, got)
+		}
+	}
+	for _, id := range []string{"", " ", "future-model", "muse-spark-9", "muse-spark-9-contributor", "MUSE-SPARK-1.3", " muse-spark-1.3"} {
+		if got := classifyMuseTier(id); got != museTierUnknown {
+			t.Errorf("%q: unreviewed tier = %q", id, got)
 		}
 	}
 }
@@ -1100,7 +1105,7 @@ func TestMuseContributorModelIsNeverImplicitDefault(t *testing.T) {
 	const contributor = "muse-spark-1.3-contributor"
 	const ordinary = "muse-spark-1.3"
 	a := newTestApp(t, &fakeTmux{})
-	a.museClassify = classifyMuseStandard
+	a.museClassify = classifyMuseTier
 	a.museCatalog = func(context.Context) ([]muse.Model, error) {
 		return []muse.Model{
 			{ID: contributor, Label: "Contributor", IsDefault: true},
@@ -1109,7 +1114,7 @@ func TestMuseContributorModelIsNeverImplicitDefault(t *testing.T) {
 	}
 
 	views := a.museViews([]muse.Model{{ID: contributor, IsDefault: true}})
-	if len(views) != 1 || !views[0].Launchable || views[0].Tier != museTierStandard {
+	if len(views) != 1 || !views[0].Launchable || views[0].Tier != museTierDiscounted {
 		t.Fatalf("contributor must remain explicitly selectable: %+v", views)
 	}
 	if views[0].Default {
@@ -1129,7 +1134,7 @@ func TestMuseContributorModelIsNeverImplicitDefault(t *testing.T) {
 func TestMuseOnlyContributorModelsRequireExplicitSelection(t *testing.T) {
 	const contributor = "muse-spark-1.3-contributor"
 	a := newTestApp(t, &fakeTmux{})
-	a.museClassify = classifyMuseStandard
+	a.museClassify = classifyMuseTier
 	a.museCatalog = func(context.Context) ([]muse.Model, error) {
 		return []muse.Model{{ID: contributor, IsDefault: true}}, nil
 	}
@@ -1146,9 +1151,9 @@ func TestHandleAgentsMuseProductionAuthorityIsStandard(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	installMuseAgentBase(a)
 	a.museCatalog = func(context.Context) ([]muse.Model, error) {
-		return []muse.Model{{ID: "catalog-model", Label: "Catalog Model", IsDefault: true}}, nil
+		return []muse.Model{{ID: "muse-spark-1.3", Label: "Catalog Model", IsDefault: true}}, nil
 	}
-	a.museClassify = classifyMuseStandard
+	a.museClassify = classifyMuseTier
 	// The catalog is served from cache now, so the probe has to have run.
 	// Production warms it at startup and behind each dialog open; a test says
 	// so out loud rather than depending on a background refresh landing in time.
@@ -1160,10 +1165,10 @@ func TestHandleAgentsMuseProductionAuthorityIsStandard(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := out["muse"].MuseModels
-	if len(rows) != 1 || rows[0].ID != "catalog-model" || rows[0].Tier != museTierStandard || !rows[0].Launchable || !rows[0].Default {
+	if len(rows) != 1 || rows[0].ID != "muse-spark-1.3" || rows[0].Tier != museTierStandard || !rows[0].Launchable || !rows[0].Default {
 		t.Fatalf("production Standard authority not projected: %+v", rows)
 	}
-	if !reflect.DeepEqual(out["muse"].Models, []string{"catalog-model"}) {
+	if !reflect.DeepEqual(out["muse"].Models, []string{"muse-spark-1.3"}) {
 		t.Fatalf("selectable models = %v", out["muse"].Models)
 	}
 }

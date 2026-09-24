@@ -860,16 +860,20 @@ func (a *app) museTierOf(id string) string {
 	return museTierUnknown
 }
 
-// classifyMuseStandard is the maintainer-approved production tier authority:
-// every nonblank model ID returned by Muse's live model/list catalog is
-// Standard. Catalog membership remains independently authoritative, so this
-// does not make forged, stale, blank, or malformed IDs launchable and does not
-// infer policy from a model name, label, provider, or update response.
-func classifyMuseStandard(modelID string) string {
-	if strings.TrimSpace(modelID) == "" {
+// classifyMuseTier records the reviewed Muse Spark designations published at
+// https://dev.meta.ai/docs/models and
+// https://dev.meta.ai/legal/geographic-use-policy (September 18, 2026).
+// The live CLI catalog must independently offer an ID. New IDs stay unknown
+// until their data-use terms are reviewed; labels and suffixes are not evidence.
+func classifyMuseTier(modelID string) string {
+	switch modelID {
+	case "muse-spark-1.1", "muse-spark-1.2", "muse-spark-1.3":
+		return museTierStandard
+	case "muse-spark-1.2-contributor", "muse-spark-1.3-contributor":
+		return museTierDiscounted
+	default:
 		return museTierUnknown
 	}
-	return museTierStandard
 }
 
 // museImplicitDefaultEligible keeps content-sharing contributor variants an

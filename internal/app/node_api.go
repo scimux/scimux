@@ -25,11 +25,15 @@ import (
 )
 
 func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
-	var n Node
-	if err := decodeJSON(w, r, &n); err != nil {
+	var body struct {
+		Node
+		MuseContributorAcknowledged bool `json:"muse_contributor_acknowledged"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "bad request: "+err.Error(), 400)
 		return
 	}
+	n := body.Node
 	// Scrub every server-owned field before validation: a create request only
 	// supplies launch config (title/description/prompt/agent/model/effort/dir/
 	// parent/lane_id/rationale). Identity, external ownership, liveness, the linked
@@ -51,6 +55,13 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	if err != nil {
 		http.Error(w, err.Error(), status)
+		return
+	}
+	// Check after fork inheritance, before any process or initial prompt. This
+	// acknowledgment belongs to this request, never to settings or the parent.
+	// An omitted model can only resolve to Standard at the launch gate below.
+	if n.Agent == "muse" && a.museTierOf(n.Model) == museTierDiscounted && !body.MuseContributorAcknowledged {
+		http.Error(w, "acknowledge Muse Contributor data retention and training before starting", http.StatusBadRequest)
 		return
 	}
 	// Snapshot current session names before the critical section (tmux is

@@ -309,7 +309,7 @@ func Run() {
 	a.installClaudeModelProbe()
 	a.ensureClaudeModels()
 	a.museCatalog = probeMuseCatalog
-	a.museClassify = classifyMuseStandard
+	a.museClassify = classifyMuseTier
 	// Same shape as the claude probe above, and for the same reason: the muse
 	// catalog costs a `muse serve` spawn, so it is learned in the background
 	// and read from cache by GET /api/agents. Warming it here means the first

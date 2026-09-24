@@ -7,6 +7,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/scimux/scimux/internal/acp/muse"
 	"github.com/scimux/scimux/internal/asset"
 	"github.com/scimux/scimux/internal/sessionlog"
 )
@@ -1354,5 +1356,61 @@ func TestHandleNewNodeMuseCreatesAndForks(t *testing.T) {
 	}
 	if child.Agent != "muse" || child.Transport != "muse" || child.Parent != created.ID {
 		t.Fatalf("fork = %+v", child)
+	}
+}
+
+func TestMuseContributorCreateRequiresRequestAcknowledgment(t *testing.T) {
+	for _, tc := range []struct {
+		name, model, ack string
+		want             int
+	}{
+		{"missing", "muse-spark-1.3-contributor", "", 400},
+		{"false", "muse-spark-1.3-contributor", `,"muse_contributor_acknowledged":false`, 400},
+		{"wrong type", "muse-spark-1.3-contributor", `,"muse_contributor_acknowledged":"true"`, 400},
+		{"accepted", "muse-spark-1.3-contributor", `,"muse_contributor_acknowledged":true`, 200},
+		{"standard", "muse-spark-1.3", "", 200},
+		{"unknown cannot be authorized", "future-model", `,"muse_contributor_acknowledged":true`, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t, &fakeTmux{})
+			installMuseTestAuthority(t, a)
+			a.museClassify = classifyMuseTier
+			a.museCatalog = func(context.Context) ([]muse.Model, error) {
+				return []muse.Model{{ID: tc.model}}, nil
+			}
+			proc := &countingProc{launchSID: "synthetic-contributor"}
+			a.testProc = proc
+			rec := newNode(a, `{"title":"Synthetic chat","prompt":"hello","agent":"muse","model":`+strconv.Quote(tc.model)+`,"dir":`+strconv.Quote(a.home)+tc.ack+`}`)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.want, rec.Body)
+			}
+			if tc.want != 200 {
+				if proc.launches != 0 || proc.sendCalls != 0 || len(a.byID) != 0 {
+					t.Fatal("rejected request launched, sent a prompt, or published a node")
+				}
+				return
+			}
+			if proc.launches != 1 || proc.sendCalls != 1 {
+				t.Fatalf("launch/send = %d/%d", proc.launches, proc.sendCalls)
+			}
+			if strings.Contains(rec.Body.String(), "muse_contributor_acknowledged") {
+				t.Fatal("request acknowledgment leaked into node response")
+			}
+			if tc.model == "muse-spark-1.3-contributor" {
+				var parent Node
+				if err := json.Unmarshal(rec.Body.Bytes(), &parent); err != nil {
+					t.Fatal(err)
+				}
+				fork := `{"title":"Synthetic fork","prompt":"fresh","parent":` + strconv.Quote(parent.ID) + `}`
+				denied := newNode(a, fork)
+				if denied.Code != 400 || proc.launches != 1 || proc.sendCalls != 1 {
+					t.Fatalf("fork reused acknowledgment: %d %s", denied.Code, denied.Body)
+				}
+				accepted := newNode(a, strings.TrimSuffix(fork, "}")+`,"muse_contributor_acknowledged":true}`)
+				if accepted.Code != 200 || proc.launches != 2 {
+					t.Fatalf("acknowledged fork: %d %s", accepted.Code, accepted.Body)
+				}
+			}
+		})
 	}
 }
