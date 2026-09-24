@@ -99,6 +99,34 @@ func TestReferenceMediaCaptureValidationAndExactAddress(t *testing.T) {
 	}
 }
 
+func TestReferenceMediaCaptureProjectsImageAtOwningTurn(t *testing.T) {
+	a, uid := referenceFixture(t)
+	w := &sessionlog.Writer{Path: a.sessionLogPath("capture-node")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "![plot](/managed/generated.png)"}))
+	must(t, w.Append(sessionlog.NewAsset(sessionlog.AssetEvent{
+		ID: "a_generated", Name: "generated.png", Mime: "image/png", Size: int64(len(referencePNG)),
+		Storage: "inline", Bytes: base64.StdEncoding.EncodeToString(referencePNG),
+		SourceKind: "agent_path", SourcePath: "/managed/generated.png",
+	})))
+	rec := postReferenceCapture(t, a, `{"source":{"uid":"`+uid+`","segment":0,"record":3}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capture = %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Text  string               `json:"text"`
+		Media referencemedia.Media `json:"media"`
+	}
+	must(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	if !strings.Contains(out.Text, "scimux-asset:a_generated") || len(out.Media.Items) != 1 || out.Media.Items[0].State != "ready" {
+		t.Fatalf("owning turn image was lost: %#v", out)
+	}
+	data, mime, err := a.referenceMedia.ReadAsset(out.Media.CaptureID, "0")
+	must(t, err)
+	if mime != "image/png" || !bytes.Equal(data, referencePNG) {
+		t.Fatal("captured image differs from the owning turn's asset")
+	}
+}
+
 func TestReferenceMediaCaptureDetectsSourceRaceAndStoreFailure(t *testing.T) {
 	a, uid := referenceFixture(t)
 	a.referenceCaptureItemsHook = func(string, string, string) ([]referencemedia.CaptureItem, error) {

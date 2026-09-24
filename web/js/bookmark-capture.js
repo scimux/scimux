@@ -8,12 +8,14 @@ function clone(value){
 }
 
 function exactAddress(turn){
-  if (!turn || typeof turn.uid !== "string" || !turn.uid ||
-      !Object.prototype.hasOwnProperty.call(turn, "segment") ||
-      !Object.prototype.hasOwnProperty.call(turn, "record") ||
-      !Number.isInteger(turn.segment) || turn.segment < 0 ||
-      !Number.isInteger(turn.record) || turn.record < 0) return null;
-  return { uid: turn.uid, segment: turn.segment, record: turn.record };
+  if (!turn || typeof turn.uid !== "string" || !turn.uid) return null;
+  // Chat Turn JSON omits zero ordinals. The capture POST requires explicit
+  // numbers, so restore those zeros without accepting malformed values.
+  const segment = turn.segment === undefined ? 0 : turn.segment;
+  const record = turn.record === undefined ? 0 : turn.record;
+  if (!Number.isInteger(segment) || segment < 0 ||
+      !Number.isInteger(record) || record < 0) return null;
+  return { uid: turn.uid, segment, record };
 }
 
 export function createBookmarkCapture({ api }){

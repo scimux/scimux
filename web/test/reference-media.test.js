@@ -101,6 +101,20 @@ test("legacy lookup is exact, coalesced, bounded, and read-only", async () => {
   resolver.destroy();
 });
 
+test("legacy preview accepts wire-omitted zeros but still checks the exact address", async () => {
+  for (const ordinal of [0, 3]) {
+    const resolver = createLegacyMediaResolver({api:async () => ({
+      uid:"synthetic", node:"live", anchor:0,
+      turns:[{uid:"synthetic", ...(ordinal ? {record:ordinal} : {})}], assets:{},
+    })});
+    const record = {uid:"synthetic",segment:0,record:ordinal};
+    resolver.view(record);
+    await resolver.settled();
+    assert.equal(resolver.view(record).state, "ready");
+    resolver.destroy();
+  }
+});
+
 test("legacy lookup rejects missing addresses and preview fallback mismatches", async () => {
   const resolver = createLegacyMediaResolver({ api: async () => ({
     uid:"u", node:"reused", anchor:0, turns:[{uid:"u",segment:0,record:9}], assets:{a_1:{name:"wrong.png"}},

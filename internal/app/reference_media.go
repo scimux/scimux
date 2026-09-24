@@ -52,6 +52,9 @@ func (a *app) handleReferenceMediaCapture(w http.ResponseWriter, r *http.Request
 	// first-turn fallback. The path itself was selected by the requested UID.
 	turn.UID, turn.Segment, turn.Record = request.Source.UID, *request.Source.Segment, *request.Source.Record
 	if nodeID != "" {
+		// Projection resolves image bindings at the owning record. The window
+		// reader leaves addresses unset; pass the stamped turn, not its old copy.
+		window[0] = turn
 		projected, _ := a.projectTurns(nodeID, window)
 		turn = projected[0]
 	}

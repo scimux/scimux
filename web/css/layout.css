@@ -34,9 +34,10 @@
 #statusbar .sys.offline #sysoffline { display: inline; }
 #statusbar .sysphase b { color: var(--ink); font-weight: 500; display: inline-block; }
 #statusbar .ubadge { display: inline-flex; align-items: center; gap: 5px; }
-#statusbar .ubadge .agent-logo { width: 13px; height: 13px; opacity: .8; }
+#statusbar .ubadge .usage-agent-label {
+  flex: none; font: inherit; font-weight: 600; color: var(--ink);
+}
 #statusbar .ubadge .fuel { vertical-align: -2px; margin-right: 3px; }
-#statusbar .ubadge .agent-logo .mask-logo { width: 13px; height: 13px; }
 #statusbar .ubadge b.u-warn { color: #FF9500; }
 #statusbar .ubadge b.u-crit { color: #FF3B30; }
 #statusbar .ubadge.u-off { opacity: .55; }

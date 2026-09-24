@@ -175,10 +175,13 @@ export function fuelGauge(rem){
     `stroke-opacity=".2" stroke-width="2.4" stroke-linecap="round"/>${fill}</svg>`;
 }
 export function usageBadge(agent, v, deps = {}){
-  const agentLogo = typeof deps.agentLogo === "function" ? deps.agentLogo : () => "";
   const now = deps.now instanceof Date ? deps.now : new Date();
   const locales = deps.locales;
-  const logo = `<span class="agent-logo" aria-hidden="true">${agentLogo(agent)}</span>`;
+  // Render the neutral badge as text here: shrinking its SVG to status-bar
+  // dimensions also shrinks the lettering far below a readable font size.
+  const labels = { claude:"Cld", codex:"Cdx", openai:"Cdx", grok:"Grk", pi:"Pi", opencode:"OC", muse:"Mus", cursor:"Cur", dsh:"Dsh" };
+  const label = labels[String(agent || "").toLowerCase()] || "?";
+  const logo = `<span class="usage-agent-label" aria-hidden="true">${label}:</span>`;
   const layout = usageBadgeLayout(agent, v);
   if (!layout.available){
     /* Only the switched-off badge is a control. The rest describe a state the

@@ -15,8 +15,7 @@ const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
 
 const NOW = new Date(2026, 7, 14, 12, 0, 0); /* Fri Aug 14 2026, local */
 const LOCALE = "en-GB";
-const logo = (agent) => `LOGO:${agent}`;
-const deps = { agentLogo: logo, now: NOW, locales: LOCALE };
+const deps = { now: NOW, locales: LOCALE };
 
 test("available usage without provider windows renders an honest unavailable value", () => {
   const html = usageBadge("codex", { available: true }, deps);
@@ -107,12 +106,12 @@ test("usageResetLabel: same day, other day, empty, unparseable", () => {
   assert.equal(usageResetLabel("not-a-date", NOW, LOCALE), "");
 });
 
-test("usageBadge unavailable: u-off, both -- cells, injected logo", () => {
+test("usageBadge unavailable: u-off, both -- cells, readable text badge", () => {
   const html = usageBadge("claude", { available: false }, deps);
   assert.match(html, /class="ubadge u-off"/);
   assert.match(html, /class="Lfull">--</);
   assert.match(html, /class="Labbr">--</);
-  assert.match(html, /LOGO:claude/);
+  assert.match(html, /class="usage-agent-label" aria-hidden="true">Cld:<\/span>/);
   assert.match(html, /role="img"/);
   assert.match(html, /title="Claude: usage unavailable"/);
   assert.match(html, /aria-label="Claude: usage unavailable"/);
@@ -134,7 +133,7 @@ test("usageBadge two-window Claude and weekly-only Grok", () => {
   assert.match(claude, /class="Lfull"/);
   assert.match(claude, /class="Labbr"/);
   assert.match(claude, /class="uwindow"/);
-  assert.match(claude, /LOGO:claude/);
+  assert.match(claude, /class="usage-agent-label" aria-hidden="true">Cld:<\/span>/);
   assert.equal((claude.match(/class="fuel"/g) || []).length, 4,
     "5h and W each appear in Lfull and Labbr");
   assert.match(claude, /17:42/);
@@ -148,7 +147,7 @@ test("usageBadge two-window Claude and weekly-only Grok", () => {
   assert.doesNotMatch(grok, /5h/);
   assert.match(grok, /W <b class="">86%<\/b>/);
   assert.equal((grok.match(/class="fuel"/g) || []).length, 2, "weekly-only: W in Lfull and Labbr");
-  assert.match(grok, /LOGO:grok/);
+  assert.match(grok, /class="usage-agent-label" aria-hidden="true">Grk:<\/span>/);
   assert.match(grok, /SuperGrok Lite/);
   assert.doesNotMatch(grok, /class="ubadge u-off"/);
 });

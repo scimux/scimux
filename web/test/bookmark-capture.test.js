@@ -8,6 +8,27 @@ const turn = {
   text: "![chart](scimux-asset:a_1)", prov: { source: ["synthetic"] },
 };
 
+test("chat wire addresses restore omitted zero ordinals for capture", async () => {
+  for (const address of [{ uid:"synthetic", record:3 }, { uid:"synthetic", segment:2 }, { uid:"synthetic" }]) {
+    let sent;
+    const capture = createBookmarkCapture({ api:async (path, options) => {
+      assert.equal(path, "/api/reference-media");
+      sent = JSON.parse(options.body).source;
+      return {text:turn.text};
+    } });
+    await capture.capture({text:turn.text}, address);
+    assert.deepEqual(sent, {uid:"synthetic",segment:address.segment ?? 0,record:address.record ?? 0});
+  }
+});
+
+test("capture rejects malformed ordinals instead of replacing them with zero", () => {
+  const capture = createBookmarkCapture({api:async () => assert.fail("must not request capture")});
+  for (const value of [null, "0", -1, 0.5, NaN]) {
+    assert.throws(() => capture.capture({text:turn.text}, {...turn, segment:value}), /no durable source/);
+    assert.throws(() => capture.capture({text:turn.text}, {...turn, record:value}), /no durable source/);
+  }
+});
+
 test("capture waits for durable publication and coalesces a pending duplicate", async () => {
   let resolve;
   let calls = 0;

@@ -78,8 +78,11 @@ export function createLegacyMediaResolver({ api, onUpdate = () => {}, maxEntries
     const promise = Promise.resolve(api(path, controller ? { signal:controller.signal } : undefined)).then(data => {
       if (ownGeneration !== generation || cache.get(key) !== entry) return;
       const turn = data && Array.isArray(data.turns) ? data.turns[data.anchor] : null;
+      // Preview uses the same Turn JSON as chat: zero ordinals are omitted.
+      const segment = turn?.segment === undefined ? 0 : turn.segment;
+      const record = turn?.record === undefined ? 0 : turn.record;
       const exact = data?.uid === address.uid && turn?.uid === address.uid &&
-        turn?.segment === address.segment && turn?.record === address.record && typeof data.node === "string" && data.node;
+        segment === address.segment && record === address.record && typeof data.node === "string" && data.node;
       cache.set(key, exact ? { state:"ready", node:data.node, assets:data.assets || {} } : { state:"unavailable" });
     }, () => {
       if (ownGeneration === generation && cache.get(key) === entry) cache.set(key, { state:"unavailable" });
