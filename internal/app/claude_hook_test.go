@@ -206,16 +206,22 @@ func TestCreateReturnsAcknowledgedForCRTranscript(t *testing.T) {
 		for time.Now().Before(deadline) {
 			a.mu.Lock()
 			if len(a.nodes) > 0 {
-				n = a.nodes[0]
+				candidate := a.nodes[0]
+				// Node publication precedes hook registration. The synthetic
+				// event bypasses the inbox, so wait until its binding exists.
+				if candidate.SessionID != "" && a.claudeHookIDLocked(candidate.ID) != "" {
+					snapshot := *candidate
+					n = &snapshot
+				}
 			}
 			a.mu.Unlock()
-			if n != nil && n.SessionID != "" {
+			if n != nil {
 				break
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if n == nil || n.SessionID == "" {
-			appendErr = errors.New("create never published a Claude node with a session id")
+		if n == nil {
+			appendErr = errors.New("create never published a Claude node with a registered hook")
 			return
 		}
 		path := writeClaudeTranscript(t, a.home, n.SessionID)

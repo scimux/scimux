@@ -23,6 +23,14 @@ Keep `TMPDIR` short (prefer `/tmp`) when running the suite. Integration tests
 create Unix-domain sockets below temporary directories, and long sandbox paths
 can exceed the platform socket-path limit and produce unrelated failures.
 
+- CI containers use `--init` so orphaned process-group test descendants are
+  reaped. Fake long-lived Go helpers sleep on a timer rather than deadlocking
+  in `select {}`; SIGTERM-resistant children signal readiness before testing
+  escalation. Forced filesystem failures must also work when CI runs as root.
+- The offline namespace has loopback plus a local dummy interface at
+  `192.0.2.2/32`: Pion excludes loopback ICE candidates by default. The dummy
+  has no external connection or default route; the job still verifies that
+  off-host traffic is unreachable before running tests.
 - **No `${{ }}` inside a workflow `run:` block.** An expression is substituted
   into the script as *text* before any shell parses it, so a ref name of
   `v0$(id)` is a command the runner executes — and quoting in the YAML cannot

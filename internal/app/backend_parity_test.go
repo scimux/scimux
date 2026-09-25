@@ -147,12 +147,34 @@ func parityRequest(t *testing.T, base, method, path, body string) parityResponse
 }
 
 func canonicalParityBody(method, path string, body []byte) []byte {
-	if method != http.MethodPost || path != "/api/notes" {
+	state := method == http.MethodGet && path == "/api/state"
+	if !state && (method != http.MethodPost || path != "/api/notes") {
 		return body
 	}
 	var value any
 	if json.Unmarshal(body, &value) != nil {
 		return body
+	}
+	if state {
+		// These are sequential requests against a live machine: disk space
+		// and system load can change between them. Preserve field presence,
+		// types, storage policy, and all other response values in the comparison.
+		if obj, ok := value.(map[string]any); ok {
+			for section, keys := range map[string][]string{
+				"storage": {"free_bytes"},
+				"sys":     {"load1", "mem_pct", "swap_pct"},
+			} {
+				if fields, ok := obj[section].(map[string]any); ok {
+					for _, key := range keys {
+						if _, ok := fields[key].(float64); ok {
+							fields[key] = 0
+						}
+					}
+				}
+			}
+		}
+		b, _ := json.Marshal(value)
+		return b
 	}
 	var scrub func(any)
 	scrub = func(v any) {
@@ -177,4 +199,29 @@ func canonicalParityBody(method, path string, body []byte) []byte {
 		return body
 	}
 	return b
+}
+
+func TestCanonicalParityStatePreservesContracts(t *testing.T) {
+	base := `{"storage":{"free_bytes":100,"used_bytes":0,"writable":true},"sys":{"load1":1,"ncpu":4}}`
+	want := canonicalParityBody(http.MethodGet, "/api/state", []byte(base))
+	for _, tc := range []struct {
+		name, old, replacement string
+		equal                  bool
+	}{
+		{"free space changes", `"free_bytes":100`, `"free_bytes":90`, true},
+		{"load changes", `"load1":1`, `"load1":2`, true},
+		{"missing free space", `"free_bytes":100,`, ``, false},
+		{"wrong free space type", `"free_bytes":100`, `"free_bytes":"100"`, false},
+		{"usage changes", `"used_bytes":0`, `"used_bytes":1`, false},
+		{"writability changes", `"writable":true`, `"writable":false`, false},
+		{"CPU count changes", `"ncpu":4`, `"ncpu":2`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(base, tc.old, tc.replacement, 1)
+			got := canonicalParityBody(http.MethodGet, "/api/state", []byte(body))
+			if bytes.Equal(got, want) != tc.equal {
+				t.Fatalf("equal = %v, want %v: %s", bytes.Equal(got, want), tc.equal, got)
+			}
+		})
+	}
 }

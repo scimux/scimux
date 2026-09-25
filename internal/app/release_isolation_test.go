@@ -56,6 +56,9 @@ func TestWorkflowJobsUsePinnedContainersAndCleanWorkspaces(t *testing.T) {
 			if !image.MatchString(body) {
 				t.Fatal("job must run in the reviewed Go toolchain container pinned by digest")
 			}
+			if !regexp.MustCompile(`(?m)^\s*options:.*(?:^|\s)--init(?:\s|$)`).MatchString(body) {
+				t.Fatal("container must reap orphaned process-group test descendants with --init")
+			}
 			clean := strings.Index(body, "- name: Clean dedicated workspace")
 			if clean < 0 {
 				t.Fatal("persistent self-hosted workspace is not cleaned before use")
