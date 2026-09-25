@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +14,61 @@ var allWorkflows = []string{
 	".github/workflows/build.yml",
 	".github/workflows/offline.yml",
 	".github/workflows/release.yml",
+}
+
+// Actions installation tokens can contain JWT segments. Check the actual
+// shell guards, including the release publisher's curl-header path, without
+// using credentials or contacting GitHub. Reject unsafe transport characters,
+// not an assumed vendor token prefix, length, or historical format.
+func TestWorkflowTokenGuardsAcceptBearerFormats(t *testing.T) {
+	cases := []struct {
+		name, token string
+		accept      bool
+	}{
+		{"opaque", "synthetic_opaque_token", true},
+		{"JWT segments", "synthetic_app_header.payload-with_dash.signature", true},
+		{"long", "synthetic_" + strings.Repeat("a", 600) + ".payload.signature", true},
+		{"bearer alphabet", "synthetic.AZaz09_~+/-==", true},
+		{"empty", "", false},
+		{"space", "synthetic token", false},
+		{"newline", "synthetic\npassword=injected", false},
+		{"carriage return", "synthetic\rinjected", false},
+		{"quote", "synthetic\"header", false},
+		{"backslash", "synthetic\\header", false},
+		{"shell syntax", "synthetic$(exit 42)", false},
+	}
+	guards := 0
+	for _, rel := range allWorkflows {
+		src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), rel)))
+		for _, block := range workflowRunBlocks(src) {
+			start := strings.Index(block, `case "$GITHUB_CLONE_TOKEN" in`)
+			if start < 0 {
+				continue
+			}
+			end := strings.Index(block[start:], "esac")
+			if end < 0 {
+				t.Fatalf("%s has an unterminated token guard", rel)
+			}
+			guard := block[start : start+end+len("esac")]
+			guards++
+			for _, tc := range cases {
+				t.Run(rel+"/"+tc.name, func(t *testing.T) {
+					cmd := exec.Command("sh", "-eu", "-c", guard)
+					cmd.Env = append(os.Environ(), "GITHUB_CLONE_TOKEN="+tc.token)
+					out, err := cmd.CombinedOutput()
+					if (err == nil) != tc.accept {
+						t.Fatalf("accept=%v, error=%v, output=%s", tc.accept, err, out)
+					}
+					if tc.token != "" && strings.Contains(string(out), tc.token) {
+						t.Fatal("token guard disclosed the credential")
+					}
+				})
+			}
+		}
+	}
+	if guards != 4 {
+		t.Fatalf("checked %d token guards, want all four clone/download paths", guards)
+	}
 }
 
 // A `${{ ... }}` expression is substituted **textually** into the script
