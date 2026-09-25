@@ -62,8 +62,8 @@ func TestUserFacingAgentError(t *testing.T) {
 		{
 			name:  "claude reset copy",
 			agent: "claude",
-			raw:   "You've hit your session limit · resets 6pm (Europe/Berlin)",
-			want:  "You've hit your session limit · resets 6pm (Europe/Berlin).",
+			raw:   "You've hit your session limit · resets 6pm",
+			want:  "You've hit your session limit · resets 6pm.",
 		},
 		{name: "unknown preserved", agent: "pi", raw: "transport closed", want: "transport closed"},
 	}

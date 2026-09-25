@@ -40,8 +40,8 @@ const LAUNCH_BIN = Object.freeze({ pi: "pi-acp" });
  * agreement the user already signed, not summarise it. One tap, one vendor.
  *
  * Consumer terms are linked because a coding-harness subscription is the
- * common case; an API-key user is under the same vendor's commercial terms,
- * which the README lists. The menu is a pointer, the README is the reference.
+ * common case. API-key users should consult their provider's applicable
+ * commercial terms; the menu links do not cover every account agreement.
  *
  * pi and opencode are deliberately absent: they are BYO-provider routers
  * holding no model of their own, so the binding terms are whichever provider

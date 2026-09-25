@@ -1,28 +1,19 @@
 package app
 
-// The CI workflows and AGENTS.md claim two things that are not true:
+// These guards keep the build matrix and integration-test lane aligned with
+// the CI workflows and AGENTS.md. They prevent regressions that previously
+// broke Darwin builds through Linux-only syscalls and left tmux integration
+// tests unexecuted in CI.
 //
-//  1. build.yml and release.yml compile darwin/arm64 and darwin/amd64
-//     release binaries. Those targets do not compile: internal/remote
-//     uses Linux-only syscalls, and cmd/scimux → internal/app →
-//     internal/remote is an unconditional import.
+// The build and release workflows compile the supported targets. The build
+// workflow runs the full Go suite with tmux installed; the release and offline
+// workflows use -short.
+// Each guard asserts that its parser found the expected declarations, so an
+// empty or broken parse cannot silently report success.
 //
-//  2. AGENTS.md documents `go test ./...` as "unit + integration". The
-//     six real-tmux tests in internal/tmuxsession are skipped under
-//     -short AND skipped when tmux is absent. All three workflows run
-//     `go test -short ./...` and none installs tmux, so those tests
-//     execute in no CI job.
-//
-// This guard is the mechanical statement of both claims. It is written
-// to fail: a guard added alongside the fix it waits for is a guard
-// nobody ever saw fail. Vacuous truth is the hazard, so each test
-// asserts that its parse actually found something — a path bug that
-// scanned zero workflow files would otherwise report "every CI target
-// builds" forever.
-//
-// The workflow files are the single source of truth for the matrix. A
-// target added to CI is automatically a target this test defends; the
-// pairs are not hard-coded here.
+// The workflow files are the single source of truth for the matrix. A target
+// added to CI is automatically a target this test defends; the pairs are not
+// hard-coded here.
 
 import (
 	"bufio"

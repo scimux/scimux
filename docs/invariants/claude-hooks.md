@@ -352,19 +352,12 @@ a path that can be asked to read a token. Do not reintroduce it.
   sentinel and surfaces as `"off": true` on `/api/usage` because it is the
   only dark gauge a tap can fix: the browser must tell it from a failure
   without matching on English, the same reason `#m_pair` has `#m_pair_note`.
-- **The probe namespace is reserved, so a probe is never a stranger.** Every
-  probe session name starts with `probeSessionPrefix`
-  (`claudeUsageProbeSessionName`), and `isProbeSession` keeps it off the
-  adoption surface: out of `/api/state`'s `unadopted` list and refused by
-  `/api/adopt`. That list is subtractive — every session on scimux's socket
-  that no node accounts for — so a probe with no reserved name is
-  indistinguishable from one the user made by hand, and each reading flashed
-  an "unadopted tmux session" card that appeared and vanished by itself. A
-  prefix rather than a lifetime entry in `a.reserved` because it also holds
-  for a probe leaked by a killed scimux: adopting one would bind a node to a
-  pane launched with no tools, no user settings and scimux's own status line.
-  A new probe shape gets its name from the same generator or it reintroduces
-  the flash.
+- **Probes use a dedicated session namespace.** Every probe session name
+  starts with `probeSessionPrefix` (`claudeUsageProbeSessionName`). These
+  temporary panes are separate from supervised chats and launch without tools
+  or user settings, using scimux's own status line. Keep new probe shapes in
+  the same namespace. scimux does not discover or offer external sessions for
+  adoption; only scimux-created chats participate in supervision and recovery.
 - **A probe is justified by an open Claude session, nothing else.** The
   refresh policy in `usage.go` is the whole schedule — prompt-driven, at most
   one reading per `usageMinInterval`, never a wall clock. `hasLiveClaudeNode`

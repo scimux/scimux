@@ -102,7 +102,7 @@ whose triggers apply, including when changing their tests or instructions.
   `internal/app/router_characterization_test.go`,
   `internal/app/static_characterization_test.go`,
   `internal/app/web_js_static_test.go` and `internal/app/css_cascade_test.go`
-  are frozen at commit `300c7b0`. Adding assertions is fine; changing or
+  are frozen at commit `6632304`. Adding assertions is fine; changing or
   deleting one is a review stop because it changes pinned behavior. Preserve
   indeterminate progress animation under Reduce Motion; its deliberate
   pre-freeze correction is why the freeze names that commit.

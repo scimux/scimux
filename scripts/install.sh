@@ -23,15 +23,11 @@
 #   - no agent CLIs: scimux supervises claude/codex/pi/opencode/grok/cursor/
 #     dsh/muse; it does not install them and never touches their credentials
 #
-# On integrity, plainly: SHA256SUMS is published by the same release as
-# the binary, so comparing against it catches a truncated or corrupted
-# download -- not a compromised release, and not a compromised
-# scimux.ai. Release signing is the actual fix, it is on the v1.0.0
-# checklist, and it is not live yet: verify_signature() below is where
-# the key goes. Until it holds one, this script is exactly as
-# trustworthy as the domain you piped it from. If that is not good
-# enough -- and it is a reasonable thing to decide -- build from source
-# instead. It is one `go build`.
+# v1.0.0 uses HTTPS and SHA256SUMS from the same GitHub release.
+# Checksums detect truncated or corrupted downloads; authenticity depends on
+# the installer host and GitHub release infrastructure. Minisign signatures
+# are not part of v1.0.0. The optional verify_signature()
+# hook below remains available for a future signing rollout.
 
 set -eu
 
@@ -41,7 +37,7 @@ set -eu
 REPO_URL="${SCIMUX_REPO_URL:-https://github.com/scimux/scimux}"
 INSTALL_DIR="${SCIMUX_INSTALL_DIR:-$HOME/.local/bin}"
 
-# Empty until release signing goes live. See verify_signature().
+# Deliberately empty for launch; minisign is deferred. See verify_signature().
 MINISIGN_PUBKEY=""
 
 die() { echo "scimux install: $*" >&2; exit 1; }
@@ -95,9 +91,8 @@ else
 fi
 command -v curl >/dev/null 2>&1 || die "need curl"
 
-# Release signing is not live yet. When it is, put the public key in
-# MINISIGN_PUBKEY above and this becomes the real gate. Until then it says
-# so once, rather than printing a reassuring line it has not earned.
+# Launch intentionally uses HTTPS + SHA256SUMS without minisign. A future
+# signing rollout can set MINISIGN_PUBKEY and publish SHA256SUMS.minisig.
 verify_signature() {
 	if [ -z "$MINISIGN_PUBKEY" ]; then
 		echo "  note: release signatures are not live yet; integrity here is HTTPS + SHA256SUMS"

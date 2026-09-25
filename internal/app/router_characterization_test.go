@@ -51,26 +51,26 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodGet, "/api/preview", "/api/preview", "handlePreview", "preview.go"},                                                                                                 // retained
 		{http.MethodPost, "/api/reference-media", "/api/reference-media", "handleReferenceMediaCapture", "reference_media.go"},
 		{http.MethodGet, "/api/reference-media/{captureID}/assets/{itemID}", "/api/reference-media/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/assets/0", "handleReferenceMediaAsset", "reference_media.go"},
-		{http.MethodGet, "/api/agents", "/api/agents", "handleAgents", "agents.go"},                                                                                                     // retained
-		{http.MethodGet, "/api/ui", "/api/ui", "handleUIGet", "ui_state_api.go"},                                                                                                        // extracted
-		{http.MethodPut, "/api/ui", "/api/ui", "handleUIPut", "ui_state_api.go"},                                                                                                        // extracted
-		{http.MethodGet, "/api/settings", "/api/settings", "handleSettingsGet", "settings.go"},                                                                                          // added: computer-owned settings
-		{http.MethodPut, "/api/settings", "/api/settings", "handleSettingsPut", "settings.go"},                                                                                          // added: computer-owned settings
-		{http.MethodGet, "/api/update/check", "/api/update/check", "handleUpdateCheck", "update.go"},                                                                                    // retained
-		{http.MethodPost, "/api/update", "/api/update", "handleUpdateApply", "update.go"},                                                                                               // retained
-		{http.MethodGet, "/api/licenses", "/api/licenses", "handleLicenses", "update.go"},                                                                                               // retained
-		{http.MethodGet, "/api/harnesses", "/api/harnesses", "handleHarnesses", "harness_version.go"},                                                                                   // harness inventory
-		{http.MethodGet, "/api/harnesses/latest", "/api/harnesses/latest", "handleHarnessLatest", "harness_version.go"},                                                                 // harness upstream check
-		{http.MethodPost, "/api/remote/pairing", "/api/remote/pairing", "handleRemotePairingMint", "remote_pairing.go"},                                                                 // S7b
-		{http.MethodGet, "/api/remote/pairing/{code}", "/api/remote/pairing/04106105", "handleRemotePairingState", "remote_pairing.go"},                                                 // S7b
-		{http.MethodPost, "/api/remote/pairing/{code}/confirm", "/api/remote/pairing/04106105/confirm", "handleRemotePairingConfirm", "remote_pairing.go"},                              // S7b
-		{http.MethodPost, "/api/remote/pairing/{code}/cancel", "/api/remote/pairing/04106105/cancel", "handleRemotePairingCancel", "remote_pairing.go"},                                 // S7b
-		{http.MethodGet, "/api/remote/devices", "/api/remote/devices", "handleRemoteDeviceList", "remote_pairing.go"},                                                                   // S7b
-		{http.MethodPatch, "/api/remote/devices/{id}", "/api/remote/devices/phone", "handleRemoteDeviceRename", "remote_pairing.go"},                                                    // S9
-		{http.MethodDelete, "/api/remote/devices/{id}", "/api/remote/devices/phone", "handleRemoteDeviceRevoke", "remote_pairing.go"},                                                   // S7b
-		{http.MethodPost, "/api/remote/unenroll", "/api/remote/unenroll", "handleRemoteUnenroll", "remote_pairing.go"},                                                                  // F1
-		{http.MethodGet, "/api/remote/status", "/api/remote/status", "handleRemoteStatus", "remote_pairing.go"},                                                                         // S8
-		{http.MethodGet, "/api/remote/bootstrap", "/api/remote/bootstrap", "handleRemoteBootstrapManifest", "remote_manifest.go"},                                                       // S8
+		{http.MethodGet, "/api/agents", "/api/agents", "handleAgents", "agents.go"},                                                                        // retained
+		{http.MethodGet, "/api/ui", "/api/ui", "handleUIGet", "ui_state_api.go"},                                                                           // extracted
+		{http.MethodPut, "/api/ui", "/api/ui", "handleUIPut", "ui_state_api.go"},                                                                           // extracted
+		{http.MethodGet, "/api/settings", "/api/settings", "handleSettingsGet", "settings.go"},                                                             // added: computer-owned settings
+		{http.MethodPut, "/api/settings", "/api/settings", "handleSettingsPut", "settings.go"},                                                             // added: computer-owned settings
+		{http.MethodGet, "/api/update/check", "/api/update/check", "handleUpdateCheck", "update.go"},                                                       // retained
+		{http.MethodPost, "/api/update", "/api/update", "handleUpdateApply", "update.go"},                                                                  // retained
+		{http.MethodGet, "/api/licenses", "/api/licenses", "handleLicenses", "update.go"},                                                                  // retained
+		{http.MethodGet, "/api/harnesses", "/api/harnesses", "handleHarnesses", "harness_version.go"},                                                      // harness inventory
+		{http.MethodGet, "/api/harnesses/latest", "/api/harnesses/latest", "handleHarnessLatest", "harness_version.go"},                                    // harness upstream check
+		{http.MethodPost, "/api/remote/pairing", "/api/remote/pairing", "handleRemotePairingMint", "remote_pairing.go"},                                    // S7b
+		{http.MethodGet, "/api/remote/pairing/{code}", "/api/remote/pairing/04106105", "handleRemotePairingState", "remote_pairing.go"},                    // S7b
+		{http.MethodPost, "/api/remote/pairing/{code}/confirm", "/api/remote/pairing/04106105/confirm", "handleRemotePairingConfirm", "remote_pairing.go"}, // S7b
+		{http.MethodPost, "/api/remote/pairing/{code}/cancel", "/api/remote/pairing/04106105/cancel", "handleRemotePairingCancel", "remote_pairing.go"},    // S7b
+		{http.MethodGet, "/api/remote/devices", "/api/remote/devices", "handleRemoteDeviceList", "remote_pairing.go"},                                      // S7b
+		{http.MethodPatch, "/api/remote/devices/{id}", "/api/remote/devices/phone", "handleRemoteDeviceRename", "remote_pairing.go"},                       // S9
+		{http.MethodDelete, "/api/remote/devices/{id}", "/api/remote/devices/phone", "handleRemoteDeviceRevoke", "remote_pairing.go"},                      // S7b
+		{http.MethodPost, "/api/remote/unenroll", "/api/remote/unenroll", "handleRemoteUnenroll", "remote_pairing.go"},                                     // F1
+		{http.MethodGet, "/api/remote/status", "/api/remote/status", "handleRemoteStatus", "remote_pairing.go"},                                            // S8
+		{http.MethodGet, "/api/remote/bootstrap", "/api/remote/bootstrap", "handleRemoteBootstrapManifest", "remote_manifest.go"},                          // S8
 	}
 }
 
