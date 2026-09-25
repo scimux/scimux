@@ -21,7 +21,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, go-builder]
     container:
       image: golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
-      options: --cap-add=SYS_ADMIN --cap-add=NET_ADMIN
+      options: --init --cap-add=SYS_ADMIN --cap-add=NET_ADMIN
     steps:
       - name: Add missing tools
         run: |
@@ -88,6 +88,15 @@ jobs:
           $NS sh -c '
             set -eu
             ip link set lo up
+            # Pion excludes loopback candidates. This namespace-only dummy
+            # address lets real ICE peers connect without an external link.
+            ip link add offline0 type dummy
+            ip addr add 192.0.2.2/32 dev offline0
+            ip link set offline0 up
+            if [ -n "$(ip -4 route show default)$(ip -6 route show default)" ]; then
+              echo "FAIL: namespace has a default route" >&2
+              exit 1
+            fi
             if [ "$(id -u)" != "$OUTER_UID" ]; then
               echo "FAIL: uid changed inside the namespace" >&2
               exit 1

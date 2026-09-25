@@ -792,14 +792,14 @@ func TestResolveClaudePermissionFailsClosedWhenAuditFails(t *testing.T) {
 	dropRequest(t, bundle, req)
 
 	logPath := a.sessionLogPath(n.ID)
-	if err := os.Chmod(logPath, 0o400); err != nil {
-		t.Skipf("cannot make the session log read-only: %v", err)
+	// A directory at the log path refuses appends even when CI runs as root.
+	// chmod alone cannot force a write failure for a privileged caller.
+	if err := os.Rename(logPath, logPath+".before-failure"); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(logPath, 0o600) })
-	if err := os.Chmod(a.sessionsDir, 0o500); err != nil {
-		t.Skipf("cannot make the session store read-only: %v", err)
+	if err := os.Mkdir(logPath, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(a.sessionsDir, 0o700) })
 
 	if got := a.resolveClaudePermissionsFor(n); got != 0 {
 		t.Fatalf("answers written = %d, want 0 when the audit cannot be appended", got)

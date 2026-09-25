@@ -1,6 +1,7 @@
 package muse
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -44,7 +45,7 @@ func runTransportHelper() bool {
 		}
 		fmt.Printf("%d\n", c.Process.Pid)
 		_ = os.Stdout.Close()
-		select {}
+		time.Sleep(time.Hour)
 	case "ignore-term":
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
@@ -54,17 +55,12 @@ func runTransportHelper() bool {
 		}()
 		fmt.Printf("ready\n")
 		_ = os.Stdout.Close()
-		select {}
+		time.Sleep(time.Hour)
 	case "child-ignore-term":
-		c := exec.Command(os.Args[0])
-		c.Env = append(os.Environ(), "SCIMUX_MUSE_HELPER=ignore-term")
-		if err := c.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "start child: %v\n", err)
-			os.Exit(1)
-		}
+		c := startIgnoringChild()
 		fmt.Printf("%d\n", c.Process.Pid)
 		_ = os.Stdout.Close()
-		select {}
+		time.Sleep(time.Hour)
 	case "ignore-term-with-child":
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGTERM)
@@ -72,20 +68,39 @@ func runTransportHelper() bool {
 			for range ch {
 			}
 		}()
-		c := exec.Command(os.Args[0])
-		c.Env = append(os.Environ(), "SCIMUX_MUSE_HELPER=ignore-term")
-		if err := c.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "start child: %v\n", err)
-			os.Exit(1)
-		}
+		c := startIgnoringChild()
 		fmt.Printf("%d\n", c.Process.Pid)
 		_ = os.Stdout.Close()
-		select {}
+		time.Sleep(time.Hour)
 	default:
 		os.Exit(2)
 	}
 	os.Exit(0)
 	return true
+}
+
+// Publish the PID only after the descendant has installed its signal handler.
+// Otherwise a quick Close can kill it before the escalation case is armed.
+func startIgnoringChild() *exec.Cmd {
+	c := exec.Command(os.Args[0])
+	c.Env = append(os.Environ(), "SCIMUX_MUSE_HELPER=ignore-term")
+	out, err := c.StdoutPipe()
+	if err == nil {
+		err = c.Start()
+	}
+	if err == nil {
+		var ready string
+		ready, err = bufio.NewReader(out).ReadString('\n')
+		if err == nil && ready != "ready\n" {
+			err = fmt.Errorf("unexpected readiness message %q", ready)
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start ignoring child: %v\n", err)
+		os.Exit(1)
+	}
+	_ = out.Close()
+	return c
 }
 
 func TestSpawnHelperInvokesTestBinaryNeverMuse(t *testing.T) {
@@ -615,7 +630,8 @@ func pidAlive(pid int) bool {
 func installHelper(kind string) func() {
 	orig := commandFn
 	commandFn = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, os.Args[0])
+		// Match production: transport cancellation must stop the whole group.
+		cmd := exec.Command(os.Args[0])
 		cmd.Env = append(os.Environ(), "SCIMUX_MUSE_HELPER="+kind)
 		return cmd
 	}
