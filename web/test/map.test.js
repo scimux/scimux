@@ -329,7 +329,7 @@ test("stationRowHTML earlier stop vs head markup contracts", () => {
   assert.match(earlier, /data-skey="a#0"/);
   assert.match(earlier, /data-stop="2026-01-01T00:00:00Z"/);
   assert.match(earlier, /earlier stop/);
-  assert.doesNotMatch(earlier, /agent-logo/);
+  assert.match(earlier, /agent-logo/);
 
   const headStop = { n, i: 1, time: "2026-01-02T00:00:00Z", head: true };
   const head = stationRowHTML(n, { color: id => `C${id}`, name: id => `N${id}` }, {
@@ -350,6 +350,48 @@ test("stationRowHTML earlier stop vs head markup contracts", () => {
   assert.match(head, /m\/high · <span class="st st-quiet">Quiet<\/span>/);
   // V2-P4: no always-on fare text row on station cards
   assert.doesNotMatch(head, /class="fare"/);
+});
+
+test("stationRowHTML keeps the supplied logo when a head becomes an earlier stop", () => {
+  const created = "2026-01-01T00:00:00Z";
+  const cleared = "2026-01-02T00:00:00Z";
+  const n = {
+    id: "synthetic-node", title: "Current title", description: "Current description",
+    agent: "synthetic-vendor", model: "model", effort: "", live: "quiet",
+    created_at: created, stops: [],
+    station_labels: {
+      [created]: { title: "Frozen title", desc: "Frozen description" },
+    },
+  };
+  const lm = { color: () => "#123", name: () => "Synthetic lane" };
+  const logo = `<svg data-logo="recognizable-synthetic-logo"></svg>`;
+  const render = stop => stationRowHTML(n, lm, {
+    stop, agentLogo: logo, fork: true, forkCue: `<span class="forkcue">fork</span>`,
+    golane: true, others: ["other-lane"], stamp: t => `STAMP(${t})`,
+  });
+
+  const initial = render(stopsOf(n)[0]);
+  assert.match(initial, /class="agent-logo"/);
+  assert.match(initial, /data-logo="recognizable-synthetic-logo"/);
+
+  n.stops.push(cleared);
+  const [previousStop, currentStop] = stopsOf(n);
+  const previous = render(previousStop);
+  const current = render(currentStop);
+
+  assert.match(previous, /class="agent-logo"/);
+  assert.match(previous, /data-logo="recognizable-synthetic-logo"/);
+  assert.match(current, /class="agent-logo"/);
+  assert.match(current, /data-logo="recognizable-synthetic-logo"/);
+  assert.match(previous, /data-stop="2026-01-01T00:00:00Z"/);
+  assert.match(previous, /data-skey="synthetic-node#0"/);
+  assert.match(previous, /STAMP\(2026-01-01T00:00:00Z\) &middot; earlier stop/);
+  assert.match(previous, /Frozen title/);
+  assert.match(previous, /Frozen description/);
+  assert.doesNotMatch(previous, /\bcurrent\b/);
+  assert.doesNotMatch(previous, /class="st st-/);
+  assert.doesNotMatch(previous, /forkcue/);
+  assert.doesNotMatch(previous, /data-golane/);
 });
 
 test("attentionStationSVG and ATTN_GLOW_DEF geometry classes", () => {

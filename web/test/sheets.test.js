@@ -1517,6 +1517,135 @@ test("fork create payload includes parent and rationale", async () => {
   assert.equal(body.model, "opus");
 });
 
+test("bubble fork clears the previous editor appearance before opening", () => {
+  const nodes = {
+    "node-a": {
+      id: "node-a", title: "Edit target", description: "Keep this metadata",
+      agent: "claude", model: "opus", effort: "high", dir: "/synthetic/a",
+      lane_id: "lane-a", created_at: "2026-01-01T00:00:00Z", stops: [],
+    },
+    "node-b": {
+      id: "node-b", title: "Fork parent", description: "Parent metadata",
+      agent: "claude", model: "opus", effort: "high", dir: "/synthetic/b",
+      lane_id: "lane-a", created_at: "2026-01-02T00:00:00Z", stops: [],
+    },
+  };
+  const ctx = createFeature({ nodes });
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("node-a");
+  ctx.feature.closeSheets();
+  ctx.feature.forkFromTurn("Bubble evidence", "node-b");
+
+  assert.equal(ctx.byId.newchat.classList.contains("open"), true);
+  assert.equal(ctx.byId.newchat.classList.contains("editing"), false);
+  assert.equal(ctx.byId.nc_head.textContent, "New activity");
+  assert.equal(ctx.byId.nc_start.innerHTML, `<span class="ctalabel">Start</span>`);
+});
+
+test("bubble fork after closing an activity editor opens creation chrome and POSTs to the explicit parent", async () => {
+  const nodes = {
+    "node-a": {
+      id: "node-a", title: "Edit target", description: "Keep this metadata",
+      agent: "claude", model: "opus", effort: "high", dir: "/synthetic/a",
+      lane_id: "lane-a", created_at: "2026-01-01T00:00:00Z", stops: [],
+    },
+    "node-b": {
+      id: "node-b", title: "Fork parent", description: "Parent metadata",
+      agent: "claude", model: "opus", effort: "high", dir: "/synthetic/b",
+      lane_id: "lane-a", created_at: "2026-01-02T00:00:00Z", stops: [],
+    },
+  };
+  const ctx = createFeature({ nodes, sel: "node-a" });
+  const beforeA = structuredClone(nodes["node-a"]);
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("node-a");
+  ctx.feature.closeSheets();
+  ctx.feature.forkFromTurn("Bubble evidence\nsecond line", "node-b");
+
+  const appearance = {
+    open: ctx.byId.newchat.classList.contains("open"),
+    editing: ctx.byId.newchat.classList.contains("editing"),
+    heading: ctx.byId.nc_head.textContent,
+    button: ctx.byId.nc_start.innerHTML,
+    title: ctx.byId.nc_title.value,
+    prompt: ctx.byId.nc_prompt.value,
+  };
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+
+  const creates = ctx.apiCalls.filter(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  const patches = ctx.apiCalls.filter(c => c.opts && c.opts.method === "PATCH");
+  assert.equal(patches.length, 0, "the previously edited activity must not be patched");
+  assert.equal(creates.length, 1, "bubble fork must take the creation request path");
+  const body = JSON.parse(creates[0].opts.body);
+  assert.equal(body.parent, "node-b");
+  assert.equal(body.rationale, "follow-up on: Bubble evidence");
+  assert.equal(body.title, "Bubble evidence");
+  assert.equal(body.prompt, "Following up on:\n> Bubble evidence\n> second line");
+  assert.deepEqual(nodes["node-a"], beforeA);
+  assert.equal(appearance.open, true);
+  assert.equal(appearance.editing, false);
+  assert.equal(appearance.heading, "New activity");
+  assert.equal(appearance.button, `<span class="ctalabel">Start</span>`);
+  assert.equal(appearance.title, "Bubble evidence");
+  assert.equal(appearance.prompt, "Following up on:\n> Bubble evidence\n> second line\n\n");
+});
+
+test("bubble fork after closing an earlier-station editor POSTs to the selected parent", async () => {
+  const stopTime = "2026-02-01T00:00:00Z";
+  const nodes = {
+    "node-a": {
+      id: "node-a", title: "Edit target", description: "Current metadata",
+      agent: "claude", model: "opus", effort: "high", dir: "/synthetic/a",
+      lane_id: "lane-a", created_at: stopTime,
+      stops: ["2026-02-02T00:00:00Z"],
+      station_labels: { [stopTime]: { title: "Earlier label", desc: "Keep this label" } },
+    },
+    "node-b": {
+      id: "node-b", title: "Selected parent", description: "Parent metadata",
+      agent: "claude", model: "opus", effort: "high", dir: "/synthetic/b",
+      lane_id: "lane-a", created_at: "2026-02-03T00:00:00Z", stops: [],
+    },
+  };
+  const ctx = createFeature({ nodes, sel: "node-b" });
+  const beforeA = structuredClone(nodes["node-a"]);
+  ctx.feature.bind();
+  ctx.feature.openActivityEditor("node-a", stopTime);
+  ctx.feature.closeSheets();
+  ctx.feature.forkFromTurn("Selected bubble");
+
+  const appearance = {
+    open: ctx.byId.newchat.classList.contains("open"),
+    editing: ctx.byId.newchat.classList.contains("editing"),
+    heading: ctx.byId.nc_head.textContent,
+    button: ctx.byId.nc_start.innerHTML,
+    title: ctx.byId.nc_title.value,
+    prompt: ctx.byId.nc_prompt.value,
+  };
+  ctx.byId.nc_lane.value = "lane-a";
+  ctx.byId.nc_start.dispatch("click");
+  await settle();
+
+  const creates = ctx.apiCalls.filter(c => c.path === "/api/nodes" && c.opts.method === "POST");
+  const patches = ctx.apiCalls.filter(c => c.opts && c.opts.method === "PATCH");
+  assert.equal(creates.length, 1, "selected-parent bubble fork must create a node");
+  assert.equal(patches.length, 0, "the previously edited station must not be patched");
+  const body = JSON.parse(creates[0].opts.body);
+  assert.equal(body.parent, "node-b");
+  assert.equal(body.rationale, "follow-up on: Selected bubble");
+  assert.equal(body.title, "Selected bubble");
+  assert.equal(body.prompt, "Following up on:\n> Selected bubble");
+  assert.deepEqual(nodes["node-a"], beforeA);
+  assert.equal(nodes["node-a"].station_labels[stopTime].title, "Earlier label");
+  assert.equal(appearance.open, true);
+  assert.equal(appearance.editing, false);
+  assert.equal(appearance.heading, "New activity");
+  assert.equal(appearance.button, `<span class="ctalabel">Start</span>`);
+  assert.equal(appearance.title, "Selected bubble");
+  assert.equal(appearance.prompt, "Following up on:\n> Selected bubble\n\n");
+});
+
 test("missing inherited agent/model remain selectable on seed", () => {
   const ctx = createFeature({
     nodes: {

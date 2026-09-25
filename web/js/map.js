@@ -1062,7 +1062,7 @@ export function stationRowHTML(n, lm, opts = {}){
   if (stop && !stop.head)
     return `
         <div class="strow stoprow ${alt ? "alt " : ""}${dim ? "dimmed" : ""}${current ? " current" : ""}" style="padding-left:${padLeft}px" data-nid="${escape(n.id)}" data-skey="${escape(stopKey(stop))}" data-stop="${escape(stop.time)}">
-          <div class="lbl${label.desc ? " hasdesc" : ""}"><span class="t">${escape(label.title)}</span></div>
+          <div class="lbl${label.desc ? " hasdesc" : ""}"><span class="agent-logo" title="${escape(n.agent || "agent")}">${opts.agentLogo || ""}</span><span class="t">${escape(label.title)}</span></div>
           <div class="cap">${escape(stamp(stop.time))} &middot; earlier stop</div>
           ${label.desc ? `<div class="desc">${escape(label.desc)}</div>` : ""}
         </div>`;

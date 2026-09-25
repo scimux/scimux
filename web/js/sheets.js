@@ -791,11 +791,13 @@ export function createSheetsFeature(deps = {}){
 
   function forkFromTurn(text, parent){
     ncForwardSources = [];
+    ncEdit = ""; ncEditStop = "";
     const sel = typeof d.sel === "function" ? d.sel() : "";
     ncParent = parent || sel;
     ncMuseInherit = !!(nodeById(ncParent) && nodeById(ncParent).agent === "muse");
     ncRationale = forkRationaleFromTurn(text);
     setNewActivitySubmitting(false);
+    resetCreateChrome();
     seedForkTitle(text);
     const prompt = root("nc_prompt");
     if (prompt) prompt.value = forkPromptFromTurn(text);
