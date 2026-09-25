@@ -46,6 +46,10 @@ jobs:
           case "$GITHUB_CLONE_TOKEN" in
             ''|*[!0-9A-Za-z._~+/=-]*) echo "GITHUB_CLONE_TOKEN is empty or contains unsafe transport characters" >&2; exit 1 ;;
           esac
+          # The runner mounts this workspace with a different container owner.
+          # Trust only the exact path validated by the cleanup step, including
+          # for later checkout, tag verification, and build-version commands.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
             -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "%s\n" "username=x-access-token" "password=$GITHUB_CLONE_TOKEN"; fi; }; f' \
             clone https://github.com/scimux/scimux.git .
