@@ -9,11 +9,13 @@ import (
 )
 
 // Every checked-in CI pipeline. build.yml and offline.yml only clone and
-// test; release.yml also publishes to GitHub with a token.
+// test; release-worker.yml also publishes to GitHub with a token.
 var allWorkflows = []string{
 	".github/workflows/build.yml",
 	".github/workflows/offline.yml",
+	".github/workflows/release-worker.yml",
 	".github/workflows/release.yml",
+	".github/workflows/pr.yml",
 }
 
 // Actions installation tokens can contain JWT segments. Check the actual
@@ -125,7 +127,7 @@ func TestWorkflowSecretsAreScopedToTheStepThatSpendsThem(t *testing.T) {
 // stamps it into every binary, so it bounds what a tag may be before it
 // builds or publishes anything.
 func TestTheReleaseTagIsBoundedBeforeItIsBuiltOrPublished(t *testing.T) {
-	rel := ".github/workflows/release.yml"
+	rel := ".github/workflows/release-worker.yml"
 	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), rel)))
 
 	guard := strings.Index(src, `case "$REF_NAME" in`)

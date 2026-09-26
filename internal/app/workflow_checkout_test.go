@@ -12,7 +12,12 @@ import (
 // ownership-test switch models a host-owned workspace mounted in a container;
 // the isolated global config must trust that workspace without trusting others.
 func TestWorkflowCheckoutTrustsOnlyItsWorkspace(t *testing.T) {
-	for _, rel := range allWorkflows {
+	// The hosted PR job uses actions/checkout; the release caller has no steps.
+	for _, rel := range []string{
+		".github/workflows/build.yml",
+		".github/workflows/offline.yml",
+		".github/workflows/release-worker.yml",
+	} {
 		t.Run(rel, func(t *testing.T) {
 			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), rel)))
 			var script string
@@ -48,7 +53,7 @@ func TestWorkflowCheckoutTrustsOnlyItsWorkspace(t *testing.T) {
 				}
 				return strings.TrimSpace(string(out))
 			}
-			git(seed, "init", "--quiet")
+			git(seed, "init", "--quiet", "-b", "main")
 			git(seed, "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
 				"-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", "Synthetic checkout fixture")
 			sha := git(seed, "rev-parse", "HEAD")
