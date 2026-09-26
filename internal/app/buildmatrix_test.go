@@ -37,7 +37,7 @@ var goosGoarchRe = regexp.MustCompile(`GOOS=([A-Za-z0-9_]+)\s+GOARCH=([A-Za-z0-9
 // offline job is deliberately not in this list: it never cross-builds.
 var crossBuildWorkflows = []string{
 	filepath.Join(".github", "workflows", "build.yml"),
-	filepath.Join(".github", "workflows", "release.yml"),
+	filepath.Join(".github", "workflows", "release-worker.yml"),
 }
 
 type crossBuildTarget struct {
@@ -118,7 +118,7 @@ func parseWorkflowBuildTargets(t *testing.T, root string) []crossBuildTarget {
 		}
 	}
 	if len(out) == 0 {
-		t.Fatal("parsed no unique GOOS/GOARCH pairs from build.yml and release.yml; the matrix is empty and every build would pass vacuously")
+		t.Fatal("parsed no unique GOOS/GOARCH pairs from build.yml and release-worker.yml; the matrix is empty and every build would pass vacuously")
 	}
 	return out
 }

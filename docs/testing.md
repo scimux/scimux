@@ -37,12 +37,12 @@ can exceed the platform socket-path limit and produce unrelated failures.
   help, because the quotes are inside the text being substituted. Values reach
   the shell through `env:`, where a substitution can only become a variable's
   value, and a secret is declared on the one step that spends it rather than
-  at workflow level where `go test` inherits it. `release.yml` also bounds the
+  at workflow level where `go test` inherits it. `release-worker.yml` also bounds the
   tag, in a step that runs before anything is built or published: a positive
   `case` arm is not enough on its own, because a shell glob's `*` matches
-  shell syntax too. `internal/app/workflow_injection_test.go` pins all three.
+  shell syntax too. `internal/app/workflow_injection_test.go` covers every workflow.
 - The release matrix is not written down twice: `TestCrossBuildTargets` parses
-  the `GOOS=… GOARCH=…` pairs out of `.github/workflows/{build,release}.yml`,
+  the `GOOS=… GOARCH=…` pairs out of `.github/workflows/{build,release-worker}.yml`,
   so a target added to a workflow is defended from that moment. freebsd/amd64
   is built but deliberately not released — it keeps the static-build invariant
   honest.
@@ -96,3 +96,40 @@ can exceed the platform socket-path limit and produce unrelated failures.
   `internal/app/testdata/codex-session-sample.jsonl`, and the fare fixtures in
   `internal/sessionlog/testdata/fare/`. Keep them that way; never paste real
   transcript or wire content into them.
+
+## Public repository CI and release setup
+
+`pr.yml` tests the PR merge commit on a fresh GitHub-hosted Ubuntu runner,
+using the same Go toolchain version as main CI. It runs the full Go suite
+(including private-socket tmux integration and cross-builds) and Node tests.
+The checkout action is pinned, does not persist credentials, and receives only
+read access. PRs use `pull_request`, never `pull_request_target`; no repository
+secrets are passed. Outside-contributor approvals remain controlled by GitHub.
+After a successful PR run, require **PR tests** in the main branch ruleset.
+Do not require the push-only build/offline jobs as PR checks.
+
+`release.yml` remains triggered by a published release. It calls
+`scimux/scimux/.github/workflows/release-worker.yml@main` explicitly, so the
+self-hosted jobs are defined by protected main rather than by the tag. The
+worker accepts only this repository's published-release tag events, validates
+the tag/commit binding, and requires the commit to be an ancestor of main
+before executing source code. Its build and publisher retain separate tokens
+and the verified artifact handoff. No manual approval is introduced.
+
+After merging these files to main and before publishing the next release,
+replace this entry in the organization's **scimux-runners** selected workflows:
+
+```text
+scimux/scimux/.github/workflows/release.yml@refs/heads/main
+```
+
+with:
+
+```text
+scimux/scimux/.github/workflows/release-worker.yml@refs/heads/main
+```
+
+Keep the build/offline and other repositories' entries. Do not add PR workflows
+to this self-hosted group. Release the new main commit (or a later descendant):
+old tags still contain the old caller workflow. Keep immutable releases disabled
+until a separate change uploads and verifies assets in a draft before publishing.

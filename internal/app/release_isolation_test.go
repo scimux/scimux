@@ -17,7 +17,7 @@ func TestWorkflowTestJobsInstallReleaseUploadTools(t *testing.T) {
 	for _, lane := range []struct{ file, job string }{
 		{"build.yml", "build-and-test:"},
 		{"offline.yml", "offline-tests:"},
-		{"release.yml", "build-and-test:"},
+		{"release-worker.yml", "build-and-test:"},
 	} {
 		t.Run(lane.file, func(t *testing.T) {
 			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", lane.file)))
@@ -45,8 +45,8 @@ func TestWorkflowJobsUsePinnedContainersAndCleanWorkspaces(t *testing.T) {
 	lanes := []struct{ file, job string }{
 		{"build.yml", "build-and-test:"},
 		{"offline.yml", "offline-tests:"},
-		{"release.yml", "build-and-test:"},
-		{"release.yml", "publish:"},
+		{"release-worker.yml", "build-and-test:"},
+		{"release-worker.yml", "publish:"},
 	}
 	image := regexp.MustCompile(`(?m)^\s*image: golang:1\.26\.8-alpine@sha256:[0-9a-f]{64}$`)
 	for _, lane := range lanes {
@@ -154,7 +154,7 @@ func writeLines(t *testing.T, dir string, lines []string) {
 
 func releaseVerifyScript(t *testing.T) string {
 	t.Helper()
-	src := mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml"))
+	src := mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release-worker.yml"))
 	marker := "      - name: Verify closed inventory and exact digests"
 	start := strings.Index(src, marker)
 	if start < 0 {
@@ -177,7 +177,7 @@ func releaseVerifyScript(t *testing.T) string {
 }
 
 func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release-worker.yml")))
 	build := workflowJobBlock(t, src, "build-and-test:")
 	publish := workflowJobBlock(t, src, "publish:")
 
@@ -211,12 +211,12 @@ func TestReleaseUsesFreshCredentialedPublishJob(t *testing.T) {
 }
 
 func TestReleaseBindsSafeTagToExactCommit(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release-worker.yml")))
 	build := workflowJobBlock(t, src, "build-and-test:")
 	for _, required := range []string{
 		`grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'`,
 		`refs/tags/$REF_NAME`,
-		`git rev-parse "$REF_NAME^{commit}"`,
+		`git rev-parse "refs/tags/$REF_NAME^{commit}"`,
 		`"$TAG_COMMIT" = "$COMMIT_SHA"`,
 	} {
 		if !strings.Contains(build, required) {
@@ -229,7 +229,7 @@ func TestReleaseBindsSafeTagToExactCommit(t *testing.T) {
 }
 
 func TestReleaseArtifactInventoryIsClosed(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows/release-worker.yml")))
 	publish := workflowJobBlock(t, src, "publish:")
 	for _, name := range []string{
 		"SHA256SUMS",
@@ -270,7 +270,7 @@ func workflowJobBlock(t *testing.T, src, key string) string {
 // Artifact actions are JavaScript programs. Each fresh Alpine job must install
 // their runtime itself; packages installed in the build job do not reach publish.
 func TestReleaseInstallsNodeBeforeArtifactActions(t *testing.T) {
-	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", "release.yml")))
+	src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", "release-worker.yml")))
 	for _, lane := range []struct{ job, action string }{
 		{"build-and-test:", "upload-artifact@"},
 		{"publish:", "download-artifact@"},
