@@ -31,6 +31,21 @@ func TestUnknownToolTitleIsNotAutoApproved(t *testing.T) {
 	}
 }
 
+func TestMissingPermissionTitleFailsClosedForExistingACPHarnesses(t *testing.T) {
+	for _, agent := range []string{"pi", "opencode", "grok", "cursor", "dsh", "vibe"} {
+		t.Run(agent, func(t *testing.T) {
+			a, n, proc := armApprovalForAgent(t, agent+"-untitled", agent)
+			pending := allowPending("incarn:2")
+			pending.Title = "Unknown tool"
+			proc.pending = pending
+			a.maybeAutoApprove(n, proc)
+			if proc.prepareCalls != 0 || proc.deliverCalls != 0 {
+				t.Fatalf("%s approved a permission without a title", agent)
+			}
+		})
+	}
+}
+
 func TestRealTitleWithEmptyKindStillAutoApproves(t *testing.T) {
 	a, n, proc := armVibeApproval(t, "vibe-titled")
 	pending := allowPending("incarn:2")
@@ -112,9 +127,13 @@ func TestChatAndManualAuditShowThePermissionTitle(t *testing.T) {
 }
 
 func armVibeApproval(t *testing.T, id string) (*app, *Node, *stubProc) {
+	return armApprovalForAgent(t, id, "vibe")
+}
+
+func armApprovalForAgent(t *testing.T, id, agent string) (*app, *Node, *stubProc) {
 	t.Helper()
 	a := newTestApp(t, &fakeTmux{})
-	n := seedStructuredNode(t, a, id, "vibe", "acp")
+	n := seedStructuredNode(t, a, id, agent, "acp")
 	proc := &stubProc{live: "active", hasSession: true, hasPending: true, clearOnDeliver: true}
 	a.mu.Lock()
 	a.autoApprove[n.ID] = &autoApproveState{

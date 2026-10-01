@@ -804,6 +804,19 @@ test("openSheet / closeSheets / backdrop / burger", () => {
   assert.ok(byId.backdrop.classList.contains("on"));
 });
 
+test("closing the menu clears its one-shot Vibe inspection choice", () => {
+  const box = { checked: false };
+  const { feature, byId } = createFeature({ deps: { onCloseSheets: () => { box.checked = false; } } });
+  feature.bind();
+  feature.openSheet("#menu");
+  box.checked = true;
+  byId.backdrop.dispatch("click");
+  assert.equal(box.checked, false);
+  byId.burger.dispatch("click");
+  assert.ok(byId.menu.classList.contains("open"));
+  assert.equal(box.checked, false);
+});
+
 /* ---------- agents probe / agent-model changes ---------- */
 test("agents probe success rebuilds catalogs; failure is silent", async () => {
   const ctx = createFeature({

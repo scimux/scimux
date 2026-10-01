@@ -26,15 +26,8 @@ func TestVibeCatalogProbeReadsModelsWithoutPrompting(t *testing.T) {
 				{"alpha", "Alpha"},
 				{"beta", "Beta"},
 			})
-			return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu}}
-		},
-		configReply: func(p sdk.SetSessionConfigOptionRequest) (sdk.SetSessionConfigOptionResponse, error) {
-			level := "lvl-low"
-			if p.ValueId != nil && string(p.ValueId.Value) == "beta" {
-				level = "lvl-max"
-			}
-			think := vibeSelect("thinking", "Thinking", "thinking", level, [][2]string{{level, "Only"}})
-			return sdk.SetSessionConfigOptionResponse{ConfigOptions: []sdk.SessionConfigOption{think}}, nil
+			think := vibeSelect("thinking", "Thinking", "thinking", "lvl-low", [][2]string{{"lvl-low", "Low"}, {"lvl-max", "Max"}})
+			return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu, think}}
 		},
 	}
 	var cp *countingProcess
@@ -52,16 +45,16 @@ func TestVibeCatalogProbeReadsModelsWithoutPrompting(t *testing.T) {
 	if got := cat.Models; len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
 		t.Fatalf("models = %v, want alpha then beta without the accidental current value", got)
 	}
-	if len(cat.Efforts["alpha"]) != 1 || cat.Efforts["alpha"][0] != "lvl-low" {
+	if len(cat.Efforts["alpha"]) != 2 || cat.Efforts["alpha"][0] != "lvl-low" {
 		t.Fatalf("alpha thinking = %v", cat.Efforts["alpha"])
 	}
-	if len(cat.Efforts["beta"]) != 1 || cat.Efforts["beta"][0] != "lvl-max" {
+	if len(cat.Efforts["beta"]) != 2 || cat.Efforts["beta"][1] != "lvl-max" {
 		t.Fatalf("beta thinking = %v", cat.Efforts["beta"])
 	}
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
-	if agent.prompts != 0 {
-		t.Fatalf("probe sent %d prompts", agent.prompts)
+	if agent.prompts != 0 || len(agent.configSets) != 0 {
+		t.Fatalf("probe sent %d prompts and %d setters", agent.prompts, len(agent.configSets))
 	}
 	if agent.closes != 1 {
 		t.Fatalf("close calls = %d, want 1", agent.closes)
@@ -74,6 +67,30 @@ func TestVibeCatalogProbeReadsModelsWithoutPrompting(t *testing.T) {
 	}
 	if cp == nil || atomic.LoadInt32(&cp.kills) != 1 || atomic.LoadInt32(&cp.waits) != 1 {
 		t.Fatalf("process reap kills/waits = %v", cp)
+	}
+}
+
+func TestVibeCatalogProbeNeverChangesSavedModel(t *testing.T) {
+	agent := &fakeAgent{newSession: func() sdk.NewSessionResponse {
+		return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{
+			vibeSelect("mdl", "Model", "model", "alpha", [][2]string{{"alpha", "Alpha"}, {"beta", "Beta"}}),
+			vibeSelect("thinking", "Thinking", "thinking", "low", [][2]string{{"low", "Low"}, {"high", "High"}}),
+		}}
+	}}
+	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
+		return fakeRunner(agent)("", "vibe", dir, "", "")
+	}, time.Second, 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.mu.Lock()
+	sets := len(agent.configSets)
+	agent.mu.Unlock()
+	if sets != 0 {
+		t.Fatalf("catalog inspection sent %d model setters", sets)
+	}
+	if len(cat.Models) != 2 || len(cat.Efforts["alpha"]) != 2 || len(cat.Efforts["beta"]) != 2 {
+		t.Fatalf("catalog = %+v, want advertised model and thinking menus", cat)
 	}
 }
 
@@ -118,22 +135,13 @@ func TestVibeCatalogProbeReapsOnTimeoutAndMalformedSession(t *testing.T) {
 	})
 }
 
-func TestVibeCatalogProbeStopsWhenAModelSwitchFails(t *testing.T) {
-	var sets atomic.Int32
+func TestVibeCatalogProbeDoesNotInventThinkingWithoutAnInitialMenu(t *testing.T) {
 	agent := &fakeAgent{
 		newSession: func() sdk.NewSessionResponse {
 			menu := vibeSelect("mdl", "Model", "model", "alpha", [][2]string{
 				{"alpha", "Alpha"}, {"beta", "Beta"}, {"gamma", "Gamma"},
 			})
 			return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu}}
-		},
-		configReply: func(p sdk.SetSessionConfigOptionRequest) (sdk.SetSessionConfigOptionResponse, error) {
-			n := sets.Add(1)
-			if n >= 2 {
-				return sdk.SetSessionConfigOptionResponse{}, errors.New("model switch refused")
-			}
-			think := vibeSelect("thinking", "Thinking", "thinking", "lvl-low", [][2]string{{"lvl-low", "Low"}})
-			return sdk.SetSessionConfigOptionResponse{ConfigOptions: []sdk.SessionConfigOption{think}}, nil
 		},
 	}
 	var cp *countingProcess
@@ -146,26 +154,25 @@ func TestVibeCatalogProbeStopsWhenAModelSwitchFails(t *testing.T) {
 	if len(cat.Models) != 3 {
 		t.Fatalf("models = %v, want every advertised id", cat.Models)
 	}
-	if len(cat.Efforts["alpha"]) != 1 || cat.Efforts["beta"] != nil || cat.Efforts["gamma"] != nil {
-		t.Fatalf("efforts = %+v, want only the snapshot taken before the failure", cat.Efforts)
+	if cat.Efforts != nil {
+		t.Fatalf("efforts = %+v, want none without an initial thinking menu", cat.Efforts)
+	}
+	agent.mu.Lock()
+	sets := len(agent.configSets)
+	agent.mu.Unlock()
+	if sets != 0 {
+		t.Fatalf("probe sent %d setters", sets)
 	}
 	if atomic.LoadInt32(&cp.kills) != 1 {
 		t.Fatal("partial probe left the process")
 	}
 }
 
-func TestVibeCatalogProbeStopsAtTheModelBound(t *testing.T) {
-	prev := vibeProbeModelLimit
-	vibeProbeModelLimit = 1
-	t.Cleanup(func() { vibeProbeModelLimit = prev })
+func TestVibeCatalogProbeKeepsEveryAdvertisedModel(t *testing.T) {
 	agent := &fakeAgent{
 		newSession: func() sdk.NewSessionResponse {
 			menu := vibeSelect("mdl", "Model", "model", "", [][2]string{{"alpha", "Alpha"}, {"beta", "Beta"}})
 			return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu}}
-		},
-		configReply: func(sdk.SetSessionConfigOptionRequest) (sdk.SetSessionConfigOptionResponse, error) {
-			think := vibeSelect("thinking", "Thinking", "thinking", "lvl-low", [][2]string{{"lvl-low", "Low"}})
-			return sdk.SetSessionConfigOptionResponse{ConfigOptions: []sdk.SessionConfigOption{think}}, nil
 		},
 	}
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
@@ -174,8 +181,8 @@ func TestVibeCatalogProbeStopsAtTheModelBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cat.Models) != 2 || cat.Efforts["beta"] != nil || len(cat.Efforts["alpha"]) != 1 {
-		t.Fatalf("catalog = %+v, want both models and only the first thinking snapshot", cat)
+	if len(cat.Models) != 2 || cat.Efforts != nil {
+		t.Fatalf("catalog = %+v, want both models and no invented thinking", cat)
 	}
 }
 
@@ -257,11 +264,8 @@ func TestVibeCatalogProbeKeepsTheCatalogWhenCloseFails(t *testing.T) {
 		closeErr: errors.New("already gone"),
 		newSession: func() sdk.NewSessionResponse {
 			menu := vibeSelect("mdl", "Model", "model", "", [][2]string{{"alpha", "Alpha"}})
-			return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu}}
-		},
-		configReply: func(sdk.SetSessionConfigOptionRequest) (sdk.SetSessionConfigOptionResponse, error) {
 			think := vibeSelect("thinking", "Thinking", "thinking", "lvl-low", [][2]string{{"lvl-low", "Low"}})
-			return sdk.SetSessionConfigOptionResponse{ConfigOptions: []sdk.SessionConfigOption{think}}, nil
+			return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu, think}}
 		},
 	}
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
@@ -317,10 +321,6 @@ func TestVibeCatalogProbeHonorsACancelledParentAndThePerCallBudget(t *testing.T)
 				menu := vibeSelect("mdl", "Model", "model", "", [][2]string{{"alpha", "Alpha"}, {"beta", "Beta"}})
 				return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu}}
 			},
-			configReply: func(sdk.SetSessionConfigOptionRequest) (sdk.SetSessionConfigOptionResponse, error) {
-				think := vibeSelect("thinking", "Thinking", "thinking", "lvl-low", [][2]string{{"lvl-low", "Low"}})
-				return sdk.SetSessionConfigOptionResponse{ConfigOptions: []sdk.SessionConfigOption{think}}, nil
-			},
 		}
 		cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 			return fakeRunner(agent)("", "vibe", dir, "", "")
@@ -328,8 +328,8 @@ func TestVibeCatalogProbeHonorsACancelledParentAndThePerCallBudget(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cat.Efforts["beta"] != nil || len(cat.Efforts["alpha"]) != 1 {
-			t.Fatalf("clock stop catalog = %+v", cat)
+		if len(cat.Models) != 2 || cat.Efforts != nil || checks.Load() != 2 {
+			t.Fatalf("read-only catalog = %+v after %d budget checks", cat, checks.Load())
 		}
 	})
 }

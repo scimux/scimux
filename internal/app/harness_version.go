@@ -388,27 +388,34 @@ func (a *app) harnessSourcesSnapshot() map[string]harnessSource {
 // opts in. Any other POST body that is present and not that boolean is
 // malformed and must not refresh. An empty body, a false boolean, and every
 // GET are ordinary checks.
-func vibeInspectChoice(r *http.Request) (inspect bool, malformed bool) {
+func vibeInspectChoice(r *http.Request) (inspect bool, status int) {
 	if r.Method != http.MethodPost {
-		return false, false
+		return false, 0
 	}
-	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	const maxBody = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
-		return false, true
+		return false, http.StatusBadRequest
+	}
+	if len(data) > maxBody {
+		return false, http.StatusRequestEntityTooLarge
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return false, false
+		return false, 0
 	}
-	var body struct {
-		InspectVibe *bool `json:"inspect_vibe"`
-	}
+	var body map[string]json.RawMessage
 	if err := json.Unmarshal(data, &body); err != nil {
-		return false, true
+		return false, http.StatusBadRequest
 	}
-	if body.InspectVibe == nil {
-		return false, false
+	raw, ok := body["inspect_vibe"]
+	if !ok || string(raw) == "null" {
+		return false, 0
 	}
-	return *body.InspectVibe, false
+	var choice bool
+	if err := json.Unmarshal(raw, &choice); err != nil {
+		return false, http.StatusBadRequest
+	}
+	return choice, 0
 }
 
 // handleHarnessLatest asks each upstream what it publishes and refreshes every
@@ -418,9 +425,9 @@ func vibeInspectChoice(r *http.Request) (inspect bool, malformed bool) {
 // vibe-acp, and neither does the version inventory. POST starts it only when
 // vibeInspectChoice accepts the body.
 func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
-	inspect, malformed := vibeInspectChoice(r)
-	if malformed {
-		http.Error(w, "invalid harness update", http.StatusBadRequest)
+	inspect, status := vibeInspectChoice(r)
+	if status != 0 {
+		http.Error(w, "invalid harness update", status)
 		return
 	}
 	type answer struct {
@@ -449,7 +456,7 @@ func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
 		}
 		agents = refreshAgents()
 		if inspect {
-			agents = inspectVibeCatalog(agents)
+			agents = inspectVibeCatalog()
 		}
 	}()
 	go func() {

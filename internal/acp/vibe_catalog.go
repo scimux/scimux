@@ -14,18 +14,12 @@ const (
 	vibeProbePerCall = 4 * time.Second
 )
 
-// vibeProbeModelLimit caps how many advertised models a disposable probe
-// selects while collecting thinking menus. Models past the cap stay in the
-// catalog with no invented levels.
-var vibeProbeModelLimit = 32
-
 // vibeProbeClock is the time source for the probe budget. Tests move it
 // forward to prove the loop stops without waiting on a wall clock.
 var vibeProbeClock = time.Now
 
-// VibeCatalog is the advertised model list and, for models the probe had
-// time to select, the thinking value ids that model returned. currentValue
-// is not a model and is not a scimux default.
+// VibeCatalog is the advertised model list and thinking value ids from the
+// initial session. currentValue is not a model and is not a scimux default.
 type VibeCatalog struct {
 	Models  []string
 	Efforts map[string][]string
@@ -40,7 +34,7 @@ func ProbeVibeCatalog(ctx context.Context, bin string) (VibeCatalog, error) {
 		return VibeCatalog{}, errors.New("vibe catalog: empty binary")
 	}
 	return probeVibeCatalog(ctx, func(dir string) (Process, error) {
-		return startGrouped([]string{bin}, dir, "")
+		return startGroupedEnv([]string{bin}, dir, "", vibeChildEnv(os.Environ()))
 	}, vibeProbeTotal, vibeProbePerCall)
 }
 
@@ -91,10 +85,10 @@ func probeVibeCatalog(ctx context.Context, start func(dir string) (Process, erro
 		return VibeCatalog{}, errors.New("vibe catalog: session/new returned no session")
 	}
 	defer func() {
-		// Closing is cleanup after the discovery budget. Give it a short,
-		// separate bound so a stalled close cannot hold startup indefinitely.
+		// Closing shares the discovery budget. Reaping the process remains
+		// authoritative if the agent has already consumed that budget.
 		closeBudget := min(perCall, 2*time.Second)
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), closeBudget)
+		closeCtx, closeCancel := context.WithTimeout(ctx, closeBudget)
 		_, _ = conn.CloseSession(closeCtx, sdk.CloseSessionRequest{SessionId: resp.SessionId})
 		closeCancel()
 	}()
@@ -108,31 +102,13 @@ func probeVibeCatalog(ctx context.Context, start func(dir string) (Process, erro
 	if len(cat.Models) == 0 {
 		return cat, nil
 	}
-	cat.Efforts = map[string][]string{}
-	for i, model := range cat.Models {
-		if i >= vibeProbeModelLimit || !probeHasRoom(ctx, perCall) {
-			break
-		}
-		callCtx, callCancel = context.WithTimeout(ctx, perCall)
-		switched, setErr := conn.SetSessionConfigOption(callCtx, sdk.SetSessionConfigOptionRequest{
-			ValueId: &sdk.SetSessionConfigOptionValueId{
-				ConfigId:  sel.Id,
-				SessionId: resp.SessionId,
-				Value:     sdk.SessionConfigValueId(model),
-			},
-		})
-		callCancel()
-		if setErr != nil {
-			break
-		}
-		if think := bestVibeThinking(switched.ConfigOptions); think != nil {
-			if levels := optionValueIDs(think); len(levels) > 0 {
-				cat.Efforts[model] = levels
+	if think := bestVibeThinking(resp.ConfigOptions); think != nil {
+		if levels := optionValueIDs(think); len(levels) > 0 {
+			cat.Efforts = make(map[string][]string, len(cat.Models))
+			for _, model := range cat.Models {
+				cat.Efforts[model] = append([]string(nil), levels...)
 			}
 		}
-	}
-	if len(cat.Efforts) == 0 {
-		cat.Efforts = nil
 	}
 	return cat, nil
 }

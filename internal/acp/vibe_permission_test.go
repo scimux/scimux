@@ -88,6 +88,25 @@ func TestSparsePermissionUsesLatestToolCall(t *testing.T) {
 	}
 }
 
+func TestSparsePermissionRefreshesAfterLateToolCall(t *testing.T) {
+	s := newPermSession(t, "vibe")
+	parked := parkSparse(t, s, "late", nil, nil, oneAllow())
+	defer parked.stop(t)
+	if parked.pending.Title != UnknownToolTitle {
+		t.Fatalf("initial title = %q", parked.pending.Title)
+	}
+	noteTool(t, s, "other", "read", sdk.ToolKindRead, "private")
+	before, ok := s.pendingInfo()
+	if !ok || before.Title != UnknownToolTitle {
+		t.Fatalf("unrelated update changed pending: %+v", before)
+	}
+	noteTool(t, s, "late", "bash", sdk.ToolKindExecute, "git status")
+	after, ok := s.pendingInfo()
+	if !ok || after.RequestID != parked.pending.RequestID || after.Title != "bash `git status`" || after.ToolKind != "execute" {
+		t.Fatalf("late tool update = %+v", after)
+	}
+}
+
 func TestPermissionToolRecallEdges(t *testing.T) {
 	t.Run("multiple ids and out of order", func(t *testing.T) {
 		s := newPermSession(t, "pi")

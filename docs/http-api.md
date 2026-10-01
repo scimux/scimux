@@ -95,12 +95,18 @@ the previous cumulative counters in that ACP session. Vibe's input counter
 includes cached prompt tokens and does not report a fresh/cache split, so
 that increase is `fare_unsplit_in` and is not counted as `fare_fresh_in` or
 `fare_cache_read`. `fare_total` for `vibe` is that unsplit input plus
-`fare_out`. `/clear` and a fork
+`fare_out`. A simultaneous drop in Vibe's cumulative token counters starts
+a new baseline, as can happen after plan acceptance. If an interrupted turn
+returns no token breakdown, its reported USD cost is retained on that turn;
+the next cumulative token report establishes a new baseline because it cannot
+separate the interrupted turn's tokens from the next turn's. `/clear` and a fork
 start a new session, so the next increase is measured from zero. `fare_cost`
 is paired with `fare_cost_complete`. For `vibe` that cost is the sum of
 positive USD increments Vibe reported for those turns: a Vibe-reported cost.
 When a counted turn has no trustworthy USD increment, `fare_cost_complete` is
-false and the cost is unknown. A missing occupancy update leaves `ctx_pct`
+false and the cost is unknown. Vibe's unsplit input does not drive the metro
+map's comparative heat width; its ticket labels the figure as reported tokens
+and says cached input may be included. A missing occupancy update leaves `ctx_pct`
 unset. The gauge reads occupancy only. `stops` are the
 node's `/clear` page-turn timestamps; the map prepends `created_at` to draw the
 full station chain. `ended_at` (RFC 3339, present only once set) marks a thread
@@ -427,19 +433,18 @@ ACP model or thinking setter; Vibe chooses its own default.
 request that runs the catalog probe. The field has to be the boolean `true`.
 A missing field, `false`, `null`, an empty body, and every GET — including a
 query string or a JSON body carrying the same name — stay ordinary refreshes
-and do not start `vibe-acp`. Malformed JSON, or `inspect_vibe` as a string,
-number, or array, is `400` before any refresh or probe. The probe is one
-cached disposable ACP session: `initialize`, `session/new`, a config
-selection per advertised model, and `session/close`. That probe never calls
+and do not start `vibe-acp`. The field name is case-sensitive. Malformed JSON,
+or `inspect_vibe` as a string, number, or array, is `400` before any refresh or
+probe; a body over 1 MiB is `413`. The probe is one temporary ACP session:
+`initialize`, `session/new`, and `session/close`. That probe never calls
 `session/prompt`, never approves a tool, and never grants filesystem or
 terminal access. Model ids are the advertised option values in the agent's
 order; an accidental `currentValue` is not added and is not a scimux default.
-Thinking levels are the value ids returned after selecting that model. The
-probe's total budget is 12 seconds, and each protocol call is limited to
-4 seconds. It stops when that bound is reached, leaving later
-models without invented levels. With installed Vibe 2.25, selecting models
-during inspection changes Vibe's saved default model and leaves the last
-inspected model selected. A failed, timed-out, or empty catalog keeps the
+The initial thinking menu's value ids are shown for each advertised model;
+an explicit selection is validated again against the live session at launch.
+The probe's protocol budget is 12 seconds after process startup, with each
+call limited to 4 seconds and close limited to 2 seconds within that budget.
+A failed, timed-out, or empty catalog keeps the
 empty `models` list: the chat still launches on Vibe's own default, and the
 response invents no model, thinking level, or success state. After a
 successful inspection, `GET /api/agents` returns that cached catalog until
@@ -1035,8 +1040,8 @@ upstream check failed. For every harness except Vibe, `installed` is the
 first version-shaped token of `<bin> --version`, empty when the output does
 not carry one. Vibe is detected through `PATH` only. Startup inventory, menu
 open, `GET /api/agents`, and an ordinary refresh do not execute `vibe-acp`,
-so its `installed` field stays empty and the menu shows that version as
-unknown. `present` and
+so its `installed` field stays empty and the menu says its version was not
+checked. `present` and
 `launchable` are separate facts: pi is installed as `pi` but launched through
 `pi-acp`. The probe is cached during ordinary menu use and replaced by the
 explicit harness-update check, so an installed or upgraded CLI appears without
@@ -1054,15 +1059,20 @@ inventory from `GET /api/harnesses`; and `agents` is the newly reprobed model
 catalog from `GET /api/agents`. For Vibe that ordinary reprobe is `PATH`
 presence: empty `models`, no `efforts`, an unknown installed version, and
 `vibe-acp` stays unstarted.
-`POST` on this same path is the one audited Handle registration beside the
-`HandleFunc` inventory. It accepts JSON `{"inspect_vibe": true}` as a one-shot
+The cache replacements are atomic, so launches after the response use the
+same catalog the browser displays.
+
+### `POST /api/harnesses/latest`
+
+This route accepts JSON `{"inspect_vibe": true}` as a one-shot
 request to run Vibe's bounded catalog probe and return the models and
 per-model thinking levels it found. The browser checkbox that sends the field
-resets after the action and is not stored consent. With installed Vibe 2.25
-the inspection changes Vibe's saved default model and leaves the last
-inspected model selected. A failed or empty inspection leaves the empty
-default offer. The cache replacements are atomic, so launches
-after the response use the same catalog the browser displays.
+is consumed when the action starts and is cleared when the menu closes; it is
+offered only when Vibe is installed and launchable. It is not stored consent.
+Inspection reads only the initial session menus and does not change Vibe's
+saved default. A failed or empty inspection leaves the empty default offer.
+The `inspect_vibe` field name is case-sensitive; malformed values return
+`400`, and a body over 1 MiB returns `413` before refresh or inspection.
 
 The full refresh is reached only on an explicit tap — the server never polls
 the registries or repeatedly reruns every CLI list command. Local probes, the

@@ -97,7 +97,7 @@ func TestVibeCatalogProbeDropsUnrelatedSecrets(t *testing.T) {
 	requireVibePerimeter(t, envMarkers(t, report))
 }
 
-func TestVibeLiveChildDropsUnrelatedSecrets(t *testing.T) {
+func TestVibeLiveChildInheritsUserCommandEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	report := filepath.Join(dir, "report")
 	writeEnvProbe(t, dir, "vibe-acp", report)
@@ -109,7 +109,12 @@ func TestVibeLiveChildDropsUnrelatedSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = proc.Wait()
-	requireVibePerimeter(t, envMarkers(t, report))
+	got := envMarkers(t, report)
+	for _, key := range []string{"SENTINEL", "VIBE_PREFIX", "MISTRAL_PREFIX", "HAS_VIBE_HOME", "HAS_MISTRAL_API_KEY", "HAS_SSL_CERT_FILE", "HAS_PATH", "HAS_LANG"} {
+		if !got[key] {
+			t.Fatalf("live Vibe child lost %s", key)
+		}
+	}
 }
 
 func TestVibeChildEnvKeepsOnlyTheFirstAllowedValue(t *testing.T) {
@@ -131,12 +136,6 @@ func TestVibeChildEnvKeepsOnlyTheFirstAllowedValue(t *testing.T) {
 	}
 	if vibeChildEnv(nil) == nil {
 		t.Fatal("an empty allowlist must still replace inheritance")
-	}
-	if vibeACPCommand(nil) || vibeACPCommand([]string{"pi-acp"}) {
-		t.Fatal("only vibe-acp uses the allowlist")
-	}
-	if !vibeACPCommand([]string{filepath.Join("/tmp", "vibe-acp")}) {
-		t.Fatal("an absolute vibe-acp path was not recognized")
 	}
 }
 

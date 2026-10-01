@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -106,17 +105,20 @@ func execRunner(nodeID, agent, dir, model, effort string) (Process, error) {
 // startGrouped spawns argv in its own process group with cwd dir. label is
 // the agent name used in the start error; an empty label leaves the start
 // error unwrapped (the catalog probe supplies its own context). Every harness
-// except vibe-acp inherits the process environment the same way exec.Command
-// does. Pipe setup failures are returned as-is, matching the historical runner.
+// inherits the process environment the same way exec.Command does. Pipe setup
+// failures are returned as-is, matching the historical runner.
 func startGrouped(argv []string, dir, label string) (Process, error) {
+	return startGroupedEnv(argv, dir, label, nil)
+}
+
+// startGroupedEnv supplies a reduced environment only for the disposable
+// catalog probe. Live sessions inherit the user's full command environment.
+func startGroupedEnv(argv []string, dir, label string, env []string) (Process, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if vibeACPCommand(argv) {
-		// A non-nil slice, even when empty, replaces inheritance.
-		cmd.Env = vibeChildEnv(os.Environ())
-	}
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -136,14 +138,7 @@ func startGrouped(argv []string, dir, label string) (Process, error) {
 	return &osProcess{cmd: cmd, stdin: stdin, stdout: stdout}, nil
 }
 
-// vibeACPCommand reports the user-installed Vibe ACP binary. The catalog
-// probe passes an absolute path and an empty label; a live session passes
-// the bare name. Both are the same executable.
-func vibeACPCommand(argv []string) bool {
-	return len(argv) > 0 && filepath.Base(argv[0]) == "vibe-acp"
-}
-
-// vibeEnvAllow is the exact environment a vibe-acp child may see. Installed
+// vibeEnvAllow is the exact environment a disposable probe may see. Installed
 // Vibe 2.25 reads these names for executable lookup, ~/.vibe and $VIBE_HOME,
 // the default Mistral API key, the OS keyring session, locale, proxies, and
 // extra certificate roots. Each name is listed on its own.

@@ -48,20 +48,39 @@ func vibeModelsFromACP(ctx context.Context, bin string) agentInfo {
 // only when that probe returns some. A missing binary, a timeout, an error,
 // or an empty menu leaves the PATH-only snapshot in place and invents no
 // model or thinking level.
-func inspectVibeCatalog(agents map[string]agentInfo) map[string]agentInfo {
+func inspectVibeCatalog() map[string]agentInfo {
+	agentsProbeMu.Lock()
+	defer agentsProbeMu.Unlock()
+	agentsCacheMu.RLock()
+	current := agentsCache
+	agentsCacheMu.RUnlock()
+	if _, installed := current["vibe"]; !installed {
+		return current
+	}
+	// Concurrent checks share a successful inspection of the same refresh.
+	if len(current["vibe"].Models) > 0 {
+		return current
+	}
 	bin, err := exec.LookPath("vibe-acp")
 	if err != nil {
-		return agents
+		return current
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	probed := vibeModelsFromACP(ctx, bin)
 	if len(probed.Models) == 0 {
-		return agents
+		return current
 	}
-	next := cloneAgentCatalog(agents)
+	next := cloneAgentCatalog(current)
 	next["vibe"] = probed
-	return storeAgentsSnapshot(next)
+	// An inspection is an overlay, not an ordinary refresh. Advancing the
+	// refresh generation here would make a refresh queued during the probe
+	// mistake this overlay for its own completed discovery and skip its pass.
+	agentsCacheMu.Lock()
+	agentsCache = next
+	agentsLoaded = true
+	agentsCacheMu.Unlock()
+	return next
 }
 
 // modelEffort is one model's reasoning-effort menu: the levels its CLI accepts

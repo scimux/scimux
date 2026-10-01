@@ -13,17 +13,16 @@ import { acceptHarnessMenuResult } from "../js/harness.js";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const indexSrc = readFileSync(join(dir, "../index.html"), "utf8");
-const appSrc = readFileSync(join(dir, "../js/app.js"), "utf8");
-const label = "Inspecting Vibe model and thinking choices changes Vibe's saved default model and leaves the last inspected model selected.";
+const label = "Inspect Vibe model and thinking choices in a temporary local session.";
 
 test("the harness update action starts with an unchecked one-shot Vibe inspection choice", () => {
   const at = indexSrc.indexOf('id="m_hcheck"');
   assert.ok(at > 0, "Check for harness updates is missing");
   const around = indexSrc.slice(Math.max(0, at - 700), at + 80);
   assert.match(around, /id="m_vibe_inspect"/);
-  assert.match(around, /Inspecting Vibe model and thinking choices changes Vibe's saved default model and leaves the last inspected model selected\./);
+  assert.match(around, /Inspect Vibe model and thinking choices in a temporary local session\./);
+  assert.match(around, /id="m_vibe_inspect_row" hidden/);
   assert.doesNotMatch(indexSrc, /id="m_vibe_inspect"[^>]*\bchecked\b/);
-  assert.match(appSrc, /runHarnessMenuCheck/);
 });
 
 test("a harness refresh publishes models only when the payload carries them", () => {
@@ -81,8 +80,50 @@ async function loadHarnessUpdate() {
   assert.equal(mod.VIBE_INSPECT_LABEL, label);
   assert.equal(typeof mod.harnessUpdateCall, "function");
   assert.equal(typeof mod.runHarnessMenuCheck, "function");
+  assert.equal(typeof mod.vibeInspectAvailable, "function");
   return mod;
 }
+
+test("Vibe inspection is offered only for a launchable installed Vibe", async () => {
+  const { vibeInspectAvailable, updateVibeInspectControl, clearVibeInspectChoice } = await loadHarnessUpdate();
+  assert.equal(vibeInspectAvailable(null), false);
+  assert.equal(vibeInspectAvailable([{ agent: "grok", present: true, launchable: true }]), false);
+  assert.equal(vibeInspectAvailable([{ agent: "vibe", present: false, launchable: false }]), false);
+  assert.equal(vibeInspectAvailable([{ agent: "vibe", present: true, launchable: true }]), true);
+  const row = { hidden: true }, box = { checked: true };
+  assert.equal(updateVibeInspectControl([{ agent: "vibe", present: true, launchable: true }], row, box), true);
+  assert.equal(row.hidden, false);
+  assert.equal(box.checked, true);
+  assert.equal(updateVibeInspectControl([{ agent: "vibe", present: false }], row, box), false);
+  assert.equal(row.hidden, true);
+  assert.equal(box.checked, false);
+  box.checked = true;
+  clearVibeInspectChoice(box);
+  assert.equal(box.checked, false);
+  clearVibeInspectChoice(null);
+  updateVibeInspectControl(null, null, null);
+});
+
+test("the check consumes and disables the Vibe choice before its request", async () => {
+  const { runHarnessMenuCheck } = await loadHarnessUpdate();
+  const box = { checked: true, disabled: false };
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  const running = runHarnessMenuCheck({
+    box,
+    api: async (path, opts) => { calls.push({ path, opts }); await gate; return {}; },
+    scimux: async () => ({}),
+  });
+  assert.equal(box.checked, false);
+  assert.equal(box.disabled, true);
+  box.checked = false;
+  await Promise.resolve();
+  assert.equal(calls[0].opts.method, "POST");
+  release();
+  await running;
+  assert.equal(box.disabled, false);
+});
 
 test("the checkbox sends the explicit signal only while it is checked, then resets", async () => {
   const { harnessUpdateCall, runHarnessMenuCheck } = await loadHarnessUpdate();

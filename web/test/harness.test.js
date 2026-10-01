@@ -988,6 +988,12 @@ test("a vibe row sorts after pi and carries no terms link", () => {
   assert.doesNotMatch(vibe, /Terms of Service|Terms of Use|Terms and privacy/i);
 });
 
+test("Vibe's unknown version says it was not checked", () => {
+  const s = harnessState({ agent: "vibe", present: true, launchable: true, installed: "" }, null);
+  assert.equal(s.state, "unknown");
+  assert.equal(s.note, "installed; version was not checked");
+});
+
 test("an installed dsh reads as unchecked with its prerelease version intact", () => {
   /* dsh ships prerelease semver; truncating it to 0.1.5 would compare a
      different version against upstream than the one on disk. */

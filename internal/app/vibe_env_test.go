@@ -11,7 +11,7 @@ import (
 	"github.com/scimux/scimux/internal/sessionworker"
 )
 
-func TestVibeWorkerChildDropsUnrelatedSecrets(t *testing.T) {
+func TestVibeWorkerChildPreservesUserCommandEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	report := filepath.Join(dir, "report")
 	bin := filepath.Join(dir, "bin")
@@ -100,12 +100,7 @@ func TestVibeWorkerChildDropsUnrelatedSecrets(t *testing.T) {
 		}
 		got[line] = true
 	}
-	for _, forbidden := range []string{"SENTINEL", "VIBE_PREFIX", "MISTRAL_PREFIX"} {
-		if got[forbidden] {
-			t.Fatalf("vibe process received %s", forbidden)
-		}
-	}
-	for _, required := range []string{"HAS_VIBE_HOME", "HAS_MISTRAL_API_KEY", "HAS_SSL_CERT_FILE", "HAS_PATH", "HAS_LANG"} {
+	for _, required := range []string{"SENTINEL", "VIBE_PREFIX", "MISTRAL_PREFIX", "HAS_VIBE_HOME", "HAS_MISTRAL_API_KEY", "HAS_SSL_CERT_FILE", "HAS_PATH", "HAS_LANG"} {
 		if !got[required] {
 			t.Fatalf("vibe process missing %s", required)
 		}

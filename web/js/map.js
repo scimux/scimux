@@ -605,6 +605,7 @@ export function heatSegmentsFingerprint(n){
    stop indices → fare_segments[min(i)]; otherwise absent. */
 export function gapTokenCost(a, b){
   if (!a || !b || !a.n || !b.n || a.n.id !== b.n.id) return null;
+  if (a.n.agent === "vibe") return null;
   if (Math.abs(a.i - b.i) !== 1) return null;
   const i = Math.min(a.i, b.i);
   const segs = a.n.fare_segments;
@@ -808,7 +809,7 @@ export function wallCapsuleSpots(pts, x){
     const a = pts[k], b = pts[k + 1];
     const ref = gapSegmentRef(a.stop, b.stop);
     if (!ref || segmentNewTokens(ref.seg) == null) continue;
-    out.push({ x, y: (a.y + b.y) / 2, ...ref });
+    out.push({ x, y: (a.y + b.y) / 2, agent: a.stop.n.agent, ...ref });
   }
   return out;
 }
@@ -831,7 +832,7 @@ export function fareCapsuleHTML(seg, opts = {}){
     data-fare-node="${escape(opts.nodeId || "")}"
     data-fare-seg="${escape(String(opts.segIdx ?? ""))}"
     style="left:${px}px;top:${py}px"
-    aria-label="fare ${escape(label)} new tokens — open ticket">
+    aria-label="fare ${escape(label)} ${opts.agent === "vibe" ? "reported tokens" : "new tokens"} — open ticket">
     <span class="fare-capsule-val">${escape(label)}</span>
   </button>`;
 }
@@ -1003,9 +1004,9 @@ export function fareTicketHTML(ctx, opts = {}){
     .filter(Boolean).join(" · ");
   const rows = ticketTokenRows(seg);
   const fareNote = vibe
-    ? "input and reply · fresh/cache split unknown"
+    ? "reported input and reply · cached input may be included"
     : "fresh input + reply · cache excluded";
-  const tokenUnit = vibe ? "tokens" : "new tokens";
+  const tokenUnit = vibe ? "reported tokens" : "new tokens";
   const split = ticketSplitParts(seg);
   const jsplit = journeySplitParts(ctx.segments);
   const clock = [from.time, to.time].filter(Boolean).join(" → ");
@@ -1798,7 +1799,7 @@ export function createMapFeature(deps){
         if (n) spots.push(...wallCapsuleSpots(branchStops[id], nodeX(n)));
       });
       capsuleHTML = spots.map(sp => fareCapsuleHTML(sp.seg, {
-        x: sp.x, y: sp.y, nodeId: sp.nodeId, segIdx: sp.segIdx, escape,
+        x: sp.x, y: sp.y, nodeId: sp.nodeId, segIdx: sp.segIdx, agent: sp.agent, escape,
       })).join("");
     }
 

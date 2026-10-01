@@ -49,7 +49,8 @@ func collectFareHits(evs []Event) (agent string, hits []usageHit, openReasons []
 			openReasons = append(openReasons, reason)
 			segIdx = len(openReasons) - 1
 		case "usage":
-			if ev.Usage == nil || !hasFareData(ev.Usage) {
+			if ev.Usage == nil || (!hasFareData(ev.Usage) &&
+				!(agent == "vibe" && ev.Usage.CostAmount > 0 && ev.Usage.CostCurrency == "USD")) {
 				continue
 			}
 			hits = append(hits, usageHit{u: *ev.Usage, segIdx: segIdx})

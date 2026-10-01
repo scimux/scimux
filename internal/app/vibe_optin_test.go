@@ -319,6 +319,8 @@ func TestVibeCatalogProbeRunsOnlyForAnExplicitInspectPost(t *testing.T) {
 		{"missing field", http.MethodPost, "/api/harnesses/latest", `{}`, "application/json", true, http.StatusOK},
 		{"null field", http.MethodPost, "/api/harnesses/latest", `{"inspect_vibe":null}`, "application/json", true, http.StatusOK},
 		{"wrong name", http.MethodPost, "/api/harnesses/latest", `{"InspectVibe":true}`, "application/json", true, http.StatusOK},
+		{"case variant", http.MethodPost, "/api/harnesses/latest", `{"INSPECT_VIBE":true}`, "application/json", true, http.StatusOK},
+		{"oversized", http.MethodPost, "/api/harnesses/latest", `{"inspect_vibe":true,"padding":"` + strings.Repeat("x", 1<<20) + `"}`, "application/json", true, http.StatusRequestEntityTooLarge},
 		{"empty body", http.MethodPost, "/api/harnesses/latest", ``, "", true, http.StatusOK},
 		{"whitespace", http.MethodPost, "/api/harnesses/latest", " \n", "application/json", true, http.StatusOK},
 		{"malformed", http.MethodPost, "/api/harnesses/latest", `{`, "application/json", true, http.StatusBadRequest},

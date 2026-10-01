@@ -2319,6 +2319,15 @@ test("V2-P3 gapTokenCost maps consecutive same-node stops to fare_segments[i]", 
   assert.equal(gapTokenCost(noSeg, noSeg1), null);
 });
 
+test("Vibe's unsplit input does not drive comparable map heat", () => {
+  const n = { id: "v", agent: "vibe", fare_segments: [{ total: 4000, unsplit_in: 3800, out: 200 }] };
+  const a = { n, i: 0 }, b = { n, i: 1 };
+  assert.equal(gapTokenCost(a, b), null);
+  const capsule = fareCapsuleHTML(n.fare_segments[0], { agent: "vibe", nodeId: "v", segIdx: 0 });
+  assert.match(capsule, /reported tokens/);
+  assert.doesNotMatch(capsule, /new tokens/);
+});
+
 test("V2-P3 wallLaneTrackSVG: heat off → single base track; heat on → per-gap width", () => {
   const n = {
     id: "a",
@@ -3089,7 +3098,8 @@ test("Vibe fare ticket keeps unsplit input out of the fresh fare", () => {
   assert.match(html, /context occupancy 25%/);
   assert.match(html, /token spend 42/);
   assert.match(html, /Vibe-reported cost \$1\.50/);
-  assert.match(html, /split unknown/);
+  assert.match(html, /cached input may be included/);
+  assert.match(html, /reported tokens/);
   assert.doesNotMatch(html, /cache excluded/);
   assert.doesNotMatch(html, /new input/);
   assert.doesNotMatch(html, /cache reused/);

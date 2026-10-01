@@ -105,6 +105,7 @@ import {
   harnessRowsHTML, harnessCheckNote, createSettingsController, externalAttachmentNote,
   openAttachmentSettings, applyExternalAttachmentChange,
   createScimuxUpdateCheck, runHarnessMenuCheck, acceptHarnessMenuResult,
+  updateVibeInspectControl, clearVibeInspectChoice,
 } from "./harness.js";
 import { createAssetPreview, bindAssetPreviewLinks } from "./asset-preview.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
@@ -1176,6 +1177,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderChatHead: () => renderChatHead(),
     renderMap: () => renderMap(),
     alert: msg => alert(msg),
+    onCloseSheets: () => clearVibeInspectChoice($("#m_vibe_inspect")),
   }));
 
   /* Device pairing + the list of who holds a grant — Packet S8.
@@ -1910,6 +1912,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   let harnessRows = null, harnessLatest = null, usageChecks = false, museConsent = false;
   function renderHarnesses(){
     if (!harnessRows) return;
+    updateVibeInspectControl(harnessRows, $("#m_vibe_inspect_row"), $("#m_vibe_inspect"));
     $("#m_harnesses").innerHTML = harnessRowsHTML(harnessRows, harnessLatest, {
       agentLogo, usageChecks, museConsent,
     });

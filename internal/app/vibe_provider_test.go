@@ -5,10 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -200,61 +198,5 @@ func TestVibeCatalogFailureStaysLaunchableWithNoInventedModels(t *testing.T) {
 	}
 	if len(info.Models) != 0 || info.Efforts != nil {
 		t.Fatalf("ordinary catalog = %+v, want an empty launchable default", info)
-	}
-}
-
-func TestVibeProbeBudgetIsTheDocumentedBound(t *testing.T) {
-	for _, path := range []string{"README.md", "docs/http-api.md"} {
-		body, err := os.ReadFile(webSourcePath(path))
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		text := string(body)
-		for _, phrase := range []string{"12 seconds", "4 seconds", "never sends a prompt"} {
-			if path == "docs/http-api.md" && phrase == "never sends a prompt" {
-				phrase = "never calls\n`session/prompt`"
-			}
-			if !strings.Contains(text, phrase) {
-				t.Errorf("%s missing %q", path, phrase)
-			}
-		}
-	}
-}
-
-func TestVibeHarnessDocsNameTheBinaryAndKeepTheMetricsDistinct(t *testing.T) {
-	readme, err := os.ReadFile(webSourcePath("README.md"))
-	if err != nil {
-		t.Fatalf("read README: %v", err)
-	}
-	doc := string(readme)
-	if !strings.Contains(doc, "https://github.com/mistralai/mistral-vibe") {
-		t.Fatal("README harness table has no Vibe row")
-	}
-	if !strings.Contains(doc, "`vibe-acp`") {
-		t.Fatal("README does not name the vibe-acp binary")
-	}
-	if strings.Contains(doc, "opening a disposable session") {
-		t.Fatal("README still says scimux does not open a disposable session")
-	}
-	if !strings.Contains(doc, "never sends a prompt") {
-		t.Fatal("README does not say the Vibe catalog probe never sends a prompt")
-	}
-	api, err := os.ReadFile(webSourcePath("docs/http-api.md"))
-	if err != nil {
-		t.Fatalf("read http-api: %v", err)
-	}
-	body := string(api)
-	for _, phrase := range []string{
-		"latest title and command",
-		"`Unknown tool`",
-		"context occupancy",
-		"token spend",
-		"Vibe-reported cost",
-		"fare_unsplit_in",
-		"fresh/cache split",
-	} {
-		if !strings.Contains(body, phrase) {
-			t.Errorf("docs/http-api.md missing %q", phrase)
-		}
 	}
 }

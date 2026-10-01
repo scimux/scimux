@@ -205,7 +205,7 @@ func TestVibeUsageEdges(t *testing.T) {
 		}
 	})
 
-	t.Run("late cost and a failed turn move the baseline without a fare", func(t *testing.T) {
+	t.Run("late cost is baseline and failed turn keeps its own fare", func(t *testing.T) {
 		s := newVibeUsageSession(t)
 		noteVibeUsage(t, s, 5, 80, usd(1))
 		endVibeUsage(s, 4, 1, 5, nil)
@@ -218,8 +218,8 @@ func TestVibeUsageEdges(t *testing.T) {
 		noteVibeUsage(t, s, 7, 80, usd(2.5))
 		endVibeUsage(s, 7, 2, 9, nil)
 		fare := sessionlog.ReadFare(s.logw.Path)
-		if fare.Turns != 2 || fare.ReportedCostUSD != 1.5 {
-			t.Fatalf("late/failed cost fare = %+v, want turns 2 cost 1.5", fare)
+		if fare.Turns != 3 || fare.UnsplitIn != 4 || fare.Out != 1 || math.Abs(fare.ReportedCostUSD-2.1) > 1e-9 {
+			t.Fatalf("late/failed cost fare = %+v, want three turns, known first tokens, cost 2.1", fare)
 		}
 		used, size := latestUsage(s.logw.Path)
 		if used != 7 || size != 80 {
@@ -327,6 +327,48 @@ func TestVibeTurnCarriesShellOccupancy(t *testing.T) {
 	}
 	if fareUsed != 42 || fareSize != 8000 {
 		t.Fatalf("turn occupancy = %d/%d, want the shell 42/8000", fareUsed, fareSize)
+	}
+}
+
+func TestVibeCumulativeCountersRecoverAfterPlanReset(t *testing.T) {
+	s := newVibeUsageSession(t)
+	noteVibeUsage(t, s, 10, 80, usd(3))
+	endVibeUsage(s, 100, 20, 120, nil)
+	s.turnActive = true
+	noteVibeUsage(t, s, 11, 80, usd(0.7))
+	endVibeUsage(s, 20, 5, 25, nil)
+	fare := sessionlog.ReadFare(s.logw.Path)
+	if fare.UnsplitIn != 120 || fare.Out != 25 || math.Abs(fare.ReportedCostUSD-3.7) > 1e-9 || fare.Turns != 2 {
+		t.Fatalf("plan-reset fare = %+v", fare)
+	}
+}
+
+func TestVibeInterruptedTurnKeepsCostWithoutChargingItsUnknownTokensToNextTurn(t *testing.T) {
+	s := newVibeUsageSession(t)
+	noteVibeUsage(t, s, 10, 80, usd(0.4))
+	s.endTurn(sdk.PromptResponse{}, errors.New("interrupted"))
+	s.turnActive = true
+	noteVibeUsage(t, s, 11, 80, usd(0.7))
+	endVibeUsage(s, 20, 5, 25, nil)
+	s.turnActive = true
+	noteVibeUsage(t, s, 12, 80, usd(1))
+	endVibeUsage(s, 25, 8, 33, nil)
+	fare := sessionlog.ReadFare(s.logw.Path)
+	if fare.UnsplitIn != 5 || fare.Out != 3 || math.Abs(fare.ReportedCostUSD-1) > 1e-9 || fare.Turns != 3 {
+		t.Fatalf("interrupted-turn fare = %+v", fare)
+	}
+}
+
+func TestVibeSuccessfulTurnWithoutUsageAlsoLeavesAnUnknownTokenGap(t *testing.T) {
+	s := newVibeUsageSession(t)
+	noteVibeUsage(t, s, 1, 80, usd(0.2))
+	s.endTurn(sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil)
+	s.turnActive = true
+	noteVibeUsage(t, s, 2, 80, usd(0.5))
+	endVibeUsage(s, 20, 5, 25, nil)
+	fare := sessionlog.ReadFare(s.logw.Path)
+	if fare.UnsplitIn != 0 || fare.Out != 0 || fare.Turns != 2 || math.Abs(fare.ReportedCostUSD-0.5) > 1e-9 {
+		t.Fatalf("missing-breakdown fare = %+v", fare)
 	}
 }
 

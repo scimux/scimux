@@ -88,12 +88,13 @@ installed version stays unknown.
 
 Beside that action, an unchecked box can include one inspection of Vibe's
 model and thinking menus. The box applies to that click and resets when the
-action finishes. It is one-shot: scimux does not store it as consent.
-Inspection is one cached disposable ACP session. That probe never sends a prompt.
-Its total budget is 12 seconds, and each protocol call is limited to
-4 seconds. With installed Vibe 2.25, inspecting those menus changes Vibe's
-saved default model and leaves the last inspected model selected. An explicit
-model or thinking choice at chat launch uses the same ACP setters and, with
+action starts or the menu closes. It appears only when Vibe is installed and
+launchable. It is one-shot: scimux does not store it as consent.
+Inspection opens one temporary ACP session and reads the model and thinking
+menus returned by `session/new`. It never sends a prompt or changes a model.
+Protocol work has a 12-second budget after process startup, with each call
+limited to 4 seconds and close limited to 2 seconds within that budget. An explicit
+model or thinking choice at chat launch uses ACP setters and, with
 Vibe 2.25, persists in Vibe's config. A failed, timed-out, or empty inspection
 leaves Vibe launchable on (default) model and (default) thinking, with no
 invented model or thinking level. When Vibe has no usable default, or its
@@ -240,4 +241,3 @@ AI-enabled Software Engineering was used to realise this software, in particular
 ---
 
 *scimux: because supervising ten conversations shouldn't take ten terminals.*
-

@@ -586,6 +586,7 @@ type Session struct {
 	vibeCostStash     float64
 	vibeCostSeen      bool
 	vibeCostUntrusted bool
+	vibeTokenGap      bool
 	// toolMeta is the latest title, kind, and command for tool-call ids seen
 	// during this turn. A permission request that carries only an id borrows
 	// them. Bounded, and cleared at each turn boundary.
@@ -662,6 +663,9 @@ type rememberedTool struct {
 // cannot be delivered to a replacement request with the same option ids.
 type pendingPermission struct {
 	seq       uint64
+	toolID    string
+	reqTitle  string
+	reqKind   string
 	toolTitle string
 	toolKind  string // ACP ToolKind string, or "" when unknown
 	options   []sdk.PermissionOption
@@ -773,10 +777,12 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 		s.mu.Unlock()
 		return cancelledPermission(), nil
 	}
+	reqTitle, reqKind := title, toolKind
 	title, toolKind = s.fillPermissionLocked(string(p.ToolCall.ToolCallId), title, toolKind)
 	s.pendingSeq++
 	s.pending = &pendingPermission{
-		seq: s.pendingSeq, toolTitle: title, toolKind: toolKind, options: p.Options, ch: ch,
+		seq: s.pendingSeq, toolID: string(p.ToolCall.ToolCallId), reqTitle: reqTitle,
+		reqKind: reqKind, toolTitle: title, toolKind: toolKind, options: p.Options, ch: ch,
 	}
 	s.mu.Unlock()
 
@@ -1287,6 +1293,12 @@ func (s *Session) rememberToolLocked(id, title, kind string, raw any) {
 		s.toolMetaOrder = s.toolMetaOrder[1:]
 		delete(s.toolMeta, drop)
 	}
+	// ACP may dispatch a permission request before its tool_call update. Keep
+	// the request pending, then fill its visible title from the matching id as
+	// soon as that notification arrives. Unrelated tools cannot change it.
+	if s.pending != nil && s.pending.toolID == id {
+		s.pending.toolTitle, s.pending.toolKind = s.fillPermissionLocked(id, s.pending.reqTitle, s.pending.reqKind)
+	}
 }
 
 func (s *Session) clearToolMetaLocked() {
@@ -1573,17 +1585,32 @@ func (s *Session) noteVibeCostLocked(cost *sdk.Cost) {
 	s.vibeCostStash = amount
 }
 
-// vibeTurnUsageLocked subtracts the session's cumulative counters once.
-// A nil usage consumes a seen cost into the baseline and writes nothing.
+// vibeTurnUsageLocked subtracts session cumulatives. If a failed turn has no
+// token breakdown, the next cumulative cannot separate that turn's tokens
+// from the next turn, so it establishes a new baseline without attributing
+// the combined amount to the next turn. Its reported USD cost is still kept.
 func (s *Session) vibeTurnUsageLocked(resp sdk.PromptResponse, sawShell bool, shellUsed, shellSize int) *UsageEvent {
 	if resp.Usage == nil {
-		s.takeVibeCostLocked(false)
-		return nil
+		s.vibeTokenGap = true
+		return vibeCostOnlyUsage(s.takeVibeCostLocked(true))
 	}
 	u := resp.Usage
-	in, inBase := vibeCounterDelta(u.InputTokens, s.vibeInBase)
-	out, outBase := vibeCounterDelta(u.OutputTokens, s.vibeOutBase)
-	total, totalBase := vibeCounterDelta(u.TotalTokens, s.vibeTotalBase)
+	if s.vibeTokenGap {
+		s.vibeTokenGap = false
+		s.vibeInBase, s.vibeOutBase, s.vibeTotalBase = u.InputTokens, u.OutputTokens, u.TotalTokens
+		return vibeCostOnlyUsage(s.takeVibeCostLocked(true))
+	}
+	reset := u.TotalTokens > 0 && s.vibeTotalBase > 0 && u.TotalTokens < s.vibeTotalBase &&
+		((u.InputTokens > 0 && u.InputTokens < s.vibeInBase) || (u.OutputTokens > 0 && u.OutputTokens < s.vibeOutBase))
+	var in, out, total, inBase, outBase, totalBase int
+	if reset {
+		in, out, total = u.InputTokens, u.OutputTokens, u.TotalTokens
+		inBase, outBase, totalBase = in, out, total
+	} else {
+		in, inBase = vibeCounterDelta(u.InputTokens, s.vibeInBase)
+		out, outBase = vibeCounterDelta(u.OutputTokens, s.vibeOutBase)
+		total, totalBase = vibeCounterDelta(u.TotalTokens, s.vibeTotalBase)
+	}
 	s.vibeInBase, s.vibeOutBase, s.vibeTotalBase = inBase, outBase, totalBase
 	emit := in > 0 || out > 0 || total > 0
 	cost := s.takeVibeCostLocked(emit)
@@ -1602,6 +1629,13 @@ func (s *Session) vibeTurnUsageLocked(resp sdk.PromptResponse, sawShell bool, sh
 	return ev
 }
 
+func vibeCostOnlyUsage(cost float64) *UsageEvent {
+	if cost <= 0 {
+		return nil
+	}
+	return &UsageEvent{CostAmount: cost, CostCurrency: "USD"}
+}
+
 // takeVibeCostLocked returns the positive USD difference for this turn when
 // emit is set, and always folds a seen figure into the baseline so it cannot
 // be billed again. An untrusted currency contributes nothing.
@@ -1617,10 +1651,14 @@ func (s *Session) takeVibeCostLocked(emit bool) float64 {
 		return 0
 	}
 	s.vibeCostSeen = false
-	if s.vibeCostStash <= s.vibeCostBase {
+	if s.vibeCostStash == s.vibeCostBase {
 		return 0
 	}
 	delta := s.vibeCostStash - s.vibeCostBase
+	if delta < 0 {
+		// Vibe can reset its session cumulative after accepting a plan.
+		delta = s.vibeCostStash
+	}
 	s.vibeCostBase = s.vibeCostStash
 	if !emit {
 		return 0

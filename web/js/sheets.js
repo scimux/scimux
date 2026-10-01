@@ -522,6 +522,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function closeSheets(){
+    if (typeof deps.onCloseSheets === "function") deps.onCloseSheets();
     ncForwardSources = [];
     const backdrop = root("backdrop");
     if (backdrop && backdrop.classList) backdrop.classList.remove("on");

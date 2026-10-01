@@ -120,6 +120,7 @@ label:has(> #m_vibe_inspect) {
   min-height: 44px; margin: 8px 0; font-size: 14px; line-height: 1.4;
   cursor: pointer; overflow-wrap: break-word;
 }
+#m_vibe_inspect_row[hidden] { display: none; }
 label:has(> #m_vibe_inspect) > input {
   width: 18px; height: 18px; flex: 0 0 18px; margin: 2px 0 0; padding: 0;
   accent-color: var(--work);
