@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { importTileHTML, splitImportRefs } from "../js/chat.js";
+import * as chatmod from "../js/chat.js";
+import { md } from "../js/format.js";
 
 test("blocked attachment references explain policy and expose explicit actions", () => {
   const off = importTileHTML("n 1", 7, 2, "outside_workspace", "chart", true, {
@@ -49,13 +51,8 @@ test("a missing unimported file is escaped inert text without attachment actions
     "n 1",
     { externalAllowed: true },
   );
-  assert.equal(split.clean, "before  middle");
-  assert.match(split.html, /&lt;img src=&quot;x&quot;&gt;/);
-  const rowAt = split.html.indexOf('<div class="attrow');
-  const nameAt = split.html.indexOf("&lt;img src=&quot;x&quot;&gt;");
-  assert.ok(nameAt >= 0 && rowAt > nameAt, split.html);
-  assert.equal(split.html.slice(rowAt).includes("&lt;img src=&quot;x&quot;&gt;"), false);
-  const missing = split.html.slice(0, rowAt);
+  const missing = chatmod.renderMissingImportText(md(split.clean), split.missing);
+  assert.match(missing, /before <span class="missingfile">&lt;img src=&quot;x&quot;&gt;<\/span> middle/);
   for (const markup of [
     "<a ", "attthumb", "attfile", "data-asset-preview", "data-asset-retry",
     "data-asset-settings", "download=", "<button", "<img", "Retry import",
@@ -63,10 +60,12 @@ test("a missing unimported file is escaped inert text without attachment actions
   ]) {
     assert.equal(missing.includes(markup), false, markup);
   }
-  assert.match(split.html.slice(rowAt), /Retry import/);
+  assert.match(split.html, /Retry import/);
+  assert.doesNotMatch(split.html, /&lt;img src=&quot;x&quot;&gt;/);
 
   const empty = splitImportRefs("[](scimux-import:1:0:not_found)", "n1");
-  assert.match(empty.html, />file</);
+  assert.match(chatmod.renderMissingImportText(md(empty.clean), empty.missing), />file</);
+  assert.equal(empty.html, "");
   assert.doesNotMatch(empty.html, /attrow|Retry import|data-asset|<a |<button/);
 });
 
@@ -74,14 +73,44 @@ test("encoded missing filenames with brackets and percent signs remain inert tex
   const split = splitImportRefs(
     "see [report%5D100%25.md](scimux-import:3:0:not_found)", "n1",
   );
-  assert.equal(split.clean, "see");
-  assert.match(split.html, />report\]100%\.md</);
+  const rendered = chatmod.renderMissingImportText(md(split.clean), split.missing);
+  assert.match(rendered, /see <span class="missingfile">report\]100%\.md<\/span>/);
   assert.doesNotMatch(split.html, /attrow|data-asset|<a |<button|Retry import/);
-  assert.doesNotMatch(split.clean + split.html, /scimux-import|%5D|%25/);
+  assert.doesNotMatch(rendered + split.html, /scimux-import|%5D|%25/);
 
   const escaped = splitImportRefs("[x%3Cimg%3E](scimux-import:3:1:not_found)", "n1");
-  assert.match(escaped.html, />x&lt;img&gt;</);
-  assert.doesNotMatch(escaped.html, /<img/);
+  const escapedHTML = chatmod.renderMissingImportText(md(escaped.clean), escaped.missing);
+  assert.match(escapedHTML, />x&lt;img&gt;</);
+  assert.doesNotMatch(escapedHTML, /<img/);
   const legacy = splitImportRefs("[100%broken](scimux-import:3:2:not_found)", "n1");
-  assert.match(legacy.html, />100%broken</);
+  assert.match(chatmod.renderMissingImportText(md(legacy.clean), legacy.missing), />100%broken</);
+});
+
+test("a previously missing file can be retried after it appears", () => {
+  const split = splitImportRefs("[report](scimux-import:3:0:retry_ready)", "n1");
+  assert.match(split.html, /File is now available/);
+  assert.match(split.html, /data-asset-retry/);
+  assert.equal(split.clean, "");
+});
+
+test("missing filenames stay in their sentence and never make a media bubble", () => {
+  const split = splitImportRefs(
+    "see [a%2Ab.md](scimux-import:1:0:not_found) and [b.md](scimux-import:1:1:not_found) for details",
+    "n1",
+  );
+  const body = chatmod.renderMissingImportText(md(split.clean), split.missing);
+  assert.match(body, /see <span class="missingfile">a\*b\.md<\/span> and <span class="missingfile">b\.md<\/span> for details/);
+  assert.equal(split.html, "");
+
+  const adjacent = splitImportRefs(
+    "[a.md](scimux-import:1:0:not_found)[b.md](scimux-import:1:1:not_found)", "n1",
+  );
+  assert.match(chatmod.renderMissingImportText(md(adjacent.clean), adjacent.missing),
+    /a\.md<\/span> <span class="missingfile">b\.md/);
+  assert.equal(adjacent.html, "");
+
+  const collision = splitImportRefs("\uE0000\uE001 [a.md](scimux-import:1:0:not_found)", "n1");
+  const collisionHTML = chatmod.renderMissingImportText(md(collision.clean), collision.missing);
+  assert.match(collisionHTML, /\uE0000\uE001 <span class="missingfile">a\.md<\/span>/);
+  assert.equal(chatmod.renderMissingImportText("unchanged"), "unchanged");
 });

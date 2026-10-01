@@ -101,6 +101,34 @@ func TestResolve_MissingFile(t *testing.T) {
 	}
 }
 
+func TestOpenUnreadableParentDoesNotClaimFileIsMissing(t *testing.T) {
+	root := t.TempDir()
+	locked := filepath.Join(root, "locked")
+	path := filepath.Join(locked, "report.md")
+	writeFile(t, path, []byte("present"))
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if _, err := os.Lstat(path); err == nil {
+		t.Skip("current user can stat through a mode-000 directory")
+	} else if errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inaccessible file appeared absent: %v", err)
+	}
+	_, _, _, err := Open(path, root, []string{root})
+	if !errors.Is(err, ErrUnreadable) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("Open error = %v, want unreadable rather than missing", err)
+	}
+	link := filepath.Join(root, "alias.md")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = Open(link, root, []string{root})
+	if !errors.Is(err, ErrUnreadable) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("Open symlink error = %v, want unreadable rather than missing", err)
+	}
+}
+
 func TestResolve_SymlinkWithinRootToRegularFile(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "real.png")

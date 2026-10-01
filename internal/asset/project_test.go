@@ -459,8 +459,20 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 		TurnRecord: 3, Occurrence: 0, Ref: returned, Reason: "not_found",
 	}}
 	returnedText := ProjectVisibleBlocked("[quarterly]("+returned+")", nil, stillMissing, dir)
-	if stillMissing[0].Reason != "not_found" || !strings.Contains(returnedText, "returned.md") || !strings.Contains(returnedText, "scimux-import:3:0:not_found") {
+	if stillMissing[0].Reason != "not_found" || !strings.Contains(returnedText, "quarterly") || !strings.Contains(returnedText, "scimux-import:3:0:retry_ready") {
 		t.Fatalf("present file with a stored not_found import = %q imports=%+v", returnedText, stillMissing)
+	}
+	returnedLink := filepath.Join(dir, "returned-link.md")
+	if err := os.Symlink(returned, returnedLink); err != nil {
+		t.Fatal(err)
+	}
+	linked := []sessionlog.AssetImportEvent{{TurnRecord: 3, Occurrence: 0, Ref: returnedLink, Reason: "not_found"}}
+	if got := ProjectVisibleBlocked("[link]("+returnedLink+")", nil, linked, dir); !strings.Contains(got, "retry_ready") {
+		t.Fatalf("live symlink did not restore retry: %q", got)
+	}
+	directory := []sessionlog.AssetImportEvent{{TurnRecord: 3, Occurrence: 0, Ref: dir, Reason: "not_found"}}
+	if got := ProjectVisibleBlocked("[folder]("+dir+")", nil, directory, dir); !strings.Contains(got, "not_found") || strings.Contains(got, "retry_ready") {
+		t.Fatalf("directory was treated as an importable file: %q", got)
 	}
 
 	bound := map[int]sessionlog.AssetEvent{
@@ -483,6 +495,19 @@ func TestProjectVisibleBlockedEncodesMissingFilenameForMarker(t *testing.T) {
 	}
 	if imports[0].Reason != "not_found" {
 		t.Fatalf("stored reason changed: %+v", imports[0])
+	}
+}
+
+func TestPlainBlockedRefsDecodesMissingLabelsAndPreservesOtherText(t *testing.T) {
+	text := "see [my%20file.md](scimux-import:1:0:not_found) " +
+		"![chart](scimux-import:1:1:outside_workspace) " +
+		"[100%broken](scimux-import:1:2:not_found) " +
+		"[](scimux-import:1:3:storage)"
+	if got, want := PlainBlockedRefs(text), "see my file.md chart 100%broken file"; got != want {
+		t.Fatalf("plain blocked refs = %q, want %q", got, want)
+	}
+	if got := PlainBlockedRefs("ordinary prose"); got != "ordinary prose" {
+		t.Fatalf("ordinary prose changed: %q", got)
 	}
 }
 

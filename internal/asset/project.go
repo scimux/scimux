@@ -193,41 +193,69 @@ func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imp
 	adjusted := make([]sessionlog.AssetImportEvent, len(imports))
 	copy(adjusted, imports)
 	for i := range adjusted {
-		if PathAbsent(adjusted[i].Ref, dir) {
+		switch currentPathState(adjusted[i].Ref, dir) {
+		case pathAbsent:
 			adjusted[i].Reason = "not_found"
+		case pathRegular:
+			if adjusted[i].Reason == "not_found" {
+				adjusted[i].Reason = "retry_ready"
+			}
 		}
 	}
 	return ProjectAgentPathBindings(text, bound, adjusted)
 }
 
+type pathState uint8
+
+const (
+	pathUnknown pathState = iota
+	pathAbsent
+	pathRegular
+)
+
 // PathAbsent reports whether ref currently names no filesystem object.
 // Relative refs resolve against dir. A dangling symlink is absent. Any other
 // error, including a permission failure, is not absence.
 func PathAbsent(ref, dir string) bool {
+	return currentPathState(ref, dir) == pathAbsent
+}
+
+func currentPathState(ref, dir string) pathState {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return false
+		return pathUnknown
 	}
 	p := ref
 	if !filepath.IsAbs(p) {
 		if strings.TrimSpace(dir) == "" {
-			return false
+			return pathUnknown
 		}
 		p = filepath.Join(dir, p)
 	}
 	abs, err := filepath.Abs(filepath.Clean(p))
 	if err != nil {
-		return false
+		return pathUnknown
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
-		return errors.Is(err, os.ErrNotExist)
+		if errors.Is(err, os.ErrNotExist) {
+			return pathAbsent
+		}
+		return pathUnknown
 	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		return false
+	if info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(abs)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return pathAbsent
+			}
+			return pathUnknown
+		}
 	}
-	_, err = os.Stat(abs)
-	return errors.Is(err, os.ErrNotExist)
+	if info.Mode().IsRegular() {
+		return pathRegular
+	}
+	return pathUnknown
 }
 
 func missingRefLabel(alt, ref string) string {
@@ -245,4 +273,25 @@ func missingRefLabel(alt, ref string) string {
 
 func ProjectBlockedAgentPaths(text string, imports []sessionlog.AssetImportEvent) string {
 	return ProjectAgentPathBindings(text, nil, imports)
+}
+
+var projectedImportRE = regexp.MustCompile(`!?\[([^\]]*)\]\(scimux-import:[0-9]+:[0-9]+:([a-z_]+)\)`)
+
+// PlainBlockedRefs removes projection-only import markers from text that will
+// be frozen in a reference-media capture. The session log's stored reason is
+// used for that capture; current filesystem state must not alter its text.
+func PlainBlockedRefs(text string) string {
+	return projectedImportRE.ReplaceAllStringFunc(text, func(marker string) string {
+		match := projectedImportRE.FindStringSubmatch(marker)
+		label := match[1]
+		if match[2] == "not_found" {
+			if decoded, err := url.PathUnescape(label); err == nil {
+				label = decoded
+			}
+		}
+		if label == "" {
+			return "file"
+		}
+		return label
+	})
 }

@@ -55,7 +55,7 @@ func (a *app) handleReferenceMediaCapture(w http.ResponseWriter, r *http.Request
 		// Projection resolves image bindings at the owning record. The window
 		// reader leaves addresses unset; pass the stamped turn, not its old copy.
 		window[0] = turn
-		projected, _ := a.projectTurns(nodeID, window)
+		projected, _ := a.projectTurnsForCapture(nodeID, window)
 		turn = projected[0]
 	}
 	captureItems := a.referenceCaptureItems

@@ -2206,6 +2206,9 @@ test("missing unimported files render as inert text in the live chat and earlier
   const html = ctx.roots.msgs.innerHTML;
   assert.match(html, /&lt;hist&gt;\.md/);
   assert.match(html, /&lt;now&gt;\.txt/);
+  assert.match(html, /old <span class="missingfile">&lt;hist&gt;\.md<\/span>/);
+  assert.match(html, /live <span class="missingfile">&lt;now&gt;\.txt<\/span>/);
+  assert.doesNotMatch(html, /class="turn[^"]*\bmedia\b/);
   for (const markup of [
     "Retry import", "data-asset-retry", "data-asset-settings", "data-asset-preview",
     "attrow", "attfile", "attthumb", "download=", "Open attachment settings",
