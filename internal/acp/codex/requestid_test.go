@@ -152,3 +152,11 @@ func TestPrepareDeliverRejectsForeignIncarnation(t *testing.T) {
 		t.Fatalf("prepare with prior incarnation = %v, want ErrStalePermission", err)
 	}
 }
+
+func TestPendingInfoWithNothingWaitingIsEmpty(t *testing.T) {
+	s := &Session{nodeID: "n1"}
+	p, ok := s.pendingInfo()
+	if ok || p.RequestID != "" || p.Title != "" || len(p.Options) != 0 {
+		t.Fatalf("empty pending = %+v ok=%v", p, ok)
+	}
+}

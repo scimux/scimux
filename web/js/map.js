@@ -81,6 +81,7 @@ import {
   hardAttention, headStopKey, toggleMapSelection,
 } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
+import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
 import { createPopoverMenu } from "./menu.js";
 
 /* ---------- storage keys (public contract) ---------- */
@@ -757,7 +758,8 @@ export function fmtRideMs(ms){
   return pair(Math.floor(hr / 24), hr % 24, "d", "h");
 }
 
-/* The fare a ride actually cost: fresh input + reply. Cache reads are
+/* The fare a ride shows: fresh input + reply, or unsplit input + reply
+   when the transport reported no fresh/cache split. Cache reads are
    *carried*, not bought — they are re-sent context, and on a long chat they
    are ~99% of the token total, which is why the v1 headline (and the heat
    encoding) read as noise. null = neither side was ever reported (≠ zero:
@@ -765,7 +767,7 @@ export function fmtRideMs(ms){
 export function segmentNewTokens(seg){
   if (seg == null || typeof seg !== "object") return null;
   let any = false, sum = 0;
-  for (const k of ["fresh_in", "out"]){
+  for (const k of ["fresh_in", "unsplit_in", "out"]){
     if (seg[k] != null){
       const v = Number(seg[k]);
       if (Number.isFinite(v)){ any = true; sum += v; }
@@ -858,6 +860,7 @@ export function ticketTokenRows(seg){
   if (!seg || typeof seg !== "object") return [];
   const defs = [
     ["fresh_in", "new input", true],
+    ["unsplit_in", "input", true],
     ["out", "reply", true],
     ["cache_read", "cache reused", false],
     ["cache_write", "cache written", false],
@@ -916,7 +919,9 @@ export function journeySplitParts(segs){
 export function journeyTicketTotals(n){
   if (!n || typeof n !== "object") return null;
   const segs = Array.isArray(n.fare_segments) ? n.fare_segments : [];
-  const newTokens = segmentNewTokens({ fresh_in: n.fare_fresh_in, out: n.fare_out });
+  const newTokens = segmentNewTokens({
+    fresh_in: n.fare_fresh_in, unsplit_in: n.fare_unsplit_in, out: n.fare_out,
+  });
   let realMS = null;
   for (const s of segs){
     if (!s || s.real_ms == null) continue;
@@ -957,14 +962,18 @@ export function fareTicketContext(n, segIdx, opts = {}){
     nodeId: n.id, segIdx: i, seg: segs[i],
     from: station(i), to: station(i + 1),
     agent: n.agent || "", model: n.fare_model || n.model || "", effort: n.effort || "",
+    // ctx_pct is a live gauge for the current segment. Older tickets have
+    // no stored occupancy snapshot, so showing today's value would misdate it.
+    occupancyPct: i === segs.length - 1 && n.ctx_pct != null ? Number(n.ctx_pct) : null,
     totals, segments: segs,
   };
 }
 
-function ticketFigure(tokens, big){
+function ticketFigure(tokens, big, unit){
   const label = tokens == null ? "—" : fmtFareTokens(tokens);
+  const name = unit || "new tokens";
   return `<span class="tk-fig ${big ? "tk-fig-lg" : ""}">${label}</span>` +
-    `<span class="tk-fig-unit">new tokens</span>`;
+    `<span class="tk-fig-unit">${name}</span>`;
 }
 
 function ticketBarHTML(parts, escape){
@@ -989,14 +998,38 @@ export function fareTicketHTML(ctx, opts = {}){
     const bits = [stopNo(s), s.time ? verb + " " + s.time : ""].filter(Boolean);
     return bits.length ? `<div class="tk-sub">${escape(bits.join(" · "))}</div>` : "";
   };
-  const line = [ctx.agent, ctx.model, ctx.effort].filter(Boolean).join(" · ");
+  const vibe = ctx.agent === "vibe";
+  const line = [vibe ? usageAgentDisplayName(ctx.agent) : ctx.agent, ctx.model, ctx.effort]
+    .filter(Boolean).join(" · ");
   const rows = ticketTokenRows(seg);
+  const fareNote = vibe
+    ? "input and reply · fresh/cache split unknown"
+    : "fresh input + reply · cache excluded";
+  const tokenUnit = vibe ? "tokens" : "new tokens";
   const split = ticketSplitParts(seg);
   const jsplit = journeySplitParts(ctx.segments);
   const clock = [from.time, to.time].filter(Boolean).join(" → ");
-  const cost = seg.cost_complete && seg.cost != null ? fmtFareCost(seg.cost) : "";
-  const foot = [t.realMS == null ? "" : fmtRideMs(t.realMS),
-    t.cost == null ? "" : fmtFareCost(t.cost)].filter(Boolean).join(" · ");
+  let vibeMetrics = "";
+  let cost = "";
+  let costCap = "REPORTED";
+  if (vibe){
+    const labels = vibeMetricLabels({
+      occupancyPct: ctx.occupancyPct,
+      tokens: segmentNewTokens(seg),
+      cost: seg.cost,
+      costComplete: seg.cost_complete === true,
+    });
+    vibeMetrics = `<div class="tk-metrics">${escape(labels.occupancy)} · ${escape(labels.spend)} · ${escape(labels.reported)}</div>`;
+    if (labels.costText){
+      cost = labels.costText;
+      costCap = "VIBE-REPORTED";
+    }
+  } else if (seg.cost_complete && seg.cost != null){
+    cost = fmtFareCost(seg.cost);
+  }
+  const journeyCost = t.cost == null ? ""
+    : (vibe ? vibeMetricLabels({ cost: t.cost, costComplete: true }).reported : fmtFareCost(t.cost));
+  const foot = [t.realMS == null ? "" : fmtRideMs(t.realMS), journeyCost].filter(Boolean).join(" · ");
   const rides = [t.rides == null ? "" : t.rides + (t.rides === 1 ? " ride" : " rides"),
     t.stops == null ? "" : t.stops + (t.stops === 1 ? " stop" : " stops")]
     .filter(Boolean).join(" · ");
@@ -1019,10 +1052,11 @@ export function fareTicketHTML(ctx, opts = {}){
   </div>
   ${line ? `<div class="tk-line">${escape(line)}</div>` : ""}
   <div class="tk-fare">
-    <div class="tk-figrow">${ticketFigure(segmentNewTokens(seg), true)}</div>
-    ${cost ? `<div class="tk-stamp"><b>${escape(cost)}</b><span>REPORTED</span></div>` : ""}
+    <div class="tk-figrow">${ticketFigure(segmentNewTokens(seg), true, tokenUnit)}</div>
+    ${cost ? `<div class="tk-stamp"><b>${escape(cost)}</b><span>${costCap}</span></div>` : ""}
   </div>
-  <div class="tk-note">fresh input + reply · cache excluded</div>
+  <div class="tk-note">${fareNote}</div>
+  ${vibeMetrics}
   <div class="tk-tear"></div>
   ${rows.length ? `<div class="tk-cap">FARE BREAKDOWN</div>
   <div class="tk-rows">${rows.map(r => `<div class="tk-row ${r.counted ? "" : "tk-off"}">
@@ -1030,7 +1064,7 @@ export function fareTicketHTML(ctx, opts = {}){
       <span class="tk-lead"></span>
       <span class="tk-rval">${escape(r.value)}</span>
     </div>`).join("")}</div>
-  <div class="tk-note">cache reads are carried, not bought — they don't count toward the fare</div>
+  ${vibe ? "" : `<div class="tk-note">cache reads are carried, not bought — they don't count toward the fare</div>`}
   <div class="tk-tear"></div>` : ""}
   ${seg.real_ms == null ? "" : `<div class="tk-caprow">
     <span class="tk-cap">JOURNEY TIME</span>${clock ? `<span class="tk-clock">${escape(clock)}</span>` : ""}
@@ -1042,7 +1076,7 @@ export function fareTicketHTML(ctx, opts = {}){
     <div class="tk-rule tk-rule-b"></div>
     <div class="tk-cap">TOTAL · WHOLE JOURNEY</div>
     <div class="tk-totrow">
-      <div class="tk-figrow">${ticketFigure(t.newTokens, false)}</div>
+      <div class="tk-figrow">${ticketFigure(t.newTokens, false, tokenUnit)}</div>
       ${foot ? `<div class="tk-totside">${escape(foot)}</div>` : ""}
     </div>
     ${jsplit ? ticketBarHTML(jsplit, escape)

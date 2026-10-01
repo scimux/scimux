@@ -5,6 +5,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -38,7 +41,8 @@ type Runner func(nodeID, agent, dir, model, effort string) (Process, error)
 // on the agent parent (session options do not carry them); cursor exposes ACP
 // as `cursor-agent acp` and takes its model the same way grok does; dsh
 // selects ACP by profile, because a dsh profile is what binds the ACP bundle
-// — there is no subcommand to ask for.
+// — there is no subcommand to ask for. vibe is the user-installed `vibe-acp`
+// binary; model and thinking are session options, never argv.
 func agentArgv(agent, model, effort string) ([]string, error) {
 	switch agent {
 	case "pi":
@@ -79,6 +83,11 @@ func agentArgv(agent, model, effort string) ([]string, error) {
 		// options on session/new, so they are set over the wire after the
 		// connection exists (cf. pi/opencode).
 		return []string{"dsh", "--profile", "acp"}, nil
+	case "vibe":
+		// The user installs and authenticates vibe-acp. scimux does not
+		// rename, wrap, or substitute another binary for it. Model and
+		// thinking travel as session config options after connect.
+		return []string{"vibe-acp"}, nil
 	}
 	return nil, fmt.Errorf("agent %q has no ACP transport", agent)
 }
@@ -91,10 +100,23 @@ func execRunner(nodeID, agent, dir, model, effort string) (Process, error) {
 	if err != nil {
 		return nil, err
 	}
+	return startGrouped(argv, dir, agent)
+}
+
+// startGrouped spawns argv in its own process group with cwd dir. label is
+// the agent name used in the start error; an empty label leaves the start
+// error unwrapped (the catalog probe supplies its own context). Every harness
+// except vibe-acp inherits the process environment the same way exec.Command
+// does. Pipe setup failures are returned as-is, matching the historical runner.
+func startGrouped(argv []string, dir, label string) (Process, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if vibeACPCommand(argv) {
+		// A non-nil slice, even when empty, replaces inheritance.
+		cmd.Env = vibeChildEnv(os.Environ())
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -106,9 +128,81 @@ func execRunner(nodeID, agent, dir, model, effort string) (Process, error) {
 	}
 	if err := cmd.Start(); err != nil {
 		// Start closes both pipe ends itself on failure.
-		return nil, fmt.Errorf("start %s ACP: %w", agent, err)
+		if label == "" {
+			return nil, err
+		}
+		return nil, fmt.Errorf("start %s ACP: %w", label, err)
 	}
 	return &osProcess{cmd: cmd, stdin: stdin, stdout: stdout}, nil
+}
+
+// vibeACPCommand reports the user-installed Vibe ACP binary. The catalog
+// probe passes an absolute path and an empty label; a live session passes
+// the bare name. Both are the same executable.
+func vibeACPCommand(argv []string) bool {
+	return len(argv) > 0 && filepath.Base(argv[0]) == "vibe-acp"
+}
+
+// vibeEnvAllow is the exact environment a vibe-acp child may see. Installed
+// Vibe 2.25 reads these names for executable lookup, ~/.vibe and $VIBE_HOME,
+// the default Mistral API key, the OS keyring session, locale, proxies, and
+// extra certificate roots. Each name is listed on its own.
+var vibeEnvAllow = map[string]struct{}{
+	"PATH":    {},
+	"HOME":    {},
+	"USER":    {},
+	"LOGNAME": {},
+	"SHELL":   {},
+
+	"VIBE_HOME":                {},
+	"MISTRAL_API_KEY":          {},
+	"DBUS_SESSION_BUS_ADDRESS": {},
+	"XDG_RUNTIME_DIR":          {},
+
+	"LANG":        {},
+	"LC_ALL":      {},
+	"LC_CTYPE":    {},
+	"LC_MESSAGES": {},
+
+	"SSL_CERT_FILE": {},
+	"SSL_CERT_DIR":  {},
+	"http_proxy":    {},
+	"https_proxy":   {},
+	"HTTP_PROXY":    {},
+	"HTTPS_PROXY":   {},
+	"all_proxy":     {},
+	"ALL_PROXY":     {},
+	"no_proxy":      {},
+	"NO_PROXY":      {},
+}
+
+// vibeChildEnv copies the first value of each allowed name. A later duplicate
+// is ignored, matching os.Getenv. The result is never nil.
+func vibeChildEnv(parent []string) []string {
+	vals := make(map[string]string, len(vibeEnvAllow))
+	for _, entry := range parent {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, allow := vibeEnvAllow[key]; !allow {
+			continue
+		}
+		if _, seen := vals[key]; seen {
+			continue
+		}
+		vals[key] = value
+	}
+	keys := make([]string, 0, len(vals))
+	for key := range vals {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+vals[key])
+	}
+	return out
 }
 
 // groupTermGrace is how long a process group is given to leave of its own

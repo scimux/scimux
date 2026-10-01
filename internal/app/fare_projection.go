@@ -50,6 +50,10 @@ func applyFare(v *nodeView, f fare.FareTotals) {
 	v.FareCacheRead = &cr
 	v.FareCacheWrite = &cw
 	v.FareOut = &out
+	if f.UnsplitIn != 0 {
+		ui := f.UnsplitIn
+		v.FareUnsplitIn = &ui
+	}
 	v.FareTotal = &total
 	v.FareTurns = &turns
 	v.FareCost = &cost
@@ -67,6 +71,7 @@ type fareSegView struct {
 	CacheRead    int      `json:"cache_read"`
 	CacheWrite   int      `json:"cache_write"`
 	Out          int      `json:"out"`
+	UnsplitIn    int      `json:"unsplit_in,omitempty"`
 	Total        int      `json:"total"`
 	Turns        int      `json:"turns"`
 	Cost         *float64 `json:"cost,omitempty"`
@@ -95,6 +100,7 @@ func applyFareRides(v *nodeView, rides []fare.Ride) {
 			CacheRead:  r.Totals.CacheRead,
 			CacheWrite: r.Totals.CacheWrite,
 			Out:        r.Totals.Out,
+			UnsplitIn:  r.Totals.UnsplitIn,
 			Total:      r.Totals.Total(),
 			Turns:      r.Totals.Turns,
 			RealMS:     r.Real.Milliseconds(),

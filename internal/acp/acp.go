@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -574,6 +575,22 @@ type Session struct {
 	// (opencode two-shape; fare-design §2.1 / D5). Cleared at turn end.
 	shellUsed int
 	shellSize int
+	// sawShell is set when this turn received a Vibe occupancy update.
+	sawShell bool
+	// Vibe reports session-cumulative tokens and USD. Baselines live on the
+	// session and reset only when the session is replaced.
+	vibeInBase        int
+	vibeOutBase       int
+	vibeTotalBase     int
+	vibeCostBase      float64
+	vibeCostStash     float64
+	vibeCostSeen      bool
+	vibeCostUntrusted bool
+	// toolMeta is the latest title, kind, and command for tool-call ids seen
+	// during this turn. A permission request that carries only an id borrows
+	// them. Bounded, and cleared at each turn boundary.
+	toolMeta      map[string]rememberedTool
+	toolMetaOrder []string
 
 	done     chan struct{} // closed on exit/stop; unblocks a pending permission
 	doneOnce sync.Once
@@ -623,6 +640,21 @@ func (m *Manager) PermissionBoundary(nodeID string) (incarn string, maxSeq uint6
 	return s.incarn, s.pendingSeq, true
 }
 
+// UnknownToolTitle is the pending title when a permission request names no
+// trustworthy tool title or command. It is not a guess, and it is not
+// auto-approved.
+const UnknownToolTitle = "Unknown tool"
+
+// toolMetaCap bounds remembered tool-call metadata to one turn.
+const toolMetaCap = 32
+
+// rememberedTool is the latest presentation metadata for one tool-call id.
+type rememberedTool struct {
+	title string
+	kind  string
+	cmd   string
+}
+
 // pendingPermission is the one outstanding permission request (ACP is one turn
 // at a time, so at most one). RequestPermission blocks on ch until a key
 // resolves it, or done closes (cancel/shutdown → cancelled outcome). seq
@@ -652,35 +684,47 @@ func (s *Session) SessionUpdate(ctx context.Context, n sdk.SessionNotification) 
 		s.appendAssistantLocked(blockText(u.AgentMessageChunk.Content), u.AgentMessageChunk.MessageId, u.AgentMessageChunk.Meta, n.Meta)
 	case u.ToolCall != nil:
 		s.flushAssistantLocked()
+		tc := u.ToolCall
+		s.rememberToolLocked(string(tc.ToolCallId), tc.Title, string(tc.Kind), tc.RawInput)
 		if s.appendLocked(Event{T: "tool", Tool: &ToolEvent{
-			ID:       string(u.ToolCall.ToolCallId),
-			Title:    u.ToolCall.Title,
-			Kind:     string(u.ToolCall.Kind),
-			Status:   string(u.ToolCall.Status),
-			RawInput: u.ToolCall.RawInput,
+			ID:       string(tc.ToolCallId),
+			Title:    tc.Title,
+			Kind:     string(tc.Kind),
+			Status:   string(tc.Status),
+			RawInput: tc.RawInput,
 		}}) {
 			s.turnHadOutput = true
 		}
 	case u.ToolCallUpdate != nil:
 		tu := u.ToolCallUpdate
 		ev := &ToolEvent{ID: string(tu.ToolCallId), RawInput: tu.RawInput}
+		title, kind := "", ""
 		if tu.Title != nil {
-			ev.Title = *tu.Title
+			title = *tu.Title
+			ev.Title = title
 		}
 		if tu.Kind != nil {
-			ev.Kind = string(*tu.Kind)
+			kind = string(*tu.Kind)
+			ev.Kind = kind
 		}
 		if tu.Status != nil {
 			ev.Status = string(*tu.Status)
 		}
+		s.rememberToolLocked(string(tu.ToolCallId), title, kind, tu.RawInput)
 		if s.appendLocked(Event{T: "tool", Tool: ev}) {
 			s.turnHadOutput = true
 		}
 	case u.UsageUpdate != nil:
+		uu := u.UsageUpdate
+		if s.agent == "vibe" {
+			// Occupancy stays the gauge. Cost is a session cumulative and is
+			// not written on the shell.
+			s.noteVibeUsageLocked(uu)
+			break
+		}
 		// Occupancy shell (opencode streams these; see fare-design §2.1).
 		// Drop empty {} — contribute nothing. Cost amount is only recorded
 		// when >0 (currency-only is fine; never fabricate a dollar figure).
-		uu := u.UsageUpdate
 		if uu.Used == 0 && uu.Size == 0 {
 			break
 		}
@@ -729,6 +773,7 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 		s.mu.Unlock()
 		return cancelledPermission(), nil
 	}
+	title, toolKind = s.fillPermissionLocked(string(p.ToolCall.ToolCallId), title, toolKind)
 	s.pendingSeq++
 	s.pending = &pendingPermission{
 		seq: s.pendingSeq, toolTitle: title, toolKind: toolKind, options: p.Options, ch: ch,
@@ -799,6 +844,7 @@ func (s *Session) reserveTurn() (context.Context, bool) {
 	s.lastError = ""
 	s.assistant.Reset()
 	s.assistantEntries = nil
+	s.clearToolMetaLocked()
 	return ctx, true
 }
 
@@ -814,6 +860,7 @@ func (s *Session) abortTurn() {
 	s.assistant.Reset()
 	s.assistantEntries = nil
 	s.curMsgID = ""
+	s.clearToolMetaLocked()
 	s.mu.Unlock()
 }
 
@@ -860,8 +907,14 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 	// feeds fare. Shell occupancy was already written for the live gauge;
 	// the turn-end record must not overwrite Used with totalTokens.
 	shellUsed, shellSize := s.shellUsed, s.shellSize
+	sawShell := s.sawShell
 	s.shellUsed, s.shellSize = 0, 0
-	if ev := usageFromPrompt(resp, s.ctxSize); ev != nil {
+	s.sawShell = false
+	if s.agent == "vibe" {
+		if ev := s.vibeTurnUsageLocked(resp, sawShell, shellUsed, shellSize); ev != nil {
+			s.appendLocked(Event{T: "usage", Usage: ev})
+		}
+	} else if ev := usageFromPrompt(resp, s.ctxSize); ev != nil {
 		if s.agent == "opencode" {
 			ev = applyOpencodeUsagePairing(ev, shellUsed, shellSize)
 		}
@@ -894,6 +947,7 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 	s.turnCancel = nil
 	s.curMsgID = ""
 	s.turnHadOutput = false
+	s.clearToolMetaLocked()
 }
 
 const (
@@ -1193,6 +1247,163 @@ func (s *Session) clearPending() {
 	s.mu.Unlock()
 }
 
+// rememberToolLocked records non-empty title, kind, and command for id.
+// Empty fields do not wipe a previous value. Callers hold s.mu.
+func (s *Session) rememberToolLocked(id, title, kind string, raw any) {
+	if id == "" {
+		return
+	}
+	title = strings.TrimSpace(title)
+	kind = strings.TrimSpace(kind)
+	cmd := commandFromRaw(raw)
+	if title == "" && kind == "" && cmd == "" {
+		return
+	}
+	if s.toolMeta == nil {
+		s.toolMeta = map[string]rememberedTool{}
+	}
+	cur, exists := s.toolMeta[id]
+	if title != "" {
+		cur.title = title
+	}
+	if kind != "" {
+		cur.kind = kind
+	}
+	if cmd != "" {
+		cur.cmd = cmd
+	}
+	s.toolMeta[id] = cur
+	if exists {
+		for i, curID := range s.toolMetaOrder {
+			if curID == id {
+				s.toolMetaOrder = append(s.toolMetaOrder[:i], s.toolMetaOrder[i+1:]...)
+				break
+			}
+		}
+	}
+	s.toolMetaOrder = append(s.toolMetaOrder, id)
+	for len(s.toolMetaOrder) > toolMetaCap {
+		drop := s.toolMetaOrder[0]
+		s.toolMetaOrder = s.toolMetaOrder[1:]
+		delete(s.toolMeta, drop)
+	}
+}
+
+func (s *Session) clearToolMetaLocked() {
+	s.toolMeta = nil
+	s.toolMetaOrder = nil
+}
+
+// fillPermissionLocked borrows cached title and kind only where the request
+// itself left them empty, then makes a command visible. Callers hold s.mu.
+func (s *Session) fillPermissionLocked(id, reqTitle, reqKind string) (string, string) {
+	reqTitle = strings.TrimSpace(reqTitle)
+	reqKind = strings.TrimSpace(reqKind)
+	var rec rememberedTool
+	ok := false
+	if id != "" {
+		rec, ok = s.toolMeta[id]
+	}
+	title := reqTitle
+	if title == "" && ok {
+		title = rec.title
+	}
+	kind := reqKind
+	if kind == "" && ok {
+		kind = rec.kind
+	}
+	if reqTitle == "" {
+		cmd := ""
+		if ok {
+			cmd = rec.cmd
+		}
+		title = composeToolTitle(title, cmd)
+	}
+	if strings.TrimSpace(title) == "" {
+		title = UnknownToolTitle
+	}
+	return title, kind
+}
+
+// commandFromRaw reads a command from a tool's raw input. A string is the
+// command. A map contributes "command" or "cmd", plus a string "args".
+func commandFromRaw(raw any) string {
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case map[string]any:
+		cmd, _ := v["command"].(string)
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			alt, _ := v["cmd"].(string)
+			cmd = strings.TrimSpace(alt)
+		}
+		if cmd == "" {
+			return ""
+		}
+		if args, ok := v["args"].(string); ok {
+			args = strings.TrimSpace(args)
+			if args != "" {
+				return cmd + " " + args
+			}
+		}
+		return cmd
+	default:
+		return ""
+	}
+}
+
+// composeToolTitle appends a command to a short verb so the approval card can
+// show it. A command that already contains a backtick is kept visible without
+// a second pair of backticks. A long title is left as the agent wrote it.
+func composeToolTitle(title, cmd string) string {
+	title = strings.TrimSpace(title)
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" || strings.Contains(title, cmd) {
+		return title
+	}
+	if strings.Contains(cmd, "`") {
+		if title == "" {
+			return cmd
+		}
+		return title + " " + cmd
+	}
+	if title == "" {
+		return "bash `" + cmd + "`"
+	}
+	if shortPermVerb(title) {
+		return title + " `" + cmd + "`"
+	}
+	return title
+}
+
+// shortPermVerb reports whether title matches the approval card's
+// "Verb `payload`" verb: one letter plus at most twenty word or space
+// characters, and no backtick of its own.
+func shortPermVerb(title string) bool {
+	if title == "" || strings.Contains(title, "`") {
+		return false
+	}
+	rs := []rune(title)
+	if len(rs) < 1 || len(rs) > 21 {
+		return false
+	}
+	if !asciiLetter(rs[0]) {
+		return false
+	}
+	for _, r := range rs[1:] {
+		if r == ' ' || r == '_' || (r >= '0' && r <= '9') || asciiLetter(r) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func asciiLetter(r rune) bool {
+	return (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')
+}
+
 // mapKeyToOption resolves a whitelisted dialog key to a permission option:
 // a digit selects the Nth option; y/Enter picks the first allow option (or the
 // first option); n/Escape picks the first reject option (or the last).
@@ -1315,6 +1526,118 @@ func (s *Session) captureBanner(resp sdk.NewSessionResponse) {
 // no cache-write (fare-design D5 — baseline is 3-quantity fare; Phase 5b
 // SQLite enrichment for cache-write/cost is paused and must not be re-opened
 // here).
+// noteVibeUsageLocked records occupancy for the gauge and remembers a
+// cumulative USD cost. The shell event carries neither cost nor tokens.
+// Callers hold s.mu.
+func (s *Session) noteVibeUsageLocked(uu *sdk.SessionUsageUpdate) {
+	if uu == nil {
+		return
+	}
+	s.noteVibeCostLocked(uu.Cost)
+	if uu.Used == 0 && uu.Size == 0 {
+		return
+	}
+	s.shellUsed = uu.Used
+	s.shellSize = uu.Size
+	s.sawShell = true
+	s.appendLocked(Event{T: "usage", Usage: &UsageEvent{Used: uu.Used, Size: uu.Size}})
+}
+
+// noteVibeCostLocked interprets one cumulative cost figure. A positive USD
+// amount is stashed for the turn, or applied straight to the baseline when
+// the turn is already over. Anything else stays unknown: an explicit zero
+// does not move the baseline, and a non-USD amount makes the next USD figure
+// advance the baseline without being billed.
+func (s *Session) noteVibeCostLocked(cost *sdk.Cost) {
+	if cost == nil {
+		return
+	}
+	amount := cost.Amount
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 || amount == 0 {
+		return
+	}
+	if cost.Currency != "USD" {
+		s.vibeCostUntrusted = true
+		return
+	}
+	if !s.turnActive || s.vibeCostUntrusted {
+		if amount > s.vibeCostBase {
+			s.vibeCostBase = amount
+		}
+		s.vibeCostUntrusted = false
+		s.vibeCostSeen = false
+		s.vibeCostStash = amount
+		return
+	}
+	s.vibeCostSeen = true
+	s.vibeCostStash = amount
+}
+
+// vibeTurnUsageLocked subtracts the session's cumulative counters once.
+// A nil usage consumes a seen cost into the baseline and writes nothing.
+func (s *Session) vibeTurnUsageLocked(resp sdk.PromptResponse, sawShell bool, shellUsed, shellSize int) *UsageEvent {
+	if resp.Usage == nil {
+		s.takeVibeCostLocked(false)
+		return nil
+	}
+	u := resp.Usage
+	in, inBase := vibeCounterDelta(u.InputTokens, s.vibeInBase)
+	out, outBase := vibeCounterDelta(u.OutputTokens, s.vibeOutBase)
+	total, totalBase := vibeCounterDelta(u.TotalTokens, s.vibeTotalBase)
+	s.vibeInBase, s.vibeOutBase, s.vibeTotalBase = inBase, outBase, totalBase
+	emit := in > 0 || out > 0 || total > 0
+	cost := s.takeVibeCostLocked(emit)
+	if !emit {
+		return nil
+	}
+	ev := &UsageEvent{InputTokens: in, OutputTokens: out, TotalTokens: total}
+	if sawShell {
+		ev.Used = shellUsed
+		ev.Size = shellSize
+	}
+	if cost > 0 {
+		ev.CostAmount = cost
+		ev.CostCurrency = "USD"
+	}
+	return ev
+}
+
+// takeVibeCostLocked returns the positive USD difference for this turn when
+// emit is set, and always folds a seen figure into the baseline so it cannot
+// be billed again. An untrusted currency contributes nothing.
+func (s *Session) takeVibeCostLocked(emit bool) float64 {
+	if s.vibeCostUntrusted {
+		if s.vibeCostSeen && s.vibeCostStash > s.vibeCostBase {
+			s.vibeCostBase = s.vibeCostStash
+		}
+		s.vibeCostSeen = false
+		return 0
+	}
+	if !s.vibeCostSeen {
+		return 0
+	}
+	s.vibeCostSeen = false
+	if s.vibeCostStash <= s.vibeCostBase {
+		return 0
+	}
+	delta := s.vibeCostStash - s.vibeCostBase
+	s.vibeCostBase = s.vibeCostStash
+	if !emit {
+		return 0
+	}
+	return delta
+}
+
+// vibeCounterDelta is the nonnegative change from base to cur. A zero current
+// value after a positive baseline is treated as missing. A decrease keeps the
+// baseline and charges nothing.
+func vibeCounterDelta(cur, base int) (delta, next int) {
+	if (cur == 0 && base > 0) || cur < base {
+		return 0, base
+	}
+	return cur - base, cur
+}
+
 func usageFromPrompt(resp sdk.PromptResponse, ctxSize int) *UsageEvent {
 	if resp.Usage != nil {
 		u := resp.Usage
@@ -1610,14 +1933,14 @@ func configSetError(err error, knob, value string) error {
 // point: dsh puts neither knob on argv, so anything applied only at Launch is
 // silently dropped by the next /clear.
 //
-// Two policies, stated once. dsh is strict — an explicit choice it cannot
-// apply fails the launch, because the alternative is a node whose record, log
-// header and gauge all name a model the live agent is not running, with
-// nothing on screen to say so. pi, opencode and grok stay tolerant: they have
-// always treated a mismatch as "keep your own default", and changing that is
-// their behaviour to change, not something adding dsh should do to them.
+// Two policies, stated once. dsh and vibe are strict — an explicit choice
+// they cannot apply fails the launch, because the alternative is a node
+// whose record, log header and gauge all name a model the live agent is not
+// running, with nothing on screen to say so. pi, opencode, grok and cursor
+// stay tolerant: they have always treated a mismatch as "keep your own
+// default", and changing that is their behaviour to change.
 func (s *Session) applyLaunchConfig(ctx context.Context, model, effort string, resp sdk.NewSessionResponse) error {
-	strict := s.agent == "dsh"
+	strict := s.agent == "dsh" || s.agent == "vibe"
 	opts := resp.ConfigOptions
 	if strict {
 		updated, err := s.applyModel(ctx, model, opts)
@@ -1645,6 +1968,11 @@ func (s *Session) applyLaunchConfig(ctx context.Context, model, effort string, r
 func (s *Session) applyEffort(ctx context.Context, effort string, modes *sdk.SessionModeState, opts []sdk.SessionConfigOption) error {
 	if effort == "" {
 		return nil
+	}
+	// Vibe's session modes include an auto-approve mode. Thinking is a config
+	// option, and matching the level against a mode name would switch modes.
+	if s.agent == "vibe" {
+		return s.applyVibeThinking(ctx, effort, opts)
 	}
 	if modes != nil {
 		for _, mode := range modes.AvailableModes {
@@ -1703,7 +2031,7 @@ func (s *Session) applyModel(ctx context.Context, model string, opts []sdk.Sessi
 		// Scoped to the model select by name. Matching on value across every
 		// select would let a model id land in the effort menu, which happens
 		// to be reachable: both are plain strings on the same wire.
-		if !containsFold(string(sel.Id), "model") && !containsFold(sel.Name, "model") {
+		if !modelSelectMatches(s.agent, sel) {
 			continue
 		}
 		val, ok := matchModelValue(sel, model)
@@ -1719,6 +2047,86 @@ func (s *Session) applyModel(ctx context.Context, model string, opts []sdk.Sessi
 		return resp.ConfigOptions, nil
 	}
 	return nil, fmt.Errorf("%w: model %q was chosen but this agent advertises no model option", ErrConfigRejected, model)
+}
+
+// modelSelectMatches finds the model menu. dsh keeps the historical
+// substring match. Vibe matches the model category, or an id or name that is
+// exactly "model", so a nearby label that merely contains the word cannot
+// absorb the choice.
+func modelSelectMatches(agent string, sel *sdk.SessionConfigOptionSelect) bool {
+	if agent == "vibe" {
+		if sel.Category != nil && *sel.Category == sdk.SessionConfigOptionCategoryModel {
+			return true
+		}
+		return strings.EqualFold(string(sel.Id), "model") || strings.EqualFold(sel.Name, "model")
+	}
+	return containsFold(string(sel.Id), "model") || containsFold(sel.Name, "model")
+}
+
+// applyVibeThinking sends the advertised thinking option. It never calls
+// SetSessionMode. Preference is the standard thought_level category, then
+// Vibe's own "thinking" category, then an id of "thinking", then a
+// conservative normalized name (thinking, thoughtlevel, thinkinglevel).
+func (s *Session) applyVibeThinking(ctx context.Context, effort string, opts []sdk.SessionConfigOption) error {
+	sel := bestVibeThinking(opts)
+	if sel == nil {
+		return fmt.Errorf("%w: effort %q is not one this agent offers", ErrConfigRejected, effort)
+	}
+	val, ok := matchSelectValue(sel, effort)
+	if !ok {
+		return fmt.Errorf("%w: effort %q is not one this agent offers", ErrConfigRejected, effort)
+	}
+	if _, err := s.conn.SetSessionConfigOption(ctx, sdk.SetSessionConfigOptionRequest{
+		ValueId: &sdk.SetSessionConfigOptionValueId{ConfigId: sel.Id, SessionId: s.sessionID, Value: val},
+	}); err != nil {
+		return configSetError(err, "effort", effort)
+	}
+	return nil
+}
+
+func bestVibeThinking(opts []sdk.SessionConfigOption) *sdk.SessionConfigOptionSelect {
+	var best *sdk.SessionConfigOptionSelect
+	bestScore := 0
+	for _, opt := range opts {
+		sel := opt.Select
+		if sel == nil {
+			continue
+		}
+		if score := vibeThinkingScore(sel); score > bestScore {
+			best = sel
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func vibeThinkingScore(sel *sdk.SessionConfigOptionSelect) int {
+	if sel.Category != nil {
+		switch string(*sel.Category) {
+		case string(sdk.SessionConfigOptionCategoryThoughtLevel):
+			return 4
+		case "thinking":
+			return 3
+		}
+	}
+	if strings.EqualFold(string(sel.Id), "thinking") {
+		return 2
+	}
+	switch normalizeOptionName(sel.Name) {
+	case "thinking", "thoughtlevel", "thinkinglevel":
+		return 1
+	}
+	return 0
+}
+
+func normalizeOptionName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if r >= 'a' && r <= 'z' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // matchModelValue accepts the id as the agent writes it, as it labels it, or —

@@ -113,7 +113,7 @@ export function harnessTermsHTML(agent){
 /**
  * One row's state and the sentence under it.
  *
- * States: "absent" (not on PATH), "unknown" (present, `--version` unreadable),
+ * States: "absent" (not on PATH), "unknown" (present, installed version empty),
  * "unlaunchable" (present, but the binary scimux launches is missing),
  * "no-source" (installed, no public version channel), "unchecked" (installed,
  * no upstream answer yet), "behind", "current".
@@ -385,6 +385,62 @@ export async function runUpdateChecks(checks = {}){
     Promise.resolve().then(() => checks.scimux()),
   ]);
   return { harness, scimux };
+}
+
+/* The checkbox copy is the warning. Inspection selects models inside Vibe,
+ * and installed Vibe 2.25 writes that selection into its saved default. */
+export const VIBE_INSPECT_LABEL =
+  "Inspecting Vibe model and thinking choices changes Vibe's saved default model and leaves the last inspected model selected.";
+
+/* Ordinary checks stay GET. Only a strict true sends the server's opt-in. */
+export function harnessUpdateCall(inspect) {
+  if (inspect === true) {
+    return {
+      path: "/api/harnesses/latest",
+      opts: { method: "POST", body: JSON.stringify({ inspect_vibe: true }) },
+    };
+  }
+  return { path: "/api/harnesses/latest" };
+}
+
+/* One burger-menu check. The box is read once, then cleared, so a later
+ * click is ordinary again. A failed harness request leaves the dialog as it
+ * was and says so on the button when one was supplied. */
+export async function runHarnessMenuCheck(deps) {
+  const button = deps.button;
+  const scimuxButton = deps.scimuxButton;
+  const box = deps.box;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "checking…";
+  }
+  if (scimuxButton) scimuxButton.disabled = true;
+  const call = harnessUpdateCall(box && box.checked === true);
+  const checked = await runUpdateChecks({
+    harness: () => deps.api(call.path, call.opts),
+    scimux: () => deps.scimux(),
+  });
+  if (box) box.checked = false;
+  if (button) button.disabled = false;
+  if (scimuxButton) scimuxButton.disabled = false;
+  if (checked.harness.status === "fulfilled") {
+    const payload = checked.harness.value || {};
+    if (typeof deps.apply === "function") deps.apply(payload);
+    if (button) button.textContent = "Check for harness updates";
+  } else if (button) {
+    button.textContent = "check failed";
+  }
+  return checked;
+}
+
+/* Fold one refresh payload into the menu's current rows. A missing list or
+ * catalog leaves the previous one in place. */
+export function acceptHarnessMenuResult(d, sinks) {
+  const data = d || {};
+  if (sinks.latest) sinks.latest(data.latest || {});
+  if (Array.isArray(data.harnesses) && sinks.rows) sinks.rows(data.harnesses);
+  if (data.agents && typeof data.agents === "object" && sinks.agents) sinks.agents(data.agents);
+  if (sinks.render) sinks.render();
 }
 
 /* Small stateful coordinator shared by the standalone scimux check and the

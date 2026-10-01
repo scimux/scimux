@@ -188,7 +188,7 @@ func TestUniqueIDEveryMatrixIDIsTmuxSafe(t *testing.T) {
 func TestNodeTransportEmptyIsTmuxForAllAgents(t *testing.T) {
 	// Legacy records with an absent Transport migrate to tmux regardless of
 	// agent name — the field predates pi/opencode/codex structured transports.
-	for _, agent := range []string{"claude", "codex", "pi", "opencode", "anything"} {
+	for _, agent := range []string{"claude", "codex", "pi", "opencode", "vibe", "anything"} {
 		n := &Node{Agent: agent, Transport: ""}
 		if got := n.transport(); got != "tmux" {
 			t.Errorf("empty Transport on agent %q = %q, want tmux", agent, got)
@@ -216,6 +216,7 @@ func TestResolveNodeRootTransportByAgent(t *testing.T) {
 		// their transport rather than earning one of its own.
 		{"cursor", "acp"},
 		{"dsh", "acp"},
+		{"vibe", "acp"},
 		{"muse", "muse"},
 	}
 	for _, c := range cases {
@@ -790,7 +791,7 @@ func TestAgentCommandRejectsCodexAndUnknown(t *testing.T) {
 	// dsh has no tmux fallback on purpose: its ACP profile is the only launch
 	// path scimux knows, and a bare `dsh <prompt>` is a different, interactive
 	// program. Rejecting it here is the honest answer, not an omission.
-	for _, agent := range []string{"dsh", "gemini", "", "Claude"} {
+	for _, agent := range []string{"dsh", "vibe", "gemini", "", "Claude"} {
 		if _, err := agentCommand(&Node{Agent: agent, Prompt: "p"}, nil); err == nil {
 			t.Errorf("agentCommand must reject unknown agent %q", agent)
 		}

@@ -964,6 +964,30 @@ test("eight harness rows render alphabetically with dsh between cursor and grok"
   assert.equal((html.match(/class="item"/g) || []).length, 8);
 });
 
+test("a vibe row sorts after pi and carries no terms link", () => {
+  const rows = [
+    { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
+    { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
+    { agent: "pi", present: false, launchable: false },
+    { agent: "opencode", present: true, launchable: true, installed: "1.2.3" },
+    { agent: "grok", present: true, launchable: true, installed: "1.0.24" },
+    { agent: "cursor", present: true, launchable: true, installed: "2026.09.15-d2fe57e", has_source: false },
+    { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
+    { agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" },
+    { agent: "vibe", present: true, launchable: true, installed: "1.2.3", has_source: false },
+  ];
+  const html = harnessRowsHTML(rows, null);
+  const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(order, ["claude", "codex", "cursor", "dsh", "grok", "muse", "opencode", "pi", "vibe"]);
+  const vibeAt = html.indexOf('data-agent="vibe"');
+  assert.ok(vibeAt >= 0);
+  const vibe = html.slice(vibeAt);
+  assert.match(vibe, / Vibe</);
+  assert.match(vibe, /no public version channel/);
+  assert.doesNotMatch(vibe, /href=/);
+  assert.doesNotMatch(vibe, /Terms of Service|Terms of Use|Terms and privacy/i);
+});
+
 test("an installed dsh reads as unchecked with its prerelease version intact", () => {
   /* dsh ships prerelease semver; truncating it to 0.1.5 would compare a
      different version against upstream than the one on disk. */

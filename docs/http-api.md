@@ -88,7 +88,20 @@ SessionStart, `claude_strict` after acknowledgement, `claude_unsupported`
 for legacy/moved-binary bundles, `claude_failed` for startup or
 delivery errors), and
 `last_activity` is the last pane change in Unix milliseconds. `ctx_pct`, when
-present, is the live segment's context occupancy percentage. `stops` are the
+present, is the live segment's context occupancy percentage. Token spend is
+the separate trio `fare_fresh_in`, `fare_out`, and `fare_total`, present once
+a segment has counted turns. For `vibe` each stored turn is the increase over
+the previous cumulative counters in that ACP session. Vibe's input counter
+includes cached prompt tokens and does not report a fresh/cache split, so
+that increase is `fare_unsplit_in` and is not counted as `fare_fresh_in` or
+`fare_cache_read`. `fare_total` for `vibe` is that unsplit input plus
+`fare_out`. `/clear` and a fork
+start a new session, so the next increase is measured from zero. `fare_cost`
+is paired with `fare_cost_complete`. For `vibe` that cost is the sum of
+positive USD increments Vibe reported for those turns: a Vibe-reported cost.
+When a counted turn has no trustworthy USD increment, `fare_cost_complete` is
+false and the cost is unknown. A missing occupancy update leaves `ctx_pct`
+unset. The gauge reads occupancy only. `stops` are the
 node's `/clear` page-turn timestamps; the map prepends `created_at` to draw the
 full station chain. `ended_at` (RFC 3339, present only once set) marks a thread
 deliberately closed via
@@ -189,12 +202,18 @@ the first Claude prompt is awaiting SessionStart or transcript confirmation,
 `restore_draft` with the original prompt; it does not open the terminal.
 
 For structured nodes (Codex app-server, ACP
-`pi`/`opencode`/`grok`/`cursor`/`dsh`,
+`pi`/`opencode`/`grok`/`cursor`/`dsh`/`vibe`,
 and Muse MSP), `source` is `acp` for compatibility across these transports;
 there is no pane fallback. Pending approval details are returned as
 `perm_title`, `perm_options`, `perm_tool_kind`, `perm_reason`, and — only
 while a permission is pending — an opaque `perm_request_id` that
-`POST …/key` must echo back. Idle structured
+`POST …/key` must echo back. When an ACP permission request names a tool-call
+id and no title, `perm_title` is the latest title and command scimux recorded
+for that id earlier in the same turn, and `perm_tool_kind` is filled from
+that record when the request omits a kind. Option ids, names, and order stay
+the agent's own, including two `allow_always` options that differ by scope.
+A request with no trustworthy title uses `perm_title` `Unknown tool` and
+still waits for a human choice. Idle structured
 chats and tmux nodes do not invent a request id. For a strict Claude
 permission dialog the echo token is `perm_dialog_id`, a **server-minted
 visible-dialog epoch**. Claude's `Notification(permission_prompt)` payload
@@ -396,7 +415,48 @@ reports an empty `models` and no `efforts`; the dialog offers only
 levels that model accepts are read from the live session at launch — the UI's
 static effort list for dsh is deliberately empty, because dsh's levels are
 `off`/`low`/`high`/`max` for models whose route reasons and absent for the
-rest. Claude's model IDs also have a persistent cache, refreshed on a CLI
+rest.
+
+`vibe` is offered when `vibe-acp` is on `PATH`. Startup, menu open,
+`GET /api/agents`, and an ordinary `GET /api/harnesses/latest` do not execute
+`vibe-acp`. They publish an empty `models` list and no `efforts`. The dialog
+offers (default) model and (default) thinking. Launching that pair sends no
+ACP model or thinking setter; Vibe chooses its own default.
+
+`POST /api/harnesses/latest` with JSON `{"inspect_vibe": true}` is the one
+request that runs the catalog probe. The field has to be the boolean `true`.
+A missing field, `false`, `null`, an empty body, and every GET — including a
+query string or a JSON body carrying the same name — stay ordinary refreshes
+and do not start `vibe-acp`. Malformed JSON, or `inspect_vibe` as a string,
+number, or array, is `400` before any refresh or probe. The probe is one
+cached disposable ACP session: `initialize`, `session/new`, a config
+selection per advertised model, and `session/close`. That probe never calls
+`session/prompt`, never approves a tool, and never grants filesystem or
+terminal access. Model ids are the advertised option values in the agent's
+order; an accidental `currentValue` is not added and is not a scimux default.
+Thinking levels are the value ids returned after selecting that model. The
+probe's total budget is 12 seconds, and each protocol call is limited to
+4 seconds. It stops when that bound is reached, leaving later
+models without invented levels. With installed Vibe 2.25, selecting models
+during inspection changes Vibe's saved default model and leaves the last
+inspected model selected. A failed, timed-out, or empty catalog keeps the
+empty `models` list: the chat still launches on Vibe's own default, and the
+response invents no model, thinking level, or success state. After a
+successful inspection, `GET /api/agents` returns that cached catalog until
+the next ordinary refresh replaces it with the empty offer. Explicit
+`model` then `effort` are applied in that order on launch and on `/clear`,
+using the ids the session advertised (`thought_level`, or Vibe's `thinking`
+option). With installed Vibe 2.25 those setters persist in Vibe's config.
+A choice the session does not offer is `400` before the session is
+recorded. When Vibe cannot create a session or answer a prompt because its
+configuration or authentication is unusable, that failure is returned on
+the existing launch and prompt error path and no chat is recorded for a
+failed session create. Context occupancy (`ctx_pct` on the state snapshot, and
+`ctx_used` / `ctx_window` / `ctx_pct` on the chat payload), token spend, and
+any Vibe-reported cost are separate figures. The state snapshot is where
+token spend and the Vibe-reported cost are projected.
+
+Claude's model IDs also have a persistent cache, refreshed on a CLI
 version change or after one day;
 `GET /api/agents` can trigger that refresh. Its model probes submit no billed
 prompt and are independent of consent for the usage gauge.
@@ -444,7 +504,14 @@ that are surfaced on `GET …/chat` (`error`, `restore_draft`), not by blocking
 this response.
 
 Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, `cursor`,
-`dsh`, and `muse`. A cursor launch whose `model`/`effort` pair is absent from the
+`dsh`, `muse`, and `vibe`. `vibe` is offered when the user-installed
+`vibe-acp` binary is on `PATH`. It has no static model list: an empty
+`models` array means the chat launches Vibe's own default and sends no ACP
+model or thinking setter. An explicit model, then an explicit thinking
+level, uses the advertised ACP option ids. With installed Vibe 2.25 those
+choices persist in Vibe's config. When Vibe has no usable default, session
+creation fails with Vibe's own error and the node is not recorded.
+A cursor launch whose `model`/`effort` pair is absent from the
 catalog is refused with `400` rather than passed to the CLI, and so is any
 non-empty `effort` the catalog cannot resolve — cursor has no effort flag, so
 an unresolved level would be dropped and the chat would run at a level nobody
@@ -964,8 +1031,12 @@ Which supported agent CLIs this computer has, in registry order:
 only — never a network call, because the menu reads it on every open.
 `has_source` says whether this harness has a public upstream version channel;
 when false, the UI shows the installed version without implying that an
-upstream check failed. `installed` is the first version-shaped token of
-`<bin> --version`, empty when the output does not carry one. `present` and
+upstream check failed. For every harness except Vibe, `installed` is the
+first version-shaped token of `<bin> --version`, empty when the output does
+not carry one. Vibe is detected through `PATH` only. Startup inventory, menu
+open, `GET /api/agents`, and an ordinary refresh do not execute `vibe-acp`,
+so its `installed` field stays empty and the menu shows that version as
+unknown. `present` and
 `launchable` are separate facts: pi is installed as `pi` but launched through
 `pi-acp`. The probe is cached during ordinary menu use and replaced by the
 explicit harness-update check, so an installed or upgraded CLI appears without
@@ -980,7 +1051,17 @@ The explicit refresh response is
 `{latest:{<agent>:{version, source}}, harnesses:[…], agents:{…}}`. `latest` is
 what each harness publishes upstream; `harnesses` is the newly reprobed local
 inventory from `GET /api/harnesses`; and `agents` is the newly reprobed model
-catalog from `GET /api/agents`. The cache replacements are atomic, so launches
+catalog from `GET /api/agents`. For Vibe that ordinary reprobe is `PATH`
+presence: empty `models`, no `efforts`, an unknown installed version, and
+`vibe-acp` stays unstarted.
+`POST` on this same path is the one audited Handle registration beside the
+`HandleFunc` inventory. It accepts JSON `{"inspect_vibe": true}` as a one-shot
+request to run Vibe's bounded catalog probe and return the models and
+per-model thinking levels it found. The browser checkbox that sends the field
+resets after the action and is not stored consent. With installed Vibe 2.25
+the inspection changes Vibe's saved default model and leaves the last
+inspected model selected. A failed or empty inspection leaves the empty
+default offer. The cache replacements are atomic, so launches
 after the response use the same catalog the browser displays.
 
 The full refresh is reached only on an explicit tap — the server never polls
@@ -988,7 +1069,8 @@ the registries or repeatedly reruns every CLI list command. Local probes, the
 scimux release check made by the browser, and the upstream requests run
 concurrently. Overlapping refresh requests (for example, from two tabs) reuse
 the completed in-flight local inventory and model probes instead of running
-the CLI commands again. There is no single upstream lane: four sources are npm
+the CLI commands again. An accepted Vibe inspection runs after that shared
+refresh, as its own bounded probe. There is no single upstream lane: four sources are npm
 packages (codex, pi, opencode and dsh), grok is a plain-text channel file, and
 Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not

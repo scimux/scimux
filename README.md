@@ -65,20 +65,40 @@ tokens.
 | [Grok CLI](https://docs.x.ai/build/cli/reference) | ACP via `grok agent stdio` | `grok`, authenticated with `grok login` |
 | [Cursor CLI](https://docs.cursor.com/en/cli/installation) | ACP via `cursor-agent acp` | `cursor-agent` |
 | [dsh](https://github.com/deepseek-ai/deepseek-harness) | ACP via `dsh --profile acp` | `dsh` and an `acp` profile whose default model is usable |
+| [Vibe](https://github.com/mistralai/mistral-vibe) | ACP via `vibe-acp` | `vibe-acp`, installed and authenticated by you |
 | [Muse Code](https://developer.meta.com/ai/products/muse-code/) | MSP via `muse serve` | `muse`; launch consent is off until the computer owner enables it |
 
 The new-activity dialog shows only harnesses that are launchable on the
 current machine. Model and reasoning choices come from each CLI where it has a
-read-only discovery surface; otherwise scimux uses the harness default rather
-than opening a disposable session or guessing.
+read-only discovery surface. Startup and an ordinary **Check for harness
+updates** detect `vibe-acp` by `PATH` and do not execute it. They offer Vibe with (default) model and
+(default) thinking. Launching those defaults sends no ACP model or thinking
+setter; Vibe chooses its own default. dsh has no discovery surface scimux can
+use, so a dsh chat launches on the harness default.
 
 The burger menu's **Check for harness updates** action refreshes that local
-inventory and those model catalogs, checks each harness's public release
-channel, and checks for a new scimux release. This is the way a long-running
-scimux notices a newly installed CLI, a changed pi/OpenCode configuration, or
-a newly published model such as a Grok model without being restarted. It does
-not install harness updates, and it still cannot enumerate dsh models because
-dsh has no read-only discovery surface.
+inventory and the read-only model catalogs, checks each harness's public
+release channel, and checks for a new scimux release. This is the way a
+long-running scimux notices a newly installed CLI, a changed pi/OpenCode
+configuration, or a newly published model such as a Grok model without being
+restarted. It does not install harness updates. It still cannot enumerate dsh
+models. Cursor has no public version channel in this menu, so its row shows
+the installed version only. Vibe is not executed to read a version, so its
+installed version stays unknown.
+
+Beside that action, an unchecked box can include one inspection of Vibe's
+model and thinking menus. The box applies to that click and resets when the
+action finishes. It is one-shot: scimux does not store it as consent.
+Inspection is one cached disposable ACP session. That probe never sends a prompt.
+Its total budget is 12 seconds, and each protocol call is limited to
+4 seconds. With installed Vibe 2.25, inspecting those menus changes Vibe's
+saved default model and leaves the last inspected model selected. An explicit
+model or thinking choice at chat launch uses the same ACP setters and, with
+Vibe 2.25, persists in Vibe's config. A failed, timed-out, or empty inspection
+leaves Vibe launchable on (default) model and (default) thinking, with no
+invented model or thinking level. When Vibe has no usable default, or its
+configuration or authentication cannot create a session or answer a prompt,
+scimux reports Vibe's own failure.
 
 scimux starts Claude Code with [`--remote-control`](https://code.claude.com/docs/en/remote-control),
 so the same local session can also be continued from `claude.ai` or the Claude

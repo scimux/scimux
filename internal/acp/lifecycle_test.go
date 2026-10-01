@@ -53,6 +53,11 @@ func TestAgentArgv(t *testing.T) {
 		{agent: "dsh", want: []string{"dsh", "--profile", "acp"}},
 		{agent: "dsh", model: "deepseek-v4-flash", effort: "high",
 			want: []string{"dsh", "--profile", "acp"}},
+		// vibe is the installed vibe-acp binary. Model and thinking are
+		// session options, so neither appears on argv.
+		{agent: "vibe", want: []string{"vibe-acp"}},
+		{agent: "vibe", model: "synthetic-model", effort: "high",
+			want: []string{"vibe-acp"}},
 		{agent: "claude", wantErr: true},
 		{agent: "", wantErr: true},
 	}

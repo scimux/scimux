@@ -1048,39 +1048,43 @@ func (c *Client) declineUserInput(captured string, params json.RawMessage) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	go func() {
-		cmdID, err := NewCommandID()
-		if err != nil {
-			c.emitIfCurrent(captured, Event{T: "error", Error: err.Error()})
-			return
-		}
-		ctx, cancel := context.WithTimeout(parent, wait)
-		defer cancel()
-		if err := c.op.acquire(ctx, c.Done()); err != nil {
-			if errors.Is(err, ErrClosed) || errors.Is(err, context.Canceled) {
-				return
-			}
-			c.emitIfCurrent(captured, Event{T: "error", Error: "userInput/cancel failed: " + err.Error()})
-			return
-		}
-		defer c.op.release()
-		if captured != c.SessionID() {
-			return
-		}
-		_, err = c.peer.Call(ctx, "userInput/cancel", map[string]any{
-			"commandId":   cmdID,
-			"sessionId":   session,
-			"userInputId": u.UserInputID,
-			"reason":      "scimux does not present interactive user-input dialogs",
-		})
-		if err == nil {
-			return
-		}
+	go c.cancelUnsupportedUserInput(captured, session, u.UserInputID, parent, wait)
+}
+
+// cancelUnsupportedUserInput runs after the unsupported-input notice. Close
+// and session transitions can win while it waits for the operation gate.
+func (c *Client) cancelUnsupportedUserInput(captured, session, userInputID string, parent context.Context, wait time.Duration) {
+	cmdID, err := NewCommandID()
+	if err != nil {
+		c.emitIfCurrent(captured, Event{T: "error", Error: err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, wait)
+	defer cancel()
+	if err := c.op.acquire(ctx, c.Done()); err != nil {
 		if errors.Is(err, ErrClosed) || errors.Is(err, context.Canceled) {
 			return
 		}
 		c.emitIfCurrent(captured, Event{T: "error", Error: "userInput/cancel failed: " + err.Error()})
-	}()
+		return
+	}
+	defer c.op.release()
+	if captured != c.SessionID() {
+		return
+	}
+	_, err = c.peer.Call(ctx, "userInput/cancel", map[string]any{
+		"commandId":   cmdID,
+		"sessionId":   session,
+		"userInputId": userInputID,
+		"reason":      "scimux does not present interactive user-input dialogs",
+	})
+	if err == nil {
+		return
+	}
+	if errors.Is(err, ErrClosed) || errors.Is(err, context.Canceled) {
+		return
+	}
+	c.emitIfCurrent(captured, Event{T: "error", Error: "userInput/cancel failed: " + err.Error()})
 }
 
 // opGate serializes session transitions with Decide and user-input

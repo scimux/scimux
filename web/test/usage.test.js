@@ -8,6 +8,7 @@ import {
   usageAgentDisplayName, usageBadgeLayout, resetRemainingPercent, usageResetBars,
   agentLogo, usageBadge, sysMetricHTML, statusPhaseAt, STATUS_PHASES, setStatusUnreachable,
 } from "../js/usage.js";
+import * as usageMod from "../js/usage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
@@ -104,6 +105,48 @@ test("usageAgentDisplayName names Muse without adding it to usage phases", () =>
   assert.deepEqual(STATUS_PHASES, ["metrics", "claude", "codex", "grok"]);
   assert.equal(STATUS_PHASES.includes("muse"), false);
   assert.doesNotMatch(usageSrc, /STATUS_PHASES[^\n]*muse/);
+});
+
+test("usageAgentDisplayName names Vibe without adding it to usage phases", () => {
+  assert.equal(usageAgentDisplayName("vibe"), "Vibe");
+  assert.equal(STATUS_PHASES.includes("vibe"), false);
+  assert.doesNotMatch(usageSrc, /STATUS_PHASES[^\n]*vibe/);
+});
+
+test("vibe metric labels keep occupancy, token spend, and reported cost apart", () => {
+  const fn = usageMod.vibeMetricLabels;
+  assert.equal(typeof fn, "function");
+  const full = fn({ occupancyPct: 25.4, tokens: 42, cost: 1.5, costComplete: true });
+  assert.equal(full.occupancy, "context occupancy 25%");
+  assert.equal(full.spend, "token spend 42");
+  assert.equal(full.reported, "Vibe-reported cost $1.50");
+  assert.equal(full.costText, "$1.50");
+  const zeroWindow = fn({ occupancyPct: 0, tokens: 0, cost: 0, costComplete: true });
+  assert.equal(zeroWindow.occupancy, "context occupancy 0%");
+  assert.equal(zeroWindow.spend, "token spend 0");
+  assert.equal(zeroWindow.reported, "Vibe-reported cost unknown");
+  assert.equal(zeroWindow.costText, "");
+  const missing = fn({});
+  assert.equal(missing.occupancy, "context occupancy unknown");
+  assert.equal(missing.spend, "token spend unknown");
+  assert.equal(missing.reported, "Vibe-reported cost unknown");
+  const incomplete = fn({ occupancyPct: 10, tokens: 8, cost: 2, costComplete: false });
+  assert.equal(incomplete.reported, "Vibe-reported cost unknown");
+  assert.equal(incomplete.costText, "");
+  const bad = fn({ occupancyPct: Number.NaN, tokens: Number.NaN, cost: Number.NaN, costComplete: true });
+  assert.equal(bad.occupancy, "context occupancy unknown");
+  assert.equal(bad.spend, "token spend unknown");
+  assert.equal(bad.reported, "Vibe-reported cost unknown");
+  const negative = fn({ occupancyPct: -1, tokens: -4, cost: -2, costComplete: true });
+  assert.equal(negative.occupancy, "context occupancy unknown");
+  assert.equal(negative.spend, "token spend unknown");
+  assert.equal(negative.reported, "Vibe-reported cost unknown");
+  const tiny = fn({ cost: 0.0011505, costComplete: true });
+  assert.equal(tiny.reported, "Vibe-reported cost $0.001151");
+  assert.equal(tiny.costText, "$0.001151");
+  const dust = fn({ cost: 1e-10, costComplete: true });
+  assert.equal(dust.reported, "Vibe-reported cost unknown");
+  assert.equal(dust.costText, "");
 });
 
 test("weekly-only Grok badge omits 5h half; plan in tip", () => {

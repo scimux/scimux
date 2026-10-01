@@ -126,14 +126,14 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam,
   never a new file or truncation; the context gauge is segment-scoped.
-  - ACP nodes (pi/opencode/grok/cursor/dsh) implement it as **deterministic
+  - ACP nodes (pi/opencode/grok/cursor/dsh/vibe) implement it as **deterministic
     process replacement** — kill the subprocess, negotiate a fresh one under the same
     node, because a second `session/new` on one connection is unproven
     upstream while a fresh PID self-evidently carries no context. The
     replacement is re-configured with the *same* launch configuration the node
-    records — dsh carries neither model nor thought level on argv, so a
+    records — dsh and vibe carry neither model nor thinking level on argv, so a
     replacement that is not configured again is a page turn that silently
-    changes model; a dsh refusal returns HTTP 400 and fails the clear before
+    changes model; a dsh or vibe refusal returns HTTP 400 and fails the clear before
     the seam, leaving the old session and its log untouched. codex opens a new
     thread on the same PID. In both, the seam is appended only after the
     protocol call succeeded. **Claude obeys the same rule**, and its proof is

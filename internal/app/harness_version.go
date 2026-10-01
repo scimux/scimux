@@ -1,7 +1,8 @@
 // harness_version.go — which agent harnesses this computer has, at which
 // version, and whether upstream has a newer one. Feeds the burger menu's
 // harness section via GET /api/harnesses (local, no network) and
-// GET /api/harnesses/latest (network, explicit tap only).
+// GET /api/harnesses/latest (network, explicit tap only). POST on the same
+// path is that tap plus an explicit request to inspect Vibe's menus.
 //
 // The inventory answers a question the new-activity dialog cannot: that
 // dialog offers models, so a harness appears there or it does not, and
@@ -11,6 +12,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -187,10 +189,11 @@ func versionSegments(v string) []int {
 	return out
 }
 
-// probeHarnessVersions runs `<bin> --version` for every supported harness, in
-// the order the registry declares them. Absent harnesses are reported too:
-// a row that simply is not there cannot be told apart from a probe that
-// failed, and the user asked what scimux found — including what it did not.
+// probeHarnessVersions reports every supported harness, in registry order.
+// An installed harness other than Vibe is asked for `<bin> --version`. Vibe is
+// detected through PATH only and its installed version stays unknown: running
+// vibe-acp prepares files before the flag is parsed. Absent harnesses are
+// reported too, because a missing row cannot be told apart from a failed probe.
 func probeHarnessVersions(hs []harness) []harnessRow {
 	rows := make([]harnessRow, 0, len(hs))
 	sources := activeHarnessSources()
@@ -220,6 +223,14 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 				row.Path = resolved
 			} else {
 				row.Path = bin
+			}
+			if filepath.Base(h.bin) == "vibe-acp" {
+				// vibe-acp logs and prepares files before it parses --version,
+				// and that process would inherit scimux's environment. PATH
+				// presence is the whole inventory. The installed version stays
+				// unknown.
+				out[i] = row
+				return
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -372,11 +383,46 @@ func (a *app) harnessSourcesSnapshot() map[string]harnessSource {
 	return activeHarnessSources()
 }
 
+// vibeInspectChoice is the server-side signal for the Vibe catalog probe.
+// A browser checkbox is not enough: only POST JSON {"inspect_vibe": true}
+// opts in. Any other POST body that is present and not that boolean is
+// malformed and must not refresh. An empty body, a false boolean, and every
+// GET are ordinary checks.
+func vibeInspectChoice(r *http.Request) (inspect bool, malformed bool) {
+	if r.Method != http.MethodPost {
+		return false, false
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return false, true
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return false, false
+	}
+	var body struct {
+		InspectVibe *bool `json:"inspect_vibe"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return false, true
+	}
+	if body.InspectVibe == nil {
+		return false, false
+	}
+	return *body.InspectVibe, false
+}
+
 // handleHarnessLatest asks each upstream what it publishes and refreshes every
 // local read-only discovery surface. It is reached only on an explicit tap.
 // Sources and local probes run independently: one dead registry costs its own
-// row, not the installed-harness or model-catalog answers.
+// row, not the installed-harness or model-catalog answers. GET never starts
+// vibe-acp, and neither does the version inventory. POST starts it only when
+// vibeInspectChoice accepts the body.
 func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
+	inspect, malformed := vibeInspectChoice(r)
+	if malformed {
+		http.Error(w, "invalid harness update", http.StatusBadRequest)
+		return
+	}
 	type answer struct {
 		Version string `json:"version"`
 		Source  string `json:"source"`
@@ -402,6 +448,9 @@ func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		agents = refreshAgents()
+		if inspect {
+			agents = inspectVibeCatalog(agents)
+		}
 	}()
 	go func() {
 		defer wg.Done()

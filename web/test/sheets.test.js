@@ -2995,6 +2995,18 @@ test("dsh reaches the new-chat dropdown from the probe, with no model menu of it
     `<option value=""></option><option value="low">low</option><option value="high">high (default)</option>`);
 });
 
+test("vibe has no static model or thinking menu", () => {
+  assert.equal(DEFAULT_MODELS.vibe, undefined);
+  assert.deepEqual(DEFAULT_EFFORTS.vibe, []);
+  assert.deepEqual(effortLevelsFor("vibe", "", {}), { list: [], default: undefined, required: false });
+  assert.deepEqual(
+    effortLevelsFor("vibe", "alpha", { vibe: { alpha: { levels: ["lvl-low", "lvl-high"] } } }),
+    { list: ["lvl-low", "lvl-high"], default: undefined, required: false });
+  const models = cloneDefaultModels();
+  applyAgentsProbe(models, {}, { vibe: { models: ["alpha"], efforts: { alpha: { levels: ["lvl-high"] } } } });
+  assert.deepEqual(models.vibe, ["", "alpha"]);
+});
+
 
 test("Contributor notice explains submitted context and the Standard alternative before acknowledgment", () => {
   const index = readFileSync(join(__dirname, "../index.html"), "utf8");

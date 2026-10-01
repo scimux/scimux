@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scimux/scimux/internal/acp"
 	"github.com/scimux/scimux/internal/sessionlog"
 )
 
@@ -728,7 +729,7 @@ func (a *app) maybeAutoApprove(n *Node, pm procManager) {
 	leaseID := st.LeaseID
 	agent := n.Agent
 	sel, ok = eligibleAutoAllow(true, after, pending.Options)
-	if !ok {
+	if !ok || permissionTitleNeedsHuman(pending.Title) {
 		a.mu.Unlock()
 		return
 	}
@@ -799,6 +800,15 @@ func (a *app) maybeAutoApprove(n *Node, pm procManager) {
 		cur.Error = ""
 	}
 	a.mu.Unlock()
+}
+
+// permissionTitleNeedsHuman is the fail-closed gate for a pending approval
+// whose title was never established. An empty title and the explicit unknown
+// tool sentinel both stay a human choice. A real title with an empty kind
+// does not.
+func permissionTitleNeedsHuman(title string) bool {
+	title = strings.TrimSpace(title)
+	return title == "" || title == acp.UnknownToolTitle
 }
 
 func decOptionsFrom(opts []PermOption) []sessionlog.DecOption {

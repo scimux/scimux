@@ -113,6 +113,10 @@ export const DEFAULT_EFFORTS = {
      and drops the option entirely for a model whose route cannot reason.
      Empty, not absent: the generic fallback would invent levels dsh refuses. */
   dsh:    [],
+  /* Vibe advertises thinking levels per model from a disposable session.
+     Empty, not absent: the generic three would name levels the model never
+     offered, and a failed catalog must stay "harness default". */
+  vibe:   [],
 };
 
 /* ---------- pure: catalogs / options ---------- */

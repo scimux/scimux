@@ -82,6 +82,12 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("GET /api/licenses", handleLicenses)
 	mux.HandleFunc("GET /api/harnesses", a.handleHarnesses)
 	mux.HandleFunc("GET /api/harnesses/latest", a.handleHarnessLatest)
+	// POST /api/harnesses/latest is the audited Handle exception: the one
+	// extra method, path, and handler beside the frozen HandleFunc inventory.
+	// It calls the same handleHarnessLatest as GET. Ordinary GET stays a
+	// refresh with no Vibe config write; only JSON {"inspect_vibe": true}
+	// may run the catalog probe.
+	mux.Handle("POST /api/harnesses/latest", http.HandlerFunc(a.handleHarnessLatest))
 	mux.HandleFunc("POST /api/remote/pairing", a.handleRemotePairingMint)
 	mux.HandleFunc("GET /api/remote/pairing/{code}", a.handleRemotePairingState)
 	mux.HandleFunc("POST /api/remote/pairing/{code}/confirm", a.handleRemotePairingConfirm)

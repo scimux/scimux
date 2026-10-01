@@ -14,13 +14,16 @@ type RawTokens struct {
 	CacheWrite int
 }
 
-// Canonical is the four billable per-turn quantities after §2.3 normalization.
+// Canonical is the billable per-turn quantities after §2.3 normalization.
 // These are the only fields summed for fare; occupancy (used) is never here.
 type Canonical struct {
 	FreshIn    int // full-price input
 	CacheRead  int // discounted cached input
 	CacheWrite int // cache-creation
 	Out        int // output
+	// UnsplitIn is input whose fresh/cache split was not reported.
+	// It is neither FreshIn nor CacheRead.
+	UnsplitIn int
 }
 
 // freshRule decides how Input maps to FreshIn for a given agent.
@@ -31,6 +34,9 @@ const (
 	direct freshRule = iota
 	// subtractCache: Input is whole-prompt → FreshIn = Input − CacheRead (≥0).
 	subtractCache
+	// unsplit: Input includes cached prompt tokens and no split was reported.
+	// FreshIn and the cache fields stay zero; the quantity is UnsplitIn.
+	unsplit
 )
 
 // agentFreshRule keys the §2.3 table on meta.agent (stable per session file, D2).
@@ -44,7 +50,11 @@ var agentFreshRule = map[string]freshRule{
 	// reaches Normalize today. Stated anyway: if one ever does, its Input is
 	// fresh-only like pi/opencode, and that is a decision rather than a
 	// default nobody chose.
-	"dsh":   direct,
+	"dsh": direct,
+	// vibe stores a per-turn delta of ACP inputTokens. Installed Vibe includes
+	// cached prompt tokens in that counter and does not report a cache split,
+	// so the delta is an unsplit quantity.
+	"vibe":  unsplit,
 	"codex": subtractCache,
 	"grok":  subtractCache,
 }
@@ -56,11 +66,16 @@ var agentFreshRule = map[string]freshRule{
 //
 //	claude, pi, opencode, cursor, dsh, unknown → direct (Input is already fresh-only)
 //	codex, grok                                → Input − CacheRead, clamped ≥ 0
+//	vibe                                       → Input is unsplit; fresh and cache stay 0
 //
-// CacheRead, CacheWrite, and Out are pass-throughs of the raw fields.
+// CacheRead, CacheWrite, and Out are pass-throughs of the raw fields for
+// every rule except unsplit, which does not invent a fresh or cache count.
 // The agent key is the file's meta.agent (stable per file); unknown agents
 // use direct and never error or panic.
 func Normalize(agent string, raw RawTokens) Canonical {
+	if agentFreshRule[agent] == unsplit {
+		return Canonical{UnsplitIn: raw.Input, Out: raw.Output}
+	}
 	fresh := raw.Input
 	if agentFreshRule[agent] == subtractCache {
 		fresh = raw.Input - raw.CacheRead

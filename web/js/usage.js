@@ -81,7 +81,44 @@ export function usageAgentDisplayName(agent){
   if (agent === "grok") return "Grok";
   if (agent === "muse") return "Muse";
   if (agent === "cursor") return "Cursor";
+  if (agent === "vibe") return "Vibe";
   return String(agent || "");
+}
+
+/* Dollar text for a positive Vibe-reported amount. Empty means unknown:
+   a missing, zero, negative, or non-finite figure is not a bill, and a
+   positive amount that rounds to $0.00 at two decimals keeps enough digits
+   to stay visibly nonzero. */
+function vibeCostText(cost, costComplete){
+  if (costComplete !== true) return "";
+  const v = Number(cost);
+  if (!Number.isFinite(v) || !(v > 0)) return "";
+  const cents = v.toFixed(2);
+  if (cents !== "0.00") return "$" + cents;
+  const precise = v.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+  if (precise === "0") return "";
+  return "$" + precise;
+}
+
+/* Three different measurements. Context occupancy is the live context fill.
+   Token spend is the summed per-turn delta. Cost is Vibe's own USD estimate
+   when one was supplied. A missing figure stays the word unknown. */
+export function vibeMetricLabels({
+  occupancyPct = null, tokens = null, cost = null, costComplete = false,
+} = {}){
+  const occN = Number(occupancyPct);
+  const occupancy = occupancyPct == null || !Number.isFinite(occN) || occN < 0
+    ? "context occupancy unknown"
+    : `context occupancy ${Math.round(occN)}%`;
+  const tokN = Number(tokens);
+  const spend = tokens == null || !Number.isFinite(tokN) || tokN < 0
+    ? "token spend unknown"
+    : `token spend ${Math.round(tokN)}`;
+  const costText = vibeCostText(cost, costComplete);
+  const reported = costText
+    ? `Vibe-reported cost ${costText}`
+    : "Vibe-reported cost unknown";
+  return { occupancy, spend, reported, costText };
 }
 
 /* Weekly-only providers omit the empty 5h half so the badge reads "W N%"

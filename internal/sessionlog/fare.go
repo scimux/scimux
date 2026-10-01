@@ -139,6 +139,7 @@ func addCanonical(dst *fare.FareTotals, can fare.Canonical, u UsageEvent) {
 	dst.CacheRead += can.CacheRead
 	dst.CacheWrite += can.CacheWrite
 	dst.Out += can.Out
+	dst.UnsplitIn += can.UnsplitIn
 	dst.Turns++
 	if u.CostAmount != 0 {
 		dst.ReportedCostUSD += u.CostAmount
@@ -160,6 +161,7 @@ func addCanonical(dst *fare.FareTotals, can fare.Canonical, u UsageEvent) {
 	pm.CacheRead += can.CacheRead
 	pm.CacheWrite += can.CacheWrite
 	pm.Out += can.Out
+	pm.UnsplitIn += can.UnsplitIn
 	pm.Turns++
 	if u.CostAmount != 0 {
 		pm.ReportedCostUSD += u.CostAmount

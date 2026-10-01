@@ -38,25 +38,51 @@ type fakeAgent struct {
 	// one the model switch returned.
 	configSets  []sdk.SetSessionConfigOptionRequest
 	lastModeSet *sdk.SetSessionModeRequest
+	// Catalog-probe observations. Production launch tests leave them at zero.
+	prompts  int
+	closes   int
+	blockNew bool
+	closeErr error
+	lastInit *sdk.InitializeRequest
+	lastNew  *sdk.NewSessionRequest
 }
 
 var _ sdk.Agent = (*fakeAgent)(nil)
 
-func (a *fakeAgent) Initialize(ctx context.Context, _ sdk.InitializeRequest) (sdk.InitializeResponse, error) {
+func (a *fakeAgent) Initialize(ctx context.Context, req sdk.InitializeRequest) (sdk.InitializeResponse, error) {
+	a.mu.Lock()
+	copied := req
+	a.lastInit = &copied
+	a.mu.Unlock()
 	return sdk.InitializeResponse{ProtocolVersion: sdk.ProtocolVersionNumber}, nil
 }
-func (a *fakeAgent) NewSession(ctx context.Context, _ sdk.NewSessionRequest) (sdk.NewSessionResponse, error) {
-	if a.newSessionErr != nil {
-		return sdk.NewSessionResponse{}, a.newSessionErr
+func (a *fakeAgent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.NewSessionResponse, error) {
+	a.mu.Lock()
+	copied := req
+	a.lastNew = &copied
+	block := a.blockNew
+	err := a.newSessionErr
+	fn := a.newSession
+	a.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return sdk.NewSessionResponse{}, ctx.Err()
 	}
-	if a.newSession != nil {
-		return a.newSession(), nil
+	if err != nil {
+		return sdk.NewSessionResponse{}, err
+	}
+	if fn != nil {
+		return fn(), nil
 	}
 	return sdk.NewSessionResponse{SessionId: sdk.SessionId("sess_test")}, nil
 }
 func (a *fakeAgent) Prompt(ctx context.Context, p sdk.PromptRequest) (sdk.PromptResponse, error) {
-	if a.prompt != nil {
-		return a.prompt(a, ctx, p)
+	a.mu.Lock()
+	a.prompts++
+	fn := a.prompt
+	a.mu.Unlock()
+	if fn != nil {
+		return fn(a, ctx, p)
 	}
 	return sdk.PromptResponse{StopReason: sdk.StopReasonEndTurn}, nil
 }
@@ -68,7 +94,11 @@ func (a *fakeAgent) Logout(ctx context.Context, _ sdk.LogoutRequest) (sdk.Logout
 }
 func (a *fakeAgent) Cancel(ctx context.Context, _ sdk.CancelNotification) error { return nil }
 func (a *fakeAgent) CloseSession(ctx context.Context, _ sdk.CloseSessionRequest) (sdk.CloseSessionResponse, error) {
-	return sdk.CloseSessionResponse{}, nil
+	a.mu.Lock()
+	a.closes++
+	err := a.closeErr
+	a.mu.Unlock()
+	return sdk.CloseSessionResponse{}, err
 }
 func (a *fakeAgent) ListSessions(ctx context.Context, _ sdk.ListSessionsRequest) (sdk.ListSessionsResponse, error) {
 	return sdk.ListSessionsResponse{}, nil

@@ -104,7 +104,7 @@ import { createNotesFeature } from "./notes.js";
 import {
   harnessRowsHTML, harnessCheckNote, createSettingsController, externalAttachmentNote,
   openAttachmentSettings, applyExternalAttachmentChange,
-  createScimuxUpdateCheck, runUpdateChecks,
+  createScimuxUpdateCheck, runHarnessMenuCheck, acceptHarnessMenuResult,
 } from "./harness.js";
 import { createAssetPreview, bindAssetPreviewLinks } from "./asset-preview.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
@@ -1955,28 +1955,16 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   });
   $("#m_external_attachments").addEventListener("change",
     applyExternalAttachmentChange.bind(null, settingsCtl));
-  $("#m_hcheck").addEventListener("click", async () => {
-    const btn = $("#m_hcheck"), scimuxBtn = $("#m_check");
-    btn.disabled = true;
-    scimuxBtn.disabled = true;
-    btn.textContent = "checking…";
-    const checked = await runUpdateChecks({
-      harness: () => api("/api/harnesses/latest"),
-      scimux: scimuxUpdate.check,
-    });
-    if (checked.harness.status === "fulfilled"){
-      const d = checked.harness.value || {};
-      harnessLatest = (d && d.latest) || {};
-      if (Array.isArray(d.harnesses)) harnessRows = d.harnesses;
-      if (d.agents && typeof d.agents === "object") sheetsFeature.applyAgents(d.agents);
-      renderHarnesses();
-      btn.textContent = "Check for harness updates";
-    } else {
-      btn.textContent = "check failed";
-    }
-    btn.disabled = false;
-    scimuxBtn.disabled = false;
-  });
+  $("#m_hcheck").addEventListener("click", () => void runHarnessMenuCheck({
+    button: $("#m_hcheck"), scimuxButton: $("#m_check"), box: $("#m_vibe_inspect"),
+    api, scimux: scimuxUpdate.check,
+    apply: (d) => acceptHarnessMenuResult(d, {
+      latest: (v) => { harnessLatest = v; },
+      rows: (v) => { harnessRows = v; },
+      agents: (v) => sheetsFeature.applyAgents(v),
+      render: renderHarnesses,
+    }),
+  }));
 
   /* license texts: fetched once on first tap, folded like everything else */
   let licenseTexts = null;

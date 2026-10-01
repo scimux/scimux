@@ -166,16 +166,18 @@ func agentCommandSettings(n *Node, addDirs []string, settingsPath string) (strin
 		return strings.Join(append(parts, shellQuote(n.Prompt)), " "), nil
 	}
 	// Reaching here does not mean the agent is unsupported, and the message
-	// must not read that way: codex, cursor, dsh and muse are all launchable,
-	// just not into a pane. codex is the one that surprises, because it is
-	// wired everywhere else — it is supervised through its app-server bridge,
-	// and `TestAgentCommandRejectsCodexAndUnknown` pins that it has no tmux
-	// launch line. dsh is the clearest case of why a fallback would be wrong:
-	// `dsh --profile acp` is the only launch line scimux knows, it speaks ACP
-	// on stdio rather than to a terminal, and a bare `dsh <prompt>` is a
-	// different program with a different profile, so a tmux fallback here
-	// would launch something the node did not ask for.
-	return "", fmt.Errorf("agent %q has no tmux launch command (codex, cursor, dsh and muse are structured-only)", n.Agent)
+	// must not read that way: codex, cursor, dsh, muse and vibe are all
+	// launchable, just not into a pane. codex is the one that surprises,
+	// because it is wired everywhere else — it is supervised through its
+	// app-server bridge, and `TestAgentCommandRejectsCodexAndUnknown` pins
+	// that it has no tmux launch line. dsh is the clearest case of why a
+	// fallback would be wrong: `dsh --profile acp` is the only launch line
+	// scimux knows, it speaks ACP on stdio rather than to a terminal, and a
+	// bare `dsh <prompt>` is a different program with a different profile, so
+	// a tmux fallback here would launch something the node did not ask for.
+	// vibe is the same shape: `vibe-acp` speaks ACP on stdio, and scimux has
+	// no terminal command for it.
+	return "", fmt.Errorf("agent %q has no tmux launch command (codex, cursor, dsh, muse and vibe are structured-only)", n.Agent)
 }
 
 // launchFailSentinel is printed on the pane by wrapLaunch when the launched
@@ -446,9 +448,9 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		n.Agent = "claude"
 	}
 	switch n.Agent {
-	case "claude", "codex", "pi", "opencode", "grok", "cursor", "dsh", "muse":
+	case "claude", "codex", "pi", "opencode", "grok", "cursor", "dsh", "muse", "vibe":
 	default:
-		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, cursor, dsh, or muse)", n.Agent)
+		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, cursor, dsh, muse, or vibe)", n.Agent)
 	}
 	// A client cannot pin the Muse transport onto a different agent, and a
 	// Muse node cannot run on any other transport. Stored records are not
@@ -456,13 +458,13 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	if n.Agent != "muse" && n.Transport == "muse" {
 		n.Transport = ""
 	}
-	// New nodes pick a transport by agent: pi/opencode/grok/cursor/dsh over ACP,
-	// codex over its app-server bridge, muse over MSP, claude over tmux. Only
-	// set this on creation — stored records with an absent Transport are
-	// migrated to tmux by Node.transport, never rewritten here.
+	// New nodes pick a transport by agent: pi/opencode/grok/cursor/dsh/vibe
+	// over ACP, codex over its app-server bridge, muse over MSP, claude over
+	// tmux. Only set this on creation — stored records with an absent
+	// Transport are migrated to tmux by Node.transport, never rewritten here.
 	if n.Transport == "" {
 		switch n.Agent {
-		case "pi", "opencode", "grok", "cursor", "dsh":
+		case "pi", "opencode", "grok", "cursor", "dsh", "vibe":
 			n.Transport = "acp"
 		case "codex":
 			n.Transport = "codex"
@@ -838,7 +840,7 @@ func (a *app) deliverClaudeInitialPrompt(n *Node) initialDelivery {
 }
 
 // launchNode starts the tmux session or structured-protocol subprocess (ACP
-// for pi/opencode/grok/cursor/dsh, codex app-server for codex, MSP for Muse) and persists
+// for pi/opencode/grok/cursor/dsh/vibe, codex app-server for codex, MSP for Muse) and persists
 // the node record.
 // Runs without a.mu. Persist follows launch: the session/process had to exist
 // first, so a store failure rolls it back (kill) — otherwise a session would

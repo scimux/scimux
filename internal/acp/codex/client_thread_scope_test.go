@@ -710,6 +710,10 @@ func TestDuplicateTerminalNotificationAndTransportClosure(t *testing.T) {
 		mt, ms := newMockTransport()
 		c := NewClient(mt, nil, nil)
 		done := startInitializedTurn(t, c, ms, context.Background())
+		// The turn/start response has to be in the client before the peer
+		// dies, or the closure is reported from the start wait instead of
+		// the running turn.
+		lifecycleBarrier(t, ms, 1302)
 		if err := mt.Close(); err != nil {
 			t.Fatal(err)
 		}

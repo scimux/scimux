@@ -279,7 +279,7 @@ type Node struct {
 	// is a scimux decision, distinct from a *mechanical* process exit — a crash
 	// leaves the node live until /exit is invoked. Empty means not ended.
 	EndedAt    string `json:"ended_at,omitempty"`
-	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode" | "grok" | "cursor" | "dsh" | "muse"
+	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode" | "grok" | "cursor" | "dsh" | "muse" | "vibe"
 	Model      string `json:"model,omitempty"`
 	Effort     string `json:"effort,omitempty"` // reasoning effort: launch id/flag or structured session config
 	Dir        string `json:"dir"`
@@ -297,7 +297,7 @@ type Node struct {
 	AXScreenReader bool `json:"ax_screen_reader,omitempty"`
 	// Transport selects the supervision mechanism: "tmux" (TUI + pane peek +
 	// transcript files, the original path — claude), "acp" (an Agent Client
-	// Protocol subprocess, pi/opencode/grok/cursor/dsh), "codex" (codex's app-server protocol
+	// Protocol subprocess, pi/opencode/grok/cursor/dsh/vibe), "codex" (codex's app-server protocol
 	// wrapped as a structured bridge), or "muse" (Muse subprocess over MSP).
 	// "acp", "codex" and "muse" are structured subprocess transports (no pane);
 	// see procManager. An absent value means tmux — every stored record that
@@ -709,7 +709,7 @@ type PermOption = agentperm.Option
 type PendingPermission = agentperm.Pending
 
 // procManager is the shared surface of scimux's structured-protocol
-// transports: acp.Manager (pi/opencode/grok/cursor/dsh over the ACP SDK), codex.Manager
+// transports: acp.Manager (pi/opencode/grok/cursor/dsh/vibe over the ACP SDK), codex.Manager
 // (codex over its app-server protocol), and muse.Manager (Muse over MSP). Each drives one subprocess per node,
 // keep the authoritative history in an append-only session log, and answer
 // permission prompts structurally — so the create/poll/chat/send/key/peek paths

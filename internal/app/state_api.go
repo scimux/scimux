@@ -124,6 +124,7 @@ type nodeView struct {
 	FareCacheRead    *int     `json:"fare_cache_read,omitempty"`
 	FareCacheWrite   *int     `json:"fare_cache_write,omitempty"`
 	FareOut          *int     `json:"fare_out,omitempty"`
+	FareUnsplitIn    *int     `json:"fare_unsplit_in,omitempty"`
 	FareTotal        *int     `json:"fare_total,omitempty"`
 	FareTurns        *int     `json:"fare_turns,omitempty"`
 	FareCost         *float64 `json:"fare_cost,omitempty"`
