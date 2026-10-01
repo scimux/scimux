@@ -795,6 +795,7 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 		return turns, nil
 	}
 	logPath := a.sessionLogPath(nodeID)
+	dir := a.nodeDir(nodeID)
 	// Anchored assets and the ID index share the node's LogCache with
 	// segment/fare — an idle chat poll no longer re-walks the log every tick.
 	c := a.sessionLogCache(nodeID)
@@ -809,7 +810,7 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 		byPath := assetsAsOf(anchored, t.Record)
 		bound := assetsBoundTo(anchored, t.Record)
 		t.Text = asset.Project(t.Text, byPath)
-		t.Text = asset.ProjectAgentPathBindings(t.Text, bound, blockedByTurn[t.Record])
+		t.Text = asset.ProjectVisibleBlocked(t.Text, bound, blockedByTurn[t.Record], dir)
 		t.Text = asset.ProjectAgentPaths(t.Text, byPath)
 		for _, id := range asset.ReferencedIDs(t.Text) {
 			referenced[id] = true
@@ -843,6 +844,15 @@ func assetsAsOf(anchored []sessionlog.AnchoredAsset, record int) map[string]sess
 		}
 	}
 	return byPath
+}
+
+func (a *app) nodeDir(id string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n := a.byID[id]; n != nil {
+		return n.Dir
+	}
+	return ""
 }
 
 func assetsBoundTo(anchored []sessionlog.AnchoredAsset, record int) map[int]sessionlog.AssetEvent {

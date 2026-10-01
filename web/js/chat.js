@@ -626,15 +626,37 @@ export function importTileHTML(nodeId, turn, occurrence, reason, alt, isImage, {
     `<span class="assetblocked-name">${escape(alt || "file")}</span>${actions}</span></span>`;
 }
 
+/* A 422 retry body is JSON text on Error.message (api.js decodeResponse).
+   Only not_found retires the stale button; every other failure stays retryable. */
+export function readRetryFailure(err){
+  if (!err || Number(err.status) !== 422) return "";
+  try {
+    const body = JSON.parse(err.message);
+    return body && typeof body.reason === "string" ? body.reason : "";
+  } catch {
+    return "";
+  }
+}
+
 export function splitImportRefs(text, nodeId, deps = {}){
   IMPORT_REF_RE.lastIndex = 0;
   if (!IMPORT_REF_RE.test(text || "")) return { clean: text || "", html: "" };
   const tiles = [];
+  const missing = [];
+  const escape = deps.escape || esc;
   const clean = (text || "").replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason) => {
+    if (reason === "not_found") {
+      let name = alt || "file";
+      try { name = decodeURIComponent(name); } catch { /* Keep malformed legacy labels as text. */ }
+      missing.push(`<span class="missingfile">${escape(name)}</span>`);
+      return "";
+    }
     tiles.push(importTileHTML(nodeId, +turn, +occurrence, reason, alt, bang === "!", deps));
     return "";
   }).replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow blockedrow">${tiles.join("")}</div>` };
+  const html = missing.join("") +
+    (tiles.length ? `<div class="attrow blockedrow">${tiles.join("")}</div>` : "");
+  return { clean, html };
 }
 
 export function splitAssetRefs(text, nodeId, assets, deps = {}){
@@ -2370,6 +2392,18 @@ export function createChatFeature(deps){
             await refreshChat();
           }
         } catch (err) {
+          if (readRetryFailure(err) === "not_found") {
+            retry.remove();
+            /* The file disappeared between render and click. Drop the stale
+               action immediately, then rebuild whichever view is still selected. */
+            if (g("sel", "") === node && chatHist.node === node && chatHist.segs){
+              await loadHistory(node, "", { preserveScroll: true });
+            } else if (g("sel", "") === node){
+              chatSig = "";
+              await refreshChat();
+            }
+            return;
+          }
           retry.disabled = false;
           retry.textContent = "Retry import";
           if (typeof d.alert === "function") d.alert(err.message || String(err));

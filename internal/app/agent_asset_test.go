@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -415,6 +416,162 @@ func TestAgentPathAsset_FullLoopIngestProjectDownload(t *testing.T) {
 	if rec.Body.String() != string(original) {
 		t.Fatalf("downloaded bytes differ from original")
 	}
+}
+
+func TestProjectTurns_MissingReferenceKeepsFileNameNotOlderAsset(t *testing.T) {
+	a, work := newAssetProjectionApp(t)
+	relative := "nested/report.md"
+	dangling := "nested/link.md"
+	if err := os.Mkdir(filepath.Join(work, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(work, "missing-target.md"), filepath.Join(work, dangling)); err != nil {
+		t.Fatal(err)
+	}
+	absolute := filepath.Join(t.TempDir(), "brief.md")
+	if err := os.WriteFile(absolute, []byte("gone"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(absolute); err != nil {
+		t.Fatal(err)
+	}
+	present := filepath.Join(work, "still.txt")
+	if err := os.WriteFile(present, []byte("kept"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(present, 0o600) })
+
+	w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "old [report.md](" + relative + ")"}))
+	must(t, w.Append(sessionlog.NewAsset(sessionlog.AssetEvent{
+		ID: "a_old", Name: "old-name.md", Storage: "inline",
+		Bytes:      base64.StdEncoding.EncodeToString([]byte("snapshot")),
+		SourceKind: "agent_path", SourcePath: relative,
+	})))
+	later := "later [quarterly](" + relative + ") [alias](" + dangling + ") [brief](" + absolute + ") [kept](" + present + ")"
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: later}))
+	imports := []sessionlog.AssetImportEvent{
+		{TurnRecord: 2, Occurrence: 0, Ref: relative, Reason: "not_found"},
+		{TurnRecord: 2, Occurrence: 1, Ref: dangling, Reason: "too_large"},
+		{TurnRecord: 2, Occurrence: 2, Ref: absolute, Reason: "outside_workspace"},
+		{TurnRecord: 2, Occurrence: 3, Ref: present, Reason: "unreadable"},
+	}
+	for _, ref := range imports {
+		must(t, w.Append(sessionlog.NewAssetImport(ref)))
+	}
+
+	seg := sessionlog.ReadSegment(a.sessionLogPath("n1"))
+	projected, assets := a.projectTurns("n1", seg.Turns)
+	if len(projected) != 2 {
+		t.Fatalf("turns = %d, want 2", len(projected))
+	}
+	if !strings.Contains(projected[0].Text, "scimux-asset:a_old") {
+		t.Fatalf("earlier import lost its snapshot: %q", projected[0].Text)
+	}
+	got := projected[1].Text
+	for _, name := range []string{"report.md", "link.md", "brief.md"} {
+		if !strings.Contains(got, name) {
+			t.Fatalf("projected text lost file name %s: %q", name, got)
+		}
+	}
+	for _, marker := range []string{
+		"scimux-import:2:0:not_found",
+		"scimux-import:2:1:not_found",
+		"scimux-import:2:2:not_found",
+		"scimux-import:2:3:unreadable",
+	} {
+		if !strings.Contains(got, marker) {
+			t.Fatalf("projected text missing %s: %q", marker, got)
+		}
+	}
+	if strings.Contains(got, "scimux-asset:a_old") || strings.Contains(got, "old-name.md") {
+		t.Fatalf("missing reference resolved to the older asset: %q", got)
+	}
+	if _, ok := assets["a_old"]; !ok {
+		t.Fatal("older snapshot dropped from the asset map")
+	}
+	stored := sessionlog.ReadAssetImports(a.sessionLogPath("n1"))
+	if len(stored) != len(imports) {
+		t.Fatalf("stored imports = %+v", stored)
+	}
+	for i, want := range imports {
+		if stored[i].Reason != want.Reason || stored[i].Ref != want.Ref {
+			t.Fatalf("stored import %d = %+v, want %+v", i, stored[i], want)
+		}
+	}
+
+	locked := filepath.Join(work, "locked")
+	secret := filepath.Join(locked, "secret.md")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("hidden"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if _, err := os.Lstat(secret); err == nil {
+		t.Skip("current user can stat a file inside a mode-000 directory")
+	}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[secret.md](" + secret + ")"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
+		TurnRecord: 7, Occurrence: 0, Ref: secret, Reason: "unreadable",
+	})))
+	again := sessionlog.ReadSegment(a.sessionLogPath("n1"))
+	projected, _ = a.projectTurns("n1", again.Turns)
+	perm := ""
+	for _, turn := range projected {
+		if strings.Contains(turn.Text, "secret") {
+			perm = turn.Text
+		}
+	}
+	if strings.Contains(perm, "not_found") || !strings.Contains(perm, "unreadable") {
+		t.Fatalf("permission error projected as absence: %q", perm)
+	}
+}
+
+func TestImportedAssetRemainsDownloadableAfterSourceDisappears(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	a.byID["n1"] = &Node{ID: "n1", Dir: dir}
+	original := []byte("snapshot-bytes")
+	path := filepath.Join(dir, "chart.png")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "generated: ![a chart](chart.png)"}))
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "chart.png", Alt: "a chart", IsImage: true}})
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+
+	seg := sessionlog.ReadSegment(a.sessionLogPath("n1"))
+	out, _ := a.projectTurns("n1", seg.Turns)
+	ids := asset.ReferencedIDs(out[0].Text)
+	if len(ids) != 1 || strings.Contains(out[0].Text, "not_found") {
+		t.Fatalf("imported attachment lost after source removal: %q", out[0].Text)
+	}
+	rec := serveAsset(a, "n1", ids[0])
+	if rec.Code != 200 || rec.Body.String() != string(original) {
+		t.Fatalf("download after source removal = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func newAssetProjectionApp(t *testing.T) (*app, string) {
+	t.Helper()
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	a.byID["n1"] = &Node{ID: "n1", Dir: work}
+	return a, work
 }
 
 // A reference scanned from a turn but never ingested (rejected or simply

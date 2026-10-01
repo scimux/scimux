@@ -1,7 +1,11 @@
 package asset
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -162,10 +166,81 @@ func ProjectAgentPathBindings(text string, bound map[int]sessionlog.AssetEvent, 
 			if !ok || ref.Ref != sub[3] {
 				return m
 			}
-			return fmt.Sprintf("%s[%s](scimux-import:%d:%d:%s)", sub[1], sub[2], ref.TurnRecord, ref.Occurrence, ref.Reason)
+			// Keep the scimux-import marker. Restoring the original path would
+			// let ProjectAgentPaths bind this occurrence to an older asset
+			// recorded at the same path.
+			label := sub[2]
+			if ref.Reason == "not_found" {
+				// Encode delimiter characters before putting the filename in
+				// Markdown marker syntax; the browser decodes this label.
+				label = url.PathEscape(missingRefLabel(sub[2], ref.Ref))
+			}
+			return fmt.Sprintf("%s[%s](scimux-import:%d:%d:%s)", sub[1], label, ref.TurnRecord, ref.Occurrence, ref.Reason)
 		})
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ProjectVisibleBlocked projects occurrence bindings and blocked imports.
+// A blocked reference whose source is currently absent is labeled not_found
+// in the returned text only; imports is not modified. The marker stays a
+// scimux-import reference so a later path projection cannot attach an older
+// asset that used the same path.
+func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imports []sessionlog.AssetImportEvent, dir string) string {
+	if len(imports) == 0 {
+		return ProjectAgentPathBindings(text, bound, nil)
+	}
+	adjusted := make([]sessionlog.AssetImportEvent, len(imports))
+	copy(adjusted, imports)
+	for i := range adjusted {
+		if PathAbsent(adjusted[i].Ref, dir) {
+			adjusted[i].Reason = "not_found"
+		}
+	}
+	return ProjectAgentPathBindings(text, bound, adjusted)
+}
+
+// PathAbsent reports whether ref currently names no filesystem object.
+// Relative refs resolve against dir. A dangling symlink is absent. Any other
+// error, including a permission failure, is not absence.
+func PathAbsent(ref, dir string) bool {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return false
+	}
+	p := ref
+	if !filepath.IsAbs(p) {
+		if strings.TrimSpace(dir) == "" {
+			return false
+		}
+		p = filepath.Join(dir, p)
+	}
+	abs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	_, err = os.Stat(abs)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+func missingRefLabel(alt, ref string) string {
+	base := filepath.Base(strings.TrimSpace(ref))
+	switch base {
+	case "", ".", "..", string(filepath.Separator):
+		if strings.TrimSpace(alt) != "" {
+			return alt
+		}
+		return "file"
+	default:
+		return base
+	}
 }
 
 func ProjectBlockedAgentPaths(text string, imports []sessionlog.AssetImportEvent) string {
