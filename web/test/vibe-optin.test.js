@@ -20,6 +20,7 @@ test("the harness update action starts with an unchecked one-shot Vibe inspectio
   assert.ok(at > 0, "Check for harness updates is missing");
   const around = indexSrc.slice(Math.max(0, at - 700), at + 80);
   assert.match(around, /id="m_vibe_inspect"/);
+  assert.match(around, /id="m_vibe_inspect"[^>]*autocomplete="off"/);
   assert.match(around, /Inspect Vibe model and thinking choices in a temporary local session\./);
   assert.match(around, /id="m_vibe_inspect_row" hidden/);
   assert.doesNotMatch(indexSrc, /id="m_vibe_inspect"[^>]*\bchecked\b/);
