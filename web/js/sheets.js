@@ -81,6 +81,7 @@
  */
 
 import { esc as escDefault } from "./format.js";
+import { usageAgentDisplayName } from "./usage.js";
 import { stopsOf as stopsOfDefault, stopLabel as stopLabelDefault } from "./lanes.js";
 import { focusAtEnd } from "./caret.js";
 import {
@@ -163,7 +164,9 @@ export function applyAgentsProbe(models, modelEfforts, payload){
 }
 
 export function agentOptionsHTML(models, esc = escDefault){
-  return Object.keys(models).map(a => `<option>${esc(a)}</option>`).join("");
+  return Object.keys(models).map(a => a === "vibe"
+    ? `<option value="vibe">${esc(usageAgentDisplayName(a))}</option>`
+    : `<option>${esc(a)}</option>`).join("");
 }
 
 /* Empty model option label: inherit parent's model when same-agent fork, else default. */

@@ -6026,7 +6026,7 @@ test("Vibe chat meta names occupancy, token spend, and reported cost separately"
   });
   feature.bind();
   feature.renderHead();
-  assert.match(roots.chatmeta.textContent, /^Vibe · synth/);
+  assert.match(roots.chatmeta.textContent, /^Mistral Vibe · synth/);
   assert.match(roots.chatmeta.textContent, /context occupancy unknown/);
   assert.match(roots.chatmeta.textContent, /token spend 42/);
   assert.match(roots.chatmeta.textContent, /Vibe-reported cost \$1\.50/);

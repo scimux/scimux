@@ -65,7 +65,7 @@ tokens.
 | [Grok CLI](https://docs.x.ai/build/cli/reference) | ACP via `grok agent stdio` | `grok`, authenticated with `grok login` |
 | [Cursor CLI](https://docs.cursor.com/en/cli/installation) | ACP via `cursor-agent acp` | `cursor-agent` |
 | [dsh](https://github.com/deepseek-ai/deepseek-harness) | ACP via `dsh --profile acp` | `dsh` and an `acp` profile whose default model is usable |
-| [Vibe](https://github.com/mistralai/mistral-vibe) | ACP via `vibe-acp` | `vibe-acp`, installed and authenticated by you |
+| [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | ACP via `vibe-acp` | `vibe-acp`, installed and authenticated by you |
 | [Muse Code](https://developer.meta.com/ai/products/muse-code/) | MSP via `muse serve` | `muse`; launch consent is off until the computer owner enables it |
 
 The new-activity dialog shows only harnesses that are launchable on the

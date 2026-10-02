@@ -102,6 +102,10 @@ test("agentOptionsHTML lists model keys escaped", () => {
   assert.match(html, /<option>x&amp;y<\/option>/);
 });
 
+test("Vibe's new-activity option shows its full name and keeps the protocol id", () => {
+  assert.equal(agentOptionsHTML({ vibe: [] }, esc), '<option value="vibe">Mistral Vibe</option>');
+});
+
 test("modelDefaultLabel inherits only same-agent parent model", () => {
   assert.equal(modelDefaultLabel("claude", null, esc), "(default)");
   assert.equal(modelDefaultLabel("claude", { agent: "codex", model: "gpt" }, esc), "(default)");

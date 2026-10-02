@@ -53,6 +53,14 @@ test("agentLogo routes each known agent through assetURL", () => {
   ]);
 });
 
+test("Mistral Vibe has a rounded abbreviation badge", () => {
+  const logo = agentLogo("vibe", () => { throw new Error("badge needs no image asset"); });
+  assert.match(logo, /<rect[^>]*rx="[^"]+"/);
+  assert.match(logo, />Mst<\/text>/);
+  assert.doesNotMatch(logo, /<circle/);
+  assert.equal(usageAgentDisplayName("vibe"), "Mistral Vibe");
+});
+
 test("dsh keeps its own lowercase name and stays out of the status rotation", () => {
   /* Vendor brands get their capital (Claude, Codex, Grok, Muse); a bare CLI
      name is its own spelling, as for pi and opencode. Renaming dsh to
@@ -108,7 +116,7 @@ test("usageAgentDisplayName names Muse without adding it to usage phases", () =>
 });
 
 test("usageAgentDisplayName names Vibe without adding it to usage phases", () => {
-  assert.equal(usageAgentDisplayName("vibe"), "Vibe");
+  assert.equal(usageAgentDisplayName("vibe"), "Mistral Vibe");
   assert.equal(STATUS_PHASES.includes("vibe"), false);
   assert.doesNotMatch(usageSrc, /STATUS_PHASES[^\n]*vibe/);
 });

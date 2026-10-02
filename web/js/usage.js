@@ -53,6 +53,11 @@ export function agentLogo(agent, assetURL){
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/cursor.svg')}')" aria-hidden="true"></span>`;
   case "dsh":
     return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/deepseek.svg')}')" aria-hidden="true"></span>`;
+  case "vibe":
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="1" y="4" width="22" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="12" y="15.2" text-anchor="middle" fill="currentColor" font-size="9.4" font-weight="800" font-family="system-ui, sans-serif">Mst</text>
+    </svg>`;
   default:
     return `<svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="10" fill="var(--dim)"/>
@@ -81,7 +86,7 @@ export function usageAgentDisplayName(agent){
   if (agent === "grok") return "Grok";
   if (agent === "muse") return "Muse";
   if (agent === "cursor") return "Cursor";
-  if (agent === "vibe") return "Vibe";
+  if (agent === "vibe") return "Mistral Vibe";
   return String(agent || "");
 }
 
