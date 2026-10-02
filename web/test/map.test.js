@@ -3118,7 +3118,7 @@ test("Vibe fare ticket names occupancy, token spend, and reported cost apart", (
     segments: [{ fresh_in: 30, out: 12 }],
   }, { escape: s => s });
   assert.match(priced, /context occupancy 25%/);
-  assert.match(priced, /Vibe · synth/);
+  assert.match(priced, /Mistral Vibe · synth/);
   assert.match(priced, /token spend 42/);
   assert.match(priced, /Vibe-reported cost \$1\.50/);
   assert.match(priced, /VIBE-REPORTED/);

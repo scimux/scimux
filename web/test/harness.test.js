@@ -964,7 +964,7 @@ test("eight harness rows render alphabetically with dsh between cursor and grok"
   assert.equal((html.match(/class="item"/g) || []).length, 8);
 });
 
-test("a vibe row sorts after pi and carries no terms link", () => {
+test("Mistral Vibe sorts between Grok and Muse and carries no terms link", () => {
   const rows = [
     { agent: "claude", present: true, launchable: true, installed: "2.1.267" },
     { agent: "codex", present: true, launchable: true, installed: "0.9.0" },
@@ -978,11 +978,11 @@ test("a vibe row sorts after pi and carries no terms link", () => {
   ];
   const html = harnessRowsHTML(rows, null);
   const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
-  assert.deepEqual(order, ["claude", "codex", "cursor", "dsh", "grok", "muse", "opencode", "pi", "vibe"]);
+  assert.deepEqual(order, ["claude", "codex", "cursor", "dsh", "grok", "vibe", "muse", "opencode", "pi"]);
   const vibeAt = html.indexOf('data-agent="vibe"');
   assert.ok(vibeAt >= 0);
-  const vibe = html.slice(vibeAt);
-  assert.match(vibe, / Vibe</);
+  const vibe = html.slice(vibeAt, html.indexOf("</div>", vibeAt) + "</div>".length);
+  assert.match(vibe, / Mistral Vibe</);
   assert.match(vibe, /no public version channel/);
   assert.doesNotMatch(vibe, /href=/);
   assert.doesNotMatch(vibe, /Terms of Service|Terms of Use|Terms and privacy/i);
