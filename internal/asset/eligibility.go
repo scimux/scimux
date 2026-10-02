@@ -52,12 +52,18 @@ func Open(ref, dir string, roots []string) (file *os.File, path string, size int
 	}
 
 	if _, err := os.Lstat(p); err != nil {
-		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		}
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
 	}
 
 	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "", 0, fmt.Errorf("%w: %s", ErrNotFound, ref)
+		}
+		return nil, "", 0, fmt.Errorf("%w: %s", ErrUnreadable, ref)
 	}
 	resolved, err = filepath.Abs(filepath.Clean(resolved))
 	if err != nil {

@@ -127,6 +127,51 @@ func TestReferenceMediaCaptureProjectsImageAtOwningTurn(t *testing.T) {
 	}
 }
 
+func TestReferenceMediaCaptureBlockedTextDoesNotDependOnFilesystem(t *testing.T) {
+	a, uid := referenceFixture(t)
+	dir := t.TempDir()
+	a.byID["capture-node"].Dir = dir
+	w := &sessionlog.Writer{Path: a.sessionLogPath("capture-node")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "see [report](report.md) for details"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
+		TurnRecord: 3, Occurrence: 0, Ref: "report.md", Alt: "report", Reason: "outside_workspace",
+	})))
+	request := `{"source":{"uid":"` + uid + `","segment":0,"record":3}}`
+	missing := postReferenceCapture(t, a, request)
+	if missing.Code != http.StatusOK {
+		t.Fatalf("missing source capture = %d %s", missing.Code, missing.Body.String())
+	}
+	must(t, os.WriteFile(filepath.Join(dir, "report.md"), []byte("now present"), 0o600))
+	present := postReferenceCapture(t, a, request)
+	if present.Code != http.StatusOK {
+		t.Fatalf("present source capture = %d %s", present.Code, present.Body.String())
+	}
+	var before, after struct {
+		Text string `json:"text"`
+	}
+	must(t, json.Unmarshal(missing.Body.Bytes(), &before))
+	must(t, json.Unmarshal(present.Body.Bytes(), &after))
+	if before.Text != "see report for details" || after.Text != before.Text {
+		t.Fatalf("capture text changed with filesystem: before=%q after=%q", before.Text, after.Text)
+	}
+
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[my file.md](.)"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
+		TurnRecord: 5, Occurrence: 0, Ref: ".", Alt: "my file.md", Reason: "not_found",
+	})))
+	encoded := postReferenceCapture(t, a, `{"source":{"uid":"`+uid+`","segment":0,"record":5}}`)
+	if encoded.Code != http.StatusOK {
+		t.Fatalf("encoded label capture = %d %s", encoded.Code, encoded.Body.String())
+	}
+	var fallback struct {
+		Text string `json:"text"`
+	}
+	must(t, json.Unmarshal(encoded.Body.Bytes(), &fallback))
+	if fallback.Text != "my file.md" {
+		t.Fatalf("encoded label leaked into capture: %q", fallback.Text)
+	}
+}
+
 func TestReferenceMediaCaptureDetectsSourceRaceAndStoreFailure(t *testing.T) {
 	a, uid := referenceFixture(t)
 	a.referenceCaptureItemsHook = func(string, string, string) ([]referencemedia.CaptureItem, error) {

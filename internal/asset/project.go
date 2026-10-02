@@ -1,7 +1,11 @@
 package asset
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -162,12 +166,171 @@ func ProjectAgentPathBindings(text string, bound map[int]sessionlog.AssetEvent, 
 			if !ok || ref.Ref != sub[3] {
 				return m
 			}
-			return fmt.Sprintf("%s[%s](scimux-import:%d:%d:%s)", sub[1], sub[2], ref.TurnRecord, ref.Occurrence, ref.Reason)
+			// Keep the scimux-import marker. Restoring the original path would
+			// let ProjectAgentPaths bind this occurrence to an older asset
+			// recorded at the same path.
+			label := sub[2]
+			if ref.Reason == "not_found" {
+				// Encode delimiter characters before putting the filename in
+				// Markdown marker syntax; the browser decodes this label.
+				label = url.PathEscape(missingRefLabel(sub[2], ref.Ref))
+			}
+			return fmt.Sprintf("%s[%s](scimux-import:%d:%d:%s)", sub[1], label, ref.TurnRecord, ref.Occurrence, ref.Reason)
 		})
 	}
 	return strings.Join(lines, "\n")
 }
 
+// ProjectVisibleBlocked projects occurrence bindings and blocked imports.
+// A blocked reference whose source is currently absent is labeled not_found
+// in the returned text only. A stored not_found can become retry_ready when
+// the source reappears within the allowed root (or external files are allowed),
+// or outside_workspace if policy still blocks it. Imports is not modified.
+// The marker stays a scimux-import reference so a later path projection cannot
+// attach an older asset that used the same path.
+func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imports []sessionlog.AssetImportEvent, dir string, allowExternal bool) string {
+	if len(imports) == 0 {
+		return ProjectAgentPathBindings(text, bound, nil)
+	}
+	adjusted := make([]sessionlog.AssetImportEvent, len(imports))
+	copy(adjusted, imports)
+	for i := range adjusted {
+		switch currentPathState(adjusted[i].Ref, dir) {
+		case pathAbsent:
+			adjusted[i].Reason = "not_found"
+		case pathRegular:
+			if adjusted[i].Reason == "not_found" {
+				if allowExternal {
+					adjusted[i].Reason = "retry_ready"
+				} else if inside, known := pathInsideRoot(adjusted[i].Ref, dir); known {
+					if inside {
+						adjusted[i].Reason = "retry_ready"
+					} else {
+						adjusted[i].Reason = "outside_workspace"
+					}
+				}
+			}
+		}
+	}
+	return ProjectAgentPathBindings(text, bound, adjusted)
+}
+
+// pathInsideRoot follows symlinks for the view's policy label. Retry still
+// opens through the approved root and rechecks the path at click time.
+func pathInsideRoot(ref, dir string) (inside, known bool) {
+	if strings.TrimSpace(dir) == "" {
+		return false, false
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false, false
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return false, false
+	}
+	p := ref
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return false, false
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return false, false
+	}
+	return withinRoot(resolved, root), true
+}
+
+type pathState uint8
+
+const (
+	pathUnknown pathState = iota
+	pathAbsent
+	pathRegular
+)
+
+// PathAbsent reports whether ref currently names no filesystem object.
+// Relative refs resolve against dir. A dangling symlink is absent. Any other
+// error, including a permission failure, is not absence.
+func PathAbsent(ref, dir string) bool {
+	return currentPathState(ref, dir) == pathAbsent
+}
+
+func currentPathState(ref, dir string) pathState {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return pathUnknown
+	}
+	p := ref
+	if !filepath.IsAbs(p) {
+		if strings.TrimSpace(dir) == "" {
+			return pathUnknown
+		}
+		p = filepath.Join(dir, p)
+	}
+	abs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return pathUnknown
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return pathAbsent
+		}
+		return pathUnknown
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(abs)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return pathAbsent
+			}
+			return pathUnknown
+		}
+	}
+	if info.Mode().IsRegular() {
+		return pathRegular
+	}
+	return pathUnknown
+}
+
+func missingRefLabel(alt, ref string) string {
+	base := filepath.Base(strings.TrimSpace(ref))
+	switch base {
+	case "", ".", "..", string(filepath.Separator):
+		if strings.TrimSpace(alt) != "" {
+			return alt
+		}
+		return "file"
+	default:
+		return base
+	}
+}
+
 func ProjectBlockedAgentPaths(text string, imports []sessionlog.AssetImportEvent) string {
 	return ProjectAgentPathBindings(text, nil, imports)
+}
+
+var projectedImportRE = regexp.MustCompile(`!?\[([^\]]*)\]\(scimux-import:[0-9]+:[0-9]+:([a-z_]+)\)`)
+
+// PlainBlockedRefs removes projection-only import markers from text that will
+// be frozen in a reference-media capture. The session log's stored reason is
+// used for that capture; current filesystem state must not alter its text.
+func PlainBlockedRefs(text string) string {
+	return projectedImportRE.ReplaceAllStringFunc(text, func(marker string) string {
+		match := projectedImportRE.FindStringSubmatch(marker)
+		label := match[1]
+		if match[2] == "not_found" {
+			if decoded, err := url.PathUnescape(label); err == nil {
+				label = decoded
+			}
+		}
+		if label == "" {
+			return "file"
+		}
+		return label
+	})
 }

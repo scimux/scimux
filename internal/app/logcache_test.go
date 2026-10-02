@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,11 +26,15 @@ func TestLogCache_UnchangedPollCycleOneWalk(t *testing.T) {
 	a.nodes = []*Node{n}
 	a.byID[n.ID] = n
 	a.live[n.ID] = "quiet"
+	report := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(report, []byte("present"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	writeSessionLog(t, a, n.ID, []sessionlog.Event{
 		sessionlog.NewMeta(n.ID, "claude", "sonnet", "", a.home),
 		{T: "user", Time: "2026-07-15T09:00:00Z", Text: "hello"},
-		{T: "assistant", Time: "2026-07-15T09:00:01Z", Text: "[report](/outside/report.md)"},
+		{T: "assistant", Time: "2026-07-15T09:00:01Z", Text: "[report](" + report + ")"},
 		{T: "usage", Time: "2026-07-15T09:00:02Z", Usage: &sessionlog.UsageEvent{
 			Used: 1000, Size: 200_000,
 			InputTokens: 10, OutputTokens: 20, TurnID: "t1", CostAmount: 0.01,
@@ -39,7 +44,7 @@ func TestLogCache_UnchangedPollCycleOneWalk(t *testing.T) {
 			Storage: "inline", Bytes: "AAAA", SourceKind: "upload", SourcePath: "/tmp/x.png",
 		}},
 		sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
-			TurnRecord: 2, Occurrence: 0, Ref: "/outside/report.md", Alt: "report", Reason: "outside_workspace",
+			TurnRecord: 2, Occurrence: 0, Ref: report, Alt: "report", Reason: "outside_workspace",
 		}),
 	})
 
@@ -82,10 +87,14 @@ func TestLogCache_UnchangedPollCycleOneWalk(t *testing.T) {
 func TestProjectTurns_UnchangedPollDoesNotReopenAssetImports(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	path := a.sessionLogPath("walk-import")
+	report := filepath.Join(t.TempDir(), "report.md")
+	if err := os.WriteFile(report, []byte("present"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	writeSessionLog(t, a, "walk-import", []sessionlog.Event{
-		{T: "assistant", Text: "[report](/outside/report.md)"},
+		{T: "assistant", Text: "[report](" + report + ")"},
 		sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
-			TurnRecord: 0, Occurrence: 0, Ref: "/outside/report.md", Reason: "outside_workspace",
+			TurnRecord: 0, Occurrence: 0, Ref: report, Reason: "outside_workspace",
 		}),
 	})
 	turns := a.sessionLogCache("walk-import").Segment(path).Turns
