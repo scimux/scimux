@@ -183,10 +183,12 @@ func ProjectAgentPathBindings(text string, bound map[int]sessionlog.AssetEvent, 
 
 // ProjectVisibleBlocked projects occurrence bindings and blocked imports.
 // A blocked reference whose source is currently absent is labeled not_found
-// in the returned text only; imports is not modified. The marker stays a
-// scimux-import reference so a later path projection cannot attach an older
-// asset that used the same path.
-func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imports []sessionlog.AssetImportEvent, dir string) string {
+// in the returned text only. A stored not_found can become retry_ready when
+// the source reappears within the allowed root (or external files are allowed),
+// or outside_workspace if policy still blocks it. Imports is not modified.
+// The marker stays a scimux-import reference so a later path projection cannot
+// attach an older asset that used the same path.
+func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imports []sessionlog.AssetImportEvent, dir string, allowExternal bool) string {
 	if len(imports) == 0 {
 		return ProjectAgentPathBindings(text, bound, nil)
 	}
@@ -198,11 +200,48 @@ func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imp
 			adjusted[i].Reason = "not_found"
 		case pathRegular:
 			if adjusted[i].Reason == "not_found" {
-				adjusted[i].Reason = "retry_ready"
+				if allowExternal {
+					adjusted[i].Reason = "retry_ready"
+				} else if inside, known := pathInsideRoot(adjusted[i].Ref, dir); known {
+					if inside {
+						adjusted[i].Reason = "retry_ready"
+					} else {
+						adjusted[i].Reason = "outside_workspace"
+					}
+				}
 			}
 		}
 	}
 	return ProjectAgentPathBindings(text, bound, adjusted)
+}
+
+// pathInsideRoot follows symlinks for the view's policy label. Retry still
+// opens through the approved root and rechecks the path at click time.
+func pathInsideRoot(ref, dir string) (inside, known bool) {
+	if strings.TrimSpace(dir) == "" {
+		return false, false
+	}
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false, false
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return false, false
+	}
+	p := ref
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return false, false
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return false, false
+	}
+	return withinRoot(resolved, root), true
 }
 
 type pathState uint8

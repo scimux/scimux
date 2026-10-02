@@ -272,7 +272,7 @@ func TestProjectVisibleBlockedMissingAndRemovedSourcesKeepFileName(t *testing.T)
 			imports := []sessionlog.AssetImportEvent{{
 				TurnRecord: 5, Occurrence: 0, Ref: tc.ref, Reason: tc.reason, Alt: "ignored",
 			}}
-			got := ProjectVisibleBlocked(tc.text, nil, imports, dir)
+			got := ProjectVisibleBlocked(tc.text, nil, imports, dir, true)
 			got = ProjectAgentPaths(got, older)
 			if imports[0].Reason != tc.reason {
 				t.Fatalf("stored reason changed to %q", imports[0].Reason)
@@ -289,7 +289,7 @@ func TestProjectVisibleBlockedMissingAndRemovedSourcesKeepFileName(t *testing.T)
 	kept := []sessionlog.AssetImportEvent{{
 		TurnRecord: 5, Occurrence: 0, Ref: present, Reason: "unreadable", Alt: "quarterly",
 	}}
-	got := ProjectVisibleBlocked("see [quarterly]("+present+")", nil, kept, dir)
+	got := ProjectVisibleBlocked("see [quarterly]("+present+")", nil, kept, dir, true)
 	if kept[0].Reason != "unreadable" || !strings.Contains(got, "quarterly") || !strings.Contains(got, "scimux-import:5:0:unreadable") {
 		t.Fatalf("present unreadable file = %q, imports=%+v", got, kept)
 	}
@@ -318,7 +318,7 @@ func TestProjectVisibleBlockedMissingAndRemovedSourcesKeepFileName(t *testing.T)
 		denied := []sessionlog.AssetImportEvent{{
 			TurnRecord: 6, Occurrence: 0, Ref: secret, Reason: "unreadable",
 		}}
-		deniedText := ProjectVisibleBlocked("[secret.md]("+secret+")", nil, denied, dir)
+		deniedText := ProjectVisibleBlocked("[secret.md]("+secret+")", nil, denied, dir, true)
 		if denied[0].Reason != "unreadable" || strings.Contains(deniedText, "not_found") {
 			t.Fatalf("permission error projected as absence: %q imports=%+v", deniedText, denied)
 		}
@@ -330,7 +330,7 @@ func TestProjectVisibleBlockedMissingAndRemovedSourcesKeepFileName(t *testing.T)
 	imported := []sessionlog.AssetImportEvent{{
 		TurnRecord: 5, Occurrence: 0, Ref: relative, Reason: "unreadable",
 	}}
-	keptAsset := ProjectVisibleBlocked("[quarterly]("+relative+")", bound, imported, dir)
+	keptAsset := ProjectVisibleBlocked("[quarterly]("+relative+")", bound, imported, dir, true)
 	if !strings.Contains(keptAsset, "scimux-asset:a_keep") || strings.Contains(keptAsset, "not_found") {
 		t.Fatalf("imported snapshot was dropped after the source disappeared: %q", keptAsset)
 	}
@@ -346,7 +346,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 	undirected := []sessionlog.AssetImportEvent{{
 		TurnRecord: 8, Occurrence: 0, Ref: relative, Reason: "unreadable",
 	}}
-	got := ProjectVisibleBlocked("see [quarterly]("+relative+")", nil, undirected, "  ")
+	got := ProjectVisibleBlocked("see [quarterly]("+relative+")", nil, undirected, "  ", true)
 	if undirected[0].Reason != "unreadable" || !strings.Contains(got, "quarterly") || strings.Contains(got, "not_found") {
 		t.Fatalf("relative ref without a directory = %q imports=%+v", got, undirected)
 	}
@@ -362,7 +362,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 	liveImports := []sessionlog.AssetImportEvent{{
 		TurnRecord: 2, Occurrence: 0, Ref: live, Reason: "too_large",
 	}}
-	liveText := ProjectVisibleBlocked("[alias]("+live+")", nil, liveImports, dir)
+	liveText := ProjectVisibleBlocked("[alias]("+live+")", nil, liveImports, dir, true)
 	liveText = ProjectAgentPaths(liveText, map[string]sessionlog.AssetEvent{
 		live: {ID: "a_old", Name: "old.md", SourcePath: live},
 	})
@@ -377,7 +377,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 	loopImports := []sessionlog.AssetImportEvent{{
 		TurnRecord: 2, Occurrence: 0, Ref: "loop.md", Reason: "unreadable",
 	}}
-	loopText := ProjectVisibleBlocked("[alias](loop.md)", nil, loopImports, dir)
+	loopText := ProjectVisibleBlocked("[alias](loop.md)", nil, loopImports, dir, true)
 	if loopImports[0].Reason != "unreadable" || strings.Contains(loopText, "not_found") {
 		t.Fatalf("symlink loop = %q imports=%+v", loopText, loopImports)
 	}
@@ -392,7 +392,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 	chainImports := []sessionlog.AssetImportEvent{{
 		TurnRecord: 2, Occurrence: 0, Ref: "chain.md", Reason: "storage",
 	}}
-	chainText := ProjectVisibleBlocked("[alias](chain.md)", nil, chainImports, dir)
+	chainText := ProjectVisibleBlocked("[alias](chain.md)", nil, chainImports, dir, true)
 	chainText = ProjectAgentPaths(chainText, map[string]sessionlog.AssetEvent{
 		"chain.md": {ID: "a_chain", Name: "old-chain.md", SourcePath: "chain.md"},
 	})
@@ -425,7 +425,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 		deniedImports := []sessionlog.AssetImportEvent{{
 			TurnRecord: 2, Occurrence: 0, Ref: "denied.md", Reason: "unreadable",
 		}}
-		deniedText := ProjectVisibleBlocked("[alias](denied.md)", nil, deniedImports, dir)
+		deniedText := ProjectVisibleBlocked("[alias](denied.md)", nil, deniedImports, dir, true)
 		if deniedImports[0].Reason != "unreadable" || strings.Contains(deniedText, "not_found") {
 			t.Fatalf("symlink target permission error = %q imports=%+v", deniedText, deniedImports)
 		}
@@ -435,7 +435,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 		labeled := []sessionlog.AssetImportEvent{{
 			TurnRecord: 4, Occurrence: 0, Ref: ref, Reason: "not_found",
 		}}
-		text := ProjectVisibleBlocked("[notes]("+ref+")", nil, labeled, dir)
+		text := ProjectVisibleBlocked("[notes]("+ref+")", nil, labeled, dir, true)
 		text = ProjectAgentPaths(text, map[string]sessionlog.AssetEvent{
 			ref: {ID: "a_named", Name: "old.md", SourcePath: ref},
 		})
@@ -445,7 +445,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 		blank := []sessionlog.AssetImportEvent{{
 			TurnRecord: 4, Occurrence: 0, Ref: ref, Reason: "not_found",
 		}}
-		unnamed := ProjectVisibleBlocked("[]("+ref+")", nil, blank, dir)
+		unnamed := ProjectVisibleBlocked("[]("+ref+")", nil, blank, dir, true)
 		if !strings.Contains(unnamed, "[file](scimux-import:4:0:not_found)") {
 			t.Fatalf("blank alt for %q = %q", ref, unnamed)
 		}
@@ -458,7 +458,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 	stillMissing := []sessionlog.AssetImportEvent{{
 		TurnRecord: 3, Occurrence: 0, Ref: returned, Reason: "not_found",
 	}}
-	returnedText := ProjectVisibleBlocked("[quarterly]("+returned+")", nil, stillMissing, dir)
+	returnedText := ProjectVisibleBlocked("[quarterly]("+returned+")", nil, stillMissing, dir, true)
 	if stillMissing[0].Reason != "not_found" || !strings.Contains(returnedText, "quarterly") || !strings.Contains(returnedText, "scimux-import:3:0:retry_ready") {
 		t.Fatalf("present file with a stored not_found import = %q imports=%+v", returnedText, stillMissing)
 	}
@@ -467,19 +467,56 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	linked := []sessionlog.AssetImportEvent{{TurnRecord: 3, Occurrence: 0, Ref: returnedLink, Reason: "not_found"}}
-	if got := ProjectVisibleBlocked("[link]("+returnedLink+")", nil, linked, dir); !strings.Contains(got, "retry_ready") {
+	if got := ProjectVisibleBlocked("[link]("+returnedLink+")", nil, linked, dir, true); !strings.Contains(got, "retry_ready") {
 		t.Fatalf("live symlink did not restore retry: %q", got)
 	}
 	directory := []sessionlog.AssetImportEvent{{TurnRecord: 3, Occurrence: 0, Ref: dir, Reason: "not_found"}}
-	if got := ProjectVisibleBlocked("[folder]("+dir+")", nil, directory, dir); !strings.Contains(got, "not_found") || strings.Contains(got, "retry_ready") {
+	if got := ProjectVisibleBlocked("[folder]("+dir+")", nil, directory, dir, true); !strings.Contains(got, "not_found") || strings.Contains(got, "retry_ready") {
 		t.Fatalf("directory was treated as an importable file: %q", got)
 	}
 
 	bound := map[int]sessionlog.AssetEvent{
 		0: {ID: "a_keep", Name: "kept.png", SourcePath: "kept.png"},
 	}
-	if got := ProjectVisibleBlocked("![shot](kept.png)", bound, nil, dir); got != "![kept.png](scimux-asset:a_keep)" {
+	if got := ProjectVisibleBlocked("![shot](kept.png)", bound, nil, dir, true); got != "![kept.png](scimux-asset:a_keep)" {
 		t.Fatalf("empty import list = %q", got)
+	}
+}
+
+func TestProjectVisibleBlockedRetryRespectsWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	inside := filepath.Join(dir, "inside.md")
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	for _, path := range []string{inside, outside} {
+		if err := os.WriteFile(path, []byte("ready"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linked := filepath.Join(dir, "linked.md")
+	if err := os.Symlink(outside, linked); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, ref, root, want string
+		allow                 bool
+	}{
+		{"inside", "inside.md", dir, "retry_ready", false},
+		{"outside", outside, dir, "outside_workspace", false},
+		{"symlink outside", "linked.md", dir, "outside_workspace", false},
+		{"external enabled", outside, dir, "retry_ready", true},
+		{"unknown workspace", outside, "", "not_found", false},
+		{"missing workspace", outside, filepath.Join(dir, "gone"), "not_found", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			imports := []sessionlog.AssetImportEvent{{TurnRecord: 1, Occurrence: 0, Ref: tc.ref, Reason: "not_found"}}
+			got := ProjectVisibleBlocked("[report]("+tc.ref+")", nil, imports, tc.root, tc.allow)
+			if !strings.Contains(got, "scimux-import:1:0:"+tc.want) || imports[0].Reason != "not_found" {
+				t.Fatalf("projection = %q, stored reason = %q; want %s in view only", got, imports[0].Reason, tc.want)
+			}
+		})
+	}
+	if inside, known := pathInsideRoot("gone.md", dir); inside || known {
+		t.Fatalf("a source removed during eligibility check cannot be labeled retryable: inside=%v known=%v", inside, known)
 	}
 }
 
@@ -489,7 +526,7 @@ func TestProjectVisibleBlockedEncodesMissingFilenameForMarker(t *testing.T) {
 	imports := []sessionlog.AssetImportEvent{{
 		TurnRecord: 3, Occurrence: 0, Ref: ref, Reason: "not_found",
 	}}
-	got := ProjectVisibleBlocked("see [quarterly]("+ref+")", nil, imports, dir)
+	got := ProjectVisibleBlocked("see [quarterly]("+ref+")", nil, imports, dir, true)
 	if !strings.Contains(got, "[report%5D100%25.md](scimux-import:3:0:not_found)") {
 		t.Fatalf("missing filename must fit the import marker: %q", got)
 	}

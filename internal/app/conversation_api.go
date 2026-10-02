@@ -804,8 +804,10 @@ func (a *app) projectTurnsWithCapture(nodeID string, turns []transcript.Turn, ca
 	}
 	logPath := a.sessionLogPath(nodeID)
 	dir := ""
+	allowExternal := false
 	if !capture {
 		dir = a.nodeDir(nodeID)
+		allowExternal = a.settings().AllowExternalAttachments
 	}
 	// Anchored assets and the ID index share the node's LogCache with
 	// segment/fare — an idle chat poll no longer re-walks the log every tick.
@@ -824,7 +826,7 @@ func (a *app) projectTurnsWithCapture(nodeID string, turns []transcript.Turn, ca
 		if capture {
 			t.Text = asset.ProjectAgentPathBindings(t.Text, bound, blockedByTurn[t.Record])
 		} else {
-			t.Text = asset.ProjectVisibleBlocked(t.Text, bound, blockedByTurn[t.Record], dir)
+			t.Text = asset.ProjectVisibleBlocked(t.Text, bound, blockedByTurn[t.Record], dir, allowExternal)
 		}
 		t.Text = asset.ProjectAgentPaths(t.Text, byPath)
 		if capture {

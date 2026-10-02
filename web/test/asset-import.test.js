@@ -86,6 +86,16 @@ test("encoded missing filenames with brackets and percent signs remain inert tex
   assert.match(chatmod.renderMissingImportText(md(legacy.clean), legacy.missing), />100%broken</);
 });
 
+test("missing filenames preserve dollar replacement patterns literally", () => {
+  for (const name of ["a$'b.md", "q$`.md", "price$&.md"]) {
+    const ref = `[${encodeURIComponent(name)}](scimux-import:3:0:not_found)`;
+    const split = splitImportRefs(`before ${ref} after`, "n1");
+    const rendered = chatmod.renderMissingImportText(md(split.clean), split.missing);
+    assert.equal(rendered, `<p>before <span class="missingfile">${name.replaceAll("&", "&amp;")}</span> after</p>`);
+    assert.equal(split.html, "");
+  }
+});
+
 test("a previously missing file can be retried after it appears", () => {
   const split = splitImportRefs("[report](scimux-import:3:0:retry_ready)", "n1");
   assert.match(split.html, /File is now available/);

@@ -667,7 +667,7 @@ export function splitImportRefs(text, nodeId, deps = {}){
 }
 
 export function renderMissingImportText(rendered, missing = []){
-  for (const item of missing) rendered = rendered.replace(item.token, item.html);
+  for (const item of missing) rendered = rendered.replace(item.token, () => item.html);
   return rendered;
 }
 
