@@ -323,7 +323,7 @@ func TestHandleHarnessesIsLocalOnly(t *testing.T) {
 	for _, row := range got.Harnesses {
 		if row.HasSource == nil {
 			t.Errorf("%s has_source is absent", row.Agent)
-		} else if want := row.Agent != "cursor"; *row.HasSource != want {
+		} else if want := harnessPublishesUpstream(row.Agent); *row.HasSource != want {
 			t.Errorf("%s has_source = %v, want %v", row.Agent, *row.HasSource, want)
 		}
 		if row.Latest != "" {
@@ -464,8 +464,8 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 	src := harnessSources()
 	for _, h := range harnesses {
 		agent := h.agentName()
-		if agent == "cursor" {
-			continue // see TestCursorPublishesNoUnauthenticatedVersion
+		if !harnessPublishesUpstream(agent) {
+			continue // cursor and vibe: no unauthenticated public version channel
 		}
 		s, ok := src[agent]
 		if !ok {
@@ -481,21 +481,21 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 	}
 	want := map[string]bool{}
 	for _, h := range harnesses {
-		if agent := h.agentName(); agent != "cursor" {
+		if agent := h.agentName(); harnessPublishesUpstream(agent) {
 			want[agent] = true
 		}
 	}
 	if len(src) != len(want) {
-		t.Fatalf("source keys = %v, want exactly the harness registry minus cursor (%v)", src, want)
+		t.Fatalf("source keys = %v, want exactly the harnesses with a public channel (%v)", src, want)
 	}
 	for agent := range src {
 		if !want[agent] {
-			t.Errorf("unexpected harness source %q; want exactly the registry minus cursor", agent)
+			t.Errorf("unexpected harness source %q; want exactly the harnesses with a public channel", agent)
 		}
 	}
 }
 
-// Cursor is the one harness with no upstream row, and that is a finding rather
+// Cursor has no upstream row, and that is a finding rather
 // than an omission. Its CLI learns its own latest version from
 // `getCliDownloadUrl` on the authenticated dashboard backend; the only public
 // endpoint, cursor.com/api/agent-cli-download, hands back a binary, not a
@@ -505,6 +505,19 @@ func TestCursorPublishesNoUnauthenticatedVersion(t *testing.T) {
 	if src, ok := harnessSources()["cursor"]; ok {
 		t.Fatalf("cursor upstream source = %+v; adding one means an authenticated check", src)
 	}
+}
+
+// vibe-acp has no unauthenticated public version channel scimux is willing to
+// name. Its installed version stays unknown because inventory does not execute
+// the binary. Inventing a URL would be a product claim, not a discovery fact.
+func TestVibePublishesNoUnauthenticatedVersion(t *testing.T) {
+	if src, ok := harnessSources()["vibe"]; ok {
+		t.Fatalf("vibe upstream source = %+v; scimux does not claim a Vibe release channel", src)
+	}
+}
+
+func harnessPublishesUpstream(agent string) bool {
+	return agent != "cursor" && agent != "vibe"
 }
 
 // writeScript's stubs are the only agent binaries this package may run; this

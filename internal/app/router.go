@@ -82,6 +82,7 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("GET /api/licenses", handleLicenses)
 	mux.HandleFunc("GET /api/harnesses", a.handleHarnesses)
 	mux.HandleFunc("GET /api/harnesses/latest", a.handleHarnessLatest)
+	mux.HandleFunc("POST /api/harnesses/latest", a.handleHarnessLatest)
 	mux.HandleFunc("POST /api/remote/pairing", a.handleRemotePairingMint)
 	mux.HandleFunc("GET /api/remote/pairing/{code}", a.handleRemotePairingState)
 	mux.HandleFunc("POST /api/remote/pairing/{code}/confirm", a.handleRemotePairingConfirm)

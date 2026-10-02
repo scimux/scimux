@@ -7,16 +7,18 @@ package fare
 // Occupancy (used/size) is intentionally not here — it is a tank, not a meter.
 type FareTotals struct {
 	FreshIn, CacheRead, CacheWrite, Out int
+	UnsplitIn                           int // input with no reported fresh/cache split
 	Turns                               int
 	ReportedCostUSD                     float64
 	ReportedCostComplete                bool // true iff every counted turn reported cost
 	PerModel                            map[string]FareTotals
 }
 
-// Total is the sum of the four canonical billable quantities only.
-// Never includes occupancy (Used) — D1.
+// Total is the sum of the canonical billable quantities plus unsplit input.
+// Never includes occupancy (Used) — D1. Agents that report a split leave
+// UnsplitIn at zero, so their total is unchanged.
 func (f FareTotals) Total() int {
-	return f.FreshIn + f.CacheRead + f.CacheWrite + f.Out
+	return f.FreshIn + f.CacheRead + f.CacheWrite + f.Out + f.UnsplitIn
 }
 
 // Occupancy is the context tank (used/size): latest level, segment-scoped.

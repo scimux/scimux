@@ -113,7 +113,7 @@ export function harnessTermsHTML(agent){
 /**
  * One row's state and the sentence under it.
  *
- * States: "absent" (not on PATH), "unknown" (present, `--version` unreadable),
+ * States: "absent" (not on PATH), "unknown" (present, installed version empty),
  * "unlaunchable" (present, but the binary scimux launches is missing),
  * "no-source" (installed, no public version channel), "unchecked" (installed,
  * no upstream answer yet), "behind", "current".
@@ -129,7 +129,7 @@ export function harnessState(row, latest){
   }
   if (!version){
     return { agent: r.agent, state: "unknown", version: "",
-      note: "installed, but it did not report a version" };
+      note: r.agent === "vibe" ? "installed; version was not checked" : "installed, but it did not report a version" };
   }
   if (!r.launchable){
     const bin = LAUNCH_BIN[r.agent] || r.agent;
@@ -385,6 +385,76 @@ export async function runUpdateChecks(checks = {}){
     Promise.resolve().then(() => checks.scimux()),
   ]);
   return { harness, scimux };
+}
+
+export const VIBE_INSPECT_LABEL =
+  "Inspect Vibe model and thinking choices in a temporary local session.";
+
+export function vibeInspectAvailable(rows){
+  return Array.isArray(rows) && rows.some(r => r && r.agent === "vibe" && r.present && r.launchable);
+}
+
+export function updateVibeInspectControl(rows, row, box){
+  const available = vibeInspectAvailable(rows);
+  if (row) row.hidden = !available;
+  if (!available && box) box.checked = false;
+  return available;
+}
+
+export function clearVibeInspectChoice(box){
+  if (box) box.checked = false;
+}
+
+/* Ordinary checks stay GET. Only a strict true sends the server's opt-in. */
+export function harnessUpdateCall(inspect) {
+  if (inspect === true) {
+    return {
+      path: "/api/harnesses/latest",
+      opts: { method: "POST", body: JSON.stringify({ inspect_vibe: true }) },
+    };
+  }
+  return { path: "/api/harnesses/latest" };
+}
+
+/* One burger-menu check. Consume the checkbox when the request starts; the
+ * user cannot untick an inspection already in flight. */
+export async function runHarnessMenuCheck(deps) {
+  const button = deps.button;
+  const scimuxButton = deps.scimuxButton;
+  const box = deps.box;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "checking…";
+  }
+  if (scimuxButton) scimuxButton.disabled = true;
+  const call = harnessUpdateCall(box && box.checked === true && !box.disabled);
+  clearVibeInspectChoice(box);
+  if (box) box.disabled = true;
+  const checked = await runUpdateChecks({
+    harness: () => deps.api(call.path, call.opts),
+    scimux: () => deps.scimux(),
+  });
+  if (box) box.disabled = false;
+  if (button) button.disabled = false;
+  if (scimuxButton) scimuxButton.disabled = false;
+  if (checked.harness.status === "fulfilled") {
+    const payload = checked.harness.value || {};
+    if (typeof deps.apply === "function") deps.apply(payload);
+    if (button) button.textContent = "Check for harness updates";
+  } else if (button) {
+    button.textContent = "check failed";
+  }
+  return checked;
+}
+
+/* Fold one refresh payload into the menu's current rows. A missing list or
+ * catalog leaves the previous one in place. */
+export function acceptHarnessMenuResult(d, sinks) {
+  const data = d || {};
+  if (sinks.latest) sinks.latest(data.latest || {});
+  if (Array.isArray(data.harnesses) && sinks.rows) sinks.rows(data.harnesses);
+  if (data.agents && typeof data.agents === "object" && sinks.agents) sinks.agents(data.agents);
+  if (sinks.render) sinks.render();
 }
 
 /* Small stateful coordinator shared by the standalone scimux check and the

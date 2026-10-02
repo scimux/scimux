@@ -804,6 +804,19 @@ test("openSheet / closeSheets / backdrop / burger", () => {
   assert.ok(byId.backdrop.classList.contains("on"));
 });
 
+test("closing the menu clears its one-shot Vibe inspection choice", () => {
+  const box = { checked: false };
+  const { feature, byId } = createFeature({ deps: { onCloseSheets: () => { box.checked = false; } } });
+  feature.bind();
+  feature.openSheet("#menu");
+  box.checked = true;
+  byId.backdrop.dispatch("click");
+  assert.equal(box.checked, false);
+  byId.burger.dispatch("click");
+  assert.ok(byId.menu.classList.contains("open"));
+  assert.equal(box.checked, false);
+});
+
 /* ---------- agents probe / agent-model changes ---------- */
 test("agents probe success rebuilds catalogs; failure is silent", async () => {
   const ctx = createFeature({
@@ -2993,6 +3006,18 @@ test("dsh reaches the new-chat dropdown from the probe, with no model menu of it
   assert.equal(effortOptionsHTML([], undefined, esc), `<option value="">(default)</option>`);
   assert.equal(effortOptionsHTML(["low", "high"], "high", esc),
     `<option value=""></option><option value="low">low</option><option value="high">high (default)</option>`);
+});
+
+test("vibe has no static model or thinking menu", () => {
+  assert.equal(DEFAULT_MODELS.vibe, undefined);
+  assert.deepEqual(DEFAULT_EFFORTS.vibe, []);
+  assert.deepEqual(effortLevelsFor("vibe", "", {}), { list: [], default: undefined, required: false });
+  assert.deepEqual(
+    effortLevelsFor("vibe", "alpha", { vibe: { alpha: { levels: ["lvl-low", "lvl-high"] } } }),
+    { list: ["lvl-low", "lvl-high"], default: undefined, required: false });
+  const models = cloneDefaultModels();
+  applyAgentsProbe(models, {}, { vibe: { models: ["alpha"], efforts: { alpha: { levels: ["lvl-high"] } } } });
+  assert.deepEqual(models.vibe, ["", "alpha"]);
 });
 
 

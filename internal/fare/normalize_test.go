@@ -135,6 +135,38 @@ func TestNormalize_UnknownAgentDirectNoPanic(t *testing.T) {
 	}
 }
 
+func TestNormalize_VibeInputIsUnsplit(t *testing.T) {
+	// Vibe's ACP inputTokens include cached prompt tokens and carry no split.
+	// A cache field on the raw record must not become a fresh or cache count.
+	raw := RawTokens{Input: 30, CacheRead: 80, CacheWrite: 7, Output: 12}
+	got := Normalize("vibe", raw)
+	if got.FreshIn != 0 || got.CacheRead != 0 || got.CacheWrite != 0 {
+		t.Fatalf("vibe presented a fresh/cache split: fresh=%d cache=%d write=%d", got.FreshIn, got.CacheRead, got.CacheWrite)
+	}
+	if got.Out != 12 || got.UnsplitIn != 30 {
+		t.Fatalf("unsplit/out = %d/%d, want 30/12", got.UnsplitIn, got.Out)
+	}
+	claude := Normalize("claude", raw)
+	if claude.FreshIn != 30 || claude.CacheRead != 80 || claude.CacheWrite != 7 || claude.Out != 12 || claude.UnsplitIn != 0 {
+		t.Fatalf("claude fare changed: %+v", claude)
+	}
+	codex := Normalize("codex", RawTokens{Input: 100, CacheRead: 40, Output: 5})
+	if codex.FreshIn != 60 || codex.CacheRead != 40 || codex.Out != 5 || codex.UnsplitIn != 0 {
+		t.Fatalf("codex fare changed: %+v", codex)
+	}
+}
+
+func TestNormalize_VibeDoesNotInheritSubtractOrDirect(t *testing.T) {
+	if got, ok := agentFreshRule["vibe"]; !ok || got != unsplit {
+		t.Errorf("agentFreshRule[vibe] = %v (present=%v), want unsplit", got, ok)
+	}
+	raw := RawTokens{Input: 30, CacheRead: 80, Output: 100}
+	got := Normalize("vibe", raw)
+	if got.FreshIn != 0 || got.CacheRead != 0 || got.UnsplitIn != 30 || got.Out != 100 {
+		t.Fatalf("vibe = %+v, want unsplit 30 and output 100", got)
+	}
+}
+
 func TestNormalize_DshFreshInputDirect(t *testing.T) {
 	// dsh reports occupancy (used/size), never a per-turn split, so the fare
 	// layer sees no dsh turns today. The rule is still written down rather
@@ -147,5 +179,20 @@ func TestNormalize_DshFreshInputDirect(t *testing.T) {
 	raw := RawTokens{Input: 30, CacheRead: 80, Output: 100}
 	if got := Normalize("dsh", raw); got.FreshIn != 30 {
 		t.Errorf("FreshIn = %d, want 30 (direct; subtract would be −50)", got.FreshIn)
+	}
+}
+
+func TestFareTotalIncludesUnsplitInput(t *testing.T) {
+	// Split agents leave UnsplitIn at zero, so Total stays the four-field sum.
+	split := FareTotals{FreshIn: 10, CacheRead: 4, CacheWrite: 1, Out: 3}
+	if split.Total() != 18 || split.UnsplitIn != 0 {
+		t.Fatalf("split total = %d unsplit = %d, want 18 and 0", split.Total(), split.UnsplitIn)
+	}
+	// Vibe's stored input is unsplit. Total counts it once, beside output,
+	// and does not invent a fresh or cache quantity.
+	vibe := Normalize("vibe", RawTokens{Input: 30, Output: 12, CacheRead: 80})
+	got := FareTotals{UnsplitIn: vibe.UnsplitIn, Out: vibe.Out}
+	if got.Total() != 42 || got.FreshIn != 0 || got.CacheRead != 0 {
+		t.Fatalf("vibe total = %+v, want unsplit 30 + out 12", got)
 	}
 }

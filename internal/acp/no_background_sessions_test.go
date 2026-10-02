@@ -16,6 +16,11 @@ import (
 // they never started. Only a chat the user asked for may open one, which in
 // this package means Session.Launch and the /clear page turn that replaces it.
 //
+// vibe-acp is the one exception: its catalog probe opens one disposable
+// session and must close it before the process is reaped. dsh still has no
+// probe. The exception is the function, not a general permission to call
+// session/new from discovery.
+//
 // This is a source-level pin because the defect is invisible at runtime: the
 // probe worked, returned a real catalog, and left the litter behind it.
 func TestOnlyAUserChatOpensAProtocolSession(t *testing.T) {
@@ -24,7 +29,7 @@ func TestOnlyAUserChatOpensAProtocolSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
-	allowed := map[string]bool{"Launch": true, "Clear": true}
+	allowed := map[string]bool{"Launch": true, "Clear": true, "probeVibeCatalog": true}
 	var found int
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -55,9 +60,31 @@ func TestOnlyAUserChatOpensAProtocolSession(t *testing.T) {
 				}
 				return true
 			})
+			if fn.Name.Name == "probeVibeCatalog" && !funcCalls(fn, "CloseSession") {
+				t.Error("probeVibeCatalog calls NewSession without CloseSession")
+			}
+			if fn.Name.Name == "probeVibeCatalog" && funcCalls(fn, "Prompt") {
+				t.Error("probeVibeCatalog calls session/prompt")
+			}
 		}
 	}
 	if found == 0 {
 		t.Fatal("found no NewSession call at all — the guard is scanning the wrong thing")
 	}
+}
+
+func funcCalls(fn *ast.FuncDecl, name string) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if ok && sel.Sel.Name == name {
+			found = true
+		}
+		return true
+	})
+	return found
 }

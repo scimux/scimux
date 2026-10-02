@@ -484,6 +484,9 @@ printf '%s\n' 'Available models' '' 'auto - Auto (current, default)' 'demo-high 
 	// ACP session, which dsh keeps in its own durable chat history — so
 	// scimux never opens one and, like muse, presence alone is the probe.
 	writeScript(t, binDir, "dsh", `exit 0`)
+	// vibe-acp is presence-only here: a script that exits is not an ACP peer.
+	// The harness stays offerable with an empty model list.
+	writeScript(t, binDir, "vibe-acp", `exit 0`)
 	t.Setenv("PATH", binDir)
 
 	cacheDir := filepath.Join(home, ".grok")
@@ -531,6 +534,12 @@ printf '%s\n' 'Available models' '' 'auto - Auto (current, default)' 'demo-high 
 	}
 	if got := agents["dsh"].Models; got == nil || len(got) != 0 {
 		t.Errorf("dsh models = %v, want empty with no static fallback", got)
+	}
+	if _, ok := agents["vibe-acp"]; ok {
+		t.Error("vibe was published under its binary name")
+	}
+	if got := agents["vibe"].Models; got == nil || len(got) != 0 {
+		t.Errorf("vibe models = %v, want empty with no static fallback", got)
 	}
 	for name, info := range agents {
 		if info.Models == nil {

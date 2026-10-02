@@ -109,6 +109,8 @@ func startSessionWorker(ctx context.Context, executable string, config sessionWo
 	}
 	cmd := exec.Command(executable, args...)
 	cmd.ExtraFiles = []*os.File{configRead, readyWrite}
+	// The worker keeps this process environment. vibe-acp applies its own
+	// allowlist when the worker starts that child.
 	cmd.Env = append(os.Environ(), opts.env...)
 	cmd.Env = append(cmd.Env, workerConfigFDEnv+"=3", workerReadyFDEnv+"=4")
 	cmd.Stdin = nil

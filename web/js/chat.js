@@ -86,6 +86,7 @@ import {
 import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
+import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
 import {
   readPendingForwards,
   clearPendingForwards,
@@ -117,7 +118,7 @@ export const DEC_LABELS = {
   waiting_question: "Agent is waiting for your answer",
   waiting_approval: "Agent needs your approval",
   quiet_inspect: "Quiet \u2014 inspect the terminal",
-  /* ACP transport (pi/opencode/grok/cursor/dsh): no pane, so "terminal" reads as the event log */
+  /* ACP transport (pi/opencode/grok/cursor/dsh/vibe): no pane, so "terminal" reads as the event log */
   turn_active: "Agent is working",
   turn_error: "The agent finished without output \u2014 check the log",
   claude_starting: "Starting Claude \u2014 waiting for SessionStart",
@@ -1689,11 +1690,24 @@ export function createChatFeature(deps){
       chatagentlogo.innerHTML = agentLogo(n.agent);
       chatagentlogo.title = n.agent || "agent";
     }
-    const ctx = chatCtxPct.node === n.id && chatCtxPct.pct != null
-      ? `context ${Math.round(chatCtxPct.pct)}%`
-      : (n.agent === "muse" ? "context unknown" : "");
+    const vibe = n.agent === "vibe";
+    let ctx = "";
+    if (vibe){
+      const labels = vibeMetricLabels({
+        occupancyPct: chatCtxPct.node === n.id ? chatCtxPct.pct : null,
+        tokens: n.fare_total,
+        cost: n.fare_cost,
+        costComplete: n.fare_cost_complete === true,
+      });
+      ctx = `${labels.occupancy} · ${labels.spend} · ${labels.reported}`;
+    } else if (chatCtxPct.node === n.id && chatCtxPct.pct != null){
+      ctx = `context ${Math.round(chatCtxPct.pct)}%`;
+    } else if (n.agent === "muse"){
+      ctx = "context unknown";
+    }
+    const agentLabel = vibe ? usageAgentDisplayName(n.agent) : (n.agent || "agent");
     if (chatmeta)
-      chatmeta.textContent = [n.agent || "agent", n.model || "default", n.effort || "", ctx].filter(Boolean).join(" · ");
+      chatmeta.textContent = [agentLabel, n.model || "default", n.effort || "", ctx].filter(Boolean).join(" · ");
     const desc = n.description || n.prompt || "";
     /* Read state: same md() the bubbles and note references use — a description
        that is usually a multi-paragraph initial prompt must not render flat here

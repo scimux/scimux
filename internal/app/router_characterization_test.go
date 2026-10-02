@@ -61,6 +61,7 @@ func characterizationAPIRoutes() []characterizationAPIRoute {
 		{http.MethodGet, "/api/licenses", "/api/licenses", "handleLicenses", "update.go"},                                                                  // retained
 		{http.MethodGet, "/api/harnesses", "/api/harnesses", "handleHarnesses", "harness_version.go"},                                                      // harness inventory
 		{http.MethodGet, "/api/harnesses/latest", "/api/harnesses/latest", "handleHarnessLatest", "harness_version.go"},                                    // harness upstream check
+		{http.MethodPost, "/api/harnesses/latest", "/api/harnesses/latest", "handleHarnessLatest", "harness_version.go"},                                   // explicit Vibe inspection
 		{http.MethodPost, "/api/remote/pairing", "/api/remote/pairing", "handleRemotePairingMint", "remote_pairing.go"},                                    // S7b
 		{http.MethodGet, "/api/remote/pairing/{code}", "/api/remote/pairing/04106105", "handleRemotePairingState", "remote_pairing.go"},                    // S7b
 		{http.MethodPost, "/api/remote/pairing/{code}/confirm", "/api/remote/pairing/04106105/confirm", "handleRemotePairingConfirm", "remote_pairing.go"}, // S7b

@@ -68,7 +68,7 @@ and "the latest release" stays true.)
 - **Binding `-addr` wider than loopback.** Doing so exposes full controller
   access by design, and the README says so.
 - **Bugs in the wrapped agent CLIs** (claude, codex, pi, opencode, grok,
-  cursor-agent, dsh, muse).
+  cursor-agent, dsh, muse, vibe-acp).
   Report those to their vendors. Bugs in how *scimux* drives them are in
   scope.
 - **Findings that assume the attacker already has your OS account**, unless

@@ -174,10 +174,8 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	s.mu.Lock()
 	s.sessionID = sid
 	s.mu.Unlock()
-	if s.client.Live() != nil {
-		return fail(fmt.Errorf("muse launch: client exited before publication"))
-	}
-
+	// publish checks client liveness under the manager lock. A separate
+	// pre-check here would only race with the same check in publish.
 	if err := m.publish(nodeID, s); err != nil {
 		return fail(err)
 	}
@@ -272,6 +270,13 @@ func (m *Manager) Send(nodeID, text string) error {
 		m.wg.Done()
 		return err
 	}
+	return m.sendAdmittedTurn(nodeID, s, text)
+}
+
+// sendAdmittedTurn completes a turn whose work slot is already held. Stop can
+// win after admission, so the second liveness check precedes the durable user
+// event. Keeping this phase explicit also makes that ordering testable.
+func (m *Manager) sendAdmittedTurn(nodeID string, s *nodeSession, text string) error {
 	if s.stopped() {
 		s.abortTurn()
 		s.releaseWork()

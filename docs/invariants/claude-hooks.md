@@ -11,7 +11,7 @@ accident is the one most likely to be load-bearing: check here before
 Claude is the one agent scimux drives through official hooks instead of
 supervision heuristics, so it has its own rules. All of this applies to a
 *scimux-owned* Claude node; Codex, Muse, and the ACP harnesses (pi, opencode,
-grok, cursor, and dsh) keep their structured-transport behavior.
+grok, cursor, dsh, and vibe) keep their structured-transport behavior.
 
 ## A transcript is bound only by that node's own SessionStart hook
 

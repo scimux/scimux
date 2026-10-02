@@ -2319,6 +2319,15 @@ test("V2-P3 gapTokenCost maps consecutive same-node stops to fare_segments[i]", 
   assert.equal(gapTokenCost(noSeg, noSeg1), null);
 });
 
+test("Vibe's unsplit input does not drive comparable map heat", () => {
+  const n = { id: "v", agent: "vibe", fare_segments: [{ total: 4000, unsplit_in: 3800, out: 200 }] };
+  const a = { n, i: 0 }, b = { n, i: 1 };
+  assert.equal(gapTokenCost(a, b), null);
+  const capsule = fareCapsuleHTML(n.fare_segments[0], { agent: "vibe", nodeId: "v", segIdx: 0 });
+  assert.match(capsule, /reported tokens/);
+  assert.doesNotMatch(capsule, /new tokens/);
+});
+
 test("V2-P3 wallLaneTrackSVG: heat off → single base track; heat on → per-gap width", () => {
   const n = {
     id: "a",
@@ -3019,6 +3028,17 @@ test("V2-P5 fareTicketContext gathers stations, agent and totals", () => {
   assert.equal(ctx.effort, "high");
   assert.equal(ctx.seg, n.fare_segments[0]);
   assert.equal(ctx.totals.rides, 3);
+  assert.equal(ctx.occupancyPct, null, "a fare ticket without a gauge does not invent occupancy");
+  const occupied = fareTicketContext({ ...n, ctx_pct: 0 }, 1, {
+    stopLabel: st => ({ title: st.i === 0 ? "First station" : "Second station" }),
+  });
+  assert.equal(occupied.occupancyPct, 0, "a genuine empty window stays 0");
+  assert.equal(fareTicketContext({ ...n, ctx_pct: 25 }, 1, {
+    stopLabel: st => ({ title: "S" }),
+  }).occupancyPct, 25);
+  assert.equal(fareTicketContext({ ...n, agent: "vibe", ctx_pct: 25 }, 0, {
+    stopLabel: st => ({ title: "S" }),
+  }).occupancyPct, null, "an older Vibe ticket must not claim the live gauge");
 
   // out-of-range or fare-less segment → no ticket
   assert.equal(fareTicketContext(n, 9, {}), null);
@@ -3062,6 +3082,65 @@ test("V2-P5 fareTicketHTML: full ticket", () => {
   assert.match(html, /7 rides|7\s*·\s*rides|rides/i);
   // both gauges present when the whole journey carries the split
   assert.equal((html.match(/ticket-bar/g) || []).length, 2);
+});
+
+test("Vibe fare ticket keeps unsplit input out of the fresh fare", () => {
+  const html = fareTicketHTML({
+    nodeId: "v", segIdx: 0,
+    seg: { fresh_in: 0, cache_read: 0, unsplit_in: 30, out: 12, total: 42, cost: 1.5, cost_complete: true },
+    from: { title: "Start", time: "09:00", index: 1 },
+    to: { title: "Next", time: "09:05", index: 2 },
+    agent: "vibe", model: "synth", effort: "",
+    occupancyPct: 25,
+    totals: { newTokens: 42, realMS: null, cost: 1.5, rides: 1, stops: 2 },
+    segments: [{ fresh_in: 0, unsplit_in: 30, out: 12 }],
+  }, { escape: s => s });
+  assert.match(html, /context occupancy 25%/);
+  assert.match(html, /token spend 42/);
+  assert.match(html, /Vibe-reported cost \$1\.50/);
+  assert.match(html, /cached input may be included/);
+  assert.match(html, /reported tokens/);
+  assert.doesNotMatch(html, /cache excluded/);
+  assert.doesNotMatch(html, /new input/);
+  assert.doesNotMatch(html, /cache reused/);
+  assert.doesNotMatch(html, /cache reads are carried/);
+});
+
+test("Vibe fare ticket names occupancy, token spend, and reported cost apart", () => {
+  const priced = fareTicketHTML({
+    nodeId: "v", segIdx: 0,
+    seg: { fresh_in: 30, out: 12, total: 42, cost: 1.5, cost_complete: true },
+    from: { title: "Start", time: "09:00", index: 1 },
+    to: { title: "Next", time: "09:05", index: 2 },
+    agent: "vibe", model: "synth", effort: "",
+    occupancyPct: 25,
+    totals: { newTokens: 42, realMS: null, cost: 1.5, rides: 1, stops: 2 },
+    segments: [{ fresh_in: 30, out: 12 }],
+  }, { escape: s => s });
+  assert.match(priced, /context occupancy 25%/);
+  assert.match(priced, /Vibe · synth/);
+  assert.match(priced, /token spend 42/);
+  assert.match(priced, /Vibe-reported cost \$1\.50/);
+  assert.match(priced, /VIBE-REPORTED/);
+  const occ = priced.indexOf("context occupancy");
+  const spend = priced.indexOf("token spend");
+  const cost = priced.indexOf("Vibe-reported cost");
+  assert.ok(occ >= 0 && spend > occ && cost > spend);
+
+  const unknown = fareTicketHTML({
+    nodeId: "v", segIdx: 0,
+    seg: { fresh_in: 30, out: 12, cost: 0, cost_complete: false },
+    from: { title: "Start", index: 1 },
+    to: { title: "Next", index: 2 },
+    agent: "vibe", model: "synth",
+    totals: { newTokens: 42, cost: null, rides: 1, stops: 2 },
+    segments: [],
+  }, { escape: s => s });
+  assert.match(unknown, /context occupancy unknown/);
+  assert.match(unknown, /token spend 42/);
+  assert.match(unknown, /Vibe-reported cost unknown/);
+  assert.doesNotMatch(unknown, /\$/);
+  assert.doesNotMatch(unknown, /VIBE-REPORTED/);
 });
 
 test("V2-P5 fareTicketHTML: sparse ticket hides what was never reported", () => {

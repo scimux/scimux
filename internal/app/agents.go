@@ -17,8 +17,71 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scimux/scimux/internal/acp"
 	"github.com/scimux/scimux/internal/acp/muse"
 )
+
+// probeVibeCatalog is the disposable ACP catalog read. Tests replace it so
+// the suite never executes a real vibe-acp binary.
+var probeVibeCatalog = acp.ProbeVibeCatalog
+
+func vibeModelsFromACP(ctx context.Context, bin string) agentInfo {
+	cat, err := probeVibeCatalog(ctx, bin)
+	if err != nil || len(cat.Models) == 0 {
+		return agentInfo{}
+	}
+	info := agentInfo{Models: append([]string(nil), cat.Models...)}
+	for _, model := range cat.Models {
+		levels := cat.Efforts[model]
+		if len(levels) == 0 {
+			continue
+		}
+		if info.Efforts == nil {
+			info.Efforts = map[string]modelEffort{}
+		}
+		info.Efforts[model] = modelEffort{Levels: append([]string(nil), levels...)}
+	}
+	return info
+}
+
+// inspectVibeCatalog runs the bounded ACP catalog probe. It publishes models
+// only when that probe returns some. A missing binary, a timeout, an error,
+// or an empty menu leaves the PATH-only snapshot in place and invents no
+// model or thinking level.
+func inspectVibeCatalog() map[string]agentInfo {
+	agentsProbeMu.Lock()
+	defer agentsProbeMu.Unlock()
+	agentsCacheMu.RLock()
+	current := agentsCache
+	agentsCacheMu.RUnlock()
+	if _, installed := current["vibe"]; !installed {
+		return current
+	}
+	// Concurrent checks share a successful inspection of the same refresh.
+	if len(current["vibe"].Models) > 0 {
+		return current
+	}
+	bin, err := exec.LookPath("vibe-acp")
+	if err != nil {
+		return current
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	probed := vibeModelsFromACP(ctx, bin)
+	if len(probed.Models) == 0 {
+		return current
+	}
+	next := cloneAgentCatalog(current)
+	next["vibe"] = probed
+	// An inspection is an overlay, not an ordinary refresh. Advancing the
+	// refresh generation here would make a refresh queued during the probe
+	// mistake this overlay for its own completed discovery and skip its pass.
+	agentsCacheMu.Lock()
+	agentsCache = next
+	agentsLoaded = true
+	agentsCacheMu.Unlock()
+	return next
+}
 
 // modelEffort is one model's reasoning-effort menu: the levels its CLI accepts
 // and the level it defaults to. Codex obtains this from its live catalog; Grok
@@ -153,6 +216,12 @@ var harnesses = []harness{
 	// probe (handleAgents overlay); an installed binary with no probe is an
 	// empty, valid model list.
 	{bin: "muse"},
+	// vibe launches only when the user-installed `vibe-acp` binary is on
+	// PATH. The agent name is `vibe`; the binary name is not. Presence is
+	// the whole ordinary probe: startup and a harness refresh publish an
+	// empty model list, and the dialog offers Vibe's own default. The
+	// catalog read is a separate explicit choice (inspectVibeCatalog).
+	{name: "vibe", bin: "vibe-acp"},
 }
 
 var (

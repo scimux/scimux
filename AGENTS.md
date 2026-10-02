@@ -94,7 +94,7 @@ whose triggers apply, including when changing their tests or instructions.
   tests skip without them. Public tests never depend on private capture tools.
 - **Tests cannot touch a user's agents.** Never run real agent CLIs in tests;
   this includes `claude`, `codex`, `pi`, `opencode`, `grok`, `cursor-agent`,
-  `dsh`, and `muse`. Use `bash --norc`, `cat` or fake protocol/helper
+  `dsh`, `muse`, and `vibe-acp`. Use `bash --norc`, `cat` or fake protocol/helper
   processes. Integration tests use private random tmux sockets and remove both
   servers and socket files.
   Fuzz crashers are bug reports to fix, never committed fixtures.

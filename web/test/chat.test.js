@@ -5962,6 +5962,109 @@ test("Muse zero ctx_window stays unknown; a real window can show genuine 0%", as
   assert.doesNotMatch(roots.chatmeta.textContent, /context unknown/);
 });
 
+test("sparse ACP approval shows the command before the choice", () => {
+  const html = keyRowHTML({
+    attention: "approval",
+    source: "acp",
+    permTitle: "bash `git status --short`",
+    permToolKind: "execute",
+    permOptions: [
+      { key: "allow-once", name: "Allow once", kind: "allow" },
+      { key: "allow-always-session", name: "Allow for session", kind: "allow_always" },
+      { key: "allow-always-project", name: "Allow for project", kind: "allow_always" },
+      { key: "reject-once", name: "Reject", kind: "reject" },
+    ],
+  });
+  const commandAt = html.indexOf("git status --short");
+  const buttonsAt = html.indexOf('class="permbtns"');
+  assert.ok(commandAt >= 0 && buttonsAt > commandAt, "the command is on the card before the choices");
+  assert.match(html, /<pre class="permcode">git status --short<\/pre>/);
+  assert.match(html, /class="permverb"[^>]*>bash</);
+  assert.match(html, /data-key="allow-always-session"/);
+  assert.match(html, /data-key="allow-always-project"/);
+  assert.doesNotMatch(html, /data-auto|auto-approve/i);
+});
+
+test("an unknown tool stays visible and still requires a human choice", () => {
+  const html = keyRowHTML({
+    attention: "approval",
+    source: "acp",
+    permTitle: "Unknown tool",
+    permToolKind: "",
+    permOptions: [
+      { key: "allow-once", name: "Allow once", kind: "allow" },
+      { key: "reject-once", name: "Reject", kind: "reject" },
+    ],
+  });
+  const titleAt = html.indexOf("Unknown tool");
+  const buttonsAt = html.indexOf('class="permbtns"');
+  assert.ok(titleAt >= 0 && buttonsAt > titleAt);
+  assert.match(html, /class="permtext"/);
+  assert.match(html, /data-key="allow-once"/);
+  assert.match(html, /data-key="reject-once"/);
+  assert.doesNotMatch(html, /<pre class="permcode">/);
+  assert.doesNotMatch(html, /data-auto|auto-approve/i);
+});
+
+test("Vibe chat meta names occupancy, token spend, and reported cost separately", async () => {
+  const nodes = [{
+    id: "n1", title: "Vibe", agent: "vibe", model: "synth",
+    live: "quiet", attention: "", lane_id: "", description: "",
+    fare_total: 42, fare_cost: 1.5, fare_cost_complete: true,
+  }];
+  let payload = {
+    turns: [{ role: "user", text: "hi", time: "2026-01-01T00:00:00Z" }],
+    live: "quiet", delivery: "ok", source: "acp",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+  };
+  const { feature, roots } = makeFeature({
+    nodes,
+    api: async (path) => {
+      if (path.includes("/chat") && !path.includes("history")) return payload;
+      return {};
+    },
+  });
+  feature.bind();
+  feature.renderHead();
+  assert.match(roots.chatmeta.textContent, /^Vibe · synth/);
+  assert.match(roots.chatmeta.textContent, /context occupancy unknown/);
+  assert.match(roots.chatmeta.textContent, /token spend 42/);
+  assert.match(roots.chatmeta.textContent, /Vibe-reported cost \$1\.50/);
+  assert.doesNotMatch(roots.chatmeta.textContent, /context occupancy \d+%/);
+
+  payload = { ...payload, ctx_window: 4000, ctx_pct: 25 };
+  feature.invalidate();
+  await feature.render();
+  assert.equal(roots.gauge.hidden, false);
+  assert.match(roots.chatmeta.textContent, /context occupancy 25%/);
+  assert.match(roots.chatmeta.textContent, /token spend 42/);
+  assert.match(roots.chatmeta.textContent, /Vibe-reported cost \$1\.50/);
+  assert.doesNotMatch(roots.chatmeta.textContent, /context occupancy unknown/);
+
+  nodes[0].fare_cost_complete = false;
+  nodes[0].fare_cost = 0;
+  delete nodes[0].fare_total;
+  feature.renderHead();
+  assert.match(roots.chatmeta.textContent, /context occupancy 25%/);
+  assert.match(roots.chatmeta.textContent, /token spend unknown/);
+  assert.match(roots.chatmeta.textContent, /Vibe-reported cost unknown/);
+  assert.doesNotMatch(roots.chatmeta.textContent, /\$/);
+});
+
+test("other agents keep their context percentage and do not use Vibe's metric names", () => {
+  const { feature, roots } = makeFeature({
+    nodes: [{
+      id: "n1", title: "Pi", agent: "pi", model: "synth",
+      live: "quiet", attention: "", lane_id: "", description: "",
+      fare_total: 42, fare_cost: 1.5, fare_cost_complete: true,
+    }],
+  });
+  feature.bind();
+  feature.renderHead();
+  assert.match(roots.chatmeta.textContent, /^pi · synth/);
+  assert.doesNotMatch(roots.chatmeta.textContent, /token spend|Vibe-reported|context occupancy/);
+});
+
 test("non-Muse context meta omits unknown and still hides the gauge without a window", async () => {
   const { feature, roots } = makeFeature({
     nodes: [{
