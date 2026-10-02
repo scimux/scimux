@@ -681,6 +681,12 @@ append-only session log, validates that it belongs to the named node and turn,
 and rechecks current filesystem and settings eligibility. The usual mutation
 security checks apply.
 
+The chat response labels a previously missing reference `retry_ready` only
+when it now names a regular file within the node workspace, or external
+attachments are enabled. A reappeared file outside the workspace is labeled
+`outside_workspace` while that setting is off; this changes only the response
+view, not the stored import reason. Retry always rechecks eligibility.
+
 Success is `200` with `status` equal to `imported` (including `asset_id`,
 `name`, `turn_record`, `occurrence`, and `current_bytes:true`) or
 `already_imported`. Repeated and concurrent requests are idempotent. A disabled

@@ -611,6 +611,7 @@ export function importTileHTML(nodeId, turn, occurrence, reason, alt, isImage, {
   const messages = {
     outside_workspace: ["Attachment outside workspace", "External attachments are disabled."],
     not_found: ["Attachment unavailable", "File no longer exists."],
+    retry_ready: ["Attachment ready to import", "File is now available."],
     unreadable: ["Attachment unavailable", "File cannot be read."],
     not_regular: ["Attachment unavailable", "Unsupported filesystem object."],
     too_large: ["Attachment unavailable", "File exceeds the import limit."],
@@ -627,15 +628,48 @@ export function importTileHTML(nodeId, turn, occurrence, reason, alt, isImage, {
     `<span class="assetblocked-name">${escape(alt || "file")}</span>${actions}</span></span>`;
 }
 
+/* A 422 retry body is JSON text on Error.message (api.js decodeResponse).
+   Only not_found retires the stale button; every other failure stays retryable. */
+export function readRetryFailure(err){
+  if (!err || Number(err.status) !== 422) return "";
+  try {
+    const body = JSON.parse(err.message);
+    return body && typeof body.reason === "string" ? body.reason : "";
+  } catch {
+    return "";
+  }
+}
+
 export function splitImportRefs(text, nodeId, deps = {}){
   IMPORT_REF_RE.lastIndex = 0;
-  if (!IMPORT_REF_RE.test(text || "")) return { clean: text || "", html: "" };
+  if (!IMPORT_REF_RE.test(text || "")) return { clean: text || "", html: "", missing: [] };
   const tiles = [];
-  const clean = (text || "").replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason) => {
+  const missing = [];
+  const escape = deps.escape || esc;
+  let nextToken = 0;
+  let priorMissingEnd = -1;
+  const source = text || "";
+  const clean = source.replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason, offset) => {
+    if (reason === "not_found") {
+      let name = alt || "file";
+      try { name = decodeURIComponent(name); } catch { /* Keep malformed legacy labels as text. */ }
+      let token;
+      do { token = `\uE000${nextToken++}\uE001`; } while (source.includes(token));
+      missing.push({ token, html: `<span class="missingfile">${escape(name)}</span>` });
+      const separator = offset === priorMissingEnd ? " " : "";
+      priorMissingEnd = offset + _m.length;
+      return separator + token;
+    }
+    priorMissingEnd = -1;
     tiles.push(importTileHTML(nodeId, +turn, +occurrence, reason, alt, bang === "!", deps));
     return "";
   }).replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow blockedrow">${tiles.join("")}</div>` };
+  return { clean, html: tiles.length ? `<div class="attrow blockedrow">${tiles.join("")}</div>` : "", missing };
+}
+
+export function renderMissingImportText(rendered, missing = []){
+  for (const item of missing) rendered = rendered.replace(item.token, () => item.html);
+  return rendered;
 }
 
 export function splitAssetRefs(text, nodeId, assets, deps = {}){
@@ -1409,7 +1443,7 @@ export function createChatFeature(deps){
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
     return `
       <div class="${cls}" ${dataAttrs}>
-		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${markdown(blocked.clean)}${a.html}${blocked.html}</div>
+		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${renderMissingImportText(markdown(blocked.clean), blocked.missing)}${a.html}${blocked.html}</div>
       </div>`;
   }
 
@@ -2384,6 +2418,18 @@ export function createChatFeature(deps){
             await refreshChat();
           }
         } catch (err) {
+          if (readRetryFailure(err) === "not_found") {
+            retry.remove();
+            /* The file disappeared between render and click. Drop the stale
+               action immediately, then rebuild whichever view is still selected. */
+            if (g("sel", "") === node && chatHist.node === node && chatHist.segs){
+              await loadHistory(node, "", { preserveScroll: true });
+            } else if (g("sel", "") === node){
+              chatSig = "";
+              await refreshChat();
+            }
+            return;
+          }
           retry.disabled = false;
           retry.textContent = "Retry import";
           if (typeof d.alert === "function") d.alert(err.message || String(err));

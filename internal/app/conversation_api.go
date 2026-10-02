@@ -791,10 +791,24 @@ func (a *app) claudeWorkerChatInto(resp map[string]any, n *Node, state sessionwo
 // can't be skipped just because nothing has been ingested yet. turns is
 // returned unmodified (assets nil) when the node has no session log at all.
 func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript.Turn, map[string]any) {
+	return a.projectTurnsWithCapture(nodeID, turns, false)
+}
+
+func (a *app) projectTurnsForCapture(nodeID string, turns []transcript.Turn) ([]transcript.Turn, map[string]any) {
+	return a.projectTurnsWithCapture(nodeID, turns, true)
+}
+
+func (a *app) projectTurnsWithCapture(nodeID string, turns []transcript.Turn, capture bool) ([]transcript.Turn, map[string]any) {
 	if a.sessionsDir == "" || len(turns) == 0 {
 		return turns, nil
 	}
 	logPath := a.sessionLogPath(nodeID)
+	dir := ""
+	allowExternal := false
+	if !capture {
+		dir = a.nodeDir(nodeID)
+		allowExternal = a.settings().AllowExternalAttachments
+	}
 	// Anchored assets and the ID index share the node's LogCache with
 	// segment/fare — an idle chat poll no longer re-walks the log every tick.
 	c := a.sessionLogCache(nodeID)
@@ -809,8 +823,15 @@ func (a *app) projectTurns(nodeID string, turns []transcript.Turn) ([]transcript
 		byPath := assetsAsOf(anchored, t.Record)
 		bound := assetsBoundTo(anchored, t.Record)
 		t.Text = asset.Project(t.Text, byPath)
-		t.Text = asset.ProjectAgentPathBindings(t.Text, bound, blockedByTurn[t.Record])
+		if capture {
+			t.Text = asset.ProjectAgentPathBindings(t.Text, bound, blockedByTurn[t.Record])
+		} else {
+			t.Text = asset.ProjectVisibleBlocked(t.Text, bound, blockedByTurn[t.Record], dir, allowExternal)
+		}
 		t.Text = asset.ProjectAgentPaths(t.Text, byPath)
+		if capture {
+			t.Text = asset.PlainBlockedRefs(t.Text)
+		}
 		for _, id := range asset.ReferencedIDs(t.Text) {
 			referenced[id] = true
 		}
@@ -843,6 +864,15 @@ func assetsAsOf(anchored []sessionlog.AnchoredAsset, record int) map[string]sess
 		}
 	}
 	return byPath
+}
+
+func (a *app) nodeDir(id string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if n := a.byID[id]; n != nil {
+		return n.Dir
+	}
+	return ""
 }
 
 func assetsBoundTo(anchored []sessionlog.AnchoredAsset, record int) map[int]sessionlog.AssetEvent {

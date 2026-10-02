@@ -128,6 +128,37 @@ func TestAssetImportRetryBindsEarlierReferenceAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMissingImportReappearsOutsideWorkspace(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	must(t, os.MkdirAll(a.sessionsDir, 0o700))
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "report.md")
+	must(t, os.WriteFile(outside, []byte("ready"), 0o600))
+	linked := filepath.Join(workspace, "linked.md")
+	must(t, os.Symlink(outside, linked))
+	inside := filepath.Join(workspace, "inside.md")
+	must(t, os.WriteFile(inside, []byte("ready"), 0o600))
+	n := &Node{ID: "n1", Title: "n1", Agent: "codex", Dir: workspace}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "see [outside](" + outside + ") and [linked](linked.md) and [inside](inside.md)"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{TurnRecord: 0, Occurrence: 0, Ref: outside, Reason: "not_found"})))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{TurnRecord: 0, Occurrence: 1, Ref: "linked.md", Reason: "not_found"})))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{TurnRecord: 0, Occurrence: 2, Ref: "inside.md", Reason: "not_found"})))
+	project := func() string {
+		turns := sessionlog.ReadHistory(a.sessionLogPath(n.ID))[0].Turns
+		out, _ := a.projectTurns(n.ID, turns)
+		return out[0].Text
+	}
+	if got := project(); strings.Count(got, "retry_ready") != 1 || strings.Count(got, "outside_workspace") != 2 {
+		t.Fatalf("external attachments off = %q, want one retryable and two policy-blocked refs", got)
+	}
+	must(t, writeFileForSettingsTest(a.settingsPath, `{"allow_external_attachments":true}`))
+	if got := project(); strings.Count(got, "retry_ready") != 3 {
+		t.Fatalf("external attachments on = %q, want three retryable refs", got)
+	}
+}
+
 func TestAssetImportRetryDedupPreservesRetriedFilename(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	must(t, os.MkdirAll(a.sessionsDir, 0o700))

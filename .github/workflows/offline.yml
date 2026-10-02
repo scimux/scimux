@@ -12,8 +12,7 @@
 # isolation is unavailable; it must never fall back to a networked run.
 on:
   push:
-    branches:
-      - "**"
+    branches: [main]
 permissions:
   contents: read
 jobs:

@@ -107,6 +107,9 @@ read access. PRs use `pull_request`, never `pull_request_target`; no repository
 secrets are passed. Outside-contributor approvals remain controlled by GitHub.
 After a successful PR run, require **PR tests** in the main branch ruleset.
 Do not require the push-only build/offline jobs as PR checks.
+`build.yml` and `offline.yml` run on the self-hosted `go-builder` only for
+pushes to `main`; feature branches use the GitHub-hosted PR check. This keeps
+jobs for untrusted branch pushes out of the main-only runner group.
 
 `release.yml` remains triggered by a published release. It calls
 `scimux/scimux/.github/workflows/release-worker.yml@main` explicitly, so the

@@ -97,3 +97,18 @@ func TestPRWorkflowKeepsUntrustedCodeOnHostedRunner(t *testing.T) {
 		}
 	}
 }
+
+func TestSelfHostedPushWorkflowsRunOnlyOnMain(t *testing.T) {
+	for _, name := range []string{"build.yml", "offline.yml"} {
+		t.Run(name, func(t *testing.T) {
+			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", name)))
+			trigger := strings.SplitN(src, "permissions:", 2)[0]
+			if !strings.Contains(trigger, "on:\n  push:\n    branches: [main]\n") {
+				t.Fatalf("%s must schedule self-hosted push jobs only on main", name)
+			}
+			if !strings.Contains(src, "runs-on: [self-hosted, linux, x64, go-builder]") {
+				t.Fatalf("%s lost its dedicated runner requirement", name)
+			}
+		})
+	}
+}
