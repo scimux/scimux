@@ -1051,10 +1051,10 @@ refresh do not execute `vibe-acp`; an unsupported or ambiguous install has an
 empty `installed` field and the menu says its version metadata is unavailable.
 Vibe has a public upstream source, so a known installed version starts in the
 unchecked state and can report a newer version after the explicit check.
-`present` and `launchable` are separate facts: pi is installed as `pi` but launched through
-`pi-acp`. The probe is cached during ordinary menu use and replaced by the
-explicit harness-update check, so an installed or upgraded CLI appears without
-restarting scimux.
+`present` and `launchable` are separate facts: pi is installed as `pi` but
+launched through `pi-acp`. The probe is cached during ordinary menu use and
+replaced by the explicit harness-update check, so an installed or upgraded CLI
+appears without restarting scimux.
 For Muse, `launchable` is true when the `muse` executable is found on `PATH`.
 This inventory flag does not grant permission to create a chat: creation
 separately enforces approval-judge consent and model-catalog checks.
