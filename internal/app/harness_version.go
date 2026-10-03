@@ -43,12 +43,12 @@ type harnessRow struct {
 }
 
 // harnessSource is where a harness publishes its current version. There is no
-// single answer — four are npm packages, Grok is a plain-text file in a
-// bucket, Muse is channel metadata, and Claude's depends on how it was
-// installed — so the source is data, not a hardcoded lane. Kind is "npm"
-// (JSON, read .version), "text" (the bare version, one line), or
-// "muse-stable". Label is shown to the user: an update notice is only
-// actionable if you know which channel it came from.
+// single answer — four are npm packages, Vibe is a Python package, Grok is a
+// plain-text file in a bucket, Muse is channel metadata, and Claude's depends
+// on how it was installed — so the source is data, not a hardcoded lane. Kind is "npm"
+// (JSON, read .version), "pypi" (JSON, read info.version), "text" (the bare
+// version, one line), or "muse-stable". Label identifies the source in the
+// response; the browser keeps Vibe's update notice to the version alone.
 //
 // Every source here is an unauthenticated public endpoint and must stay one.
 // No vendor credential is ever attached to these requests, and none is read
@@ -72,6 +72,7 @@ const (
 	// explicit harness-update-check route. The response shape is not
 	// documented in this repository, so parsing fails closed.
 	museStableChannel = "https://api.meta.ai/muse-code/channels/muse-stable"
+	vibePackageLatest = "https://pypi.org/pypi/mistral-vibe/json"
 )
 
 // claudeHarnessSource picks Claude's channel from where its binary actually
@@ -109,6 +110,7 @@ func harnessSources() map[string]harnessSource {
 		"grok":     {URL: grokStable, Kind: "text", Label: "xAI stable channel"},
 		"muse":     {URL: museStableChannel, Kind: "muse-stable", Label: "Meta stable channel"},
 		"dsh":      {URL: npmRegistry + "@deepseek-ai/dsh/latest", Kind: "npm", Label: "npm @deepseek-ai/dsh"},
+		"vibe":     {URL: vibePackageLatest, Kind: "pypi", Label: "PyPI mistral-vibe"},
 	}
 }
 
@@ -342,6 +344,20 @@ func fetchHarnessLatest(ctx context.Context, src harnessSource) (string, error) 
 			return "", errHarnessSource("unreadable registry response")
 		}
 		raw = pkg.Version
+	}
+	if src.Kind == "pypi" {
+		var pkg struct {
+			Info struct {
+				Version string `json:"version"`
+			} `json:"info"`
+		}
+		if err := json.Unmarshal(body, &pkg); err != nil {
+			return "", errHarnessSource("unreadable package response")
+		}
+		if pkg.Info.Version == "" || parseHarnessVersion(pkg.Info.Version) != pkg.Info.Version {
+			return "", errHarnessSource("no version in package response")
+		}
+		raw = pkg.Info.Version
 	}
 	if src.Kind == "muse-stable" {
 		// No checked-in textual findings document this channel's JSON.

@@ -159,7 +159,7 @@ func rowByAgent(rows []harnessRow, agent string) harnessRow {
 func assertVibeVersionUnknown(t *testing.T, rows []harnessRow) {
 	t.Helper()
 	got := rowByAgent(rows, "vibe")
-	if !got.Present || !got.Launchable || got.Installed != "" || got.HasSource || got.Path == "" {
-		t.Fatalf("vibe inventory = %+v, want present and launchable with an unknown version", got)
+	if !got.Present || !got.Launchable || got.Installed != "" || !got.HasSource || got.Path == "" {
+		t.Fatalf("vibe inventory = %+v, want present and launchable with an unknown installed version and public update source", got)
 	}
 }

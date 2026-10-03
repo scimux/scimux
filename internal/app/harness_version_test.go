@@ -253,6 +253,89 @@ func TestFetchHarnessLatest(t *testing.T) {
 	}
 }
 
+func TestFetchVibeLatestReadsOnlyPublishedVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Errorf("Vibe version request = %s %v", r.Method, r.Header)
+		}
+		_, _ = w.Write([]byte(`{"info":{"version":"2.25.8"},"releases":{"999.999.999":[]}}`))
+	}))
+	defer server.Close()
+	got, err := fetchHarnessLatest(context.Background(), harnessSource{URL: server.URL, Kind: "pypi"})
+	if err != nil || got != "2.25.8" {
+		t.Fatalf("Vibe release = %q, %v; want 2.25.8", got, err)
+	}
+
+	for _, body := range []string{
+		`{"info":{"version":"unknown"},"releases":{"2.25.8":[]}}`,
+		`{"info":{"version":"2.25.8 unexpected"}}`,
+		`{"version":"2.25.8"}`,
+		`<html>2.25.8</html>`,
+	} {
+		bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		if got, err := fetchHarnessLatest(context.Background(), harnessSource{URL: bad.URL, Kind: "pypi"}); err == nil {
+			t.Errorf("malformed Vibe release %q accepted as %q", body, got)
+		}
+		bad.Close()
+	}
+}
+
+func TestVibeLatestReachesUpdateResponseWithoutLaunchingCLI(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(root, "launched")
+	writeScript(t, binDir, "vibe-acp", "printf 'launched\\n' >> "+quoteForScript(record)+"\n")
+	writeVibeWheelMetadata(t, root, "2.25.0", "Name: mistral-vibe\nVersion: 2.25.0\n\n")
+	t.Setenv("PATH", binDir)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"info":{"version":"2.25.8"}}`))
+	}))
+	defer server.Close()
+	restore := setHarnessSourcesForTest(map[string]harnessSource{
+		"vibe": {URL: server.URL, Kind: "pypi", Label: "PyPI mistral-vibe"},
+	})
+	defer restore()
+	a := newTestApp(t, &fakeTmux{})
+	a.harnessInventory = func(bool) []harnessRow { return probeHarnessVersions(harnesses) }
+	rec := httptest.NewRecorder()
+	a.handleHarnessLatest(rec, httptest.NewRequest(http.MethodGet, "/api/harnesses/latest", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Latest map[string]struct {
+			Version string `json:"version"`
+		} `json:"latest"`
+		Harnesses []harnessRow `json:"harnesses"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Latest["vibe"].Version != "2.25.8" {
+		t.Errorf("Vibe latest = %+v, want 2.25.8", got.Latest)
+	}
+	found := false
+	for _, row := range got.Harnesses {
+		if row.Agent == "vibe" {
+			found = true
+			if row.Installed != "2.25.0" || !row.HasSource {
+				t.Errorf("Vibe inventory = %+v, want 2.25.0 with an update source", row)
+			}
+		}
+	}
+	if !found {
+		t.Error("Vibe missing from inventory")
+	}
+	if _, err := os.Stat(record); !os.IsNotExist(err) {
+		t.Fatalf("update check launched vibe-acp: %v", err)
+	}
+}
+
 func TestHarnessSourcesIncludesMuseStableChannel(t *testing.T) {
 	src := harnessSources()["muse"]
 	if src.URL != museStableChannel || src.Kind != "muse-stable" {
@@ -465,7 +548,7 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 	for _, h := range harnesses {
 		agent := h.agentName()
 		if !harnessPublishesUpstream(agent) {
-			continue // cursor and vibe: no unauthenticated public version channel
+			continue // cursor: no unauthenticated public version channel
 		}
 		s, ok := src[agent]
 		if !ok {
@@ -475,8 +558,8 @@ func TestHarnessSourcesCoverEverySupportedHarness(t *testing.T) {
 		if s.URL == "" || s.Kind == "" || s.Label == "" {
 			t.Errorf("harness %q source = %+v, want url, kind and label", agent, s)
 		}
-		if s.Kind != "npm" && s.Kind != "text" && s.Kind != "muse-stable" {
-			t.Errorf("harness %q source kind = %q, want npm, text, or muse-stable", agent, s)
+		if s.Kind != "npm" && s.Kind != "pypi" && s.Kind != "text" && s.Kind != "muse-stable" {
+			t.Errorf("harness %q source kind = %q, want npm, pypi, text, or muse-stable", agent, s)
 		}
 	}
 	want := map[string]bool{}
@@ -507,18 +590,17 @@ func TestCursorPublishesNoUnauthenticatedVersion(t *testing.T) {
 	}
 }
 
-// vibe-acp has no unauthenticated public version channel scimux is willing to
-// name. Its installed version can come from adjacent package metadata without
-// executing the binary. Inventing a URL would be a product claim, not a
-// discovery fact.
-func TestVibePublishesNoUnauthenticatedVersion(t *testing.T) {
-	if src, ok := harnessSources()["vibe"]; ok {
-		t.Fatalf("vibe upstream source = %+v; scimux does not claim a Vibe release channel", src)
+// Mistral publishes the same package used by the installed Vibe launcher.
+// The update check uses its public metadata and never starts vibe-acp.
+func TestVibePublishesPublicVersion(t *testing.T) {
+	src, ok := harnessSources()["vibe"]
+	if !ok || src.URL != "https://pypi.org/pypi/mistral-vibe/json" || src.Kind != "pypi" {
+		t.Fatalf("Vibe upstream source = %+v, want the public package version", src)
 	}
 }
 
 func harnessPublishesUpstream(agent string) bool {
-	return agent != "cursor" && agent != "vibe"
+	return agent != "cursor"
 }
 
 // writeScript's stubs are the only agent binaries this package may run; this
