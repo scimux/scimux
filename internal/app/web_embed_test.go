@@ -57,6 +57,7 @@ func TestWebFSEmbeddedProductionFiles(t *testing.T) {
 		"web/assets/agents/deepseek.svg",
 		"web/assets/agents/grok.svg",
 		"web/assets/agents/meta.svg",
+		"web/assets/agents/mistral.svg",
 		"web/assets/agents/openai.svg",
 		"web/assets/agents/opencode.svg",
 		"web/assets/agents/pi.svg",

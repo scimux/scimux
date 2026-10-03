@@ -39,6 +39,7 @@ test("agentLogo routes each known agent through assetURL", () => {
   assert.match(agentLogo("muse", url), /U:\/assets\/agents\/meta\.svg/);
   assert.match(agentLogo("cursor", url), /U:\/assets\/agents\/cursor\.svg/);
   assert.match(agentLogo("dsh", url), /U:\/assets\/agents\/deepseek\.svg/);
+  assert.match(agentLogo("vibe", url), /U:\/assets\/agents\/mistral\.svg/);
   assert.match(agentLogo("unknown", url), /<svg/);
   assert.deepEqual(seen, [
     "/assets/agents/claude.svg",
@@ -50,14 +51,14 @@ test("agentLogo routes each known agent through assetURL", () => {
     "/assets/agents/meta.svg",
     "/assets/agents/cursor.svg",
     "/assets/agents/deepseek.svg",
+    "/assets/agents/mistral.svg",
   ]);
+  assert.match(agentLogo("claude", p => p), /^<img src="\/assets\/agents\/claude\.svg" alt="" aria-hidden="true">$/);
 });
 
-test("Mistral Vibe has a rounded abbreviation badge", () => {
-  const logo = agentLogo("vibe", () => { throw new Error("badge needs no image asset"); });
-  assert.match(logo, /<rect[^>]*rx="[^"]+"/);
-  assert.match(logo, />Mst<\/text>/);
-  assert.doesNotMatch(logo, /<circle/);
+test("Mistral Vibe uses its own SVG badge", () => {
+  const logo = agentLogo("vibe", p => p);
+  assert.match(logo, /<img src="\/assets\/agents\/mistral\.svg"/);
   assert.equal(usageAgentDisplayName("vibe"), "Mistral Vibe");
 });
 

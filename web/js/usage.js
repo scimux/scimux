@@ -37,27 +37,24 @@ export function agentLogo(agent, assetURL){
      classifies these sinks as seam-routed (wrapper name is the contract). */
   switch ((agent || "").toLowerCase()){
   case "claude":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/claude.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/claude.svg')}" alt="" aria-hidden="true">`;
   case "codex":
   case "openai":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/openai.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/openai.svg')}" alt="" aria-hidden="true">`;
   case "pi":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/pi.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/pi.svg')}" alt="" aria-hidden="true">`;
   case "opencode":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/opencode.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/opencode.svg')}" alt="" aria-hidden="true">`;
   case "grok":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/grok.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/grok.svg')}" alt="" aria-hidden="true">`;
   case "muse":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/meta.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/meta.svg')}" alt="" aria-hidden="true">`;
   case "cursor":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/cursor.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/cursor.svg')}" alt="" aria-hidden="true">`;
   case "dsh":
-    return `<span class="mask-logo" style="--logo:url('${assetURL('/assets/agents/deepseek.svg')}')" aria-hidden="true"></span>`;
+    return `<img src="${assetURL('/assets/agents/deepseek.svg')}" alt="" aria-hidden="true">`;
   case "vibe":
-    return `<svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="1" y="4" width="22" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.4"/>
-      <text x="12" y="15.2" text-anchor="middle" fill="currentColor" font-size="9.4" font-weight="800" font-family="system-ui, sans-serif">Mst</text>
-    </svg>`;
+    return `<img src="${assetURL('/assets/agents/mistral.svg')}" alt="" aria-hidden="true">`;
   default:
     return `<svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="10" fill="var(--dim)"/>
@@ -219,7 +216,7 @@ export function fuelGauge(rem){
 export function usageBadge(agent, v, deps = {}){
   const now = deps.now instanceof Date ? deps.now : new Date();
   const locales = deps.locales;
-  // Render the neutral badge as text here: shrinking its SVG to status-bar
+  // Render the abbreviation as text here: shrinking its SVG to status-bar
   // dimensions also shrinks the lettering far below a readable font size.
   const labels = { claude:"Cld", codex:"Cdx", openai:"Cdx", grok:"Grk", pi:"Pi", opencode:"OC", muse:"Mus", cursor:"Cur", dsh:"Dsh" };
   const label = labels[String(agent || "").toLowerCase()] || "?";

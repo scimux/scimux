@@ -127,7 +127,7 @@ func TestRemoteBootstrapManifestAntiVacuityCounts(t *testing.T) {
 		"index": 1,
 		"js":    33,
 		"css":   10,
-		"asset": 8,
+		"asset": 9,
 	} {
 		if byKind[kind] != want {
 			t.Errorf("manifest holds %d %s entries, want %d", byKind[kind], kind, want)
