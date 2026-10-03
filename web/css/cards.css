@@ -15,6 +15,9 @@
 .agent-logo { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--ink); }
 .agent-logo img, .agent-logo svg, .agent-logo .mask-logo { width: 20px; height: 20px; display: block; }
 .agent-logo img { object-fit: contain; }
+.agent-logo .badge-accent { display: none; }
+.accent-harness-logos .agent-logo .badge-mono { display: none; }
+.accent-harness-logos .agent-logo .badge-accent { display: block; }
 .agent-logo .mask-logo {
   background: currentColor;
   -webkit-mask: var(--logo) center / contain no-repeat;

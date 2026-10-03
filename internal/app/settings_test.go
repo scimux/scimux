@@ -137,6 +137,56 @@ func TestSettingsHTTP(t *testing.T) {
 	}
 }
 
+func TestAccentHarnessLogosSetting(t *testing.T) {
+	a := settingsApp(t)
+	get := func() map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		a.handleSettingsGet(rec, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	put := func(body string) int {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		a.handleSettingsPut(rec, httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body)))
+		return rec.Code
+	}
+	if got := get()["use_accent_harness_logos"]; got != false {
+		t.Fatalf("default accent preference = %v, want false", got)
+	}
+	if code := put(`{"use_accent_harness_logos":true}`); code != http.StatusOK {
+		t.Fatalf("enable accent preference = %d", code)
+	}
+	if got := get()["use_accent_harness_logos"]; got != true {
+		t.Fatalf("saved accent preference = %v, want true", got)
+	}
+	if got := (&app{settingsPath: a.settingsPath}).settings().UseAccentHarnessLogos; !got {
+		t.Fatal("accent preference did not survive a new app instance")
+	}
+	if code := put(`{"use_accent_harness_logos":null}`); code != http.StatusOK {
+		t.Fatalf("null accent preference = %d", code)
+	}
+	if get()["use_accent_harness_logos"] != true {
+		t.Fatal("null changed the accent preference")
+	}
+	if code := put(`{"use_accent_harness_logos":"yes"}`); code != http.StatusBadRequest {
+		t.Fatalf("non-boolean accent preference = %d, want 400", code)
+	}
+	if get()["use_accent_harness_logos"] != true {
+		t.Fatal("rejected write changed the accent preference")
+	}
+	if code := put(`{"use_accent_harness_logos":false}`); code != http.StatusOK {
+		t.Fatalf("disable accent preference = %d", code)
+	}
+	if get()["use_accent_harness_logos"] != false {
+		t.Fatal("accent preference could not be turned off")
+	}
+}
+
 // The gate is on the server, before anything is launched: a browser that has
 // not read the setting still cannot cause a probe.
 func TestClaudeUsageCollectionIsGatedOnConsent(t *testing.T) {

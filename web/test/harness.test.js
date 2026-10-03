@@ -717,6 +717,7 @@ test("cross-setting writes serialize Muse then Claude", async () => {
     claude_usage_checks: true,
     muse_approval_judge_consent: false,
     allow_external_attachments: false,
+    use_accent_harness_logos: false,
   });
 });
 
@@ -750,6 +751,7 @@ test("cross-setting writes serialize Claude then Muse", async () => {
     claude_usage_checks: false,
     muse_approval_judge_consent: true,
     allow_external_attachments: false,
+    use_accent_harness_logos: false,
   });
 });
 
@@ -853,6 +855,7 @@ test("failed read at queue head turns both off; a later write still runs", async
   assert.deepEqual(h.controller.getState(), {
     claude_usage_checks: false, muse_approval_judge_consent: false,
     allow_external_attachments: false,
+    use_accent_harness_logos: false,
   });
   await micro();
   assert.equal(writes, 1);

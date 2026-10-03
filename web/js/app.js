@@ -57,6 +57,7 @@ import {
 import {
   usageBadge,
   agentLogo as agentLogoMod,
+  setAccentHarnessLogos,
   sysMetricHTML,
   statusPhaseAt,
   setStatusUnreachable,
@@ -118,7 +119,7 @@ import { createSheetsFeature } from "./sheets.js";
 import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl, homeScreenInstallable } from "./pairing-ui.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
-import { claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
+import { APP_SLOT, claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
 import { focusAtEnd } from "./caret.js";
 import { createStorage } from "./storage.js";
 import { createBookmarkCapture } from "./bookmark-capture.js";
@@ -1933,11 +1934,14 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     read: () => api("/api/settings"),
     write: body => api("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
     render: state => {
+      if (window[APP_SLOT] !== instance) return;
       usageChecks = !!state.claude_usage_checks;
       museConsent = !!state.muse_approval_judge_consent;
       const external = !!state.allow_external_attachments;
       $("#m_external_attachments").checked = external;
       $("#m_external_attachments_note").textContent = externalAttachmentNote(external);
+      $("#m_accent_harness_logos").checked = !!state.use_accent_harness_logos;
+      setAccentHarnessLogos(document.documentElement, state.use_accent_harness_logos);
       renderHarnesses();
     },
   });
@@ -1967,6 +1971,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   });
   $("#m_external_attachments").addEventListener("change",
     applyExternalAttachmentChange.bind(null, settingsCtl));
+  $("#m_accent_harness_logos").addEventListener("change", e =>
+    settingsCtl.setAccentHarnessLogos(!!e.target?.checked));
+  void settingsCtl.load();
   $("#m_hcheck").addEventListener("click", () => void runHarnessMenuCheck({
     button: $("#m_hcheck"), scimuxButton: $("#m_check"), box: $("#m_vibe_inspect"),
     api, scimux: scimuxUpdate.check,

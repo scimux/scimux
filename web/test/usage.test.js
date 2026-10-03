@@ -42,23 +42,33 @@ test("agentLogo routes each known agent through assetURL", () => {
   assert.match(agentLogo("vibe", url), /U:\/assets\/agents\/mistral\.svg/);
   assert.match(agentLogo("unknown", url), /<svg/);
   assert.deepEqual(seen, [
+    "/assets/agents/claude-mono.svg",
     "/assets/agents/claude.svg",
+    "/assets/agents/openai-mono.svg",
     "/assets/agents/openai.svg",
+    "/assets/agents/openai-mono.svg",
     "/assets/agents/openai.svg",
+    "/assets/agents/pi-mono.svg",
     "/assets/agents/pi.svg",
+    "/assets/agents/opencode-mono.svg",
     "/assets/agents/opencode.svg",
+    "/assets/agents/grok-mono.svg",
     "/assets/agents/grok.svg",
+    "/assets/agents/meta-mono.svg",
     "/assets/agents/meta.svg",
+    "/assets/agents/cursor-mono.svg",
     "/assets/agents/cursor.svg",
+    "/assets/agents/deepseek-mono.svg",
     "/assets/agents/deepseek.svg",
+    "/assets/agents/mistral-mono.svg",
     "/assets/agents/mistral.svg",
   ]);
-  assert.match(agentLogo("claude", p => p), /^<img src="\/assets\/agents\/claude\.svg" alt="" aria-hidden="true">$/);
+  assert.match(agentLogo("claude", p => p), /<img class="badge-mono" src="\/assets\/agents\/claude-mono\.svg" alt="" aria-hidden="true">/);
 });
 
 test("Mistral Vibe uses its own SVG badge", () => {
   const logo = agentLogo("vibe", p => p);
-  assert.match(logo, /<img src="\/assets\/agents\/mistral\.svg"/);
+  assert.match(logo, /<img class="badge-accent" src="\/assets\/agents\/mistral\.svg"/);
   assert.equal(usageAgentDisplayName("vibe"), "Mistral Vibe");
 });
 

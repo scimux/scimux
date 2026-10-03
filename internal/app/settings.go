@@ -1,14 +1,12 @@
 // settings.go — the small set of choices the *computer* holds, as opposed to
 // the opaque per-browser blob in ui.json.
 //
-// The values here are server-enforced consent gates: Claude usage probing and
-// Muse's token-spending approval judge. They cannot live in ui.json, which is
-// deliberately opaque to the server and revisioned for concurrent browsers;
-// a gate the server enforces must be a value the server owns.
+// The values here include server-enforced consent gates and a shared visual
+// preference. Unlike ui.json, this document is typed and merged field by field
+// so settings changed from different browsers do not overwrite one another.
 //
 // Every read degrades toward off. A missing, unreadable or nonsense file is
-// "no consent given", never consent — the one store here whose failure mode
-// must cost the user nothing.
+// "no consent given", never consent, and uses monochrome harness badges.
 package app
 
 import (
@@ -46,6 +44,9 @@ type settings struct {
 	StorageGlobalLimitBytes int64 `json:"storage_global_limit_bytes"`
 	StorageNodeLimitBytes   int64 `json:"storage_node_limit_bytes"`
 	StorageMinFreeBytes     int64 `json:"storage_min_free_bytes"`
+	// UseAccentHarnessLogos selects the colored SVG badges in every browser
+	// connected to this computer. The monochrome design is the default.
+	UseAccentHarnessLogos bool `json:"use_accent_harness_logos"`
 	// Extra preserves settings written by a newer scimux. A Phase 5 write must
 	// not erase a field merely because this binary does not understand it yet.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -60,6 +61,7 @@ func (s *settings) UnmarshalJSON(b []byte) error {
 		ClaudeUsageChecks        bool  `json:"claude_usage_checks"`
 		MuseApprovalJudgeConsent bool  `json:"muse_approval_judge_consent"`
 		AllowExternalAttachments bool  `json:"allow_external_attachments"`
+		UseAccentHarnessLogos    bool  `json:"use_accent_harness_logos"`
 		StorageGlobalLimitBytes  int64 `json:"storage_global_limit_bytes"`
 		StorageNodeLimitBytes    int64 `json:"storage_node_limit_bytes"`
 		StorageMinFreeBytes      int64 `json:"storage_min_free_bytes"`
@@ -74,12 +76,14 @@ func (s *settings) UnmarshalJSON(b []byte) error {
 	s.ClaudeUsageChecks = known.ClaudeUsageChecks
 	s.MuseApprovalJudgeConsent = known.MuseApprovalJudgeConsent
 	s.AllowExternalAttachments = known.AllowExternalAttachments
+	s.UseAccentHarnessLogos = known.UseAccentHarnessLogos
 	s.StorageGlobalLimitBytes = known.StorageGlobalLimitBytes
 	s.StorageNodeLimitBytes = known.StorageNodeLimitBytes
 	s.StorageMinFreeBytes = known.StorageMinFreeBytes
 	delete(raw, "claude_usage_checks")
 	delete(raw, "muse_approval_judge_consent")
 	delete(raw, "allow_external_attachments")
+	delete(raw, "use_accent_harness_logos")
 	delete(raw, "storage_global_limit_bytes")
 	delete(raw, "storage_node_limit_bytes")
 	delete(raw, "storage_min_free_bytes")
@@ -88,16 +92,18 @@ func (s *settings) UnmarshalJSON(b []byte) error {
 }
 
 func (s settings) MarshalJSON() ([]byte, error) {
-	raw := make(map[string]json.RawMessage, len(s.Extra)+6)
+	raw := make(map[string]json.RawMessage, len(s.Extra)+7)
 	for key, value := range s.Extra {
 		raw[key] = append(json.RawMessage(nil), value...)
 	}
 	claude, _ := json.Marshal(s.ClaudeUsageChecks)
 	museConsent, _ := json.Marshal(s.MuseApprovalJudgeConsent)
 	external, _ := json.Marshal(s.AllowExternalAttachments)
+	accent, _ := json.Marshal(s.UseAccentHarnessLogos)
 	raw["claude_usage_checks"] = claude
 	raw["muse_approval_judge_consent"] = museConsent
 	raw["allow_external_attachments"] = external
+	raw["use_accent_harness_logos"] = accent
 	for key, value := range map[string]int64{
 		"storage_global_limit_bytes": s.StorageGlobalLimitBytes,
 		"storage_node_limit_bytes":   s.StorageNodeLimitBytes,
@@ -218,7 +224,7 @@ func (a *app) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 		s.Extra = map[string]json.RawMessage{}
 	}
 	for key, raw := range patch {
-		if key == "claude_usage_checks" || key == "muse_approval_judge_consent" || key == "allow_external_attachments" ||
+		if key == "claude_usage_checks" || key == "muse_approval_judge_consent" || key == "allow_external_attachments" || key == "use_accent_harness_logos" ||
 			key == "storage_global_limit_bytes" || key == "storage_node_limit_bytes" || key == "storage_min_free_bytes" {
 			continue
 		}
@@ -238,6 +244,12 @@ func (a *app) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw, ok := patch["allow_external_attachments"]; ok {
 		if string(raw) != "null" && json.Unmarshal(raw, &s.AllowExternalAttachments) != nil {
+			http.Error(w, "settings must be valid JSON", 400)
+			return
+		}
+	}
+	if raw, ok := patch["use_accent_harness_logos"]; ok {
+		if string(raw) != "null" && json.Unmarshal(raw, &s.UseAccentHarnessLogos) != nil {
 			http.Error(w, "settings must be valid JSON", 400)
 			return
 		}

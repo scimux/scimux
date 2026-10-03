@@ -32,29 +32,42 @@ export function statusPhaseAt(idx, usageSnap){
  * FR-42 transport seam stays explicit; the shell closes over its supplier and
  * keeps the historical one-argument `agentLogo(agent)` call sites.
  */
+export function setAccentHarnessLogos(root, on){
+  root?.classList?.toggle("accent-harness-logos", on === true);
+}
+
 export function agentLogo(agent, assetURL){
   /* Call the parameter as assetURL(...) so AT-FR-42's seam scanner still
      classifies these sinks as seam-routed (wrapper name is the contract). */
   switch ((agent || "").toLowerCase()){
   case "claude":
-    return `<img src="${assetURL('/assets/agents/claude.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/claude-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/claude.svg')}" alt="" aria-hidden="true">`;
   case "codex":
   case "openai":
-    return `<img src="${assetURL('/assets/agents/openai.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/openai-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/openai.svg')}" alt="" aria-hidden="true">`;
   case "pi":
-    return `<img src="${assetURL('/assets/agents/pi.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/pi-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/pi.svg')}" alt="" aria-hidden="true">`;
   case "opencode":
-    return `<img src="${assetURL('/assets/agents/opencode.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/opencode-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/opencode.svg')}" alt="" aria-hidden="true">`;
   case "grok":
-    return `<img src="${assetURL('/assets/agents/grok.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/grok-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/grok.svg')}" alt="" aria-hidden="true">`;
   case "muse":
-    return `<img src="${assetURL('/assets/agents/meta.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/meta-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/meta.svg')}" alt="" aria-hidden="true">`;
   case "cursor":
-    return `<img src="${assetURL('/assets/agents/cursor.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/cursor-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/cursor.svg')}" alt="" aria-hidden="true">`;
   case "dsh":
-    return `<img src="${assetURL('/assets/agents/deepseek.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/deepseek-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/deepseek.svg')}" alt="" aria-hidden="true">`;
   case "vibe":
-    return `<img src="${assetURL('/assets/agents/mistral.svg')}" alt="" aria-hidden="true">`;
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/mistral-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/mistral.svg')}" alt="" aria-hidden="true">`;
   default:
     return `<svg viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="10" fill="var(--dim)"/>

@@ -357,7 +357,8 @@ export function tilePaths() {
 }
 
 export function logoPaths() {
-  return Object.values(AGENT_ASSET_PATHS);
+  return Object.values(AGENT_ASSET_PATHS).flatMap(path =>
+    [path, path.replace(/\.svg$/, "-mono.svg")]);
 }
 
 export function allAssetPaths() {

@@ -204,8 +204,8 @@ test("AT-FR-40-a: fake channel serving the real files boots the full graph", asy
   if (css.length !== 10) {
     fail(at, `disk has ${css.length} stylesheets, want 10`);
   }
-  if (assets.length !== 9) {
-    fail(at, `disk has ${assets.length} assets, want 9`);
+  if (assets.length !== 18) {
+    fail(at, `disk has ${assets.length} assets, want 18`);
   }
   if (!s.imported.length) {
     fail(at, "entry module was not started");

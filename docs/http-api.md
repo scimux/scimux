@@ -799,14 +799,16 @@ are `413`.
 ### `GET /api/settings` / `PUT /api/settings`
 
 The **computer's** own settings (`~/.scimux/settings.json`). The server reads
-and enforces these values itself; `/api/ui` holds the separate shared UI
-document, whose contents are opaque to the server.
+and enforces consent and attachment settings and stores the shared harness-logo
+preference. `/api/ui` holds the separate shared UI document, whose contents
+are opaque to the server.
 
 ```json
 {
   "claude_usage_checks": false,
   "muse_approval_judge_consent": false,
   "allow_external_attachments": false,
+  "use_accent_harness_logos": false,
   "storage_global_limit_bytes": 0,
   "storage_node_limit_bytes": 0,
   "storage_min_free_bytes": 67108864
@@ -830,6 +832,11 @@ server-owned setting for every import, so changes apply without restarting a
 chat. Turning it off blocks later imports and retries but does not remove
 already imported snapshots or automatically revisit older blocked references.
 
+`use_accent_harness_logos` selects the accent-color CLI harness badges in all
+connected browser views. It defaults to false, which uses the matching
+monochrome badges. Changing it affects the current browser immediately;
+other browsers pick up the change when they next read settings.
+
 The storage fields are non-negative integer byte counts. A zero global or
 per-node limit means unlimited; a zero minimum-free value disables that
 reserve. A missing `storage_min_free_bytes` uses the 64 MiB safety default.
@@ -839,7 +846,7 @@ attachments, and asset blobs. Before a managed write, all scimux processes
 serialize the usage check through an owner-only lock. A write that would cross
 a limit fails without truncating or deleting existing durable history.
 
-**Both consent fields and external attachments default to off.** A missing,
+**Both consent fields, external attachments, and accent logos default to off.** A missing,
 unreadable, empty, oversized, or invalid settings file is read as no consent
 and no permission to import external attachments.
 

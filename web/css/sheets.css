@@ -41,6 +41,10 @@
 .nc-ack { display: flex; align-items: flex-start; gap: 8px; }
 .sheet .nc-ack input { width: 18px; height: 18px; flex: 0 0 18px;
   padding: 0; margin: 2px 0 0; accent-color: var(--work); }
+#m_attachment_settings .hswitch { display: flex; align-items: flex-start;
+  gap: 8px; min-height: 44px; font-size: 14px; line-height: 1.4; cursor: pointer; }
+#m_attachment_settings .hswitch input { width: 18px; height: 18px;
+  flex: 0 0 18px; margin: 2px 0 0; padding: 0; accent-color: var(--work); }
 .sheet .sect .k { font-size: 11px; font-weight: 700; letter-spacing: .06em;
   text-transform: uppercase; color: var(--dim); margin-bottom: 4px; }
 .sheet .sect .v { font-size: 15px; line-height: 1.5; overflow-wrap: break-word; }

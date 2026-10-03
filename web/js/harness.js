@@ -168,12 +168,14 @@ export function computerSettingOn(v){
 const CLAUDE_USAGE_KEY = "claude_usage_checks";
 const MUSE_CONSENT_KEY = "muse_approval_judge_consent";
 const EXTERNAL_ATTACHMENTS_KEY = "allow_external_attachments";
+const ACCENT_LOGOS_KEY = "use_accent_harness_logos";
 
 function settingsSnapshot(s){
   return {
     claude_usage_checks: !!s.claude_usage_checks,
     muse_approval_judge_consent: !!s.muse_approval_judge_consent,
     allow_external_attachments: !!s.allow_external_attachments,
+    use_accent_harness_logos: !!s.use_accent_harness_logos,
   };
 }
 
@@ -190,7 +192,7 @@ export function createSettingsController(deps = {}){
   const read = typeof deps.read === "function" ? deps.read : async () => ({});
   const write = typeof deps.write === "function" ? deps.write : async () => ({});
   const render = typeof deps.render === "function" ? deps.render : () => {};
-  let confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false };
+  let confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false, use_accent_harness_logos: false };
   let tail = Promise.resolve();
 
   function snapshot(){
@@ -206,12 +208,13 @@ export function createSettingsController(deps = {}){
       claude_usage_checks: computerSettingOn(raw && raw[CLAUDE_USAGE_KEY]),
       muse_approval_judge_consent: computerSettingOn(raw && raw[MUSE_CONSENT_KEY]),
       allow_external_attachments: computerSettingOn(raw && raw[EXTERNAL_ATTACHMENTS_KEY]),
+      use_accent_harness_logos: computerSettingOn(raw && raw[ACCENT_LOGOS_KEY]),
     };
   }
 
   function applyWrite(changedKey, raw){
     confirmed[changedKey] = flagFrom(raw, changedKey);
-    for (const key of [CLAUDE_USAGE_KEY, MUSE_CONSENT_KEY, EXTERNAL_ATTACHMENTS_KEY]){
+    for (const key of [CLAUDE_USAGE_KEY, MUSE_CONSENT_KEY, EXTERNAL_ATTACHMENTS_KEY, ACCENT_LOGOS_KEY]){
       if (key !== changedKey && raw && typeof raw === "object" && key in raw)
         confirmed[key] = computerSettingOn(raw[key]);
     }
@@ -229,7 +232,7 @@ export function createSettingsController(deps = {}){
         const s = await read();
         applyRead(s);
       } catch {
-        confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false };
+        confirmed = { claude_usage_checks: false, muse_approval_judge_consent: false, allow_external_attachments: false, use_accent_harness_logos: false };
       }
       paint();
       return snapshot();
@@ -254,6 +257,7 @@ export function createSettingsController(deps = {}){
     setMuseConsent(want){ return put(MUSE_CONSENT_KEY, want); },
     setClaudeUsage(want){ return put(CLAUDE_USAGE_KEY, want); },
     setExternalAttachments(want){ return put(EXTERNAL_ATTACHMENTS_KEY, want); },
+    setAccentHarnessLogos(want){ return put(ACCENT_LOGOS_KEY, want); },
     getState(){ return snapshot(); },
   };
 }
