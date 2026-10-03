@@ -45,29 +45,102 @@ func TestS5R4_F1_WaitProtocolSignedRIDAndChallengeChain(t *testing.T) {
 	waitForSched(t, sched, 2*time.Second)
 	sched.FireAll()
 	waitForWaits(t, srv, 1, 2*time.Second)
-	first := srv.LastWait()
-	if first.Reject != "" {
-		t.Fatalf("F1: first wait rejected: %s body=%s", first.Reject, first.Body)
-	}
-	if first.ID != d.RID {
-		t.Fatalf("F1: wait id = %q, want registered RID %q", first.ID, d.RID)
-	}
-	if first.Sig == "" || first.Challenge == "" {
-		t.Fatal("F1: wait missing challenge or signature")
-	}
 
 	waitForSched(t, sched, 2*time.Second)
 	sched.FireAll()
 	waitForWaits(t, srv, 2, 2*time.Second)
-	second := srv.LastWait()
-	if second.Reject != "" {
-		t.Fatalf("F1: second wait rejected: %s", second.Reject)
+	// As SustainedSuccessResetInRVLoop explains, the count is a lower bound.
+	// Check the recorded history rather than whichever wait happened last.
+	if err := waitChainErr(srv.Waits(), d.RID, 2); err != nil {
+		t.Fatalf("F1: %v", err)
 	}
-	if second.Challenge != first.NextChallenge {
-		t.Fatalf("F1: challenge chain broken: second=%q want %q", second.Challenge, first.NextChallenge)
+}
+
+func TestWaitChainErr(t *testing.T) {
+	rid := strings.Repeat("ab", 32)
+	challenge := func(n byte) string {
+		b := bytes.Repeat([]byte{0x22}, 32)
+		b[0] += n
+		return hex.EncodeToString(b)
 	}
-	if second.ID != d.RID {
-		t.Fatalf("F1: second wait id = %q, want %q", second.ID, d.RID)
+	for _, row := range []struct {
+		name      string
+		count     int
+		mutate    func([]waitRec)
+		wantIndex int
+	}{
+		{"two accepted waits", 2, nil, -1},
+		{"three accepted waits", 3, nil, -1},
+		{"too few waits", 1, nil, 1},
+		{"no waits", 0, nil, 0},
+		{"wait 0 rejected", 2, func(w []waitRec) { w[0].Reject = "injected-fail" }, 0},
+		{"wait 1 rejected", 2, func(w []waitRec) { w[1].Reject = "injected-fail" }, 1},
+		{"wrong RID", 2, func(w []waitRec) { w[1].ID = strings.Repeat("cd", 32) }, 1},
+		{"missing signature", 2, func(w []waitRec) { w[1].Sig = "" }, 1},
+		{"missing challenge", 2, func(w []waitRec) { w[1].Challenge = "" }, 1},
+		{"broken chain", 2, func(w []waitRec) { w[1].Challenge = w[0].Challenge }, 1},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			waits := make([]waitRec, row.count)
+			for i := range waits {
+				waits[i] = waitRec{
+					ID: rid, Sig: strings.Repeat("ef", 64),
+					Challenge: challenge(byte(i)), NextChallenge: challenge(byte(i + 1)),
+				}
+			}
+			if row.mutate != nil {
+				row.mutate(waits)
+			}
+			err := waitChainErr(waits, rid, 2)
+			if row.wantIndex < 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("invalid wait history was accepted")
+			}
+			if want := fmt.Sprintf("wait %d:", row.wantIndex); !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not name %q", err, want)
+			}
+		})
+	}
+}
+
+func TestS5R4_F1_ChallengeChainSurvivesAWaitThatRunsAhead(t *testing.T) {
+	srv := newStrictWaitRV(t)
+	cfg := r3ClientCfg(t, srv.URL, srv.Client)
+	cfg.InviteFile = writeInviteFile(t, cfg.DataDir, vectorInviteGrouped, 0o600)
+	sched := newDelaySched()
+	cfg.Scheduler = sched
+	cfg.Clock = newClock(time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC))
+	cfg.RNG = constRNG{v: 0.5}
+	cfg.Backoff = BackoffConfig{Initial: 50 * time.Millisecond, Max: 800 * time.Millisecond, Factor: 2, Jitter: 0.2, SuccessFor: 5 * time.Second}
+	ctx, cancel := ctxTO(t)
+	defer cancel()
+	c, err := startClient(ctx, cfg)
+	if err != nil {
+		t.Fatalf("F1: start: %v", err)
+	}
+	defer c.Close()
+	// Let the initial no-device timer exist before registration wakes the
+	// loop, then observe wait #1 so that timer has been cancelled before firing.
+	waitForSched(t, sched, 2*time.Second)
+	d, err := c.RegisterDevice(ctx, DeviceRecord{ID: "phone", PubKey: append([]byte(nil), testPhonePubKey...)})
+	if err != nil {
+		t.Fatalf("F1: register: %v", err)
+	}
+	waitForWaits(t, srv, 1, 2*time.Second)
+
+	waitForSched(t, sched, 2*time.Second)
+	sched.FireAll()
+	waitForWaits(t, srv, 2, 2*time.Second)
+	waitForSched(t, sched, 2*time.Second)
+	sched.FireAll()
+	waitForWaits(t, srv, 3, 2*time.Second)
+	if err := waitChainErr(srv.Waits(), d.RID, 3); err != nil {
+		t.Fatalf("F1: %v", err)
 	}
 }
 
@@ -163,19 +236,22 @@ func TestS5R4_F1_SustainedSuccessResetInRVLoop(t *testing.T) {
 	// delays=[100ms 100ms 200ms 400ms 800ms] against a server count of 4 where
 	// the loop had driven 3. Indexing is immune to the overshoot; waiting on
 	// the scheduler's own record count is immune to the handoff.
-	for i := 0; i < 3; i++ {
-		waitForSched(t, sched, 2*time.Second)
-		sched.FireAll()
-		waitForWaits(t, srv, i+1, 2*time.Second)
+	// Registration produces failure 1 without a fire. Wait for each failure's
+	// retry to be recorded before firing it; the initial no-device timer can
+	// still be pending or being cancelled just after registration.
+	for n := 1; n <= 3; n++ {
+		waitForWaits(t, srv, n, 2*time.Second)
+		waitForDelayCount(t, sched, n+1, 2*time.Second)
+		if n < 3 {
+			sched.FireAll()
+		}
 	}
-	waitForDelayCount(t, sched, 4, 2*time.Second)
 	afterFail := sched.AllDelays()[3]
 	if afterFail != 400*time.Millisecond {
 		t.Fatalf("F1: delay after 3 failures = %s, want 400ms (delays %v)", afterFail, sched.AllDelays())
 	}
 
 	srv.FailWaits(false)
-	waitForSched(t, sched, 2*time.Second)
 	sched.FireAll()
 	waitForWaits(t, srv, 4, 2*time.Second)
 
@@ -185,10 +261,10 @@ func TestS5R4_F1_SustainedSuccessResetInRVLoop(t *testing.T) {
 	// recording that wait. Advancing the clock before that stamp lands makes
 	// upAt the *advanced* time, so the NotifyDown below measures a zero-length
 	// success window, declines to reset the failure count, and the row reads a
-	// still-climbing 800ms instead of Initial. Waiting for the next schedule
-	// proves the success path ran to completion first. (Production is immune:
+	// still-climbing 800ms instead of Initial. Waiting for the next recorded
+	// delay proves the success path ran to completion first. (Production is immune:
 	// nothing advances a real clock out from under the stamp.)
-	waitForSched(t, sched, 2*time.Second)
+	waitForDelayCount(t, sched, 5, 2*time.Second)
 	clock.Advance(cfg.Backoff.SuccessFor)
 
 	// Take the index of the next delay before provoking it, so the assertion
@@ -1039,13 +1115,33 @@ func (s *strictWaitRV) WaitCount() int {
 	return len(s.waits)
 }
 
-func (s *strictWaitRV) LastWait() waitRec {
+// Waits returns a snapshot so assertions can address each recorded wait by index.
+func (s *strictWaitRV) Waits() []waitRec {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.waits) == 0 {
-		return waitRec{Reject: "no-wait"}
+	return append([]waitRec(nil), s.waits...)
+}
+
+// waitChainErr validates every recorded wait, including any beyond the minimum.
+func waitChainErr(waits []waitRec, rid string, min int) error {
+	if len(waits) < min {
+		return fmt.Errorf("wait %d: missing; got %d waits, want at least %d", len(waits), len(waits), min)
 	}
-	return s.waits[len(s.waits)-1]
+	for i, wait := range waits {
+		if wait.Reject != "" {
+			return fmt.Errorf("wait %d: rejected: %s body=%s", i, wait.Reject, wait.Body)
+		}
+		if wait.ID != rid {
+			return fmt.Errorf("wait %d: id = %q, want registered RID %q", i, wait.ID, rid)
+		}
+		if wait.Sig == "" || wait.Challenge == "" {
+			return fmt.Errorf("wait %d: missing challenge or signature", i)
+		}
+		if i > 0 && wait.Challenge != waits[i-1].NextChallenge {
+			return fmt.Errorf("wait %d: challenge chain broken: challenge=%q want %q", i, wait.Challenge, waits[i-1].NextChallenge)
+		}
+	}
+	return nil
 }
 
 func (s *strictWaitRV) serve(w http.ResponseWriter, r *http.Request) {
