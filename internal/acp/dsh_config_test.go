@@ -220,20 +220,19 @@ func TestDshClearRefusesWhenTheModelCannotBeReapplied(t *testing.T) {
 }
 
 func TestNonDshAgentsKeepTheirTolerantApply(t *testing.T) {
-	// pi and opencode have always treated an unusable effort as "keep your
-	// default". Making dsh strict must not make them strict: their model and
-	// effort handling is upstream behaviour scimux is not changing here.
+	// pi keeps treating an unusable effort as "keep your default". Making
+	// dsh strict must not change pi's tolerant model and effort handling.
 	agent := &fakeAgent{newSession: func() sdk.NewSessionResponse {
 		return dshSession("sess_1", dshModelSelect(`["local","a"]`, `["local","a"]`))
 	}}
 	m := newManager(t, agent)
-	if _, err := m.Launch("n1", "opencode", t.TempDir(), "something/else", "medium"); err != nil {
-		t.Fatalf("opencode launch refused a mismatch it used to tolerate: %v", err)
+	if _, err := m.Launch("n1", "pi", t.TempDir(), "something/else", "medium"); err != nil {
+		t.Fatalf("pi launch refused a mismatch it used to tolerate: %v", err)
 	}
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
 	if len(agent.configSets) != 0 {
-		t.Fatalf("opencode sent %d config requests for options it cannot place", len(agent.configSets))
+		t.Fatalf("pi sent %d config requests for options it cannot place", len(agent.configSets))
 	}
 }
 

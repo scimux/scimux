@@ -434,8 +434,8 @@ func TestVibeClearRefusalLeavesTheOldSession(t *testing.T) {
 	}
 }
 
-func TestPiOpencodeGrokAndCursorStayTolerant(t *testing.T) {
-	for _, agentName := range []string{"pi", "opencode", "grok", "cursor"} {
+func TestPiGrokAndCursorStayTolerant(t *testing.T) {
+	for _, agentName := range []string{"pi", "grok", "cursor"} {
 		t.Run(agentName, func(t *testing.T) {
 			agent := vibeConfiguredAgent()
 			m := newManager(t, agent)
