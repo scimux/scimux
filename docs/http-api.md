@@ -539,9 +539,8 @@ checkbox above Start, resets it when the model changes or a new dialog opens,
 and disables Start until acknowledged. Existing chats and `/clear` retain their
 existing session policy; this acknowledgment gates new node creation.
 
-A dsh create carries its model over the wire rather than on argv, and dsh is
-the one agent for which that application is authoritative: if the live agent
-does not offer the requested model, or refuses it (or the requested thought
+A dsh create carries its model over the wire rather than on argv: if the live
+agent does not offer the requested model, or refuses it (or the requested thought
 level), the launch is refused, the process and its meta-only session log are
 discarded, and the response is `400` naming what was rejected — never a chat
 quietly running a different model from the one the node records. `400` means
@@ -549,7 +548,14 @@ the choice itself was wrong: the option is absent from the set the agent
 advertised, or the agent answered the apply with JSON-RPC `-32602`. A failure
 of the same call for any other reason — an internal error, a cancellation, a
 transport that dies mid-launch — still fails the create, but as `500`, because
-the model and thought level the user picked were not the problem.
+the model and thought level the user picked were not the problem. An opencode
+create applies its chosen model the same way when the live agent advertises a
+model menu, but effort remains tolerant. If the model is absent and its
+provider has no entries in that menu, scimux sends the raw model value and
+retries `-32602` refusals every 100 ms for up to 5 seconds while the provider
+loads. A model from an already listed provider gets one attempt; a remaining
+`-32602` refusal is `400`, and other errors are `500` without retry. An opencode
+agent with no model menu keeps its own default.
 
 Only launch-config fields are honored. Server-owned fields (`id`, `session_id`,
 `transcript`, `created_at`, `ended_at`, `fork_kind`, `adopted`) are ignored if
@@ -615,9 +621,10 @@ recorded as a source seam — same page-turn semantics as Claude's `/clear`.
 ACP replaces the agent subprocess; Codex opens a fresh thread on its existing
 process, and Muse starts a fresh session on its connection. Muse `/clear`
 requires the current `muse_approval_judge_consent` setting (`400` when off).
-A dsh `/clear` that the replacement agent refuses because its saved model or
-effort is no longer offered returns `400` and tells the user to fork with a
-model the agent still offers; other replacement failures remain `500`.
+A dsh or opencode `/clear` that the replacement agent refuses because its saved
+model (or, for dsh, effort) cannot be reapplied returns `400` before writing a
+seam, leaves the old session untouched, and tells the user to fork with a model
+the agent still offers; other replacement failures remain `500`.
 Claude's page turn is confirmed by its own `SessionStart` clear hook, not
 by successful pasting alone; an unconfirmed `/clear` does not retire history.
 A Claude send whose leading slash command is `/fork` or `/fork …` is `400`

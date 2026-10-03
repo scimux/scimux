@@ -60,6 +60,13 @@ var (
 // blocked on an auth prompt it never surfaces) can't wedge createNode.
 const launchTimeout = 30 * time.Second
 
+// opencode loads config-defined providers after session/new; measured warm-up
+// is about 150 ms. Allow a bounded settle period for a provider not yet listed.
+var (
+	opencodeModelSettle     = 5 * time.Second
+	opencodeModelRetryEvery = 100 * time.Millisecond
+)
+
 // Manager owns every node's ACP subprocess and connection. It is the seam the
 // HTTP handlers talk to; the tmux Server has the analogous role for TUI nodes.
 type Manager struct {
@@ -1959,39 +1966,111 @@ const jsonrpcInvalidParams = -32602
 // launch failure crosses the session-worker boundary as a string, and
 // IsConfigRejection matches on that string as well as on the value.
 func configSetError(err error, knob, value string) error {
-	var re *sdk.RequestError
-	if errors.As(err, &re) && re.Code == jsonrpcInvalidParams {
+	if isInvalidParams(err) {
 		return fmt.Errorf("%w: agent refused %s %q: %v", ErrConfigRejected, knob, value, err)
 	}
 	return fmt.Errorf("agent failed to set %s %q: %w", knob, value, err)
 }
 
+// isInvalidParams reports a typed JSON-RPC -32602 refusal, including wrapped errors.
+func isInvalidParams(err error) bool {
+	var re *sdk.RequestError
+	return errors.As(err, &re) && re.Code == jsonrpcInvalidParams
+}
+
+// settleConfigSet retries only invalid-params refusals within the settle period.
+// Other failures are agent errors, and cancellation interrupts the retry wait.
+func settleConfigSet(ctx context.Context, settle, every time.Duration, set func() (sdk.SetSessionConfigOptionResponse, error)) (sdk.SetSessionConfigOptionResponse, error) {
+	deadline := time.Now().Add(settle)
+	for {
+		resp, err := set()
+		if err == nil || !isInvalidParams(err) || !time.Now().Before(deadline) {
+			return resp, err
+		}
+		timer := time.NewTimer(every)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return sdk.SetSessionConfigOptionResponse{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// opencodeProvider extracts the provider from a non-empty provider/model pair.
+func opencodeProvider(model string) (string, bool) {
+	provider, rest, ok := strings.Cut(model, "/")
+	if !ok || provider == "" || rest == "" {
+		return "", false
+	}
+	return provider, true
+}
+
+// applyOpencodeModel enforces an explicit model when the agent offers a model
+// select. A provider absent from that menu may still be loading, so its raw
+// model value gets a bounded retry window. No menu preserves the agent default.
+func (s *Session) applyOpencodeModel(ctx context.Context, model string, opts []sdk.SessionConfigOption) ([]sdk.SessionConfigOption, error) {
+	if model == "" {
+		return nil, nil
+	}
+	for _, opt := range opts {
+		sel := opt.Select
+		if sel == nil || !modelSelectMatches(s.agent, sel) {
+			continue
+		}
+		val, listed := matchSelectValue(sel, model)
+		settle := time.Duration(0)
+		if !listed {
+			val = sdk.SessionConfigValueId(model)
+			if provider, ok := opencodeProvider(model); ok {
+				settle = opencodeModelSettle
+				for _, option := range selectOptions(sel) {
+					if strings.HasPrefix(string(option.Value), provider+"/") {
+						settle = 0
+						break
+					}
+				}
+			}
+		}
+		resp, err := settleConfigSet(ctx, settle, opencodeModelRetryEvery, func() (sdk.SetSessionConfigOptionResponse, error) {
+			return s.conn.SetSessionConfigOption(ctx, sdk.SetSessionConfigOptionRequest{
+				ValueId: &sdk.SetSessionConfigOptionValueId{ConfigId: sel.Id, SessionId: s.sessionID, Value: val},
+			})
+		})
+		if err != nil {
+			return nil, configSetError(err, "model", model)
+		}
+		return resp.ConfigOptions, nil
+	}
+	return nil, nil
+}
+
 // applyLaunchConfig puts the supervisor's model and effort onto a session that
 // already exists. Launch and Clear both call it, and that shared call is the
-// point: dsh puts neither knob on argv, so anything applied only at Launch is
-// silently dropped by the next /clear.
+// point: agents configured over ACP need their choices reapplied after /clear.
 //
-// Two policies, stated once. dsh and vibe are strict — an explicit choice
-// they cannot apply fails the launch, because the alternative is a node
-// whose record, log header and gauge all name a model the live agent is not
-// running, with nothing on screen to say so. pi, opencode, grok and cursor
-// stay tolerant: they have always treated a mismatch as "keep your own
-// default", and changing that is their behaviour to change.
+// Three policies: dsh and vibe enforce explicit model and effort choices.
+// opencode enforces the model when it advertises a model menu, allowing time
+// for an absent provider to load; its effort stays tolerant. pi, grok and
+// cursor skip the ACP model setter and tolerate effort mismatches.
 func (s *Session) applyLaunchConfig(ctx context.Context, model, effort string, resp sdk.NewSessionResponse) error {
 	strict := s.agent == "dsh" || s.agent == "vibe"
 	opts := resp.ConfigOptions
+	var updated []sdk.SessionConfigOption
+	var err error
 	if strict {
-		updated, err := s.applyModel(ctx, model, opts)
-		if err != nil {
-			return err
-		}
-		// The model switch answers with the full option set as it now stands,
-		// and that set is what the effort menu must be read from: dsh offers
-		// reasoning_effort only for a model whose route has one, so the menu
-		// that arrived with session/new described the *previous* model.
-		if len(updated) > 0 {
-			opts = updated
-		}
+		updated, err = s.applyModel(ctx, model, opts)
+	} else if s.agent == "opencode" {
+		updated, err = s.applyOpencodeModel(ctx, model, opts)
+	}
+	if err != nil {
+		return err
+	}
+	// The model switch returns the current option set. Its effort menu may
+	// differ from session/new, which described the previous model.
+	// dsh offers reasoning_effort only for models whose route supports it.
+	if len(updated) > 0 {
+		opts = updated
 	}
 	if err := s.applyEffort(ctx, effort, resp.Modes, opts); err != nil && strict {
 		return err
@@ -2054,9 +2133,8 @@ func (s *Session) applyEffort(ctx context.Context, effort string, modes *sdk.Ses
 // applying it or refusing the launch. Any other RPC failure still fails the
 // launch, but as a server error — see configSetError.
 //
-// Called for dsh only. pi and opencode have ignored the model field over ACP
-// since that transport landed, and making it take effect is a change to their
-// behaviour that belongs to them, not to adding dsh.
+// Called for dsh and vibe. opencode uses applyOpencodeModel to allow missing
+// menus and providers still loading; the other agents skip the ACP model setter.
 func (s *Session) applyModel(ctx context.Context, model string, opts []sdk.SessionConfigOption) ([]sdk.SessionConfigOption, error) {
 	if model == "" {
 		return nil, nil
