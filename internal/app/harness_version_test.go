@@ -508,8 +508,9 @@ func TestCursorPublishesNoUnauthenticatedVersion(t *testing.T) {
 }
 
 // vibe-acp has no unauthenticated public version channel scimux is willing to
-// name. Its installed version stays unknown because inventory does not execute
-// the binary. Inventing a URL would be a product claim, not a discovery fact.
+// name. Its installed version can come from adjacent package metadata without
+// executing the binary. Inventing a URL would be a product claim, not a
+// discovery fact.
 func TestVibePublishesNoUnauthenticatedVersion(t *testing.T) {
 	if src, ok := harnessSources()["vibe"]; ok {
 		t.Fatalf("vibe upstream source = %+v; scimux does not claim a Vibe release channel", src)

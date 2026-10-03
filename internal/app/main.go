@@ -299,8 +299,8 @@ func Run() {
 	// first new-activity dialog doesn't wait on subprocesses.
 	go detectAgents()
 	// Same reason, separate probe: the burger menu reads `<bin> --version`
-	// for every harness except vibe-acp, which is detected through PATH only.
-	// The menu should open on an answer, and Vibe's installed version stays unknown.
+	// for every harness except vibe-acp, whose version comes from adjacent
+	// package metadata where available. The menu should open on an answer.
 	go harnessInventory()
 	// Learn the concrete claude model ids (the CLI mis-resolves its own family
 	// aliases). The probe spends no tokens, but it does spend throwaway

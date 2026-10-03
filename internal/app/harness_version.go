@@ -191,8 +191,8 @@ func versionSegments(v string) []int {
 
 // probeHarnessVersions reports every supported harness, in registry order.
 // An installed harness other than Vibe is asked for `<bin> --version`. Vibe is
-// detected through PATH only and its installed version stays unknown: running
-// vibe-acp prepares files before the flag is parsed. Absent harnesses are
+// detected through PATH and its adjacent package metadata: running vibe-acp
+// prepares files before the flag is parsed. Absent harnesses are
 // reported too, because a missing row cannot be told apart from a failed probe.
 func probeHarnessVersions(hs []harness) []harnessRow {
 	rows := make([]harnessRow, 0, len(hs))
@@ -225,10 +225,9 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 				row.Path = bin
 			}
 			if filepath.Base(h.bin) == "vibe-acp" {
-				// vibe-acp logs and prepares files before it parses --version,
-				// and that process would inherit scimux's environment. PATH
-				// presence is the whole inventory. The installed version stays
-				// unknown.
+				// vibe-acp prepares files before it parses --version. Read
+				// adjacent package metadata instead of starting the binary.
+				row.Installed = vibeInstalledVersion(bin)
 				out[i] = row
 				return
 			}
@@ -422,7 +421,7 @@ func vibeInspectChoice(r *http.Request) (inspect bool, status int) {
 // local read-only discovery surface. It is reached only on an explicit tap.
 // Sources and local probes run independently: one dead registry costs its own
 // row, not the installed-harness or model-catalog answers. GET never starts
-// vibe-acp, and neither does the version inventory. POST starts it only when
+// vibe-acp, and neither does the read-only version inventory. POST starts it only when
 // vibeInspectChoice accepts the body.
 func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
 	inspect, status := vibeInspectChoice(r)

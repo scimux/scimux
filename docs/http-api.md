@@ -1044,10 +1044,12 @@ only — never a network call, because the menu reads it on every open.
 when false, the UI shows the installed version without implying that an
 upstream check failed. For every harness except Vibe, `installed` is the
 first version-shaped token of `<bin> --version`, empty when the output does
-not carry one. Vibe is detected through `PATH` only. Startup inventory, menu
-open, `GET /api/agents`, and an ordinary refresh do not execute `vibe-acp`,
-so its `installed` field stays empty and the menu says its version was not
-checked. `present` and
+not carry one. Vibe is detected through `PATH`, then its installed version is
+read from adjacent `mistral-vibe` package metadata when one unambiguous copy
+is present. Startup inventory, menu open, `GET /api/agents`, and an ordinary
+refresh do not execute `vibe-acp`; an unsupported or ambiguous install has an
+empty `installed` field and the menu says its version metadata is unavailable.
+`present` and
 `launchable` are separate facts: pi is installed as `pi` but launched through
 `pi-acp`. The probe is cached during ordinary menu use and replaced by the
 explicit harness-update check, so an installed or upgraded CLI appears without
@@ -1063,7 +1065,8 @@ The explicit refresh response is
 what each harness publishes upstream; `harnesses` is the newly reprobed local
 inventory from `GET /api/harnesses`; and `agents` is the newly reprobed model
 catalog from `GET /api/agents`. For Vibe that ordinary reprobe is `PATH`
-presence: empty `models`, no `efforts`, an unknown installed version, and
+presence plus adjacent package metadata: empty `models`, no `efforts`, a
+version only where metadata identifies the installed distribution, and
 `vibe-acp` stays unstarted.
 The cache replacements are atomic, so launches after the response use the
 same catalog the browser displays.

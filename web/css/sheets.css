@@ -112,9 +112,8 @@
 #m_harnesses .hswitch { flex-basis: 100%; display: flex; align-items: center; gap: 8px;
   min-height: 44px; font-size: 14px; cursor: pointer; }
 #m_harnesses .hswitch input { width: 18px; height: 18px; accent-color: var(--work); }
-/* The one-shot Vibe inspection sits outside #m_harnesses, so the row switch
-   rule above does not reach it. The label is the 44px tap target, the sentence
-   wraps, and the checkbox stays a visible control rather than a full-width field. */
+/* The one-shot Vibe inspection is moved into its harness row after rendering.
+   The label is the 44px tap target, and the sentence can wrap. */
 label:has(> #m_vibe_inspect) {
   display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px;
   min-height: 44px; margin: 8px 0; font-size: 14px; line-height: 1.4;

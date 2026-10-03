@@ -13,7 +13,8 @@ import (
 // TestVibeInventoryDoesNotExecuteTheBinary is the version-inventory boundary.
 // Startup, a cold menu open, GET /api/agents, and an ordinary refresh may see
 // vibe-acp on PATH. None of them may start it. Another installed harness still
-// receives its --version check, and Vibe's installed version stays unknown.
+// receives its --version check. This fake Vibe has no adjacent package metadata,
+// so its installed version stays unknown.
 func TestVibeInventoryDoesNotExecuteTheBinary(t *testing.T) {
 	binDir, vibeRecord := vibeLaunchRecorder(t)
 	grokRecord := filepath.Join(binDir, "grok-invocations.txt")

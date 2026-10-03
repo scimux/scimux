@@ -129,7 +129,7 @@ export function harnessState(row, latest){
   }
   if (!version){
     return { agent: r.agent, state: "unknown", version: "",
-      note: r.agent === "vibe" ? "installed; version was not checked" : "installed, but it did not report a version" };
+      note: r.agent === "vibe" ? "installed; version metadata unavailable" : "installed, but it did not report a version" };
   }
   if (!r.launchable){
     const bin = LAUNCH_BIN[r.agent] || r.agent;
@@ -356,6 +356,7 @@ export function harnessRowsHTML(rows, latest, deps = {}){
   }).join("");
 }
 
+
 /**
  * The sentence under the check button after a check, or "" before one.
  *
@@ -388,7 +389,7 @@ export async function runUpdateChecks(checks = {}){
 }
 
 export const VIBE_INSPECT_LABEL =
-  "Inspect Vibe model and thinking choices in a temporary local session.";
+  "Inspect Mistral Vibe model and thinking choices on the next update check (opens a temporary local session).";
 
 export function vibeInspectAvailable(rows){
   return Array.isArray(rows) && rows.some(r => r && r.agent === "vibe" && r.present && r.launchable);
