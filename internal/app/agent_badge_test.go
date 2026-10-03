@@ -2,24 +2,27 @@ package app
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestAgentAssetsAreNeutralTextBadges(t *testing.T) {
+func TestAgentAssetsAreAccentTextBadges(t *testing.T) {
 	want := map[string]struct {
-		badge string
-		name  string
+		badge  string
+		name   string
+		accent string
 	}{
-		"claude.svg":   {"Cld", "Claude"},
-		"openai.svg":   {"Cdx", "Codex"},
-		"grok.svg":     {"Grk", "Grok"},
-		"meta.svg":     {"Mus", "Muse"},
-		"pi.svg":       {"Pi", "pi"},
-		"opencode.svg": {"OC", "OpenCode"},
-		"cursor.svg":   {"Cur", "Cursor"},
-		"deepseek.svg": {"Dsh", "dsh"},
+		"claude.svg":   {"Cld", "Claude", "#fb8c63"},
+		"openai.svg":   {"Cdx", "Codex", "#79e9c4"},
+		"cursor.svg":   {"Cur", "Cursor", "#dfe1e5"},
+		"deepseek.svg": {"Dsh", "DeepSeek Harness", "#5c9df8"},
+		"grok.svg":     {"Grk", "Grok", "#66d9f6"},
+		"mistral.svg":  {"Mst", "Mistral Vibe", "#fa616b"},
+		"meta.svg":     {"Mus", "Meta Muse", "#b979ed"},
+		"opencode.svg": {"OpC", "OpenCode", "#fac42e"},
+		"pi.svg":       {"Pi.", "Pi.dev", "#f9aae0"},
 	}
 	for file, expected := range want {
 		t.Run(file, func(t *testing.T) {
@@ -28,18 +31,24 @@ func TestAgentAssetsAreNeutralTextBadges(t *testing.T) {
 				t.Fatal(err)
 			}
 			svg := string(body)
+			var root struct{ XMLName xml.Name }
+			if err := xml.Unmarshal(body, &root); err != nil || root.XMLName.Local != "svg" {
+				t.Fatalf("invalid SVG: %v", err)
+			}
 			for _, fragment := range []string{
-				`viewBox="0 0 64 64"`, `<rect`, `rx="12"`, `fill="none"`,
-				`stroke="currentColor"`, `fill="currentColor"`,
+				`viewBox="0 0 64 64"`, `<rect`, `rx="7"`, `<linearGradient`,
+				`fill="url(#bg)"`, `stop-color="` + expected.accent + `"`,
+				`transform="rotate(-7 32 32)"`,
 				`<title id="title">` + expected.name + `</title>`,
 				`>` + expected.badge + `</text>`,
 			} {
 				if !strings.Contains(svg, fragment) {
-					t.Errorf("%s missing neutral-badge fragment %q", file, fragment)
+					t.Errorf("%s missing accent-badge fragment %q", file, fragment)
 				}
 			}
 			lower := strings.ToLower(svg)
-			for _, forbidden := range []string{"<script", "<image", "<foreignobject", "<use", "href=", "url(", "onload=", "onclick="} {
+			lower = strings.Replace(lower, `xmlns="http://www.w3.org/2000/svg"`, "", 1)
+			for _, forbidden := range []string{"<script", "<image", "<foreignobject", "<use", "href=", "http:", "https:", "data:", "onload=", "onclick="} {
 				if strings.Contains(lower, forbidden) {
 					t.Errorf("%s contains executable or external-resource fragment %q", file, forbidden)
 				}

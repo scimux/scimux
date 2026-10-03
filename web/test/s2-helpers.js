@@ -38,6 +38,8 @@ export const AGENT_ASSET_PATHS = Object.freeze({
   grok: "/assets/agents/grok.svg",
   muse: "/assets/agents/meta.svg",
   cursor: "/assets/agents/cursor.svg",
+  dsh: "/assets/agents/deepseek.svg",
+  vibe: "/assets/agents/mistral.svg",
 });
 
 export const TILE_NODE = "n1";
@@ -260,6 +262,8 @@ export function todayAgentLogoHTML() {
     grok: runAgentLogo("grok", identityAssetURL),
     muse: runAgentLogo("muse", identityAssetURL),
     cursor: runAgentLogo("cursor", identityAssetURL),
+    dsh: runAgentLogo("dsh", identityAssetURL),
+    vibe: runAgentLogo("vibe", identityAssetURL),
   };
 }
 
@@ -339,6 +343,8 @@ export function exerciseLogos(assetURL) {
     grok: runAgentLogo("grok", assetURL),
     muse: runAgentLogo("muse", assetURL),
     cursor: runAgentLogo("cursor", assetURL),
+    dsh: runAgentLogo("dsh", assetURL),
+    vibe: runAgentLogo("vibe", assetURL),
   };
 }
 
@@ -351,7 +357,8 @@ export function tilePaths() {
 }
 
 export function logoPaths() {
-  return Object.values(AGENT_ASSET_PATHS);
+  return Object.values(AGENT_ASSET_PATHS).flatMap(path =>
+    [path, path.replace(/\.svg$/, "-mono.svg")]);
 }
 
 export function allAssetPaths() {
