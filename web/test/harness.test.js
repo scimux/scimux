@@ -974,7 +974,7 @@ test("Mistral Vibe sorts between Grok and Muse and carries no terms link", () =>
     { agent: "cursor", present: true, launchable: true, installed: "2026.09.15-d2fe57e", has_source: false },
     { agent: "muse", present: true, launchable: true, installed: "0.1.0" },
     { agent: "dsh", present: true, launchable: true, installed: "0.1.5-rc.1" },
-    { agent: "vibe", present: true, launchable: true, installed: "1.2.3", has_source: false },
+    { agent: "vibe", present: true, launchable: true, installed: "1.2.3", has_source: true },
   ];
   const html = harnessRowsHTML(rows, null);
   const order = [...html.matchAll(/data-agent="([^"]+)"/g)].map(m => m[1]);
@@ -983,7 +983,7 @@ test("Mistral Vibe sorts between Grok and Muse and carries no terms link", () =>
   assert.ok(vibeAt >= 0);
   const vibe = html.slice(vibeAt, html.indexOf("</div>", vibeAt) + "</div>".length);
   assert.match(vibe, / Mistral Vibe</);
-  assert.match(vibe, /no public version channel/);
+  assert.doesNotMatch(vibe, /no public version channel/);
   assert.doesNotMatch(vibe, /href=/);
   assert.doesNotMatch(vibe, /Terms of Service|Terms of Use|Terms and privacy/i);
 });
@@ -992,6 +992,21 @@ test("Vibe's unknown version says local metadata was unavailable", () => {
   const s = harnessState({ agent: "vibe", present: true, launchable: true, installed: "" }, null);
   assert.equal(s.state, "unknown");
   assert.equal(s.note, "installed; version metadata unavailable");
+});
+
+test("Vibe update text shows only the available version", () => {
+  const row = { agent: "vibe", present: true, launchable: true, installed: "2.25.0", has_source: true };
+  const newer = harnessState(row, { version: "2.25.8", source: "PyPI mistral-vibe" });
+  assert.equal(newer.state, "behind");
+  assert.equal(newer.note, "2.25.8 available");
+  const current = harnessState(row, { version: "2.25.0", source: "PyPI mistral-vibe" });
+  assert.equal(current.state, "current");
+  assert.equal(current.note, "up to date");
+  const other = harnessState({ ...row, agent: "codex" }, { version: "2.25.8", source: "npm codex" });
+  assert.match(other.note, /npm codex/);
+  const html = harnessRowsHTML([row], { vibe: { version: "2.25.8", source: "PyPI mistral-vibe" } });
+  assert.match(html, /2\.25\.8 available/);
+  assert.doesNotMatch(html, /PyPI/);
 });
 
 test("an installed dsh reads as unchecked with its prerelease version intact", () => {

@@ -1049,11 +1049,12 @@ read from adjacent `mistral-vibe` package metadata when one unambiguous copy
 is present. Startup inventory, menu open, `GET /api/agents`, and an ordinary
 refresh do not execute `vibe-acp`; an unsupported or ambiguous install has an
 empty `installed` field and the menu says its version metadata is unavailable.
-`present` and
-`launchable` are separate facts: pi is installed as `pi` but launched through
-`pi-acp`. The probe is cached during ordinary menu use and replaced by the
-explicit harness-update check, so an installed or upgraded CLI appears without
-restarting scimux.
+Vibe has a public upstream source, so a known installed version starts in the
+unchecked state and can report a newer version after the explicit check.
+`present` and `launchable` are separate facts: pi is installed as `pi` but
+launched through `pi-acp`. The probe is cached during ordinary menu use and
+replaced by the explicit harness-update check, so an installed or upgraded CLI
+appears without restarting scimux.
 For Muse, `launchable` is true when the `muse` executable is found on `PATH`.
 This inventory flag does not grant permission to create a chat: creation
 separately enforces approval-judge consent and model-catalog checks.
@@ -1068,6 +1069,11 @@ catalog from `GET /api/agents`. For Vibe that ordinary reprobe is `PATH`
 presence plus adjacent package metadata: empty `models`, no `efforts`, a
 version only where metadata identifies the installed distribution, and
 `vibe-acp` stays unstarted.
+The upstream Vibe answer comes from the public `mistral-vibe` package version
+endpoint (`https://pypi.org/pypi/mistral-vibe/json`, `info.version`). It is
+checked on the same explicit action across supported operating systems. The
+menu shows the version result without naming the package registry. A failed
+or malformed response omits Vibe from `latest`.
 The cache replacements are atomic, so launches after the response use the
 same catalog the browser displays.
 
@@ -1090,8 +1096,8 @@ concurrently. Overlapping refresh requests (for example, from two tabs) reuse
 the completed in-flight local inventory and model probes instead of running
 the CLI commands again. An accepted Vibe inspection runs after that shared
 refresh, as its own bounded probe. There is no single upstream lane: four sources are npm
-packages (codex, pi, opencode and dsh), grok is a plain-text channel file, and
-Claude's depends on whether
+packages (codex, pi, opencode and dsh), grok is a plain-text channel file,
+Vibe is a package version response, and Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not
 the npm dist-tag, which it can never receive). Muse has a separate stable
 channel metadata source. Its response format is not yet supported, so Muse

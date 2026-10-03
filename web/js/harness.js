@@ -144,12 +144,13 @@ export function harnessState(row, latest){
   if (!up){
     return { agent: r.agent, state: "unchecked", version, note: "" };
   }
+  const source = r.agent === "vibe" ? "" : (up.source ? ` · ${up.source}` : "");
   if (isNewer(version, up.version)){
     return { agent: r.agent, state: "behind", version,
-      note: `${up.version} available${up.source ? " · " + up.source : ""}` };
+      note: `${up.version} available${source}` };
   }
   return { agent: r.agent, state: "current", version,
-    note: `up to date${up.source ? " · " + up.source : ""}` };
+    note: `up to date${source}` };
 }
 
 /* The usage-check switch's own copy. Claude is the only harness whose gauge

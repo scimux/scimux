@@ -29,7 +29,7 @@ test("the same one-shot checkbox lives under the Mistral Vibe row across renders
     remove(){ this.parentNode = null; },
   };
   const host = makeHost(row);
-  const rows = [{ agent: "vibe", present: true, launchable: true, installed: "2.25.0", has_source: false }];
+  const rows = [{ agent: "vibe", present: true, launchable: true, installed: "2.25.0", has_source: true }];
   updateVibeInspectControl(rows, row, box);
   mountHarnessRows(host, harnessRowsHTML(rows, null), row);
   assert.equal(row.hidden, false);
