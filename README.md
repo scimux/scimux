@@ -83,13 +83,16 @@ long-running scimux notices a newly installed CLI, a changed pi/OpenCode
 configuration, or a newly published model such as a Grok model without being
 restarted. It does not install harness updates. It still cannot enumerate dsh
 models. Cursor has no public version channel in this menu, so its row shows
-the installed version only. Vibe is not executed to read a version, so its
-installed version stays unknown.
+the installed version only. For Vibe, scimux reads adjacent `mistral-vibe`
+package metadata when available; it does not execute `vibe-acp` to read a
+version or claim an upstream update. Unsupported or ambiguous installations
+show that version metadata is unavailable.
 
-Beside that action, an unchecked box can include one inspection of Vibe's
-model and thinking menus. The box applies to that click and resets when the
-action starts or the menu closes. It appears only when Vibe is installed and
-launchable. It is one-shot: scimux does not store it as consent.
+Under Mistral Vibe's row, an unchecked box can include one inspection of its
+model and thinking menus on the next update check. The box applies to that
+click and resets when the action starts or the menu closes. It appears only
+when Vibe is installed and launchable. It is one-shot: scimux does not store
+it as consent.
 Inspection opens one temporary ACP session and reads the model and thinking
 menus returned by `session/new`. It never sends a prompt or changes a model.
 Protocol work has a 12-second budget after process startup, with each call

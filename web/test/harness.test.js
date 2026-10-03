@@ -988,10 +988,10 @@ test("Mistral Vibe sorts between Grok and Muse and carries no terms link", () =>
   assert.doesNotMatch(vibe, /Terms of Service|Terms of Use|Terms and privacy/i);
 });
 
-test("Vibe's unknown version says it was not checked", () => {
+test("Vibe's unknown version says local metadata was unavailable", () => {
   const s = harnessState({ agent: "vibe", present: true, launchable: true, installed: "" }, null);
   assert.equal(s.state, "unknown");
-  assert.equal(s.note, "installed; version was not checked");
+  assert.equal(s.note, "installed; version metadata unavailable");
 });
 
 test("an installed dsh reads as unchecked with its prerelease version intact", () => {

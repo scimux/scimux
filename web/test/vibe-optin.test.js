@@ -13,7 +13,7 @@ import { acceptHarnessMenuResult } from "../js/harness.js";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const indexSrc = readFileSync(join(dir, "../index.html"), "utf8");
-const label = "Inspect Vibe model and thinking choices in a temporary local session.";
+const label = "Inspect Mistral Vibe model and thinking choices on the next update check (opens a temporary local session).";
 
 test("the harness update action starts with an unchecked one-shot Vibe inspection choice", () => {
   const at = indexSrc.indexOf('id="m_hcheck"');
@@ -21,7 +21,7 @@ test("the harness update action starts with an unchecked one-shot Vibe inspectio
   const around = indexSrc.slice(Math.max(0, at - 700), at + 80);
   assert.match(around, /id="m_vibe_inspect"/);
   assert.match(around, /id="m_vibe_inspect"[^>]*autocomplete="off"/);
-  assert.match(around, /Inspect Vibe model and thinking choices in a temporary local session\./);
+  assert.match(around, /Inspect Mistral Vibe model and thinking choices on the next update check \(opens a temporary local session\)\./);
   assert.match(around, /id="m_vibe_inspect_row" hidden/);
   assert.doesNotMatch(indexSrc, /id="m_vibe_inspect"[^>]*\bchecked\b/);
 });

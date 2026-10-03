@@ -124,6 +124,14 @@ import { createStorage } from "./storage.js";
 import { createBookmarkCapture } from "./bookmark-capture.js";
 import { createLegacyMediaResolver } from "./reference-media.js";
 
+/* Keep the one-shot checkbox in Vibe's row across inventory rerenders. Detach
+   the same DOM node first so a pending choice and disabled state survive. */
+export function mountHarnessRows(host, html, inspectRow) {
+  inspectRow.remove();
+  host.innerHTML = html;
+  const vibe = host.querySelector('[data-agent="vibe"]');
+  if (vibe && !inspectRow.hidden) vibe.appendChild(inspectRow);
+}
 
 /* FR-42 transport seam: the composition root takes fetchImpl and assetURL as
    required suppliers. No module-global default — a missing supplier throws,
@@ -1910,12 +1918,13 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      check refreshes installed versions and models, asks the public harness
      channels, and checks scimux. Opening the menu itself phones nowhere. */
   let harnessRows = null, harnessLatest = null, usageChecks = false, museConsent = false;
+  const vibeInspectRow = $("#m_vibe_inspect_row"), vibeInspectBox = $("#m_vibe_inspect");
   function renderHarnesses(){
     if (!harnessRows) return;
-    updateVibeInspectControl(harnessRows, $("#m_vibe_inspect_row"), $("#m_vibe_inspect"));
-    $("#m_harnesses").innerHTML = harnessRowsHTML(harnessRows, harnessLatest, {
+    updateVibeInspectControl(harnessRows, vibeInspectRow, vibeInspectBox);
+    mountHarnessRows($("#m_harnesses"), harnessRowsHTML(harnessRows, harnessLatest, {
       agentLogo, usageChecks, museConsent,
-    });
+    }), vibeInspectRow);
     const note = harnessCheckNote(harnessRows, harnessLatest);
     $("#m_hnote").textContent = note;
     $("#m_hnote").hidden = !note;
