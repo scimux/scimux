@@ -359,6 +359,12 @@ func (a *app) refreshClaudeModelsNow(ctx context.Context) {
 	if a == nil || a.claudeResolveModels == nil {
 		return
 	}
+	timeout := a.claudeRefreshTimeout
+	if timeout <= 0 {
+		timeout = claudeModelRefreshTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	start := a.claudeExplicitRefresh.Load()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

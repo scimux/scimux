@@ -977,3 +977,33 @@ func TestClaudeModelSuccessClearsFailureBackoff(t *testing.T) {
 		t.Fatalf("resolver calls = %d, want 3", calls)
 	}
 }
+
+func TestExplicitClaudeModelRefreshHasWholeOperationTimeout(t *testing.T) {
+	for _, wait := range []bool{false, true} {
+		name := "resolver"
+		if wait {
+			name = "in-flight-pass"
+		}
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			a := refreshApp(t, func(ctx context.Context) map[string]string { calls++; <-ctx.Done(); return nil })
+			a.claudeRefreshTimeout = 200 * time.Millisecond
+			a.claudeRefreshing.Store(wait)
+			start := time.Now()
+			a.refreshClaudeModelsNow(context.Background())
+			if elapsed := time.Since(start); elapsed >= 2*time.Second {
+				t.Fatalf("refresh took %v", elapsed)
+			}
+			want := 1
+			if wait {
+				want = 0
+			}
+			if calls != want {
+				t.Fatalf("resolver calls = %d, want %d", calls, want)
+			}
+			if !wait && a.claudeRefreshing.Load() {
+				t.Fatal("refresh gate stayed held")
+			}
+		})
+	}
+}

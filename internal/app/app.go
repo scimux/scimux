@@ -554,6 +554,8 @@ type app struct {
 	// is validated against. Injected for the same reason: a test must not shell
 	// out to whichever claude happens to be on the host.
 	claudeVersion func(context.Context) string
+	// Zero uses claudeModelRefreshTimeout; bounds explicit waiting and probing.
+	claudeRefreshTimeout time.Duration
 	// claudeRefreshing collapses overlapping refresh triggers into one run.
 	claudeRefreshing atomic.Bool
 	// claudeExplicitRefresh advances after a forced update-check probe. It lets
