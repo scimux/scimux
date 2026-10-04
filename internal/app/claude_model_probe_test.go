@@ -10,7 +10,153 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/scimux/scimux/internal/tmuxsession"
 )
+
+func TestResolveClaudeModelsStopsAtUntrustedPickerCandidate(t *testing.T) {
+	calls := 0
+	r := claudeModelResolver{
+		probe: func(context.Context, string) (claudeModelMarker, error) {
+			calls++
+			if calls > len(claudeModelAliases) {
+				return claudeModelMarker{}, errClaudeProbeUntrusted
+			}
+			return claudeModelMarker{}, errClaudeModelUnreadable
+		},
+		picker: func(context.Context) map[string]string {
+			return map[string]string{"fable": "claude-fable-9", "opus": "claude-opus-9"}
+		},
+	}
+	if got := r.resolve(context.Background()); len(got) != 0 {
+		t.Fatalf("models = %v", got)
+	}
+	if calls != len(claudeModelAliases)+1 {
+		t.Fatalf("probe calls = %d", calls)
+	}
+}
+
+func TestClaudeModelProbeRejectsEmptyCandidateAndBlockedMarker(t *testing.T) {
+	opts := claudeProbeOptions{Dir: t.TempDir()}
+	if _, err := runClaudeModelProbe(context.Background(), opts, ""); err != errClaudeModelUnreadable {
+		t.Fatalf("empty candidate error = %v", err)
+	}
+	if err := os.Mkdir(claudeModelMarkerPath(opts.Dir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeModelMarkerPath(opts.Dir), "child"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runClaudeModelProbe(context.Background(), opts, "fable"); err != errClaudeModelUnreadable {
+		t.Fatalf("blocked marker error = %v", err)
+	}
+}
+
+func TestResolveClaudeModelsWithoutProbe(t *testing.T) {
+	if got := (claudeModelResolver{}).resolve(context.Background()); len(got) != 0 {
+		t.Fatalf("models = %v", got)
+	}
+}
+
+func TestInstallClaudeModelProbeRereadsTrustAndIsolatesPicker(t *testing.T) {
+	var absent *app
+	absent.installClaudeModelProbe()
+	(&app{}).installClaudeModelProbe()
+	a := &app{home: t.TempDir(), claudeProbeDir: t.TempDir()}
+	expectedCwd := a.claudeProbeDir
+	pickerCalls := 0
+	a.server = tmuxsession.NewServerWithRunner("synthetic", func(_ context.Context, _ string, args ...string) (string, error) {
+		for _, arg := range args {
+			if arg == "new-session" {
+				for j, flag := range args {
+					if flag == "-c" && args[j+1] != expectedCwd {
+						t.Fatalf("cwd = %q, want %q", args[j+1], expectedCwd)
+					}
+				}
+				command := args[len(args)-1]
+				dir := a.claudeProbeDir
+				marker := claudeModelMarker{ID: "unknown", DisplayName: "unknown"}
+				if strings.Contains(command, "--model 'claude-opus-9-2'") {
+					marker = claudeModelMarker{ID: "claude-opus-9-2", DisplayName: "Opus 9.2"}
+				}
+				for _, alias := range []string{"fable", "sonnet", "haiku"} {
+					if strings.Contains(command, "--model "+shellQuote(alias)) {
+						marker = claudeModelMarker{ID: "claude-" + alias + "-9", DisplayName: "Synthetic model"}
+					}
+				}
+				if !strings.Contains(command, "--model ") {
+					dir = claudeModelPickerDir(dir)
+					pickerCalls++
+				}
+				if !strings.Contains(command, "--settings "+shellQuote(filepath.Join(dir, claudeUsageProbeSettingsName))) {
+					t.Fatalf("settings escaped marker directory: %s", command)
+				}
+				b, _ := json.Marshal(marker)
+				if err := os.WriteFile(claudeModelMarkerPath(dir), b, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if arg == "capture-pane" {
+				return claudeModelPickerPane, nil
+			}
+		}
+		return "", nil
+	})
+	a.installClaudeModelProbe()
+	if a.claudeResolveModels == nil || a.claudeVersion == nil {
+		t.Fatal("resolver was not installed")
+	}
+	for run := 0; run < 2; run++ {
+		if run == 1 {
+			writeTrustedProjects(t, a.home, map[string]any{a.home: map[string]bool{"hasTrustDialogAccepted": true}})
+			expectedCwd = a.home
+		}
+		got := a.claudeResolveModels(context.Background())
+		if len(got) != 4 || got["opus"] != "claude-opus-9-2" {
+			t.Fatalf("models = %v", got)
+		}
+	}
+	if pickerCalls != 2 {
+		t.Fatalf("picker calls = %d", pickerCalls)
+	}
+}
+
+func TestRefreshClaudeModelsCacheFallbackAndWriteFailure(t *testing.T) {
+	a := refreshApp(t, nil)
+	ids := map[string]string{"opus": "claude-opus-9"}
+	if err := writeClaudeCache(a.claudeCachePath, "old", ids); err != nil {
+		t.Fatal(err)
+	}
+	a.refreshClaudeModels(context.Background())
+	if got := a.resolveClaudeModel("opus"); got != ids["opus"] {
+		t.Fatalf("cache fallback = %q", got)
+	}
+	calls := 0
+	a.claudeResolveModels = func(context.Context) map[string]string { calls++; return nil }
+	a.claudeVersion = nil
+	a.refreshClaudeModelsWithCache(context.Background(), false)
+	// Simulate lost in-memory ids; suppressed retries must restore stale cache.
+	a.setClaudeIDs(nil)
+	a.refreshClaudeModels(context.Background())
+	if calls != 1 || a.resolveClaudeModel("opus") != ids["opus"] {
+		t.Fatal("backoff did not serve the stale cache")
+	}
+	a.claudeCachePath = filepath.Join(t.TempDir(), "cache")
+	if err := os.Mkdir(a.claudeCachePath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	a.claudeResolveModels = func(context.Context) map[string]string { return ids }
+	a.refreshClaudeModelsWithCache(context.Background(), false)
+	if got := a.resolveClaudeModel("opus"); got != ids["opus"] {
+		t.Fatalf("write failure lost resolved model: %q", got)
+	}
+}
+
+func TestExplicitClaudeModelRefreshIsInertWithoutResolver(t *testing.T) {
+	var absent *app
+	absent.refreshClaudeModelsNow(context.Background())
+	(&app{}).refreshClaudeModelsNow(context.Background())
+}
 
 func TestClaudeModelMarkerFromStatusLine(t *testing.T) {
 	body := []byte(`{"model":{"id":"claude-opus-9-2","display_name":"Opus 9.2"},"cwd":"/x"}`)
@@ -441,6 +587,7 @@ func pickerCmd(t *testing.T, dir string) string {
 func TestCaptureClaudeModelPickerReadsRows(t *testing.T) {
 	sv := probeTmux(t)
 	opts := probeOpts(t, sv, "")
+	opts.Cwd = t.TempDir()
 	opts.Command = pickerCmd(t, opts.Dir)
 	got := captureClaudeModelPicker(context.Background(), opts)
 	for fam, id := range map[string]string{
@@ -490,6 +637,7 @@ func TestCaptureClaudeModelPickerGivesUpQuietly(t *testing.T) {
 func TestCaptureClaudeModelPickerIgnoresAnotherSessionsMarker(t *testing.T) {
 	sv := probeTmux(t)
 	opts := probeOpts(t, sv, "")
+	opts.Cwd = t.TempDir()
 	// A pane that draws the picker once something is submitted but never
 	// writes a marker of its own: only the foreign marker below could make
 	// this capture believe its TUI is up.
@@ -712,5 +860,150 @@ func TestRefreshClaudeModelsReprobesAfterACLIUpgrade(t *testing.T) {
 	}
 	if c := readClaudeCache(a.claudeCachePath); c.Version != "2.2.0" {
 		t.Fatalf("cache version = %q, want the build that answered", c.Version)
+	}
+}
+
+func TestClaudeModelProbeOptionsRefreshTrustedFolder(t *testing.T) {
+	a := &app{home: t.TempDir(), claudeProbeDir: t.TempDir()}
+	opts := a.claudeModelProbeOptions("test-exe")
+	if opts.Cwd != a.claudeProbeDir || opts.Dir != a.claudeProbeDir {
+		t.Fatalf("fallback options = %+v", opts)
+	}
+	writeTrustedProjects(t, a.home, map[string]any{a.home: map[string]bool{"hasTrustDialogAccepted": true}})
+	opts = a.claudeModelProbeOptions("test-exe")
+	if opts.Cwd != a.home || opts.Dir != a.claudeProbeDir || opts.ExecPath != "test-exe" || opts.Server != a.server || opts.Timeout != claudeModelProbeTimeout {
+		t.Fatalf("model options = %+v", opts)
+	}
+}
+
+func TestClaudeModelProbePreservesUntrustedError(t *testing.T) {
+	opts := trustProbeOpts(t)
+	start := time.Now()
+	_, err := runClaudeModelProbe(context.Background(), opts, "fable")
+	if !errors.Is(err, errClaudeProbeUntrusted) {
+		t.Fatalf("error = %v, want untrusted", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("trust prompt took %v", elapsed)
+	}
+}
+
+func TestResolveClaudeModelsStopsAtUntrustedAlias(t *testing.T) {
+	calls, pickers := 0, 0
+	r := claudeModelResolver{
+		probe: func(context.Context, string) (claudeModelMarker, error) {
+			calls++
+			return claudeModelMarker{}, errClaudeProbeUntrusted
+		},
+		picker: func(context.Context) map[string]string { pickers++; return nil },
+	}
+	if got := r.resolve(context.Background()); len(got) != 0 {
+		t.Fatalf("models = %v, want empty", got)
+	}
+	if calls != 1 || pickers != 0 {
+		t.Fatalf("probe calls = %d, picker calls = %d", calls, pickers)
+	}
+}
+
+func TestClaudeModelFailureBackoffSameVersion(t *testing.T) {
+	for _, version := range []string{"test-version", ""} {
+		t.Run(version, func(t *testing.T) {
+			calls := 0
+			a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+			a.claudeVersion = func(context.Context) string { return version }
+			a.refreshClaudeModels(context.Background())
+			a.refreshClaudeModels(context.Background())
+			if calls != 1 {
+				t.Fatalf("resolver calls = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestClaudeModelFailureBackoffVersionChange(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+	a.refreshClaudeModels(context.Background())
+	a.claudeVersion = func(context.Context) string { return "next-version" }
+	a.refreshClaudeModels(context.Background())
+	if calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", calls)
+	}
+}
+
+func TestClaudeModelFailureBackoffExpires(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+	a.refreshClaudeModels(context.Background())
+	a.claudeMu.Lock()
+	a.claudeProbeFailedAt = time.Now().Add(-claudeProbeFailureBackoff - time.Second)
+	a.claudeMu.Unlock()
+	a.refreshClaudeModels(context.Background())
+	if calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", calls)
+	}
+}
+
+func TestExplicitClaudeModelRefreshIgnoresFailureBackoff(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+	a.refreshClaudeModels(context.Background())
+	a.refreshClaudeModelsNow(context.Background())
+	if calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", calls)
+	}
+}
+
+func TestClaudeModelSuccessClearsFailureBackoff(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string {
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		return map[string]string{"opus": "claude-opus-9"}
+	})
+	a.refreshClaudeModels(context.Background())
+	a.refreshClaudeModelsNow(context.Background())
+	a.claudeMu.Lock()
+	failedVersion, failedAt := a.claudeProbeFailedVersion, a.claudeProbeFailedAt
+	a.claudeMu.Unlock()
+	if failedVersion != "" || !failedAt.IsZero() {
+		t.Fatalf("success retained failure: %q %v", failedVersion, failedAt)
+	}
+	a.claudeVersion = func(context.Context) string { return "next-version" }
+	a.refreshClaudeModels(context.Background())
+	if calls != 3 {
+		t.Fatalf("resolver calls = %d, want 3", calls)
+	}
+}
+
+func TestExplicitClaudeModelRefreshHasWholeOperationTimeout(t *testing.T) {
+	for _, wait := range []bool{false, true} {
+		name := "resolver"
+		if wait {
+			name = "in-flight-pass"
+		}
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			a := refreshApp(t, func(ctx context.Context) map[string]string { calls++; <-ctx.Done(); return nil })
+			a.claudeRefreshTimeout = 200 * time.Millisecond
+			a.claudeRefreshing.Store(wait)
+			start := time.Now()
+			a.refreshClaudeModelsNow(context.Background())
+			if elapsed := time.Since(start); elapsed >= 2*time.Second {
+				t.Fatalf("refresh took %v", elapsed)
+			}
+			want := 1
+			if wait {
+				want = 0
+			}
+			if calls != want {
+				t.Fatalf("resolver calls = %d, want %d", calls, want)
+			}
+			if !wait && a.claudeRefreshing.Load() {
+				t.Fatal("refresh gate stayed held")
+			}
+		})
 	}
 }

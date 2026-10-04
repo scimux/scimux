@@ -315,6 +315,8 @@ a path that can be asked to read a token. Do not reintroduce it.
   line installed. Installing one on a supervised pane
   trades supervision — the product — for a gauge. `docs/invariants/attention.md`
   owns the anchor; this rule is why it is still there to own.
+- **The usage probe stays in `~/.scimux/probe`** because it submits a turn,
+  which writes a session file associated with its working directory.
 - **The probe is not a hook bundle.** It proves no ownership, binds no
   transcript and answers no approval, so it gets its own tiny settings file
   with a `statusLine` key and nothing else: no `hooks`, no
@@ -376,6 +378,20 @@ to, so an Opus default paid several times that). That was the wrong
 instrument, and it is deleted — `claudeModelPrompt`, `parseClaudeModels` and
 `probeClaudeModels` are gone. Do not reintroduce a billed model probe.
 
+- The model probe launches in the first trusted folder listed in
+  `~/.claude.json` (lexically sorted, existing directories only). That
+  undocumented file is read-only and bounded; `~/.scimux/probe` is the fallback.
+- Measured on Claude Code 2.1.289: neither a no-prompt launch nor one that
+  submits only `/model` writes a session file under `~/.claude/projects` or
+  anything into the working directory, so re-linking has nothing to adopt
+  even when the trusted folder is a supervised node's directory. The
+  picker's `/model` is, however, appended to `~/.claude/history.jsonl` under
+  that folder: one prompt-history line per picker run, accepted by the
+  maintainer on 2026-10-04. The usage probe submits a real turn, which
+  would write a session file, so it stays in `~/.scimux/probe`.
+- A workspace-trust prompt aborts the probe with `errClaudeProbeUntrusted`.
+  Failed catalog reads back off for one hour on the background path for the
+  same CLI version; an explicit update check bypasses this backoff.
 - **A launch with no prompt costs nothing.** `claude --model <candidate>`
   renders its status line before any API request, and the status line states
   the model the CLI *resolved* — `--model sonnet` comes back

@@ -34,6 +34,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -225,6 +226,9 @@ func runClaudeModelProbe(ctx context.Context, opts claudeProbeOptions, candidate
 		return ok
 	})
 	if err != nil {
+		if errors.Is(err, errClaudeProbeUntrusted) {
+			return claudeModelMarker{}, fmt.Errorf("model probe: %w", err)
+		}
 		return claudeModelMarker{}, errClaudeModelUnreadable
 	}
 	return got, nil
@@ -255,7 +259,11 @@ func (r claudeModelResolver) resolve(ctx context.Context) map[string]string {
 	out := map[string]string{}
 	var unresolved []string
 	for _, alias := range claudeModelAliases {
-		if id, ok := r.validate(ctx, alias, alias); ok {
+		id, ok, err := r.validate(ctx, alias, alias)
+		if errors.Is(err, errClaudeProbeUntrusted) {
+			return out
+		}
+		if ok {
 			out[alias] = id
 			continue
 		}
@@ -270,7 +278,11 @@ func (r claudeModelResolver) resolve(ctx context.Context) map[string]string {
 		if candidate == "" {
 			continue
 		}
-		if id, ok := r.validate(ctx, candidate, alias); ok {
+		id, ok, err := r.validate(ctx, candidate, alias)
+		if errors.Is(err, errClaudeProbeUntrusted) {
+			return out
+		}
+		if ok {
 			out[alias] = id
 		}
 	}
@@ -281,19 +293,19 @@ func (r claudeModelResolver) resolve(ctx context.Context) map[string]string {
 // a model it knows, in the family we asked about. The family check is not
 // pedantry: an answer from another family would relabel a model, so picking
 // "opus" in scimux would quietly launch Sonnet.
-func (r claudeModelResolver) validate(ctx context.Context, candidate, want string) (string, bool) {
+func (r claudeModelResolver) validate(ctx context.Context, candidate, want string) (string, bool, error) {
 	if r.probe == nil {
-		return "", false
+		return "", false, nil
 	}
 	m, err := r.probe(ctx, candidate)
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	family, id, ok := claudeModelResolved(m)
 	if !ok || family != want {
-		return "", false
+		return "", false, nil
 	}
-	return id, true
+	return id, true, nil
 }
 
 // claudeModelPickerDirName is the picker's own probe directory, a child of the
@@ -407,12 +419,7 @@ func (a *app) installClaudeModelProbe() {
 		// about, so a marker left by a sibling fails closed. The picker
 		// cannot make that check and takes a directory of its own
 		// (claudeModelPickerDirName).
-		opts := claudeProbeOptions{
-			Dir:      claudeProbeWorkdir(a.claudeProbeDir),
-			ExecPath: exe,
-			Server:   a.server,
-			Timeout:  claudeModelProbeTimeout,
-		}
+		opts := a.claudeModelProbeOptions(exe)
 		return claudeModelResolver{
 			probe: func(ctx context.Context, candidate string) (claudeModelMarker, error) {
 				return runClaudeModelProbe(ctx, opts, candidate)
@@ -421,5 +428,22 @@ func (a *app) installClaudeModelProbe() {
 				return captureClaudeModelPicker(ctx, opts)
 			},
 		}.resolve(ctx)
+	}
+}
+
+// claudeModelProbeOptions rereads trust on every resolver run, so a folder
+// trusted since startup is available without restarting scimux.
+func (a *app) claudeModelProbeOptions(exe string) claudeProbeOptions {
+	dir := claudeProbeWorkdir(a.claudeProbeDir)
+	cwd := claudeTrustedFolder(a.home)
+	if cwd == "" {
+		cwd = dir
+	}
+	return claudeProbeOptions{
+		Dir:      dir,
+		Cwd:      cwd,
+		ExecPath: exe,
+		Server:   a.server,
+		Timeout:  claudeModelProbeTimeout,
 	}
 }

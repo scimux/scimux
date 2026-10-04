@@ -275,6 +275,8 @@ func (a *app) refreshClaudeModels(ctx context.Context) {
 	a.refreshClaudeModelsWithCache(ctx, true)
 }
 
+const claudeProbeFailureBackoff = time.Hour
+
 func (a *app) refreshClaudeModelsWithCache(ctx context.Context, acceptFreshCache bool) {
 	cache := readClaudeCache(a.claudeCachePath)
 	serveCache := func() {
@@ -296,7 +298,24 @@ func (a *app) refreshClaudeModelsWithCache(ctx context.Context, acceptFreshCache
 		a.setClaudeIDs(cache.IDs)
 		return
 	}
+	a.claudeMu.Lock()
+	backoff := acceptFreshCache && a.claudeProbeFailedVersion == version &&
+		!a.claudeProbeFailedAt.IsZero() && time.Since(a.claudeProbeFailedAt) < claudeProbeFailureBackoff
+	a.claudeMu.Unlock()
+	if backoff {
+		serveCache()
+		return
+	}
 	ids := a.claudeResolveModels(ctx)
+	a.claudeMu.Lock()
+	if len(ids) == 0 {
+		a.claudeProbeFailedVersion = version
+		a.claudeProbeFailedAt = time.Now()
+	} else {
+		a.claudeProbeFailedVersion = ""
+		a.claudeProbeFailedAt = time.Time{}
+	}
+	a.claudeMu.Unlock()
 	if len(ids) == 0 {
 		serveCache()
 		return
@@ -340,6 +359,12 @@ func (a *app) refreshClaudeModelsNow(ctx context.Context) {
 	if a == nil || a.claudeResolveModels == nil {
 		return
 	}
+	timeout := a.claudeRefreshTimeout
+	if timeout <= 0 {
+		timeout = claudeModelRefreshTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	start := a.claudeExplicitRefresh.Load()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

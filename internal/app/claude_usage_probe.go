@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -74,6 +75,8 @@ func isProbeSession(name string) bool {
 	return strings.HasPrefix(name, probeSessionPrefix)
 }
 
+var errClaudeProbeUntrusted = errors.New("probe workspace is untrusted")
+
 var errClaudeUsageProbe = errors.New("usage unavailable: probe did not report")
 
 // errClaudeUsageOff is the switched-off gauge. It is a distinct value rather
@@ -82,12 +85,19 @@ var errClaudeUsageProbe = errors.New("usage unavailable: probe did not report")
 var errClaudeUsageOff = errors.New("usage checks are off")
 
 type claudeProbeOptions struct {
-	// Dir is the probe's cwd and the marker's home. It must be a directory no
-	// node can own: claude writes a transcript into
-	// ~/.claude/projects/<slug of cwd>/, and a probe launched from a
-	// supervised node's directory drops a throwaway session where the relink
-	// machinery can adopt it.
-	Dir      string
+	// Dir owns the probe's settings and markers, and is the pane's cwd unless
+	// Cwd overrides it. It must be a directory no node can own: claude writes
+	// a transcript into ~/.claude/projects/<slug of cwd>/ once a turn is
+	// submitted, and a throwaway session there is one the relink machinery
+	// can adopt. The usage probe submits a turn, so it always launches here.
+	Dir string
+	// Cwd moves only the model probe's pane, normally into a trusted folder
+	// that may also be a supervised node's directory. That is safe only
+	// because the model probe submits no turn and so writes no transcript.
+	// The picker's single /model is still recorded in ~/.claude/history.jsonl
+	// under that folder, which is accepted. An invalid or absent Cwd falls
+	// back to Dir.
+	Cwd      string
 	ExecPath string
 	Server   *tmuxsession.Server
 	// Command overrides the launched argv. Tests only — the suite must never
@@ -167,6 +177,18 @@ func runClaudeUsageProbe(ctx context.Context, opts claudeProbeOptions) (agentUsa
 	return claudeUsageFromMarker(got, time.Now())
 }
 
+// This detector belongs to disposable probes, not supervised-node attention.
+// It accepts both arrow and lettered menus and never answers either one.
+var claudeProbeANSI = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))`)
+
+func claudeProbeLooksUntrusted(pane string) bool {
+	text := strings.ToLower(claudeProbeANSI.ReplaceAllString(pane, ""))
+	return strings.Contains(text, "trust this folder") &&
+		(strings.Contains(text, "accessing workspace") ||
+			strings.Contains(text, "one you trust") ||
+			strings.Contains(text, "project you created"))
+}
+
 // runClaudeProbeSession is the shared body of every throwaway probe: install
 // the status line, launch one unsupervised pane, wait for it to leave the
 // evidence the caller is after, and kill it on every exit path.
@@ -203,7 +225,13 @@ func runClaudeProbeSession(ctx context.Context, opts claudeProbeOptions, argv fu
 	if err != nil {
 		return errClaudeUsageProbe
 	}
-	sess, err := opts.Server.NewSession(name, dir, command)
+	cwd := dir
+	if filepath.IsAbs(opts.Cwd) && filepath.Clean(opts.Cwd) == opts.Cwd {
+		if st, err := os.Stat(opts.Cwd); err == nil && st.IsDir() {
+			cwd = opts.Cwd
+		}
+	}
+	sess, err := opts.Server.NewSession(name, cwd, command)
 	if err != nil {
 		return errClaudeUsageProbe
 	}
@@ -226,6 +254,9 @@ func runClaudeProbeSession(ctx context.Context, opts claudeProbeOptions, argv fu
 	for {
 		if ready(sess) {
 			return nil
+		}
+		if pane, err := sess.Capture(); err == nil && claudeProbeLooksUntrusted(pane) {
+			return errClaudeProbeUntrusted
 		}
 		select {
 		case <-ctx.Done():
@@ -276,11 +307,16 @@ func (a *app) collectClaudeUsage(ctx context.Context) (agentUsage, error) {
 	if err != nil || exe == "" {
 		return shell, errClaudeUsageProbe
 	}
-	return runClaudeUsageProbe(ctx, claudeProbeOptions{
+	return runClaudeUsageProbe(ctx, a.claudeUsageProbeOptions(exe))
+}
+
+// claudeUsageProbeOptions keeps the paid probe in its neutral directory.
+func (a *app) claudeUsageProbeOptions(exe string) claudeProbeOptions {
+	return claudeProbeOptions{
 		Dir:      claudeProbeWorkdir(a.claudeProbeDir),
 		ExecPath: exe,
 		Server:   a.server,
-	})
+	}
 }
 
 // hasLiveClaudeNode reports whether any Claude node is currently open. Ended
