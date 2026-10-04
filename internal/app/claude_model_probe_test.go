@@ -904,3 +904,76 @@ func TestResolveClaudeModelsStopsAtUntrustedAlias(t *testing.T) {
 		t.Fatalf("probe calls = %d, picker calls = %d", calls, pickers)
 	}
 }
+
+func TestClaudeModelFailureBackoffSameVersion(t *testing.T) {
+	for _, version := range []string{"test-version", ""} {
+		t.Run(version, func(t *testing.T) {
+			calls := 0
+			a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+			a.claudeVersion = func(context.Context) string { return version }
+			a.refreshClaudeModels(context.Background())
+			a.refreshClaudeModels(context.Background())
+			if calls != 1 {
+				t.Fatalf("resolver calls = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestClaudeModelFailureBackoffVersionChange(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+	a.refreshClaudeModels(context.Background())
+	a.claudeVersion = func(context.Context) string { return "next-version" }
+	a.refreshClaudeModels(context.Background())
+	if calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", calls)
+	}
+}
+
+func TestClaudeModelFailureBackoffExpires(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+	a.refreshClaudeModels(context.Background())
+	a.claudeMu.Lock()
+	a.claudeProbeFailedAt = time.Now().Add(-claudeProbeFailureBackoff - time.Second)
+	a.claudeMu.Unlock()
+	a.refreshClaudeModels(context.Background())
+	if calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", calls)
+	}
+}
+
+func TestExplicitClaudeModelRefreshIgnoresFailureBackoff(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string { calls++; return nil })
+	a.refreshClaudeModels(context.Background())
+	a.refreshClaudeModelsNow(context.Background())
+	if calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2", calls)
+	}
+}
+
+func TestClaudeModelSuccessClearsFailureBackoff(t *testing.T) {
+	calls := 0
+	a := refreshApp(t, func(context.Context) map[string]string {
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		return map[string]string{"opus": "claude-opus-9"}
+	})
+	a.refreshClaudeModels(context.Background())
+	a.refreshClaudeModelsNow(context.Background())
+	a.claudeMu.Lock()
+	failedVersion, failedAt := a.claudeProbeFailedVersion, a.claudeProbeFailedAt
+	a.claudeMu.Unlock()
+	if failedVersion != "" || !failedAt.IsZero() {
+		t.Fatalf("success retained failure: %q %v", failedVersion, failedAt)
+	}
+	a.claudeVersion = func(context.Context) string { return "next-version" }
+	a.refreshClaudeModels(context.Background())
+	if calls != 3 {
+		t.Fatalf("resolver calls = %d, want 3", calls)
+	}
+}

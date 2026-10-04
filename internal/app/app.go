@@ -541,6 +541,10 @@ type app struct {
 	// Written by the refresh triggers, read per launch; guarded by claudeMu.
 	claudeIDs map[string]string
 	claudeMu  sync.Mutex
+	// Failed model probes suppress background retries for this version only.
+	// Both fields are guarded by claudeMu; explicit refreshes bypass them.
+	claudeProbeFailedVersion string
+	claudeProbeFailedAt      time.Time
 	// claudeResolveModels performs the probe. It is a field, not a call, so the
 	// expensive machinery is installed by the serve path rather than reachable
 	// from any app value: the suite must never launch a real claude, and a
