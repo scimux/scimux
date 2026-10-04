@@ -85,11 +85,18 @@ var errClaudeUsageProbe = errors.New("usage unavailable: probe did not report")
 var errClaudeUsageOff = errors.New("usage checks are off")
 
 type claudeProbeOptions struct {
-	// Dir owns settings and markers. Usage probes also launch here, because
-	// submitting their turn writes a transcript associated with the cwd.
+	// Dir owns the probe's settings and markers, and is the pane's cwd unless
+	// Cwd overrides it. It must be a directory no node can own: claude writes
+	// a transcript into ~/.claude/projects/<slug of cwd>/ once a turn is
+	// submitted, and a throwaway session there is one the relink machinery
+	// can adopt. The usage probe submits a turn, so it always launches here.
 	Dir string
-	// Cwd optionally separates the model probe's launch directory from its
-	// marker directory. Invalid or absent directories fall back to Dir.
+	// Cwd moves only the model probe's pane, normally into a trusted folder
+	// that may also be a supervised node's directory. That is safe only
+	// because the model probe submits no turn and so writes no transcript.
+	// The picker's single /model is still recorded in ~/.claude/history.jsonl
+	// under that folder, which is accepted. An invalid or absent Cwd falls
+	// back to Dir.
 	Cwd      string
 	ExecPath string
 	Server   *tmuxsession.Server

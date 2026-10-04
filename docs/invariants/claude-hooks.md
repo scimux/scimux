@@ -381,10 +381,14 @@ instrument, and it is deleted — `claudeModelPrompt`, `parseClaudeModels` and
 - The model probe launches in the first trusted folder listed in
   `~/.claude.json` (lexically sorted, existing directories only). That
   undocumented file is read-only and bounded; `~/.scimux/probe` is the fallback.
-- Measured on Claude Code 2.1.289: both a no-prompt launch and a launch that
-  submits only `/model` leave no session file under `~/.claude/projects` and
-  write nothing to the working directory. This is why only the model probe
-  moves to a trusted folder; the usage probe submits a turn.
+- Measured on Claude Code 2.1.289: neither a no-prompt launch nor one that
+  submits only `/model` writes a session file under `~/.claude/projects` or
+  anything into the working directory, so re-linking has nothing to adopt
+  even when the trusted folder is a supervised node's directory. The
+  picker's `/model` is, however, appended to `~/.claude/history.jsonl` under
+  that folder: one prompt-history line per picker run, accepted by the
+  maintainer on 2026-10-04. The usage probe submits a real turn, which
+  would write a session file, so it stays in `~/.scimux/probe`.
 - A workspace-trust prompt aborts the probe with `errClaudeProbeUntrusted`.
   Failed catalog reads back off for one hour on the background path for the
   same CLI version; an explicit update check bypasses this backoff.
