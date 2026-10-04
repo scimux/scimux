@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -73,6 +74,8 @@ const (
 func isProbeSession(name string) bool {
 	return strings.HasPrefix(name, probeSessionPrefix)
 }
+
+var errClaudeProbeUntrusted = errors.New("probe workspace is untrusted")
 
 var errClaudeUsageProbe = errors.New("usage unavailable: probe did not report")
 
@@ -167,6 +170,18 @@ func runClaudeUsageProbe(ctx context.Context, opts claudeProbeOptions) (agentUsa
 	return claudeUsageFromMarker(got, time.Now())
 }
 
+// This detector belongs to disposable probes, not supervised-node attention.
+// It accepts both arrow and lettered menus and never answers either one.
+var claudeProbeANSI = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))`)
+
+func claudeProbeLooksUntrusted(pane string) bool {
+	text := strings.ToLower(claudeProbeANSI.ReplaceAllString(pane, ""))
+	return strings.Contains(text, "trust this folder") &&
+		(strings.Contains(text, "accessing workspace") ||
+			strings.Contains(text, "one you trust") ||
+			strings.Contains(text, "project you created"))
+}
+
 // runClaudeProbeSession is the shared body of every throwaway probe: install
 // the status line, launch one unsupervised pane, wait for it to leave the
 // evidence the caller is after, and kill it on every exit path.
@@ -232,6 +247,9 @@ func runClaudeProbeSession(ctx context.Context, opts claudeProbeOptions, argv fu
 	for {
 		if ready(sess) {
 			return nil
+		}
+		if pane, err := sess.Capture(); err == nil && claudeProbeLooksUntrusted(pane) {
+			return errClaudeProbeUntrusted
 		}
 		select {
 		case <-ctx.Done():

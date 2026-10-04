@@ -14,6 +14,28 @@ import (
 	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
+func TestResolveClaudeModelsStopsAtUntrustedPickerCandidate(t *testing.T) {
+	calls := 0
+	r := claudeModelResolver{
+		probe: func(context.Context, string) (claudeModelMarker, error) {
+			calls++
+			if calls > len(claudeModelAliases) {
+				return claudeModelMarker{}, errClaudeProbeUntrusted
+			}
+			return claudeModelMarker{}, errClaudeModelUnreadable
+		},
+		picker: func(context.Context) map[string]string {
+			return map[string]string{"fable": "claude-fable-9", "opus": "claude-opus-9"}
+		},
+	}
+	if got := r.resolve(context.Background()); len(got) != 0 {
+		t.Fatalf("models = %v", got)
+	}
+	if calls != len(claudeModelAliases)+1 {
+		t.Fatalf("probe calls = %d", calls)
+	}
+}
+
 func TestClaudeModelProbeRejectsEmptyCandidateAndBlockedMarker(t *testing.T) {
 	opts := claudeProbeOptions{Dir: t.TempDir()}
 	if _, err := runClaudeModelProbe(context.Background(), opts, ""); err != errClaudeModelUnreadable {
@@ -851,5 +873,34 @@ func TestClaudeModelProbeOptionsRefreshTrustedFolder(t *testing.T) {
 	opts = a.claudeModelProbeOptions("test-exe")
 	if opts.Cwd != a.home || opts.Dir != a.claudeProbeDir || opts.ExecPath != "test-exe" || opts.Server != a.server || opts.Timeout != claudeModelProbeTimeout {
 		t.Fatalf("model options = %+v", opts)
+	}
+}
+
+func TestClaudeModelProbePreservesUntrustedError(t *testing.T) {
+	opts := trustProbeOpts(t)
+	start := time.Now()
+	_, err := runClaudeModelProbe(context.Background(), opts, "fable")
+	if !errors.Is(err, errClaudeProbeUntrusted) {
+		t.Fatalf("error = %v, want untrusted", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("trust prompt took %v", elapsed)
+	}
+}
+
+func TestResolveClaudeModelsStopsAtUntrustedAlias(t *testing.T) {
+	calls, pickers := 0, 0
+	r := claudeModelResolver{
+		probe: func(context.Context, string) (claudeModelMarker, error) {
+			calls++
+			return claudeModelMarker{}, errClaudeProbeUntrusted
+		},
+		picker: func(context.Context) map[string]string { pickers++; return nil },
+	}
+	if got := r.resolve(context.Background()); len(got) != 0 {
+		t.Fatalf("models = %v, want empty", got)
+	}
+	if calls != 1 || pickers != 0 {
+		t.Fatalf("probe calls = %d, picker calls = %d", calls, pickers)
 	}
 }

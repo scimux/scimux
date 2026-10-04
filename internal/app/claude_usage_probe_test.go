@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -484,5 +485,66 @@ func TestClaudeUsageProbeOptionsLeaveCwdEmpty(t *testing.T) {
 	opts := a.claudeUsageProbeOptions("test-exe")
 	if opts.Cwd != "" || opts.Dir != a.claudeProbeDir || opts.Server != a.server || opts.ExecPath != "test-exe" {
 		t.Fatalf("usage options = %+v", opts)
+	}
+}
+
+const syntheticProbeTrustPane = "Accessing workspace\nChoose whether to trust this folder\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel"
+
+func TestClaudeProbeTrustPromptDetector(t *testing.T) {
+	for _, tt := range []struct {
+		name, pane string
+		want       bool
+	}{
+		{"arrow", syntheticProbeTrustPane, true},
+		{"lettered", "Is this a project you created?\nA. Yes, I trust this folder\nB. No, exit", true},
+		{"ansi-and-case", "Is this \x1b[32mONE YOU TRUST\x1b[0m?\nYes, I TRUST \x1b[1mTHIS\x1b[0m FOLDER", true},
+		{"picker", claudeModelPickerPane, false},
+		{"empty", "", false},
+		{"conversation", "We trust the result of this calculation.", false},
+		{"folder-only", "I trust this folder", false},
+		{"workspace-only", "Accessing workspace", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := claudeProbeLooksUntrusted(tt.pane); got != tt.want {
+				t.Fatalf("trust prompt = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func trustProbeOpts(t *testing.T) claudeProbeOptions {
+	t.Helper()
+	opts := probeOpts(t, probeTmux(t), "bash --norc -c "+shellQuote("printf %s "+shellQuote(syntheticProbeTrustPane)+"; sleep 30"))
+	opts.Timeout = 20 * time.Second
+	return opts
+}
+
+func TestRunClaudeProbeSessionAbortsTrustPrompt(t *testing.T) {
+	opts := trustProbeOpts(t)
+	start := time.Now()
+	err := runClaudeProbeSession(context.Background(), opts, claudeUsageProbeArgv, func(*tmuxsession.Session) bool { return false })
+	if !errors.Is(err, errClaudeProbeUntrusted) {
+		t.Fatalf("error = %v, want untrusted", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("trust prompt took %v", elapsed)
+	}
+	if sessions := opts.Server.Sessions(); len(sessions) != 0 {
+		t.Fatalf("leftover sessions = %v", sessions)
+	}
+}
+
+func TestClaudeUsageProbeTrustPromptStaysUsageError(t *testing.T) {
+	opts := trustProbeOpts(t)
+	start := time.Now()
+	_, err := runClaudeUsageProbe(context.Background(), opts)
+	if err != errClaudeUsageProbe {
+		t.Fatalf("error = %v, want usage unavailable", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("trust prompt took %v", elapsed)
+	}
+	if sessions := opts.Server.Sessions(); len(sessions) != 0 {
+		t.Fatalf("leftover sessions = %v", sessions)
 	}
 }
