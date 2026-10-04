@@ -10,8 +10,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/scimux/scimux/internal/backend"
+	"github.com/scimux/scimux/internal/storagebudget"
 )
 
 // TestLegacyAndSplitPublicSurfacesMatch runs the characterized monolith and
@@ -32,6 +34,32 @@ func TestLegacyAndSplitPublicSurfacesMatch(t *testing.T) {
 	defer legacyServer.Close()
 
 	splitApp := newTestApp(t, &fakeTmux{})
+	// Live disk space can differ between the apps' samples: body normalization
+	// masks that difference, but the raw-body ETags still differ. Give both
+	// transports the same synthetic metrics and keep their caches fresh for
+	// the test, including across the normal 30-second refresh boundary.
+	sampleAt := time.Now().Add(time.Hour)
+	for _, a := range []*app{legacyApp, splitApp} {
+		a.storageMu.Lock()
+		a.storageSnapshot = storagebudget.Status{
+			FreeBytes:    1 << 30,
+			MinFreeBytes: storagebudget.DefaultMinFreeBytes,
+			Writable:     true,
+			Nodes:        map[string]int64{},
+		}
+		a.storageAt = sampleAt
+		a.storageMu.Unlock()
+	}
+	sysMu.Lock()
+	previousSys, previousSysAt := sysCache, sysCacheAt
+	sysCache = sysInfo{Load1: 0.5, NCPU: 2, MemPct: 25, MemTotalGB: 8}
+	sysCacheAt = sampleAt
+	sysMu.Unlock()
+	t.Cleanup(func() {
+		sysMu.Lock()
+		sysCache, sysCacheAt = previousSys, previousSysAt
+		sysMu.Unlock()
+	})
 	coreHandler, err := newCoreMux(splitApp)
 	if err != nil {
 		t.Fatal(err)
