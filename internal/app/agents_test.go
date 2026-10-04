@@ -1368,3 +1368,77 @@ func (a *app) waitMuseCatalogForTest(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func opencodeCounterStub(t *testing.T, body string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "calls")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	bin := writeScript(t, dir, "opencode", "echo call >> "+shellQuote(counter)+"\n"+body)
+	return bin, counter
+}
+
+func assertOpencodeCalls(t *testing.T, counter string, want int) {
+	t.Helper()
+	b, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(b), "call\n"); got != want {
+		t.Fatalf("invocations = %d, want %d", got, want)
+	}
+}
+
+func TestOpencodeModelsRetriesOnceAfterEmptyColdStart(t *testing.T) {
+	bin, counter := opencodeCounterStub(t, "exit 0")
+	// The counter's pathname is private, and supplied directly to the stub.
+	writeScript(t, filepath.Dir(bin), "opencode", "echo call >> "+shellQuote(counter)+"\nif [ \"$(wc -l < "+shellQuote(counter)+")\" = 2 ]; then printf 'provider/one\\nprovider/two\\n'; fi")
+	if got := opencodeModels(context.Background(), bin); !reflect.DeepEqual(got, []string{"provider/one", "provider/two"}) {
+		t.Fatalf("models = %v, want both models", got)
+	}
+	assertOpencodeCalls(t, counter, 2)
+}
+
+func TestOpencodeModelsGivesUpAfterOneRetry(t *testing.T) {
+	bin, counter := opencodeCounterStub(t, "printf '  \\n'")
+	if got := opencodeModels(context.Background(), bin); got != nil {
+		t.Fatalf("models = %v, want nil", got)
+	}
+	assertOpencodeCalls(t, counter, 2)
+}
+
+func TestOpencodeModelsDoesNotRetryFailure(t *testing.T) {
+	bin, counter := opencodeCounterStub(t, "exit 1")
+	if got := opencodeModels(context.Background(), bin); got != nil {
+		t.Fatalf("models = %v, want nil", got)
+	}
+	assertOpencodeCalls(t, counter, 1)
+}
+
+// Cancel at the first post-command context check, after the stub has exited
+// successfully. This avoids racing cancellation against CommandContext's kill.
+type opencodeCancelAfterCall struct {
+	context.Context
+	counter string
+	cancel  context.CancelFunc
+}
+
+func (c opencodeCancelAfterCall) Err() error {
+	if _, err := os.Stat(c.counter); err == nil {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestOpencodeModelsSkipsRetryWhenContextDone(t *testing.T) {
+	bin, counter := opencodeCounterStub(t, "exit 0")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if got := opencodeModels(opencodeCancelAfterCall{ctx, counter, cancel}, bin); got != nil {
+		t.Fatalf("models = %v, want nil", got)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("post-command cancellation was not checked")
+	}
+	assertOpencodeCalls(t, counter, 1)
+}

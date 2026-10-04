@@ -725,17 +725,22 @@ func piModels(ctx context.Context, bin string) []string {
 // opencodeModels parses `opencode models`: one "provider/model" per line,
 // which is exactly the form `opencode --model` takes back.
 func opencodeModels(ctx context.Context, bin string) []string {
-	out, err := exec.CommandContext(ctx, bin, "models").Output()
-	if err != nil {
-		return nil
-	}
-	var models []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			models = append(models, line)
+	for attempt := 0; attempt < 2; attempt++ {
+		out, err := exec.CommandContext(ctx, bin, "models").Output()
+		if err != nil {
+			return nil
+		}
+		var models []string
+		for _, line := range strings.Split(string(out), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				models = append(models, line)
+			}
+		}
+		if len(models) > 0 || ctx.Err() != nil {
+			return models
 		}
 	}
-	return models
+	return nil
 }
 
 // grokDefaultEfforts is the static effort menu when the CLI does not expose
