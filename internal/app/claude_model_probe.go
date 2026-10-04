@@ -407,12 +407,7 @@ func (a *app) installClaudeModelProbe() {
 		// about, so a marker left by a sibling fails closed. The picker
 		// cannot make that check and takes a directory of its own
 		// (claudeModelPickerDirName).
-		opts := claudeProbeOptions{
-			Dir:      claudeProbeWorkdir(a.claudeProbeDir),
-			ExecPath: exe,
-			Server:   a.server,
-			Timeout:  claudeModelProbeTimeout,
-		}
+		opts := a.claudeModelProbeOptions(exe)
 		return claudeModelResolver{
 			probe: func(ctx context.Context, candidate string) (claudeModelMarker, error) {
 				return runClaudeModelProbe(ctx, opts, candidate)
@@ -421,5 +416,22 @@ func (a *app) installClaudeModelProbe() {
 				return captureClaudeModelPicker(ctx, opts)
 			},
 		}.resolve(ctx)
+	}
+}
+
+// claudeModelProbeOptions rereads trust on every resolver run, so a folder
+// trusted since startup is available without restarting scimux.
+func (a *app) claudeModelProbeOptions(exe string) claudeProbeOptions {
+	dir := claudeProbeWorkdir(a.claudeProbeDir)
+	cwd := claudeTrustedFolder(a.home)
+	if cwd == "" {
+		cwd = dir
+	}
+	return claudeProbeOptions{
+		Dir:      dir,
+		Cwd:      cwd,
+		ExecPath: exe,
+		Server:   a.server,
+		Timeout:  claudeModelProbeTimeout,
 	}
 }

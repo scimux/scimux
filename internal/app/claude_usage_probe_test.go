@@ -18,6 +18,97 @@ import (
 // probeTmux is a real tmux on a private random socket. The probe launches a
 // session, so there is nothing to assert without one; the wrapped command is
 // always bash, never a real agent CLI.
+func TestRunClaudeProbeSessionFailurePaths(t *testing.T) {
+	base := claudeProbeOptions{Dir: t.TempDir(), ExecPath: "test-exe", Server: tmuxsession.NewServerWithRunner("synthetic", func(context.Context, string, ...string) (string, error) {
+		return "", fmt.Errorf("synthetic launch failure")
+	})}
+	ready := func(*tmuxsession.Session) bool { return false }
+	for _, name := range []string{"nil-argv", "nil-ready", "unclean-dir", "unsafe-dir", "mkdir", "settings", "launch"} {
+		t.Run(name, func(t *testing.T) {
+			opts := base
+			argv, done := claudeUsageProbeArgv, ready
+			switch name {
+			case "nil-argv":
+				argv = nil
+			case "nil-ready":
+				done = nil
+			case "unclean-dir":
+				opts.Dir += "/."
+			case "unsafe-dir":
+				opts.Dir = "/"
+			case "mkdir":
+				opts.Dir = filepath.Join(t.TempDir(), "file")
+				if err := os.WriteFile(opts.Dir, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "settings":
+				opts.Dir = t.TempDir()
+				if err := os.Mkdir(filepath.Join(opts.Dir, claudeUsageProbeSettingsName), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := runClaudeProbeSession(context.Background(), opts, argv, done); err != errClaudeUsageProbe {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRunClaudeProbeSessionCancellationAndDefaults(t *testing.T) {
+	opts := probeOpts(t, probeTmux(t), "bash --norc -c 'sleep 30'")
+	opts.Timeout, opts.Poll = 0, 0
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runClaudeProbeSession(ctx, opts, claudeUsageProbeArgv, func(*tmuxsession.Session) bool { return false }); err != errClaudeUsageProbe {
+		t.Fatalf("error = %v", err)
+	}
+	if sessions := opts.Server.Sessions(); len(sessions) != 0 {
+		t.Fatalf("leftover sessions = %v", sessions)
+	}
+}
+
+func TestCollectClaudeUsageWiringUsesNeutralDir(t *testing.T) {
+	a := &app{settingsPath: filepath.Join(t.TempDir(), "settings.json"), claudeProbeDir: t.TempDir()}
+	if err := a.saveSettings(settings{ClaudeUsageChecks: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.collectClaudeUsage(context.Background()); err != errClaudeUsageProbe {
+		t.Fatalf("missing server error = %v", err)
+	}
+	a.server = tmuxsession.NewServerWithRunner("synthetic", func(context.Context, string, ...string) (string, error) { return "", nil })
+	if _, err := a.collectClaudeUsage(context.Background()); err == nil || !strings.Contains(err.Error(), "no open Claude session") {
+		t.Fatalf("no node error = %v", err)
+	}
+	a.nodes = []*Node{{ID: "synthetic", Agent: "claude"}}
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	if _, err := a.collectClaudeUsage(context.Background()); err == nil || !strings.Contains(err.Error(), "claude not installed") {
+		t.Fatalf("not installed error = %v", err)
+	}
+	// LookPath can find only this independently synthetic executable. The fake
+	// tmux runner below never executes it or any launch command.
+	writeScript(t, dir, "claude", "exit 0")
+	a.server = tmuxsession.NewServerWithRunner("synthetic", func(_ context.Context, _ string, args ...string) (string, error) {
+		for i, arg := range args {
+			if arg == "-c" && args[i+1] != a.claudeProbeDir {
+				t.Fatalf("usage cwd = %q", args[i+1])
+			}
+			if arg == "new-session" {
+				used, reset := 17.0, time.Now().Add(time.Hour).Unix()
+				b, _ := json.Marshal(claudeUsageMarker{FiveHourUsed: &used, FiveHourReset: &reset, At: time.Now().UTC().Format(time.RFC3339Nano)})
+				if err := os.WriteFile(claudeUsageMarkerPath(a.claudeProbeDir), b, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return "", nil
+	})
+	got, err := a.collectClaudeUsage(context.Background())
+	if err != nil || got.FiveHourUsed == nil || *got.FiveHourUsed != 17 {
+		t.Fatalf("usage = %+v, error = %v", got, err)
+	}
+}
+
 func probeTmux(t *testing.T) *tmuxsession.Server {
 	t.Helper()
 	if testing.Short() {
@@ -319,5 +410,79 @@ func TestProbeSessionNamesAreReserved(t *testing.T) {
 		if isProbeSession(name) {
 			t.Errorf("isProbeSession(%q) = true, want false", name)
 		}
+	}
+}
+
+func TestRunClaudeProbeSessionLaunchesInCwd(t *testing.T) {
+	sv := probeTmux(t)
+	opts := probeOpts(t, sv, "")
+	opts.Cwd = t.TempDir()
+	assertProbeCwd(t, opts, opts.Cwd)
+	entries, err := os.ReadDir(opts.Cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("launch cwd was written: %v", entries)
+	}
+}
+
+func assertProbeCwd(t *testing.T, opts claudeProbeOptions, want string) {
+	t.Helper()
+	path := filepath.Join(opts.Dir, "pwd")
+	opts.Command = "bash --norc -c " + shellQuote("pwd > "+shellQuote(path)+"; sleep 30")
+	err := runClaudeProbeSession(context.Background(), opts, claudeUsageProbeArgv, func(*tmuxsession.Session) bool {
+		_, err := os.Stat(path)
+		return err == nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(b)); got != want {
+		t.Fatalf("pwd = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(opts.Dir, claudeUsageProbeSettingsName)); err != nil {
+		t.Fatalf("settings not in marker directory: %v", err)
+	}
+}
+
+func TestRunClaudeProbeSessionEmptyCwdUsesDir(t *testing.T) {
+	opts := probeOpts(t, probeTmux(t), "")
+	assertProbeCwd(t, opts, opts.Dir)
+}
+
+func TestRunClaudeProbeSessionInvalidCwdUsesDir(t *testing.T) {
+	sv := probeTmux(t)
+	for _, name := range []string{"relative", "missing", "unclean", "file"} {
+		t.Run(name, func(t *testing.T) {
+			opts := probeOpts(t, sv, "")
+			switch name {
+			case "relative":
+				opts.Cwd = "relative"
+			case "missing":
+				opts.Cwd = filepath.Join(t.TempDir(), "missing")
+			case "unclean":
+				opts.Cwd = opts.Dir + "/."
+			case "file":
+				opts.Cwd = filepath.Join(opts.Dir, "file")
+				if err := os.WriteFile(opts.Cwd, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertProbeCwd(t, opts, opts.Dir)
+		})
+	}
+}
+
+func TestClaudeUsageProbeOptionsLeaveCwdEmpty(t *testing.T) {
+	a := &app{home: t.TempDir(), claudeProbeDir: t.TempDir()}
+	writeTrustedProjects(t, a.home, map[string]any{a.home: map[string]bool{"hasTrustDialogAccepted": true}})
+	opts := a.claudeUsageProbeOptions("test-exe")
+	if opts.Cwd != "" || opts.Dir != a.claudeProbeDir || opts.Server != a.server || opts.ExecPath != "test-exe" {
+		t.Fatalf("usage options = %+v", opts)
 	}
 }

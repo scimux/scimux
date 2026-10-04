@@ -82,12 +82,12 @@ var errClaudeUsageProbe = errors.New("usage unavailable: probe did not report")
 var errClaudeUsageOff = errors.New("usage checks are off")
 
 type claudeProbeOptions struct {
-	// Dir is the probe's cwd and the marker's home. It must be a directory no
-	// node can own: claude writes a transcript into
-	// ~/.claude/projects/<slug of cwd>/, and a probe launched from a
-	// supervised node's directory drops a throwaway session where the relink
-	// machinery can adopt it.
-	Dir      string
+	// Dir owns settings and markers. Usage probes also launch here, because
+	// submitting their turn writes a transcript associated with the cwd.
+	Dir string
+	// Cwd optionally separates the model probe's launch directory from its
+	// marker directory. Invalid or absent directories fall back to Dir.
+	Cwd      string
 	ExecPath string
 	Server   *tmuxsession.Server
 	// Command overrides the launched argv. Tests only — the suite must never
@@ -203,7 +203,13 @@ func runClaudeProbeSession(ctx context.Context, opts claudeProbeOptions, argv fu
 	if err != nil {
 		return errClaudeUsageProbe
 	}
-	sess, err := opts.Server.NewSession(name, dir, command)
+	cwd := dir
+	if filepath.IsAbs(opts.Cwd) && filepath.Clean(opts.Cwd) == opts.Cwd {
+		if st, err := os.Stat(opts.Cwd); err == nil && st.IsDir() {
+			cwd = opts.Cwd
+		}
+	}
+	sess, err := opts.Server.NewSession(name, cwd, command)
 	if err != nil {
 		return errClaudeUsageProbe
 	}
@@ -276,11 +282,16 @@ func (a *app) collectClaudeUsage(ctx context.Context) (agentUsage, error) {
 	if err != nil || exe == "" {
 		return shell, errClaudeUsageProbe
 	}
-	return runClaudeUsageProbe(ctx, claudeProbeOptions{
+	return runClaudeUsageProbe(ctx, a.claudeUsageProbeOptions(exe))
+}
+
+// claudeUsageProbeOptions keeps the paid probe in its neutral directory.
+func (a *app) claudeUsageProbeOptions(exe string) claudeProbeOptions {
+	return claudeProbeOptions{
 		Dir:      claudeProbeWorkdir(a.claudeProbeDir),
 		ExecPath: exe,
 		Server:   a.server,
-	})
+	}
 }
 
 // hasLiveClaudeNode reports whether any Claude node is currently open. Ended
