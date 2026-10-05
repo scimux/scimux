@@ -23,6 +23,8 @@
  *   - POST /api/remote/pairing/:code/confirm
  *   - POST /api/remote/pairing/:code/cancel
  *
+ * Clipboard (via injected copy): copies the link already encoded in the QR.
+ *
  * Timers: one setInterval while the sheet is open. It drives TICK (which
  * is what expires and refreshes a code) and the session poll.
  *
@@ -71,12 +73,13 @@ function actionsHTML(actions) {
     .join("");
 }
 
-export function createPairingFeature({ api, doc, timers = {}, now = Date.now } = {}) {
+export function createPairingFeature({ api, doc, timers = {}, now = Date.now, copy = null } = {}) {
   const setInterval_ = timers.setInterval || ((fn, ms) => globalThis.setInterval(fn, ms));
   const clearInterval_ = timers.clearInterval || ((id) => globalThis.clearInterval(id));
 
   let state = initialPairingState();
   let ticker = null;
+  let actionsShown = null;
   let minting = false;
   /* Work queue. Every effect is appended here so settled() has one thing
      to wait for, and so two effects can never interleave their dispatches. */
@@ -109,8 +112,18 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
       sas.hidden = !v.entry;
       if (!v.entry) sas.value = "";
     }
+    /* Rebuilt only when the buttons change. render() runs on every tick and
+       every poll; replacing the buttons once a second loses any click whose
+       press and release straddle a rebuild (the browser retargets it to
+       #pair_actions, where no [data-pa] is found) and drops keyboard focus.
+       The comparison is against the string last written, never against
+       innerHTML read back: browsers re-serialize it. */
     const actions = el("#pair_actions");
-    if (actions) actions.innerHTML = actionsHTML(v.actions);
+    const html = actionsHTML(v.actions);
+    if (actions && html !== actionsShown) {
+      actions.innerHTML = html;
+      actionsShown = html;
+    }
     /* Only ever written when there is something new to say: assigning ""
        on every render would clear the region before a screen reader had
        finished reading the digits out. */
@@ -230,12 +243,36 @@ export function createPairingFeature({ api, doc, timers = {}, now = Date.now } =
     });
   }
 
+  /* The clipboard needs the click's user activation (Safari refuses a write
+     that has waited on the network), so the copy starts here, synchronously,
+     and only its outcome waits in the queue. outcome never rejects: a
+     rejection parked behind a long queue would surface as unhandled. A result
+     for a link that has since been replaced is dropped; the reducer would
+     otherwise report a copy of the new link that never happened. */
+  function copyLink() {
+    const link = state.link;
+    if (!link) return;
+    let outcome;
+    try {
+      outcome = copy
+        ? Promise.resolve(copy(link)).then(() => true, () => false)
+        : Promise.resolve(false);
+    } catch {
+      outcome = Promise.resolve(false);
+    }
+    enqueue(async () => {
+      const ok = await outcome;
+      if (state.link === link) dispatch({ type: "LINK_COPY", ok });
+    });
+  }
+
   const ACTIONS = {
     begin: () => dispatch({ type: "BEGIN" }),
     ack: () => dispatch({ type: "ACK_WARNING" }),
     cancel: () => leave({ type: "CANCEL" }),
     reject: () => leave({ type: "REJECT" }),
     confirm,
+    copy: copyLink,
     close: () => close(),
   };
 
