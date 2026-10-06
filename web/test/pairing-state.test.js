@@ -68,6 +68,7 @@ const TRANSITIONS = {
   "authority-warning": { ACK_WARNING: "show-code", CANCEL: "closed", CLOSE: "closed", MINT_FAILED: "failed", HOSTED_BLOCKED: "failed" },
   "show-code": {
     MINTED: "show-code",
+    LINK_COPY: "show-code",
     MINT_FAILED: "failed",
     HOSTED_BLOCKED: "failed",
     OFFER: "compare-sas",
@@ -103,6 +104,7 @@ const TRANSITIONS = {
 
 function eventFor(type) {
   if (type === "MINTED") return MINTED;
+  if (type === "LINK_COPY") return { type: "LINK_COPY", ok: true };
   if (type === "OFFER") return OFFER;
   if (type === "CONFIRM") return CONFIRM;
   if (type === "TICK") return { type: "TICK", now: T0 };
@@ -336,4 +338,110 @@ test("a state with no SAS cannot be confirmed by typing nothing", () => {
   const s = nextPairing(at("compare-sas", { sas: "" }), { type: "CONFIRM", value: "" }, T0);
   assert.equal(s.screen, "compare-sas");
   assert.equal(s.computerConfirmed, false);
+});
+
+
+test("LINK_COPY is declared immediately after MINTED", () => {
+  assert.equal(PAIRING_EVENTS[PAIRING_EVENTS.indexOf("MINTED") + 1], "LINK_COPY");
+});
+
+test("a new pairing has no link copy outcome", () => {
+  assert.equal(initialPairingState().linkCopy, "");
+});
+
+test("copy outcomes change only linkCopy and only literal true succeeds", () => {
+  for (const event of [
+    { type: "LINK_COPY", ok: true },
+    { type: "LINK_COPY", ok: false },
+    { type: "LINK_COPY" },
+    { type: "LINK_COPY", ok: "yes" },
+  ]) {
+    const before = Object.freeze(at("show-code"));
+    const got = nextPairing(before, event, T0);
+    assert.equal(got.linkCopy, event.ok === true ? "copied" : "failed");
+    assert.deepEqual({ ...got, linkCopy: "" }, { ...before, linkCopy: "" });
+  }
+});
+
+test("a copy outcome without a link returns the same state", () => {
+  const before = at("show-code", { link: "" });
+  assert.equal(nextPairing(before, { type: "LINK_COPY", ok: true }, T0), before);
+});
+
+test("copy outcomes on every other screen return the same state", () => {
+  for (const screen of PAIRING_SCREENS) {
+    if (screen === "show-code") continue;
+    const before = at(screen);
+    assert.equal(nextPairing(before, { type: "LINK_COPY", ok: true }, T0), before, screen);
+  }
+});
+
+test("a refreshed link clears the earlier copy outcome", () => {
+  const got = nextPairing(at("show-code", { linkCopy: "copied" }), MINTED, T0);
+  assert.equal(got.linkCopy, "");
+  assert.equal(got.link, MINTED.link);
+});
+
+test("exits from show-code clear the copy outcome", () => {
+  for (const type of ["CANCEL", "CLOSE", "MINT_FAILED", "HOSTED_BLOCKED"]) {
+    const got = nextPairing(at("show-code", { linkCopy: "copied" }), { type }, T0);
+    assert.equal(got.linkCopy, "", type);
+  }
+  const expired = nextPairing(at("show-code", { linkCopy: "copied", visible: false }), { type: "TICK" }, T0 + TTL + 1);
+  assert.equal(expired.screen, "expired");
+  assert.equal(expired.linkCopy, "");
+});
+
+test("completion, failure and restart also clear the copy outcome", () => {
+  for (const [screen, type] of [
+    ["awaiting-other-side", "COMPLETED"],
+    ["awaiting-other-side", "CONFIRM_FAILED"],
+    ["compare-sas", "REJECT"],
+    ["cancelled", "BEGIN"],
+  ]) {
+    assert.equal(nextPairing(at(screen, { linkCopy: "copied" }), { type }, T0).linkCopy, "");
+  }
+});
+
+test("show-code offers a non-primary copy action only once a link exists", () => {
+  const withLink = pairingView(at("show-code"));
+  assert.deepEqual(withLink.actions.map((a) => a.id), ["copy", "cancel"]);
+  assert.equal(withLink.actions[0].primary, undefined);
+  const minting = pairingView(at("show-code", { code: "", link: "" }));
+  assert.deepEqual(minting.actions.map((a) => a.id), ["cancel"]);
+  assert.equal(minting.body, "Minting a pairing code…");
+  assert.equal(minting.announce, "");
+});
+
+test("only show-code offers copy even if every screen carries a link", () => {
+  const link = at("show-code").link;
+  for (const screen of PAIRING_SCREENS) {
+    assert.equal(pairingView(at(screen, { link })).actions.some((a) => a.id === "copy"), screen === "show-code", screen);
+  }
+});
+
+test("show-code renders the exact copy outcome messages", () => {
+  for (const [linkCopy, body, announce] of [
+    ["", "The code is valid for a short time and refreshes itself while this stays open.", "New pairing code ready to scan."],
+    ["copied", "Link copied. Open it in a browser on the device you are pairing before this code refreshes.", "Pairing link copied."],
+    ["failed", "Could not copy the link. Scan the code instead, or try again.", "Could not copy the pairing link."],
+  ]) {
+    const view = pairingView(at("show-code", { linkCopy }));
+    assert.equal(view.title, "Scan this with your device");
+    assert.equal(view.body, body);
+    assert.equal(view.announce, announce);
+  }
+});
+
+test("no screen or copy outcome renders the link as text", () => {
+  const link = at("show-code").link;
+  for (const screen of PAIRING_SCREENS) {
+    for (const linkCopy of ["", "copied", "failed"]) {
+      const state = at(screen, { link, linkCopy });
+      const view = pairingView(state);
+      for (const field of ["title", "body", "announce"]) {
+        assert.ok(!view[field].includes(state.link), `${screen} / ${linkCopy} disclosed the link in ${field}`);
+      }
+    }
+  }
 });

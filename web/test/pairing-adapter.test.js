@@ -694,3 +694,345 @@ test("visibility changes reach the reducer", async () => {
     "returning to the tab left a dead screen to poke at",
   );
 });
+
+/* ---------- clipboard -> events ---------- */
+
+test("copy starts synchronously in the click with the exact QR link", async () => {
+  const calls = [];
+  const h = setup({ [MINT]: () => mintOK() }, {
+    copy: (text) => { calls.push(text); return Promise.resolve(); },
+  });
+  await toShowCode(h);
+  h.doc.el("#pair_actions").click("copy");
+  assert.deepEqual(calls, [LINK], "the clipboard call waited beyond the click's user activation");
+  await h.f.settled();
+});
+
+test("a successful copy is announced and leaves the QR available", async () => {
+  const h = setup({ [MINT]: () => mintOK() }, { copy: () => Promise.resolve() });
+  await toShowCode(h);
+  const qr = h.doc.el("#pair_qr").innerHTML;
+  h.doc.el("#pair_actions").click("copy");
+  await h.f.settled();
+  assert.match(h.doc.el("#pair_body").innerHTML, /Link copied\./);
+  assert.equal(h.doc.el("#pair_live").textContent, "Pairing link copied.");
+  assert.ok(h.doc.el("#pair_qr").innerHTML.length > 0);
+  assert.equal(h.doc.el("#pair_qr").innerHTML, qr);
+});
+
+test("a rejected clipboard promise reports failure without an unhandled rejection", async () => {
+  const h = setup({ [MINT]: () => mintOK() }, {
+    copy: () => Promise.reject(new Error("denied")),
+  });
+  await toShowCode(h);
+  h.doc.el("#pair_actions").click("copy");
+  await h.f.settled();
+  assert.match(h.doc.el("#pair_body").innerHTML, /Could not copy the link\./);
+  assert.equal(h.doc.el("#pair_live").textContent, "Could not copy the pairing link.");
+});
+
+test("a synchronous clipboard throw reports failure", async () => {
+  const h = setup({ [MINT]: () => mintOK() }, {
+    copy: () => { throw new Error("denied"); },
+  });
+  await toShowCode(h);
+  h.doc.el("#pair_actions").click("copy");
+  await h.f.settled();
+  assert.match(h.doc.el("#pair_body").innerHTML, /Could not copy the link\./);
+  assert.equal(h.doc.el("#pair_live").textContent, "Could not copy the pairing link.");
+});
+
+test("a missing clipboard injection reports failure without throwing", async () => {
+  const h = setup({ [MINT]: () => mintOK() });
+  await toShowCode(h);
+  assert.doesNotThrow(() => h.doc.el("#pair_actions").click("copy"));
+  await h.f.settled();
+  assert.match(h.doc.el("#pair_body").innerHTML, /Could not copy the link\./);
+  assert.equal(h.doc.el("#pair_live").textContent, "Could not copy the pairing link.");
+});
+
+test("a copy tap before a link exists never calls the clipboard", async () => {
+  const calls = [];
+  const h = setup({ [MINT]: () => mintOK() }, { copy: (text) => { calls.push(text); } });
+  h.f.open();
+  h.doc.el("#pair_actions").click("copy");
+  assert.deepEqual(calls, []);
+  assert.equal(h.f.screen(), "authority-warning");
+  await h.f.settled();
+  assert.deepEqual(h.api.keys(), []);
+});
+
+test("a copy outcome queued behind a refresh is dropped for the replaced link", async () => {
+  const LINK2 = "https://my.scimux.com/p#c=04106106";
+  const calls = [];
+  let release;
+  let refreshing = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = setup({
+    [MINT]: () => mintOK({ expires_at: new Date(T0 + 60_000).toISOString() }),
+    [POLL]: () => ({ state: "pending" }),
+    "GET /api/remote/pairing/04106106": () => ({ state: "pending" }),
+  }, { copy: (text) => { calls.push(text); return Promise.resolve(); } });
+  await toShowCode(h);
+  const oldQR = h.doc.el("#pair_qr").innerHTML;
+  h.api.routes[MINT] = () => { refreshing = true; return gate; };
+  h.at(T0 + 60_001);
+  h.timers.fire();
+  await Promise.resolve();
+  assert.equal(refreshing, true, "the refresh mint must be in flight before the copy tap");
+  h.doc.el("#pair_actions").click("copy");
+  release(mintOK({ code: "04106106", link: LINK2 }));
+  await h.f.settled();
+  assert.deepEqual(calls, [LINK]);
+  assert.doesNotMatch(h.doc.el("#pair_body").innerHTML, /Link copied\./);
+  assert.notEqual(h.doc.el("#pair_qr").innerHTML, oldQR, "the QR still encodes the old link");
+  const { pairingView, initialPairingState } = await import("../js/pairing.js");
+  assert.equal(h.doc.el("#pair_qr").innerHTML, pairingView({
+    ...initialPairingState(), screen: "show-code", code: "04106106", link: LINK2,
+  }).qr);
+  h.timers.fire();
+  await h.f.settled();
+  assert.ok(h.api.keys().includes("GET /api/remote/pairing/04106106"));
+});
+
+test("refresh clears the message about a successful copy of the earlier link", async () => {
+  const h = setup({
+    [MINT]: () => mintOK({ expires_at: new Date(T0 + 60_000).toISOString() }),
+    [POLL]: () => ({ state: "pending" }),
+    "GET /api/remote/pairing/04106106": () => ({ state: "pending" }),
+  }, { copy: () => Promise.resolve() });
+  await toShowCode(h);
+  h.doc.el("#pair_actions").click("copy");
+  await h.f.settled();
+  assert.match(h.doc.el("#pair_body").innerHTML, /Link copied\./);
+  h.api.routes[MINT] = () => mintOK({ code: "04106106", link: "https://my.scimux.com/p#c=04106106" });
+  h.at(T0 + 60_001);
+  h.timers.fire();
+  await h.f.settled();
+  assert.equal(h.doc.el("#pair_body").innerHTML, "The code is valid for a short time and refreshes itself while this stays open.");
+  assert.equal(h.doc.el("#pair_live").textContent, "New pairing code ready to scan.");
+});
+
+test("the copy button is rendered only after minting supplies a link", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = setup({ [MINT]: () => gate });
+  h.f.open();
+  h.doc.el("#pair_actions").click("ack");
+  await Promise.resolve();
+  assert.equal(h.f.screen(), "show-code");
+  assert.equal(h.f.code(), "");
+  assert.doesNotMatch(h.doc.el("#pair_actions").innerHTML, /data-pa="copy"/);
+  release(mintOK());
+  await h.f.settled();
+  assert.match(h.doc.el("#pair_actions").innerHTML, /data-pa="copy"/);
+  assert.match(h.doc.el("#pair_actions").innerHTML, />Copy link</);
+});
+
+test("a clipboard function returning undefined counts as success", async () => {
+  const calls = [];
+  const h = setup({ [MINT]: () => mintOK() }, { copy: (text) => { calls.push(text); } });
+  await toShowCode(h);
+  h.doc.el("#pair_actions").click("copy");
+  await h.f.settled();
+  assert.deepEqual(calls, [LINK]);
+  assert.equal(h.doc.el("#pair_live").textContent, "Pairing link copied.");
+});
+
+test("a rejected copy is handled immediately even behind a blocked poll", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = setup({ [MINT]: () => mintOK(), [POLL]: () => gate }, {
+    copy: () => Promise.reject(new Error("denied")),
+  });
+  await toShowCode(h);
+  h.timers.fire();
+  await Promise.resolve();
+  h.doc.el("#pair_actions").click("copy");
+  /* A full event-loop turn lets Node surface an unhandled rejection while
+     the work queue is still waiting on the poll. */
+  await new Promise((resolve) => setImmediate(resolve));
+  release({ state: "pending" });
+  await h.f.settled();
+  assert.equal(h.doc.el("#pair_live").textContent, "Could not copy the pairing link.");
+});
+
+/* ---------- stable action buttons ---------- */
+
+function countHTMLWrites(element, readBack = (html) => html) {
+  let stored = element.innerHTML;
+  let writes = 0;
+  Object.defineProperty(element, "innerHTML", {
+    configurable: true,
+    get: () => readBack(stored),
+    set(html) {
+      stored = html;
+      writes++;
+    },
+  });
+  return () => writes;
+}
+
+/* Replacing a pressed button makes the browser retarget the click to the
+   actions container, which carries no data-pa for the delegation to find. */
+function retargetingPointer(element, writes) {
+  let action;
+  let pressedAt;
+  return {
+    press(nextAction) {
+      action = nextAction;
+      pressedAt = writes();
+    },
+    release() {
+      element.click(writes() === pressedAt ? action : null);
+    },
+  };
+}
+
+test("a tick that changes nothing keeps the show-code buttons", async () => {
+  const h = setup({ [MINT]: () => mintOK(), [POLL]: () => ({ state: "pending" }) });
+  const actions = h.doc.el("#pair_actions");
+  const writes = countHTMLWrites(actions);
+  await toShowCode(h);
+  const shownAt = writes();
+  for (let i = 0; i < 5; i++) {
+    h.advance(1000);
+    h.timers.fire();
+    await h.f.settled();
+  }
+  assert.equal(writes(), shownAt, "unchanged ticks rebuilt the show-code buttons");
+  assert.match(actions.innerHTML, /data-pa="copy"/);
+  assert.match(actions.innerHTML, /data-pa="cancel"/);
+});
+
+test("a click pressed before a tick still lands after it", async () => {
+  const calls = [];
+  const h = setup({ [MINT]: () => mintOK(), [POLL]: () => ({ state: "pending" }) }, {
+    copy: (text) => { calls.push(text); return Promise.resolve(); },
+  });
+  const actions = h.doc.el("#pair_actions");
+  const writes = countHTMLWrites(actions);
+  const pointer = retargetingPointer(actions, writes);
+  await toShowCode(h);
+  pointer.press("copy");
+  h.timers.fire();
+  await h.f.settled();
+  pointer.release();
+  assert.deepEqual(calls, [LINK], "a rebuild retargeted the released click and lost the copy");
+  await h.f.settled();
+});
+
+test("the compare-sas buttons survive ticks and repeated offers", async () => {
+  const h = setup({
+    [MINT]: () => mintOK(),
+    [POLL]: () => ({ state: "pending", sas: SAS }),
+  });
+  const actions = h.doc.el("#pair_actions");
+  const writes = countHTMLWrites(actions);
+  await toShowCode(h);
+  h.timers.fire();
+  await h.f.settled();
+  assert.equal(h.f.screen(), "compare-sas");
+  const shownAt = writes();
+  for (let i = 0; i < 3; i++) {
+    h.advance(1000);
+    h.timers.fire();
+    await h.f.settled();
+  }
+  assert.equal(writes(), shownAt, "ticks and repeated offers rebuilt the comparison buttons");
+  assert.match(actions.innerHTML, /data-pa="confirm"/);
+  assert.match(actions.innerHTML, /data-pa="reject"/);
+});
+
+test("a copy outcome changes the message but not the buttons", async () => {
+  const h = setup({ [MINT]: () => mintOK() }, { copy: () => Promise.resolve() });
+  const actions = h.doc.el("#pair_actions");
+  const writes = countHTMLWrites(actions);
+  await toShowCode(h);
+  const shownAt = writes();
+  actions.click("copy");
+  await h.f.settled();
+  assert.match(h.doc.el("#pair_body").innerHTML, /Link copied\./);
+  assert.equal(writes(), shownAt, "copy feedback rebuilt unchanged buttons");
+});
+
+test("the buttons are still rebuilt when they change", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const h = setup({ [MINT]: () => gate, [CANCEL]: () => "" });
+  const actions = h.doc.el("#pair_actions");
+  const writes = countHTMLWrites(actions);
+
+  h.f.open();
+  assert.equal(writes(), 1);
+  assert.match(actions.innerHTML, /data-pa="ack"/);
+
+  actions.click("ack");
+  await Promise.resolve();
+  assert.equal(h.f.screen(), "show-code");
+  assert.equal(h.f.code(), "");
+  assert.deepEqual(h.api.keys(), [MINT], "the fixture must still be waiting on its mint");
+  assert.equal(writes(), 2);
+  assert.match(actions.innerHTML, /data-pa="cancel"/);
+  assert.doesNotMatch(actions.innerHTML, /data-pa="copy"/);
+  assert.deepEqual([...actions.innerHTML.matchAll(/data-pa="([^"]+)"/g)].map((m) => m[1]), ["cancel"]);
+
+  release(mintOK());
+  await h.f.settled();
+  assert.equal(writes(), 3);
+  assert.match(actions.innerHTML, /data-pa="copy"/);
+  assert.match(actions.innerHTML, /data-pa="cancel"/);
+
+  actions.click("cancel");
+  await h.f.settled();
+  assert.equal(h.f.screen(), "cancelled");
+  assert.equal(writes(), 4);
+  assert.match(actions.innerHTML, /data-pa="begin"/);
+  assert.match(actions.innerHTML, /data-pa="close"/);
+
+  actions.click("close");
+  await h.f.settled();
+  assert.equal(h.f.screen(), "closed");
+  assert.equal(writes(), 5);
+  assert.equal(actions.innerHTML, "");
+
+  h.f.open();
+  assert.equal(writes(), 6);
+  assert.match(actions.innerHTML, /data-pa="ack"/);
+});
+
+test("a missing actions slot never throws and never marks buttons as shown", async () => {
+  const h = setup({ [MINT]: () => mintOK(), [POLL]: () => ({ state: "pending" }) });
+  /* Keep the bound element aside so the ack tap can reach the adapter while
+     its queried slot is absent throughout open, ack and mint. */
+  const actions = h.doc.el("#pair_actions");
+  const writes = countHTMLWrites(actions);
+  h.doc.els.delete("#pair_actions");
+  assert.doesNotThrow(() => h.f.open());
+  assert.doesNotThrow(() => actions.click("ack"));
+  await h.f.settled();
+  assert.equal(h.f.screen(), "show-code");
+  assert.equal(h.f.code(), CODE);
+  assert.equal(writes(), 0, "a missing slot should receive no writes");
+
+  h.doc.els.set("#pair_actions", actions);
+  h.timers.fire();
+  await h.f.settled();
+  assert.equal(writes(), 1, "the skipped markup was incorrectly remembered as shown");
+  assert.match(actions.innerHTML, /data-pa="copy"/);
+  assert.match(actions.innerHTML, /data-pa="cancel"/);
+});
+
+test("browser serialization does not cause unchanged actions to be rebuilt", async () => {
+  const h = setup({ [MINT]: () => mintOK(), [POLL]: () => ({ state: "pending" }) });
+  const actions = h.doc.el("#pair_actions");
+  /* A valid re-serialization differing from the assigned markup makes a
+     comparison against DOM read-back fail even though the buttons agree. */
+  const writes = countHTMLWrites(actions, (html) => html.replace(/="([^"]*)"/g, "='$1'"));
+  await toShowCode(h);
+  assert.match(actions.innerHTML, /data-pa='copy'/);
+  const shownAt = writes();
+  h.timers.fire();
+  await h.f.settled();
+  assert.equal(writes(), shownAt, "render compared against re-serialized DOM markup");
+});

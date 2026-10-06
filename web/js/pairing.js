@@ -75,6 +75,7 @@ export const PAIRING_EVENTS = Object.freeze([
   "BEGIN",
   "ACK_WARNING",
   "MINTED",
+  "LINK_COPY",
   "MINT_FAILED",
   "TICK",
   "OFFER",
@@ -95,6 +96,8 @@ export function initialPairingState() {
     code: "",
     rid: "",
     link: "",
+    /* Outcome of the last copy of this link. */
+    linkCopy: "",
     sas: "",
     expiresAt: 0,
     computerConfirmed: false,
@@ -117,7 +120,7 @@ export function initialPairingState() {
  * from a live pairing so a cancelled or failed screen cannot still be
  * holding a credential that a later render could put back on screen. */
 function withoutCredential(s) {
-  return { ...s, code: "", rid: "", link: "", sas: "", expiresAt: 0, refreshDue: false, sasMismatch: false };
+  return { ...s, code: "", rid: "", link: "", linkCopy: "", sas: "", expiresAt: 0, refreshDue: false, sasMismatch: false };
 }
 
 function closedFrom(s) {
@@ -165,9 +168,14 @@ export function nextPairing(state, event, now) {
           code: String(event.code || ""),
           rid: String(event.rid || ""),
           link: String(event.link || ""),
+          linkCopy: "",
           expiresAt: Number(event.expiresAt || 0),
           refreshDue: false,
         };
+      }
+      if (type === "LINK_COPY") {
+        if (s.link === "") return s;
+        return { ...s, linkCopy: event.ok === true ? "copied" : "failed" };
       }
       if (type === "MINT_FAILED") return failWith(s, event);
       if (type === "HOSTED_BLOCKED") return blockedWith(s, event);
@@ -311,11 +319,30 @@ const VIEWS = {
       { id: "cancel", label: "Cancel" },
     ],
   }),
+  /* Copying serves devices with no camera, such as a laptop. The link is
+   * exactly what the QR already shows: single-use and short-lived. The SAS
+   * typed on the computer still binds the device that answers. Deliberately
+   * leave the clipboard alone afterwards: clearing it would clobber whatever
+   * the user had copied since, and cannot be done reliably. */
   "show-code": (s) => ({
     title: "Scan this with your device",
-    body: s.code ? "The code is valid for a short time and refreshes itself while this stays open." : "Minting a pairing code…",
-    actions: [{ id: "cancel", label: "Cancel" }],
-    announce: s.code ? "New pairing code ready to scan." : "",
+    body: s.code
+      ? s.linkCopy === "copied"
+        ? "Link copied. Open it in a browser on the device you are pairing before this code refreshes."
+        : s.linkCopy === "failed"
+          ? "Could not copy the link. Scan the code instead, or try again."
+          : "The code is valid for a short time and refreshes itself while this stays open."
+      : "Minting a pairing code…",
+    actions: s.link
+      ? [{ id: "copy", label: "Copy link" }, { id: "cancel", label: "Cancel" }]
+      : [{ id: "cancel", label: "Cancel" }],
+    announce: s.code
+      ? s.linkCopy === "copied"
+        ? "Pairing link copied."
+        : s.linkCopy === "failed"
+          ? "Could not copy the pairing link."
+          : "New pairing code ready to scan."
+      : "",
   }),
   "compare-sas": (s) => ({
     title: "Type the digits from your device",

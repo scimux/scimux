@@ -453,7 +453,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      plain LAN http fall back to execCommand */
   function copyText(s){
     if (navigator.clipboard && window.isSecureContext){
-      navigator.clipboard.writeText(s); return;
+      return navigator.clipboard.writeText(s);
     }
     const ta = document.createElement("textarea");
     ta.value = s;
@@ -1192,7 +1192,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   /* Device pairing + the list of who holds a grant — Packet S8.
      Both take the generic api() and the document; pairing-ui.js owns every
      #pair_* root and #m_devices, and nothing else here writes into them. */
-  const pairingFeature = own(createPairingFeature({ api, doc: document }));
+  const pairingFeature = own(createPairingFeature({ api, doc: document, copy: copyText }));
   const deviceList = own(createDeviceList({
     api,
     doc: document,

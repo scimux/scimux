@@ -171,3 +171,10 @@ func TestPairingDigitsAreTypedNotShown(t *testing.T) {
 		t.Errorf("pair_sas is not an <input> but %.24q; the digits are typed here, never shown", tag)
 	}
 }
+
+func TestPairingFeatureIsGivenTheClipboard(t *testing.T) {
+	app := readWebFile(t, "web/js/app.js")
+	if !strings.Contains(app, `createPairingFeature({ api, doc: document, copy: copyText })`) {
+		t.Error("web/js/app.js does not give the pairing feature copyText: the Copy link action would ship permanently failing, because the adapter treats a missing copy as a refused clipboard")
+	}
+}
