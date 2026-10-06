@@ -244,7 +244,7 @@ func Run() {
 	if err := workers.RecoverOwnedClaudePanes(a); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: recover owned Claude chats with session workers:", err)
 	}
-	if err := sweepWorkerExecutables(dataDir, workerExe); err != nil {
+	if err := sweepWorkerExecutables(dataDir, a.claudeHooksDir(), workerExe); err != nil {
 		fmt.Fprintln(os.Stderr, "scimux: clean obsolete session-worker binaries:", err)
 	}
 	a.workers = workers

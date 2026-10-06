@@ -96,8 +96,13 @@ The executable used for workers is copied to a content-addressed, owner-only
 path before launch. Replacing the user-facing `scimux` pathname cannot change
 what an old muxer or long-lived worker will exec halfway through an update.
 Startup hashes the running image and reuses an existing pin without rewriting
-it. After reconciliation it retains the current pin and every pin named by a
-worker locator, and removes other content-addressed generations. A live locator
+it. After reconciliation it retains the current pin, every pin named by a
+worker locator, and every pin named by the `exec` of a live (unarchived)
+Claude hook bundle, and removes other content-addressed generations. The
+bundle rule matters after a full stop: the preserved pane's hook settings keep
+exec'ing the retired worker's pin even though a newer worker recovered it, so
+deleting that pin would silently disable every hook, auto-approve included. An
+unreadable bundle capability record fails the sweep closed. A live locator
 from an older worker that cannot name its executable disables that sweep; disk
 cleanup fails safe until that worker exits.
 
