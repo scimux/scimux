@@ -148,7 +148,7 @@ func TestSweepWorkerExecutablesKeepsCurrentLiveAndLegacyPins(t *testing.T) {
 		return path
 	}
 	current, live, stale := pin("current"), pin("live"), pin("stale")
-	if err := sweepWorkerExecutables(data, filepath.Join(data, "outside-pin")); err == nil {
+	if err := sweepWorkerExecutables(data, "", filepath.Join(data, "outside-pin")); err == nil {
 		t.Fatal("sweep accepted a current executable outside the pin directory")
 	}
 	dir := filepath.Dir(current)
@@ -178,7 +178,7 @@ func TestSweepWorkerExecutablesKeepsCurrentLiveAndLegacyPins(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sweepWorkerExecutables(data, current); err != nil {
+	if err := sweepWorkerExecutables(data, "", current); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{current, live} {
@@ -213,7 +213,7 @@ func TestSweepWorkerExecutablesKeepsCurrentLiveAndLegacyPins(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sweepWorkerExecutables(data, current); err != nil {
+	if err := sweepWorkerExecutables(data, "", current); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(legacyPin); err != nil {
@@ -227,7 +227,7 @@ func TestSweepWorkerExecutablesKeepsCurrentLiveAndLegacyPins(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(data, "control", "workers", "malformed.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := sweepWorkerExecutables(data, current); err == nil {
+	if err := sweepWorkerExecutables(data, "", current); err == nil {
 		t.Fatal("sweep hid a malformed worker locator")
 	}
 	if _, err := os.Stat(malformedProtected); err != nil {
@@ -239,7 +239,105 @@ func TestSweepWorkerExecutablesKeepsCurrentLiveAndLegacyPins(t *testing.T) {
 		t.Fatal(err)
 	}
 	missingCurrent := filepath.Join(missingPins, "control", "worker-binaries", "scimux-"+strings.Repeat("1", sha256.Size*2))
-	if err := sweepWorkerExecutables(missingPins, missingCurrent); err == nil {
+	if err := sweepWorkerExecutables(missingPins, "", missingCurrent); err == nil {
 		t.Fatal("sweep hid a missing pin directory")
+	}
+}
+
+// A full stop retires a Claude worker but preserves its pane, whose hook
+// settings keep exec'ing the retired worker's pin. Startup recovers the pane
+// with a newer worker and then sweeps; the old pin must survive, or every hook
+// of the recovered chat (auto-approve included) silently stops running.
+func TestSweepWorkerExecutablesKeepsClaudeBundlePins(t *testing.T) {
+	data := t.TempDir()
+	if err := os.Chmod(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pin := func(name string) string {
+		t.Helper()
+		source := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(source, []byte(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path, err := pinWorkerExecutable(source, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	hooks := filepath.Join(data, "claude-hooks")
+	bundle := func(dir, capabilities string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if capabilities == "" {
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, "capabilities.json"), []byte(capabilities), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, recovered, archived := pin("current"), pin("recovered"), pin("archived")
+	bundle(filepath.Join(hooks, "aaaa"), `{"permission":1,"stop":1,"exec":"`+recovered+`"}`)
+	bundle(filepath.Join(hooks, "archive", "bbbb.20260101T000000.000000000Z"), `{"permission":1,"exec":"`+archived+`"}`)
+	bundle(filepath.Join(hooks, "cccc"), "")
+	bundle(filepath.Join(hooks, "dddd"), `{"permission":1,"exec":"/usr/local/bin/scimux"}`)
+	bundle(filepath.Join(hooks, "ffff"), `{"permission":1}`)
+	if err := sweepWorkerExecutables(data, hooks, current); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{current, recovered} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("retained pin %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(archived); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pin named only by an archived bundle remains: %v", err)
+	}
+
+	// A bundle whose proof cannot be read leaves its pin unknowable: fail
+	// closed before deleting anything.
+	protected := pin("unparseable-protected")
+	bundle(filepath.Join(hooks, "eeee"), "{")
+	if err := sweepWorkerExecutables(data, hooks, current); err == nil {
+		t.Fatal("sweep hid an unparseable hook bundle")
+	}
+	if _, err := os.Stat(protected); err != nil {
+		t.Fatalf("pin was removed despite an unparseable bundle: %v", err)
+	}
+
+	// Read failures other than absence fail closed too. Shapes, not
+	// permissions, provoke them, so the test holds when run as root.
+	if err := os.Remove(filepath.Join(hooks, "eeee", "capabilities.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(hooks, "eeee", "capabilities.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepWorkerExecutables(data, hooks, current); err == nil {
+		t.Fatal("sweep hid an unreadable hook bundle")
+	}
+	if _, err := os.Stat(protected); err != nil {
+		t.Fatalf("pin was removed despite an unreadable bundle: %v", err)
+	}
+	notDir := filepath.Join(data, "hooks-file")
+	if err := os.WriteFile(notDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepWorkerExecutables(data, notDir, current); err == nil {
+		t.Fatal("sweep hid an unlistable hook directory")
+	}
+	if _, err := os.Stat(protected); err != nil {
+		t.Fatalf("pin was removed despite an unlistable hook directory: %v", err)
+	}
+
+	// A data directory that has never launched Claude has no hook directory;
+	// that is no reference, not a failure.
+	if err := sweepWorkerExecutables(data, filepath.Join(data, "no-hooks"), current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(protected); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreferenced pin remains without a hook directory: %v", err)
 	}
 }

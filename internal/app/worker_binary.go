@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -99,10 +100,11 @@ func pinWorkerExecutable(executable, dataDir string) (string, error) {
 }
 
 // sweepWorkerExecutables removes generations that no current or discoverable
-// worker can exec. A locator written by a pre-Executable worker makes the
-// sweep fail closed: keeping a few pins is cheaper than stranding that chat on
-// its next provider subprocess replacement.
-func sweepWorkerExecutables(dataDir, current string) error {
+// worker can exec, and that no live Claude hook bundle in hooksDir names. A
+// locator written by a pre-Executable worker makes the sweep fail closed:
+// keeping a few pins is cheaper than stranding that chat on its next provider
+// subprocess replacement.
+func sweepWorkerExecutables(dataDir, hooksDir, current string) error {
 	dir := filepath.Join(dataDir, "control", "worker-binaries")
 	current = filepath.Clean(current)
 	if filepath.Dir(current) != filepath.Clean(dir) {
@@ -121,6 +123,9 @@ func sweepWorkerExecutables(dataDir, current string) error {
 		if filepath.Dir(path) == filepath.Clean(dir) {
 			keep[filepath.Base(path)] = true
 		}
+	}
+	if err := keepClaudeBundlePins(hooksDir, filepath.Clean(dir), keep); err != nil {
+		return err
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -143,6 +148,51 @@ func sweepWorkerExecutables(dataDir, current string) error {
 		}
 		if err := os.Remove(filepath.Join(dir, name)); err != nil {
 			return fmt.Errorf("session worker binary: remove stale pin: %w", err)
+		}
+	}
+	return nil
+}
+
+// keepClaudeBundlePins marks every pin a live Claude hook bundle names. A
+// bundle's settings.json bakes the pin of the worker that launched it, and the
+// pane keeps exec'ing that path for every hook after a full stop retires the
+// worker and a newer one recovers the pane, so the bundle is as much a
+// reference as a locator. Deleting the pin would leave the recovered chat with
+// no runnable hooks: no auto-approve, no Stop, no /clear binding. Archived
+// bundles belong to no pane. A bundle without capabilities.json predates pins;
+// one that cannot be read or parsed fails the sweep closed.
+func keepClaudeBundlePins(hooksDir, pinDir string, keep map[string]bool) error {
+	if hooksDir == "" {
+		return nil
+	}
+	bundles, err := os.ReadDir(hooksDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("session worker binary: list Claude hook bundles: %w", err)
+	}
+	for _, bundle := range bundles {
+		if !bundle.IsDir() || bundle.Name() == "archive" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(hooksDir, bundle.Name(), "capabilities.json"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("session worker binary: read Claude hook bundle %s: %w", bundle.Name(), err)
+		}
+		var caps claudeHookCapabilities
+		if err := json.Unmarshal(b, &caps); err != nil {
+			return fmt.Errorf("session worker binary: parse Claude hook bundle %s: %w", bundle.Name(), err)
+		}
+		if caps.Exec == "" {
+			continue
+		}
+		path := filepath.Clean(caps.Exec)
+		if filepath.Dir(path) == pinDir {
+			keep[filepath.Base(path)] = true
 		}
 	}
 	return nil
