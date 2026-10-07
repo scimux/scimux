@@ -10,6 +10,47 @@ import (
 	"github.com/scimux/scimux/internal/sessionlog"
 )
 
+func TestPathNonRegular(t *testing.T) {
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "subdir")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "report.md")
+	if err := os.WriteFile(file, []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirLink := filepath.Join(dir, "dir-link")
+	fileLink := filepath.Join(dir, "file-link")
+	dangling := filepath.Join(dir, "dangling")
+	missing := filepath.Join(dir, "missing")
+	for link, target := range map[string]string{dirLink: subdir, fileLink: file, dangling: missing} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, ref, dir string
+		want           bool
+	}{
+		{"absolute directory", subdir, dir, true},
+		{"relative subdirectory", "subdir", dir, true},
+		{"symlink to directory", dirLink, dir, true},
+		{"regular file", file, dir, false},
+		{"symlink to regular file", fileLink, dir, false},
+		{"missing path", missing, dir, false},
+		{"dangling symlink", dangling, dir, false},
+		{"relative ref with blank directory", "subdir", "  ", false},
+		{"empty ref", "", dir, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PathNonRegular(tc.ref, tc.dir); got != tc.want {
+				t.Fatalf("PathNonRegular(%q, %q) = %v, want %v", tc.ref, tc.dir, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProject_RewritesImageMarker(t *testing.T) {
 	byPath := map[string]sessionlog.AssetEvent{
 		"/tmp/n1/photo.png": {ID: "a_1", Name: "photo.png"},

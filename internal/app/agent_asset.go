@@ -28,11 +28,8 @@ const agentAssetMaxBytes = 50 << 20
 // can disappear; handleChat's render-time projection never touches the
 // filesystem again.
 //
-// Ineligible candidates (outside dir, unreadable, not a regular file, over
-// agentAssetMaxBytes) are simply not ingested — no asset event, no error.
-// That absence is itself the durable signal internal/asset.Project reads at
-// render time to produce the "unavailable" chip, so eligibility is decided
-// exactly once, here, never re-derived from a later filesystem check.
+// Existing non-regular targets are skipped silently. Every other ineligible
+// candidate appends one asset_import failure for its turn and occurrence.
 func (a *app) ingestAssetHook(nodeID, dir string, cands []asset.Candidate) {
 	if a.sessionsDir == "" {
 		return
@@ -60,6 +57,11 @@ func (a *app) ingestAssetHook(nodeID, dir string, cands []asset.Candidate) {
 		existingImports[[2]int{ref.TurnRecord, ref.Occurrence}] = true
 	}
 	for occurrence, c := range cands {
+		// A link to a directory or other non-regular object is a reference,
+		// not an attachment; continue keeps occurrence numbering stable.
+		if asset.PathNonRegular(c.Ref, dir) {
+			continue
+		}
 		f, resolved, size, err := asset.Open(c.Ref, dir, roots)
 		if errors.Is(err, asset.ErrOutsideRoot) && a.settings().AllowExternalAttachments {
 			f, resolved, size, err = asset.OpenExternal(c.Ref, dir)

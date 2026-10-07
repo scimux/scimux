@@ -78,6 +78,9 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     labels and image alt text are descriptive only and never authorize inline
     rendering. Failed explicit attachment references are durable additive
     `asset_import` events keyed by their owning turn record and occurrence.
+    A link whose target currently exists and is not a regular file (such as a
+    directory) is a reference, not an attachment: it records no `asset_import`
+    and renders as written.
     A later retry appends a normal asset event with an explicit earlier-turn
     anchor; it never rewrites conversation text or moves the import to the
     newest turn. Reference identity and asset identity remain first-record
