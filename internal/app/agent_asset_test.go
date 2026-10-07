@@ -14,6 +14,114 @@ import (
 	"github.com/scimux/scimux/internal/transcript"
 )
 
+func TestIngestAssetHook_DirectoryInWorkspaceIsNotAnAttachment(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	abs := filepath.Join(dir, "new-folder-2")
+	if err := os.Mkdir(abs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[relative](new-folder-2) [absolute](" + abs + ")"}))
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "new-folder-2"}, {Ref: abs}})
+	if imports := sessionlog.ReadAssetImports(w.Path); len(imports) != 0 {
+		t.Errorf("directory imports = %+v, want none", imports)
+	}
+	if assets := sessionlog.ReadAssets(w.Path); len(assets) != 0 {
+		t.Errorf("directory assets = %+v, want none", assets)
+	}
+}
+
+func TestIngestAssetHook_DirectoryOutsideWorkspaceIsNotAnAttachment(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings string
+	}{
+		{"external off", `{"allow_external_attachments":false}`},
+		{"external on", `{"allow_external_attachments":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestApp(t, &fakeTmux{})
+			if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeFileForSettingsTest(a.settingsPath, tc.settings); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			outside := t.TempDir()
+			w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+			must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[folder](" + outside + ")"}))
+			a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: outside}})
+			if imports := sessionlog.ReadAssetImports(w.Path); len(imports) != 0 {
+				t.Errorf("outside directory imports = %+v, want none", imports)
+			}
+			if assets := sessionlog.ReadAssets(w.Path); len(assets) != 0 {
+				t.Errorf("outside directory assets = %+v, want none", assets)
+			}
+		})
+	}
+}
+
+func TestIngestAssetHook_SkippedDirectoryKeepsLaterOccurrences(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "subdir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[folder](subdir) [missing](missing.txt) [report](report.md)"}))
+	a.ingestAssetHook("n1", dir, []asset.Candidate{{Ref: "subdir"}, {Ref: "missing.txt"}, {Ref: "report.md"}})
+	imports := sessionlog.ReadAssetImports(w.Path)
+	if len(imports) != 1 {
+		t.Errorf("imports = %+v, want exactly one", imports)
+	} else if imports[0].Occurrence != 1 || imports[0].Reason != "not_found" || imports[0].Ref != "missing.txt" || imports[0].TurnRecord != 0 {
+		t.Errorf("missing import = %+v, want turn 0 occurrence 1 not_found for missing.txt", imports[0])
+	}
+	assets := sessionlog.ReadAssets(w.Path)
+	if len(assets) != 1 {
+		t.Fatalf("assets = %+v, want report.md", assets)
+	}
+	for _, ev := range assets {
+		if ev.SourcePath != "report.md" || ev.Name != "report.md" {
+			t.Errorf("ingested asset = %+v, want report.md", ev)
+		}
+	}
+}
+
+func TestDirectoryLinkRendersAsWritten(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	a.byID["n1"] = &Node{ID: "n1", Dir: dir}
+	abs := filepath.Join(dir, "new-folder-2")
+	if err := os.Mkdir(abs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	text := "Created the empty folder [new-folder-2](" + abs + ")."
+	w := &sessionlog.Writer{Path: a.sessionLogPath("n1")}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: text}))
+	a.ingestAssetHook("n1", dir, asset.Candidates(text, nil))
+	seg := sessionlog.ReadSegment(w.Path)
+	projected, _ := a.projectTurns("n1", seg.Turns)
+	if len(projected) != 1 {
+		t.Fatalf("projected turns = %d, want one", len(projected))
+	}
+	if projected[0].Text != text {
+		t.Fatalf("projected text = %q, want original %q", projected[0].Text, text)
+	}
+}
+
 func TestIngestAssetHookWithoutSessionStoreIsNoop(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	a.sessionsDir = ""

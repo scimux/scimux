@@ -250,6 +250,7 @@ const (
 	pathUnknown pathState = iota
 	pathAbsent
 	pathRegular
+	pathNonRegular
 )
 
 // PathAbsent reports whether ref currently names no filesystem object.
@@ -257,6 +258,13 @@ const (
 // error, including a permission failure, is not absence.
 func PathAbsent(ref, dir string) bool {
 	return currentPathState(ref, dir) == pathAbsent
+}
+
+// PathNonRegular follows symlinks and reports whether ref currently names an
+// object that exists and is not a regular file. Absence and stat errors return
+// false. Relative refs resolve against dir. It never reads file contents.
+func PathNonRegular(ref, dir string) bool {
+	return currentPathState(ref, dir) == pathNonRegular
 }
 
 func currentPathState(ref, dir string) pathState {
@@ -294,7 +302,7 @@ func currentPathState(ref, dir string) pathState {
 	if info.Mode().IsRegular() {
 		return pathRegular
 	}
-	return pathUnknown
+	return pathNonRegular
 }
 
 func missingRefLabel(alt, ref string) string {
