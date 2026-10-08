@@ -6109,3 +6109,152 @@ test("retry button retirement follows the stable failure reason", () => {
     assert.equal(chatmod.retryFailureRetiresButton(reason), false, reason);
   }
 });
+
+/* Inline attachment labels are substituted only after Markdown rendering. */
+import { md } from "../js/format.js";
+
+function inlineAssetResult(text, assets = {}, deps = {}){
+  const split = splitAssetRefs(text, "n1", assets, deps);
+  return { ...split, body: chatmod.renderMissingImportText(md(split.clean), split.labels) };
+}
+
+const inlineAssets = {
+  a: { name: "overview.md" },
+  b: { name: "chart.png", mime: "image/png" },
+};
+
+test("splitAssetRefs inline: mid-sentence file keeps label and one tile", () => {
+  const r = inlineAssetResult("Created the [research overview](scimux-asset:a), using", inlineAssets);
+  assert.equal(r.body, "<p>Created the research overview, using</p>");
+  assert.equal((r.html.match(/<a /g) || []).length, 1);
+  assert.match(r.html, /overview\.md/);
+});
+
+test("splitAssetRefs inline: mid-sentence image keeps alt and thumbnail", () => {
+  const r = inlineAssetResult("See ![the diagram](scimux-asset:b) here", inlineAssets);
+  assert.equal(r.body, "<p>See the diagram here</p>");
+  assert.match(r.html, /class="attthumb"/);
+});
+
+test("splitAssetRefs inline: image alone has no body", () => {
+  const r = splitAssetRefs("![the diagram](scimux-asset:b)", "n1", inlineAssets);
+  assert.equal(r.clean, "");
+  assert.deepEqual(r.labels, []);
+  assert.match(r.html, /attthumb/);
+});
+
+for (const [name, newline] of [["LF", "\n"], ["CR", "\r"], ["CRLF", "\r\n"]]) {
+  test(`splitAssetRefs inline: user attachment on its own line (${name})`, () => {
+    const r = inlineAssetResult(`look${newline}${newline}[report.pdf](scimux-asset:a)`, inlineAssets);
+    assert.equal(r.body, "<p>look</p>");
+    assert.doesNotMatch(r.body, /report\.pdf/);
+    assert.match(r.html, /attfile/);
+    assert.deepEqual(r.labels, []);
+  });
+}
+
+test("splitAssetRefs inline: refs and whitespace alone are all dropped", () => {
+  const r = splitAssetRefs(" \t[a.md](scimux-asset:a) \t ![chart](scimux-asset:b) \t", "n1", inlineAssets);
+  assert.equal(r.clean, "");
+  assert.deepEqual(r.labels, []);
+  assert.equal((r.html.match(/<a /g) || []).length, 2);
+});
+
+test("splitAssetRefs inline: list marker counts as text", () => {
+  const r = inlineAssetResult("- [a.md](scimux-asset:a)", inlineAssets);
+  assert.equal(r.body, "<ul><li>a.md</li></ul>");
+});
+
+for (const [name, label, assets, expected] of [
+  ["empty label", "", inlineAssets, "overview.md"],
+  ["whitespace label", " \t ", inlineAssets, "overview.md"],
+  ["missing record", "", undefined, "file"],
+  ["empty record name", "", { a: { name: "" } }, "file"],
+]) {
+  test(`splitAssetRefs inline: fallback for ${name}`, () => {
+    const r = inlineAssetResult(`See [${label}](scimux-asset:a).`, assets);
+    assert.equal(r.body, `<p>See ${expected}.</p>`);
+  });
+}
+
+for (const [label, expected] of [
+  ['<b>"x"</b>', '&lt;b&gt;&quot;x&quot;&lt;/b&gt;'],
+  ["*x*", "*x*"],
+  ["`x`", "`x`"],
+  [" scimux-import:1:0:not_found scimux-asset:a ", " scimux-import:1:0:not_found scimux-asset:a "],
+]) {
+  test(`splitAssetRefs inline: inert label ${label}`, () => {
+    const r = inlineAssetResult(`See [${label}](scimux-asset:a).`, inlineAssets);
+    assert.equal(r.body, `<p>See ${expected}.</p>`);
+    assert.doesNotMatch(r.body, /<b>|<em>|<code>|missingfile|attrow/);
+    assert.equal(r.labels.length, 1);
+  });
+}
+
+test("splitAssetRefs inline: source tokens survive without collisions", () => {
+  const original = "\uE0000\uE001 \uE0001\uE001";
+  const source = `${original} [overview](scimux-asset:a) and [diagram](scimux-asset:b)`;
+  const r = inlineAssetResult(source, inlineAssets);
+  assert.equal(r.body, `<p>${original} overview and diagram</p>`);
+  assert.equal(new Set(r.labels.map(item => item.token)).size, 2);
+  for (const item of r.labels) assert.equal(source.includes(item.token), false);
+});
+
+test("splitAssetRefs inline: asset and missing import tokens coexist", () => {
+  const a = splitAssetRefs("See [the overview](scimux-asset:a) and [missing%20notes.md](scimux-import:1:0:not_found).", "n1", inlineAssets);
+  const blocked = chatmod.splitImportRefs(a.clean, "n1");
+  const body = chatmod.renderMissingImportText(
+    chatmod.renderMissingImportText(md(blocked.clean), blocked.missing), a.labels);
+  assert.equal(body, '<p>See the overview and <span class="missingfile">missing notes.md</span>.</p>');
+  assert.notEqual(a.labels[0].token, blocked.missing[0].token);
+});
+
+test("splitAssetRefs inline: repeated id keeps both labels and one tile", () => {
+  const r = inlineAssetResult("See [first](scimux-asset:a) then [second](scimux-asset:a).", inlineAssets);
+  assert.equal(r.body, "<p>See first then second.</p>");
+  assert.equal((r.html.match(/<a /g) || []).length, 1);
+});
+
+test("splitAssetRefs inline: distinct tiles follow first appearance", () => {
+  const r = inlineAssetResult("[first](scimux-asset:a), [diagram](scimux-asset:b), [again](scimux-asset:a)", inlineAssets);
+  assert.equal(r.body, "<p>first, diagram, again</p>");
+  assert.deepEqual([...r.html.matchAll(/href="[^"]*\/assets\/([^"/]+)"/g)].map(m => m[1]), ["a", "b"]);
+});
+
+for (const text of ["plain text", "", null]) {
+  test(`splitAssetRefs inline: stable no-ref shape for ${JSON.stringify(text)}`, () => {
+    assert.deepEqual(splitAssetRefs(text, "n1", {}), { clean: text || "", html: "", labels: [] });
+  });
+}
+
+test("splitAssetRefs inline: injected regex and escape apply to label", () => {
+  const r = splitAssetRefs("See [overview](scimux-asset:a)", "n1", inlineAssets, {
+    assetRefRe: /(!?)\[([^\]]*)\]\(scimux-asset:([\w-]+)\)/g,
+    escape: value => `ESC(${value})`,
+  });
+  assert.equal(chatmod.renderMissingImportText(md(r.clean), r.labels), "<p>See ESC(overview)</p>");
+});
+
+test("splitAssetRefs inline: live render keeps media only for image-only turn", async () => {
+  const ctx = makeFeature({ chatPayload: {
+    ...defaultChatPayload(),
+    turns: [
+      { role: "assistant", text: "![diagram](scimux-asset:b)" },
+      { role: "assistant", text: "See [research overview](scimux-asset:a), using" },
+    ],
+    assets: inlineAssets,
+  } });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const html = ctx.roots.msgs.innerHTML;
+  assert.match(html, /class="turn assistant media"/);
+  assert.match(html, /class="turn assistant"/);
+  assert.match(html, /See research overview, using/);
+  ctx.feature.destroy();
+});
+
+test("splitAssetRefs inline: absent asset map uses file fallback", () => {
+  const r = splitAssetRefs("See [](scimux-asset:a).", "n1", null);
+  assert.equal(chatmod.renderMissingImportText(md(r.clean), r.labels), "<p>See file.</p>");
+  assert.match(r.html, /missing/);
+});
