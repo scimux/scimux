@@ -645,6 +645,29 @@ export function retryFailureRetiresButton(reason){
   return reason === "not_found" || reason === "too_large";
 }
 
+/* Mirror md()'s line-based /^\s*```/ toggle while retaining raw source bytes.
+   The break after a closing line is outside; an unclosed fence reaches EOF. */
+function fencedReferenceSegments(text){
+  const segments = [];
+  const parts = text.split(/(\r\n|\r|\n)/);
+  let inFence = false;
+  let start = 0;
+  let offset = 0;
+  for (let i = 0; i < parts.length; i += 2) {
+    const line = parts[i];
+    if (/^\s*```/.test(line)) {
+      const end = inFence ? offset + line.length : offset;
+      segments.push({ fenced: inFence, text: text.slice(start, end) });
+      start = end;
+      inFence = !inFence;
+    }
+    offset += line.length;
+    if (i + 1 < parts.length) offset += parts[i + 1].length;
+  }
+  segments.push({ fenced: inFence, text: text.slice(start) });
+  return segments;
+}
+
 export function splitImportRefs(text, nodeId, deps = {}){
   IMPORT_REF_RE.lastIndex = 0;
   if (!IMPORT_REF_RE.test(text || "")) return { clean: text || "", html: "", missing: [] };
@@ -687,7 +710,9 @@ export function splitAssetRefs(text, nodeId, assets, deps = {}){
   const escape = deps.escape || esc;
   const source = text;
   let nextToken = 0;
-  const clean = source.replace(/\r\n?/g, "\n").split("\n").map(line => {
+  const clean = fencedReferenceSegments(source).map((segment, index, segments) => {
+    if (segment.fenced) return segment.text;
+    let outside = segment.text.replace(/\r\n?/g, "\n").split("\n").map(line => {
     const inline = !!line.replace(re, "").trim();
     return line.replace(re, (_m, _bang, alt, id) => {
       const rec = (assets || {})[id];
@@ -704,8 +729,13 @@ export function splitAssetRefs(text, nodeId, assets, deps = {}){
       labels.push({ token, html: escape(label) });
       return token;
     });
-  }).join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow">${tiles.join("")}</div>`, labels };
+    }).join("\n").replace(/\n{3,}/g, "\n\n");
+    // Trim outer prose without altering indented openers or unclosed code tails.
+    if (index === 0) outside = outside.trimStart();
+    if (index === segments.length - 1) outside = outside.trimEnd();
+    return outside;
+  }).join("");
+  return { clean, html: tiles.length ? `<div class="attrow">${tiles.join("")}</div>` : "", labels };
 }
 
 export function assetBubbleBodyHTML(text, nodeId, assets, deps = {}){
