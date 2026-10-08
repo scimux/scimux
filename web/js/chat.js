@@ -708,6 +708,12 @@ export function splitAssetRefs(text, nodeId, assets, deps = {}){
   return { clean, html: `<div class="attrow">${tiles.join("")}</div>`, labels };
 }
 
+export function assetBubbleBodyHTML(text, nodeId, assets, deps = {}){
+  const a = splitAssetRefs(text, nodeId, assets, deps);
+  const markdown = deps.markdown || md;
+  return renderMissingImportText(markdown(a.clean), a.labels) + a.html;
+}
+
 /* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything
    else (codex bare commands, search regexes, think prose, future agents) falls
    through as { verb: "", code: <whole title> }. Never throws, never null. */
