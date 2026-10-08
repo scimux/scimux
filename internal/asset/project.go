@@ -183,23 +183,28 @@ func ProjectAgentPathBindings(text string, bound map[int]sessionlog.AssetEvent, 
 
 // ProjectVisibleBlocked projects occurrence bindings and blocked imports.
 // A blocked reference whose source is currently absent is labeled not_found
-// in the returned text only. A stored not_found can become retry_ready when
-// the source reappears within the allowed root (or external files are allowed),
-// or outside_workspace if policy still blocks it. Imports is not modified.
+// in the returned text only. Any blocked reference to an oversized regular
+// file is labeled too_large. A stored not_found or too_large can become
+// retry_ready when the source is a regular file within maxBytes and the allowed
+// root (or external files are allowed), or outside_workspace if policy still
+// blocks it. Imports is not modified.
 // The marker stays a scimux-import reference so a later path projection cannot
 // attach an older asset that used the same path.
-func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imports []sessionlog.AssetImportEvent, dir string, allowExternal bool) string {
+func ProjectVisibleBlocked(text string, bound map[int]sessionlog.AssetEvent, imports []sessionlog.AssetImportEvent, dir string, allowExternal bool, maxBytes int64) string {
 	if len(imports) == 0 {
 		return ProjectAgentPathBindings(text, bound, nil)
 	}
 	adjusted := make([]sessionlog.AssetImportEvent, len(imports))
 	copy(adjusted, imports)
 	for i := range adjusted {
-		switch currentPathState(adjusted[i].Ref, dir) {
+		state, size := currentPathState(adjusted[i].Ref, dir)
+		switch state {
 		case pathAbsent:
 			adjusted[i].Reason = "not_found"
 		case pathRegular:
-			if adjusted[i].Reason == "not_found" {
+			if size > maxBytes {
+				adjusted[i].Reason = "too_large"
+			} else if adjusted[i].Reason == "not_found" || adjusted[i].Reason == "too_large" {
 				if allowExternal {
 					adjusted[i].Reason = "retry_ready"
 				} else if inside, known := pathInsideRoot(adjusted[i].Ref, dir); known {
@@ -257,52 +262,54 @@ const (
 // Relative refs resolve against dir. A dangling symlink is absent. Any other
 // error, including a permission failure, is not absence.
 func PathAbsent(ref, dir string) bool {
-	return currentPathState(ref, dir) == pathAbsent
+	state, _ := currentPathState(ref, dir)
+	return state == pathAbsent
 }
 
 // PathNonRegular follows symlinks and reports whether ref currently names an
 // object that exists and is not a regular file. Absence and stat errors return
 // false. Relative refs resolve against dir. It never reads file contents.
 func PathNonRegular(ref, dir string) bool {
-	return currentPathState(ref, dir) == pathNonRegular
+	state, _ := currentPathState(ref, dir)
+	return state == pathNonRegular
 }
 
-func currentPathState(ref, dir string) pathState {
+func currentPathState(ref, dir string) (pathState, int64) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return pathUnknown
+		return pathUnknown, 0
 	}
 	p := ref
 	if !filepath.IsAbs(p) {
 		if strings.TrimSpace(dir) == "" {
-			return pathUnknown
+			return pathUnknown, 0
 		}
 		p = filepath.Join(dir, p)
 	}
 	abs, err := filepath.Abs(filepath.Clean(p))
 	if err != nil {
-		return pathUnknown
+		return pathUnknown, 0
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return pathAbsent
+			return pathAbsent, 0
 		}
-		return pathUnknown
+		return pathUnknown, 0
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		info, err = os.Stat(abs)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return pathAbsent
+				return pathAbsent, 0
 			}
-			return pathUnknown
+			return pathUnknown, 0
 		}
 	}
 	if info.Mode().IsRegular() {
-		return pathRegular
+		return pathRegular, info.Size()
 	}
-	return pathNonRegular
+	return pathNonRegular, 0
 }
 
 func missingRefLabel(alt, ref string) string {

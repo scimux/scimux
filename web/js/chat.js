@@ -619,7 +619,7 @@ export function importTileHTML(nodeId, turn, occurrence, reason, alt, isImage, {
     chat_unavailable: ["Attachment unavailable", "Chat is unavailable for this operation."],
   };
   const copy = messages[reason] || ["Attachment unavailable", "Attachment could not be imported."];
-  const retry = reason !== "outside_workspace" || externalAllowed;
+  const retry = reason !== "too_large" && (reason !== "outside_workspace" || externalAllowed);
   const actions = (reason === "outside_workspace" && !externalAllowed)
     ? `<button data-asset-settings>Open attachment settings</button>`
     : (retry ? `<button data-asset-retry data-node="${escape(nodeId)}" data-turn="${turn}" data-occurrence="${occurrence}">Retry import</button>` : "");
@@ -629,7 +629,8 @@ export function importTileHTML(nodeId, turn, occurrence, reason, alt, isImage, {
 }
 
 /* A 422 retry body is JSON text on Error.message (api.js decodeResponse).
-   Only not_found retires the stale button; every other failure stays retryable. */
+   Missing or oversized files retire the stale button until the view finds
+   an eligible file; every other failure stays retryable. */
 export function readRetryFailure(err){
   if (!err || Number(err.status) !== 422) return "";
   try {
@@ -638,6 +639,10 @@ export function readRetryFailure(err){
   } catch {
     return "";
   }
+}
+
+export function retryFailureRetiresButton(reason){
+  return reason === "not_found" || reason === "too_large";
 }
 
 export function splitImportRefs(text, nodeId, deps = {}){
@@ -2418,10 +2423,11 @@ export function createChatFeature(deps){
             await refreshChat();
           }
         } catch (err) {
-          if (readRetryFailure(err) === "not_found") {
+          if (retryFailureRetiresButton(readRetryFailure(err))) {
             retry.remove();
-            /* The file disappeared between render and click. Drop the stale
-               action immediately, then rebuild whichever view is still selected. */
+            /* The file disappeared or grew too large between render and click.
+               Drop the stale action immediately, then rebuild whichever view
+               is still selected. */
             if (g("sel", "") === node && chatHist.node === node && chatHist.segs){
               await loadHistory(node, "", { preserveScroll: true });
             } else if (g("sel", "") === node){

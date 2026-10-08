@@ -487,3 +487,43 @@ func jsonNumber(v int) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+func TestChatProjectsBlockedImportSizeEligibility(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	must(t, os.MkdirAll(a.sessionsDir, 0o700))
+	n := &Node{ID: "n1", Title: "n1", Agent: "codex", Dir: t.TempDir()}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	path := filepath.Join(n.Dir, "report.md")
+	must(t, os.WriteFile(path, []byte("small"), 0o600))
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	must(t, w.Append(sessionlog.Event{T: "assistant", Text: "[report](report.md)"}))
+	must(t, w.Append(sessionlog.NewAssetImport(sessionlog.AssetImportEvent{
+		TurnRecord: 0, Occurrence: 0, Ref: "report.md", Reason: "too_large",
+	})))
+	stored, err := os.ReadFile(w.Path)
+	must(t, err)
+	h := newTestHandler(t, a)
+	for _, tc := range []struct {
+		name, want string
+		size       int64
+	}{
+		{"small", "retry_ready", 5},
+		{"over limit", "too_large", agentAssetMaxBytes + 1},
+		{"exact limit", "retry_ready", agentAssetMaxBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			must(t, os.Truncate(path, tc.size))
+			for _, suffix := range []string{"", "?history=1"} {
+				rec := routeRequest(h, http.MethodGet, "/api/nodes/n1/chat"+suffix, "", false)
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "scimux-import:0:0:"+tc.want) {
+					t.Fatalf("chat%s = %d %s, want %s", suffix, rec.Code, rec.Body.String(), tc.want)
+				}
+			}
+		})
+	}
+	after, err := os.ReadFile(w.Path)
+	must(t, err)
+	if string(after) != string(stored) {
+		t.Fatal("chat projection modified the session log")
+	}
+}

@@ -2218,129 +2218,134 @@ test("missing unimported files render as inert text in the live chat and earlier
   ctx.feature.destroy();
 });
 
-function notFoundRetryError() {
+function retryFailureError(reason = "not_found") {
   const err = new Error(JSON.stringify({
-    status: "failed", reason: "not_found", message: "File no longer exists.",
+    status: "failed", reason, message: reason === "too_large" ? "File exceeds the import limit." : "File no longer exists.",
   }) + "\n");
   err.status = 422;
   return err;
 }
 
-test("a not_found retry drops the stale button and refreshes history without moving the reader", async () => {
-  let historyReads = 0;
-  const alerts = [];
-  const order = [];
-  const ctx = makeFeature({
-    api: async path => {
-      if (path.includes("asset-imports/retry")) {
-        order.push("retry");
-        throw notFoundRetryError();
+for (const reason of ["not_found", "too_large"]) {
+  test(`a ${reason} retry drops the stale button and refreshes history without moving the reader`, async () => {
+    let historyReads = 0;
+    const alerts = [];
+    const order = [];
+    const ctx = makeFeature({
+      api: async path => {
+        if (path.includes("asset-imports/retry")) {
+          order.push("retry");
+          throw retryFailureError(reason);
+        }
+        if (path.includes("/chat?history=1")) {
+          historyReads++;
+          order.push("history");
+          return {
+            segments: [{
+              start: "2025-12-31T00:00:00Z",
+              seam: "2025-12-31T00:00:00Z",
+              reason: "clear",
+              turns: [{
+                role: "assistant",
+                time: "2025-12-31T00:01:00Z",
+                text: historyReads === 1
+                  ? "[report.md](scimux-import:0:0:retry_ready)"
+                  : `[report.md](scimux-import:0:0:${reason})`,
+              }],
+            }],
+            assets: {},
+            allow_external_attachments: true,
+          };
+        }
+        if (path.includes("/chat")) {
+          return {
+            turns: [{ role: "assistant", text: "current chat", time: "2026-01-01T00:01:00Z" }],
+            live: "quiet", delivery: "ok", source: "tmux",
+            chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
+            allow_external_attachments: true,
+          };
+        }
+        return {};
+      },
+      deps: { alert: value => alerts.push(value) },
+    });
+    ctx.feature.bind();
+    await ctx.feature.loadHistory("n1", "");
+    assert.match(ctx.roots.msgs.innerHTML, /Retry import/);
+    ctx.roots.msgs.scrollHeight = 2400;
+    ctx.roots.msgs.clientHeight = 400;
+    ctx.roots.msgs.scrollTop = 275;
+    const retry = el("button", {
+      dataset: { assetRetry: "1", node: "n1", turn: "0", occurrence: "0" },
+    });
+    const host = el("span");
+    host.appendChild(retry);
+    retry.remove = () => {
+      order.push("remove");
+      if (retry.parentNode) {
+        const i = retry.parentNode.children.indexOf(retry);
+        if (i >= 0) retry.parentNode.children.splice(i, 1);
+        retry.parentNode = null;
       }
-      if (path.includes("/chat?history=1")) {
-        historyReads++;
-        order.push("history");
-        return {
-          segments: [{
-            start: "2025-12-31T00:00:00Z",
-            seam: "2025-12-31T00:00:00Z",
-            reason: "clear",
+    };
+    firstListener(ctx.roots.msgs, "click")({ target: retry });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    assert.equal(retry.parentNode, null);
+    assert.ok(order.indexOf("remove") >= 0 && order.indexOf("remove") < order.lastIndexOf("history"));
+    assert.equal(historyReads, 2);
+    assert.match(ctx.roots.msgs.innerHTML, /report\.md/);
+    assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Retry import/);
+    assert.equal(ctx.roots.msgs.scrollTop, 275);
+    assert.match(ctx.roots.msgs.innerHTML, /current chat/);
+    assert.deepEqual(alerts, []);
+    ctx.feature.destroy();
+  });
+
+  test(`a ${reason} retry refreshes the live chat and leaves the selection in place`, async () => {
+    let liveReads = 0;
+    const ctx = makeFeature({
+      api: async path => {
+        if (path.includes("asset-imports/retry")) throw retryFailureError(reason);
+        if (path.includes("/chat")) {
+          liveReads++;
+          return {
             turns: [{
               role: "assistant",
-              time: "2025-12-31T00:01:00Z",
-              text: historyReads === 1
-                ? "[report.md](scimux-import:0:0:unreadable)"
-                : "[report.md](scimux-import:0:0:not_found)",
+              text: liveReads === 1
+                ? "[notes.md](scimux-import:2:0:retry_ready)"
+                : `[notes.md](scimux-import:2:0:${reason})`,
+              time: "2026-01-01T00:01:00Z",
             }],
-          }],
-          assets: {},
-          allow_external_attachments: true,
-        };
-      }
-      if (path.includes("/chat")) {
-        return {
-          turns: [{ role: "assistant", text: "current chat", time: "2026-01-01T00:01:00Z" }],
-          live: "quiet", delivery: "ok", source: "tmux",
-          chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
-          allow_external_attachments: true,
-        };
-      }
-      return {};
-    },
-    deps: { alert: value => alerts.push(value) },
+            live: "quiet", delivery: "ok", source: "tmux",
+            chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+            allow_external_attachments: true,
+          };
+        }
+        return {};
+      },
+      deps: { alert: () => { throw new Error(`live ${reason} retry alerted`); } },
+    });
+    ctx.feature.bind();
+    await ctx.feature.render();
+    assert.match(ctx.roots.msgs.innerHTML, /Retry import/);
+    const retry = el("button", {
+      dataset: { assetRetry: "1", node: "n1", turn: "2", occurrence: "0" },
+    });
+    let removed = false;
+    retry.remove = () => { removed = true; };
+    firstListener(ctx.roots.msgs, "click")({ target: retry });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    assert.equal(removed, true);
+    assert.equal(liveReads, 2);
+    assert.match(ctx.roots.msgs.innerHTML, /notes\.md/);
+    assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Retry import|data-asset-retry/);
+    if (reason === "not_found") assert.doesNotMatch(ctx.roots.msgs.innerHTML, /attrow/);
+    else assert.match(ctx.roots.msgs.innerHTML, /File exceeds the import limit/);
+    assert.equal(ctx.roots.chattitle.textContent, "Alpha");
+    ctx.feature.destroy();
   });
-  ctx.feature.bind();
-  await ctx.feature.loadHistory("n1", "");
-  assert.match(ctx.roots.msgs.innerHTML, /Retry import/);
-  ctx.roots.msgs.scrollHeight = 2400;
-  ctx.roots.msgs.clientHeight = 400;
-  ctx.roots.msgs.scrollTop = 275;
-  const retry = el("button", {
-    dataset: { assetRetry: "1", node: "n1", turn: "0", occurrence: "0" },
-  });
-  const host = el("span");
-  host.appendChild(retry);
-  retry.remove = () => {
-    order.push("remove");
-    if (retry.parentNode) {
-      const i = retry.parentNode.children.indexOf(retry);
-      if (i >= 0) retry.parentNode.children.splice(i, 1);
-      retry.parentNode = null;
-    }
-  };
-  firstListener(ctx.roots.msgs, "click")({ target: retry });
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(retry.parentNode, null);
-  assert.ok(order.indexOf("remove") >= 0 && order.indexOf("remove") < order.lastIndexOf("history"));
-  assert.equal(historyReads, 2);
-  assert.match(ctx.roots.msgs.innerHTML, /report\.md/);
-  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Retry import/);
-  assert.equal(ctx.roots.msgs.scrollTop, 275);
-  assert.match(ctx.roots.msgs.innerHTML, /current chat/);
-  assert.deepEqual(alerts, []);
-  ctx.feature.destroy();
-});
 
-test("a not_found retry refreshes the live chat and leaves the selection in place", async () => {
-  let liveReads = 0;
-  const ctx = makeFeature({
-    api: async path => {
-      if (path.includes("asset-imports/retry")) throw notFoundRetryError();
-      if (path.includes("/chat")) {
-        liveReads++;
-        return {
-          turns: [{
-            role: "assistant",
-            text: liveReads === 1
-              ? "[notes.md](scimux-import:2:0:unreadable)"
-              : "[notes.md](scimux-import:2:0:not_found)",
-            time: "2026-01-01T00:01:00Z",
-          }],
-          live: "quiet", delivery: "ok", source: "tmux",
-          chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
-          allow_external_attachments: true,
-        };
-      }
-      return {};
-    },
-    deps: { alert: () => { throw new Error("live not_found retry alerted"); } },
-  });
-  ctx.feature.bind();
-  await ctx.feature.render();
-  assert.match(ctx.roots.msgs.innerHTML, /Retry import/);
-  const retry = el("button", {
-    dataset: { assetRetry: "1", node: "n1", turn: "2", occurrence: "0" },
-  });
-  let removed = false;
-  retry.remove = () => { removed = true; };
-  firstListener(ctx.roots.msgs, "click")({ target: retry });
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(removed, true);
-  assert.equal(liveReads, 2);
-  assert.match(ctx.roots.msgs.innerHTML, /notes\.md/);
-  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /Retry import|data-asset-retry|attrow/);
-  assert.equal(ctx.roots.chattitle.textContent, "Alpha");
-  ctx.feature.destroy();
-});
+}
 
 test("other retry failures keep the button and do not refresh the chat", async () => {
   let historyReads = 0;
@@ -2382,7 +2387,7 @@ test("other retry failures keep the button and do not refresh the chat", async (
         return {
           segments: [{
             start: "2025-12-31T00:00:00Z",
-            turns: [{ role: "assistant", text: "[report.md](scimux-import:0:0:too_large)" }],
+            turns: [{ role: "assistant", text: "[report.md](scimux-import:0:0:unreadable)" }],
           }],
           assets: {},
         };
@@ -2431,7 +2436,7 @@ test("other retry failures keep the button and do not refresh the chat", async (
 test("a not_found retry completion cannot repaint a newly selected chat", async () => {
   let finishRetry;
   let historyReads = 0;
-  const retryDone = new Promise((_, reject) => { finishRetry = () => reject(notFoundRetryError()); });
+  const retryDone = new Promise((_, reject) => { finishRetry = () => reject(retryFailureError()); });
   const ctx = makeFeature({
     nodes: [
       { id: "n1", title: "One", agent: "claude", live: "quiet", attention: "" },
@@ -6094,4 +6099,13 @@ test("pendingEmptyHTML: delivering says the prompt is in flight, not that Claude
   assert.doesNotMatch(html, /raw terminal/i);
   const strict = pendingEmptyHTML({ pending: true, supervision: "claude_strict", delivering: true });
   assert.match(strict, /delivering/i);
+});
+
+test("retry button retirement follows the stable failure reason", () => {
+  for (const reason of ["not_found", "too_large"]) {
+    assert.equal(chatmod.retryFailureRetiresButton(reason), true, reason);
+  }
+  for (const reason of ["", "unreadable", "storage", "outside_workspace", "not_regular", "chat_unavailable", "unknown"]) {
+    assert.equal(chatmod.retryFailureRetiresButton(reason), false, reason);
+  }
 });

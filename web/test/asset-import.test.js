@@ -33,7 +33,6 @@ test("blocked reasons are distinct and escaped", () => {
   const cases = new Map([
     ["unreadable", "File cannot be read"],
     ["not_regular", "Unsupported filesystem object"],
-    ["too_large", "File exceeds the import limit"],
     ["storage", "Storage budget or free-space limit"],
     ["chat_unavailable", "Chat is unavailable"],
   ]);
@@ -60,7 +59,8 @@ test("a missing unimported file is escaped inert text without attachment actions
   ]) {
     assert.equal(missing.includes(markup), false, markup);
   }
-  assert.match(split.html, /Retry import/);
+  assert.doesNotMatch(split.html, /Retry import|data-asset-retry|<button/);
+  assert.match(split.html, /File exceeds the import limit/);
   assert.doesNotMatch(split.html, /&lt;img src=&quot;x&quot;&gt;/);
 
   const empty = splitImportRefs("[](scimux-import:1:0:not_found)", "n1");
@@ -123,4 +123,16 @@ test("missing filenames stay in their sentence and never make a media bubble", (
   const collisionHTML = chatmod.renderMissingImportText(md(collision.clean), collision.missing);
   assert.match(collisionHTML, /\uE0000\uE001 <span class="missingfile">a\.md<\/span>/);
   assert.equal(chatmod.renderMissingImportText("unchanged"), "unchanged");
+});
+
+test("oversized attachments explain the limit without retry actions", () => {
+  for (const externalAllowed of [false, true]) {
+    const html = importTileHTML("n", 1, 0, "too_large", '<big&file>.md', false, { externalAllowed });
+    assert.match(html, /File exceeds the import limit/);
+    assert.match(html, /&lt;big&amp;file&gt;\.md/);
+    assert.doesNotMatch(html, /data-asset-retry|<button|<big/);
+    const split = splitImportRefs("[big](scimux-import:1:0:too_large)", "n", { externalAllowed });
+    assert.match(split.html, /File exceeds the import limit/);
+    assert.doesNotMatch(split.html, /data-asset-retry|<button/);
+  }
 });

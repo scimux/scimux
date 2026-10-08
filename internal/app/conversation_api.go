@@ -826,7 +826,7 @@ func (a *app) projectTurnsWithCapture(nodeID string, turns []transcript.Turn, ca
 		if capture {
 			t.Text = asset.ProjectAgentPathBindings(t.Text, bound, blockedByTurn[t.Record])
 		} else {
-			t.Text = asset.ProjectVisibleBlocked(t.Text, bound, blockedByTurn[t.Record], dir, allowExternal)
+			t.Text = asset.ProjectVisibleBlocked(t.Text, bound, blockedByTurn[t.Record], dir, allowExternal, agentAssetMaxBytes)
 		}
 		t.Text = asset.ProjectAgentPaths(t.Text, byPath)
 		if capture {

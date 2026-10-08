@@ -688,11 +688,14 @@ append-only session log, validates that it belongs to the named node and turn,
 and rechecks current filesystem and settings eligibility. The usual mutation
 security checks apply.
 
-The chat response labels a previously missing reference `retry_ready` only
-when it now names a regular file within the node workspace, or external
-attachments are enabled. A reappeared file outside the workspace is labeled
-`outside_workspace` while that setting is off; this changes only the response
-view, not the stored import reason. Retry always rechecks eligibility.
+In the chat response, any blocked reference whose current file exceeds the
+import limit is labeled `too_large` with no retry action. A reference stored
+as `not_found` or `too_large` is labeled `retry_ready` only when it now names
+a regular file within the import limit and the node workspace, or within the
+limit with external attachments enabled. For those references, a file within
+the limit but outside the workspace is labeled `outside_workspace` while that
+setting is off. These labels change only the chat view, not the stored import
+reason. Retry always rechecks eligibility.
 
 Success is `200` with `status` equal to `imported` (including `asset_id`,
 `name`, `turn_record`, `occurrence`, and `current_bytes:true`) or
