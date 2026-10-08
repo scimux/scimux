@@ -677,7 +677,11 @@ export function splitImportRefs(text, nodeId, deps = {}){
   let nextToken = 0;
   let priorMissingEnd = -1;
   const source = text || "";
-  const clean = source.replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason, offset) => {
+  const clean = fencedReferenceSegments(source).map((segment, index, segments) => {
+    if (segment.fenced) return segment.text;
+    // Replacement offsets and missing-file adjacency belong to this prose only.
+    priorMissingEnd = -1;
+    let outside = segment.text.replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason, offset) => {
     if (reason === "not_found") {
       let name = alt || "file";
       try { name = decodeURIComponent(name); } catch { /* Keep malformed legacy labels as text. */ }
@@ -691,7 +695,11 @@ export function splitImportRefs(text, nodeId, deps = {}){
     priorMissingEnd = -1;
     tiles.push(importTileHTML(nodeId, +turn, +occurrence, reason, alt, bang === "!", deps));
     return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
+    }).replace(/\n{3,}/g, "\n\n");
+    if (index === 0) outside = outside.trimStart();
+    if (index === segments.length - 1) outside = outside.trimEnd();
+    return outside;
+  }).join("");
   return { clean, html: tiles.length ? `<div class="attrow blockedrow">${tiles.join("")}</div>` : "", missing };
 }
 
