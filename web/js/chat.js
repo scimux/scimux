@@ -680,13 +680,32 @@ export function renderMissingImportText(rendered, missing = []){
 export function splitAssetRefs(text, nodeId, assets, deps = {}){
   const re = deps.assetRefRe || ASSET_REF_RE;
   re.lastIndex = 0;
-  if (!re.test(text || "")) return { clean: text || "", html: "" };
+  if (!re.test(text || "")) return { clean: text || "", html: "", labels: [] };
   const tiles = [];
-  const clean = (text || "").replace(re, (_m, _bang, alt, id) => {
-    tiles.push(assetTileHTML(nodeId, id, alt, (assets || {})[id], deps));
-    return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
+  const labels = [];
+  const seen = new Set();
+  const escape = deps.escape || esc;
+  const source = text;
+  let nextToken = 0;
+  const clean = source.replace(/\r\n?/g, "\n").split("\n").map(line => {
+    const inline = !!line.replace(re, "").trim();
+    return line.replace(re, (_m, _bang, alt, id) => {
+      const rec = (assets || {})[id];
+      if (!seen.has(id)) {
+        seen.add(id);
+        tiles.push(assetTileHTML(nodeId, id, alt, rec, deps));
+      }
+      if (!inline) return "";
+      const label = alt.trim() ? alt : (rec?.name || "file");
+      let token;
+      // Reserve tokens against the whole source; splitImportRefs then reserves
+      // its own tokens against clean, which already contains these tokens.
+      do { token = `\uE000${nextToken++}\uE001`; } while (source.includes(token));
+      labels.push({ token, html: escape(label) });
+      return token;
+    });
+  }).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { clean, html: `<div class="attrow">${tiles.join("")}</div>`, labels };
 }
 
 /* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything
@@ -1448,7 +1467,7 @@ export function createChatFeature(deps){
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
     return `
       <div class="${cls}" ${dataAttrs}>
-		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${renderMissingImportText(markdown(blocked.clean), blocked.missing)}${a.html}${blocked.html}</div>
+		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${renderMissingImportText(renderMissingImportText(markdown(blocked.clean), blocked.missing), a.labels)}${a.html}${blocked.html}</div>
       </div>`;
   }
 
