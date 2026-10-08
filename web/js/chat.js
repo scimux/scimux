@@ -645,6 +645,29 @@ export function retryFailureRetiresButton(reason){
   return reason === "not_found" || reason === "too_large";
 }
 
+/* Mirror md()'s line-based /^\s*```/ toggle while retaining raw source bytes.
+   The break after a closing line is outside; an unclosed fence reaches EOF. */
+function fencedReferenceSegments(text){
+  const segments = [];
+  const parts = text.split(/(\r\n|\r|\n)/);
+  let inFence = false;
+  let start = 0;
+  let offset = 0;
+  for (let i = 0; i < parts.length; i += 2) {
+    const line = parts[i];
+    if (/^\s*```/.test(line)) {
+      const end = inFence ? offset + line.length : offset;
+      segments.push({ fenced: inFence, text: text.slice(start, end) });
+      start = end;
+      inFence = !inFence;
+    }
+    offset += line.length;
+    if (i + 1 < parts.length) offset += parts[i + 1].length;
+  }
+  segments.push({ fenced: inFence, text: text.slice(start) });
+  return segments;
+}
+
 export function splitImportRefs(text, nodeId, deps = {}){
   IMPORT_REF_RE.lastIndex = 0;
   if (!IMPORT_REF_RE.test(text || "")) return { clean: text || "", html: "", missing: [] };
@@ -654,7 +677,11 @@ export function splitImportRefs(text, nodeId, deps = {}){
   let nextToken = 0;
   let priorMissingEnd = -1;
   const source = text || "";
-  const clean = source.replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason, offset) => {
+  const clean = fencedReferenceSegments(source).map((segment, index, segments) => {
+    if (segment.fenced) return segment.text;
+    // Replacement offsets and missing-file adjacency belong to this prose only.
+    priorMissingEnd = -1;
+    let outside = segment.text.replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason, offset) => {
     if (reason === "not_found") {
       let name = alt || "file";
       try { name = decodeURIComponent(name); } catch { /* Keep malformed legacy labels as text. */ }
@@ -668,7 +695,11 @@ export function splitImportRefs(text, nodeId, deps = {}){
     priorMissingEnd = -1;
     tiles.push(importTileHTML(nodeId, +turn, +occurrence, reason, alt, bang === "!", deps));
     return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
+    }).replace(/\n{3,}/g, "\n\n");
+    if (index === 0) outside = outside.trimStart();
+    if (index === segments.length - 1) outside = outside.trimEnd();
+    return outside;
+  }).join("");
   return { clean, html: tiles.length ? `<div class="attrow blockedrow">${tiles.join("")}</div>` : "", missing };
 }
 
@@ -680,13 +711,45 @@ export function renderMissingImportText(rendered, missing = []){
 export function splitAssetRefs(text, nodeId, assets, deps = {}){
   const re = deps.assetRefRe || ASSET_REF_RE;
   re.lastIndex = 0;
-  if (!re.test(text || "")) return { clean: text || "", html: "" };
+  if (!re.test(text || "")) return { clean: text || "", html: "", labels: [] };
   const tiles = [];
-  const clean = (text || "").replace(re, (_m, _bang, alt, id) => {
-    tiles.push(assetTileHTML(nodeId, id, alt, (assets || {})[id], deps));
-    return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
+  const labels = [];
+  const seen = new Set();
+  const escape = deps.escape || esc;
+  const source = text;
+  let nextToken = 0;
+  const clean = fencedReferenceSegments(source).map((segment, index, segments) => {
+    if (segment.fenced) return segment.text;
+    let outside = segment.text.replace(/\r\n?/g, "\n").split("\n").map(line => {
+    const inline = !!line.replace(re, "").trim();
+    return line.replace(re, (_m, _bang, alt, id) => {
+      const rec = (assets || {})[id];
+      if (!seen.has(id)) {
+        seen.add(id);
+        tiles.push(assetTileHTML(nodeId, id, alt, rec, deps));
+      }
+      if (!inline) return "";
+      const label = alt.trim() ? alt : (rec?.name || "file");
+      let token;
+      // Reserve tokens against the whole source; splitImportRefs then reserves
+      // its own tokens against clean, which already contains these tokens.
+      do { token = `\uE000${nextToken++}\uE001`; } while (source.includes(token));
+      labels.push({ token, html: escape(label) });
+      return token;
+    });
+    }).join("\n").replace(/\n{3,}/g, "\n\n");
+    // Trim outer prose without altering indented openers or unclosed code tails.
+    if (index === 0) outside = outside.trimStart();
+    if (index === segments.length - 1) outside = outside.trimEnd();
+    return outside;
+  }).join("");
+  return { clean, html: tiles.length ? `<div class="attrow">${tiles.join("")}</div>` : "", labels };
+}
+
+export function assetBubbleBodyHTML(text, nodeId, assets, deps = {}){
+  const a = splitAssetRefs(text, nodeId, assets, deps);
+  const markdown = deps.markdown || md;
+  return renderMissingImportText(markdown(a.clean), a.labels) + a.html;
 }
 
 /* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything
@@ -1448,7 +1511,7 @@ export function createChatFeature(deps){
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
     return `
       <div class="${cls}" ${dataAttrs}>
-		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${renderMissingImportText(markdown(blocked.clean), blocked.missing)}${a.html}${blocked.html}</div>
+		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${renderMissingImportText(renderMissingImportText(markdown(blocked.clean), blocked.missing), a.labels)}${a.html}${blocked.html}</div>
       </div>`;
   }
 
