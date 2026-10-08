@@ -76,7 +76,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   training dataset.
   - Agent file imports record the file's actual basename and extension; link
     labels and image alt text are descriptive only and never authorize inline
-    rendering. Failed explicit attachment references are durable additive
+    rendering. Chat projection keeps the agent's link label as display text,
+    falling back to the recorded file name; the browser shows it inline as plain
+    text, and tiles always use the recorded name.
+    Failed explicit attachment references are durable additive
     `asset_import` events keyed by their owning turn record and occurrence.
     A link whose target currently exists and is not a regular file (such as a
     directory) is a reference, not an attachment: it records no `asset_import`
