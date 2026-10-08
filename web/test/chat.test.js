@@ -53,6 +53,7 @@ import {
    send-to strip). Mechanical import-path move from chat.js. */
 import {
   ASSET_REF_RE,
+  esc,
   stripAssetRefs,
 } from "../js/format.js";
 /* Namespace import for symbols a red commit adds: a missing *named* import is a
@@ -6291,4 +6292,123 @@ test("assetBubbleBodyHTML: preview delegates its bubble body", () => {
   const preview = appSrc.slice(start, appSrc.indexOf('$("#previewbody").innerHTML', start));
   assert.match(preview, /\$\{assetBubbleBodyHTML\(/, "preview bubble must call assetBubbleBodyHTML(");
   assert.doesNotMatch(preview, /md\(s\.clean\)/);
+});
+
+
+const fencedAssetLine = '- want := "see [the report](scimux-asset:a)"';
+const fencedAssetText = `\`\`\`diff\n${fencedAssetLine}\n\`\`\``;
+
+function fencedCodeContents(html){
+  return [...html.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)].map(m => m[1]);
+}
+
+test("splitAssetRefs fenced: known id stays verbatim", () => {
+  const r = splitAssetRefs(fencedAssetText, "n1", inlineAssets);
+  assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(fencedAssetText, "n1", inlineAssets)), [esc(fencedAssetLine)]);
+  assert.equal(r.clean, fencedAssetText);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.labels, []);
+});
+
+test("splitAssetRefs fenced: unknown id makes no unavailable row", () => {
+  const text = fencedAssetText.replaceAll("scimux-asset:a", "scimux-asset:unknown");
+  const html = chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets);
+  assert.doesNotMatch(html, /unavailable|attrow/);
+  assert.deepEqual(fencedCodeContents(html), [esc(fencedAssetLine.replaceAll("scimux-asset:a", "scimux-asset:unknown"))]);
+  assert.equal(splitAssetRefs(text, "n1", inlineAssets).html, "");
+});
+
+test("splitAssetRefs fenced: standalone marker line is retained", () => {
+  const line = "[x](scimux-asset:a)";
+  const text = `\`\`\`\n${line}\n\`\`\``;
+  assert.equal(splitAssetRefs(text, "n1", inlineAssets).clean, text);
+  assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets)), [esc(line)]);
+});
+
+test("splitAssetRefs fenced: blank lines stay inside and collapse outside", () => {
+  const lines = `${fencedAssetLine}\n\n\n\nend`;
+  const fence = `\`\`\`diff\n${lines}\n\`\`\``;
+  const r = inlineAssetResult(`before\n\n\n\nSee [report](scimux-asset:a).\n${fence}\n\n\n\nafter`, inlineAssets);
+  assert.deepEqual(fencedCodeContents(r.body), [esc(lines)]);
+  assert.ok(r.clean.startsWith("before\n\nSee "));
+  assert.ok(r.clean.endsWith("```\n\nafter"));
+});
+
+test("splitAssetRefs fenced: only outside occurrences create tiles", () => {
+  const lines = `${fencedAssetLine}\n![diagram](scimux-asset:b)`;
+  const fence = `\`\`\`diff\n${lines}\n\`\`\``;
+  const r = inlineAssetResult(`${fence}\nSee [outside report](scimux-asset:a).`, inlineAssets);
+  assert.deepEqual(fencedCodeContents(r.body), [esc(lines)]);
+  assert.match(r.body, /<p>See outside report\.<\/p>/);
+  assert.equal((r.html.match(/<a /g) || []).length, 1);
+  assert.doesNotMatch(r.html, /chart\.png/);
+});
+
+test("splitAssetRefs fenced: unclosed fence includes appended attachment", () => {
+  const lines = `sample\n\n[report.pdf](scimux-asset:a)\n\n`;
+  const text = `\`\`\`text\n${lines}`;
+  const r = splitAssetRefs(text, "n1", inlineAssets);
+  assert.equal(r.clean, text);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.labels, []);
+  assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets)), [esc(lines)]);
+});
+
+test("splitAssetRefs fenced: indented info opener and opener marker are preserved", () => {
+  const text = "  ```go [opener](scimux-asset:a)\nvalue\n  ``` [closer](scimux-asset:b)";
+  const r = splitAssetRefs(text, "n1", inlineAssets);
+  assert.equal(r.clean, text);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.labels, []);
+});
+
+for (const [name, newline] of [["CR", "\r"], ["CRLF", "\r\n"]]) {
+  test(`splitAssetRefs fenced: ${name} renders like LF`, () => {
+    const text = fencedAssetText.replaceAll("\n", newline);
+    assert.equal(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets), md(fencedAssetText));
+    assert.equal(splitAssetRefs(text, "n1", inlineAssets).clean, text);
+  });
+}
+
+test("splitAssetRefs fenced: verbatim property across synthetic fixtures", () => {
+  const marker = "[x](scimux-asset:a)";
+  const fixtures = [
+    [fencedAssetText, [fencedAssetLine]],
+    [`\`\`\`\n${marker}\n\`\`\``, [marker]],
+    [`  \`\`\`go\n${marker}\n  \`\`\``, [marker]],
+    [`\`\`\`text ${marker}\n<&>\n\`\`\``, ["<&>"]],
+    [`\`\`\`\n${marker}\n\n\n\nend\n\`\`\``, [`${marker}\n\n\n\nend`]],
+    [`\`\`\`\n${marker}\n\n`, [`${marker}\n\n`]],
+    [fencedAssetText.replaceAll("\n", "\r"), [fencedAssetLine]],
+    [fencedAssetText.replaceAll("\n", "\r\n"), [fencedAssetLine]],
+    [`${fencedAssetText}\nprose\n\`\`\`text\n${marker}\n\`\`\``, [fencedAssetLine, marker]],
+    [`${fencedAssetText}\n\`\`\`text\n${marker}\n\`\`\``, [fencedAssetLine, marker]],
+  ];
+  for (const [text, contents] of fixtures) {
+    assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets)), contents.map(esc), text);
+  }
+});
+
+test("splitAssetRefs fenced: synthetic report reproduction has six quoted markers", () => {
+  const diff = Array.from({ length: 4 }, (_, i) => `- want := "here: [sketch ${i}](scimux-asset:quote_${i})"`).join("\n");
+  const plain = "[report](scimux-asset:quote_4)\n![diagram](scimux-asset:quote_5)";
+  const text = `The synthetic checks preserve the quoted fixtures.\n\n\`\`\`diff\n${diff}\n\`\`\`\n\nResults are recorded below.\n\n\`\`\`text\n${plain}\n\`\`\``;
+  const html = chatmod.assetBubbleBodyHTML(text, "n1", {});
+  assert.doesNotMatch(html, /<a |unavailable|attrow/);
+  assert.deepEqual(fencedCodeContents(html), [esc(diff), esc(plain)]);
+});
+
+test("splitAssetRefs fenced: live render has no media class or attachment row", async () => {
+  const ctx = makeFeature({ chatPayload: {
+    ...defaultChatPayload(),
+    turns: [{ role: "assistant", text: fencedAssetText }],
+    assets: inlineAssets,
+  } });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const html = ctx.roots.msgs.innerHTML;
+  assert.doesNotMatch(html, /attrow|class="turn assistant media"/);
+  assert.match(html, /class="turn assistant"/);
+  assert.deepEqual(fencedCodeContents(html), [esc(fencedAssetLine)]);
+  ctx.feature.destroy();
 });
