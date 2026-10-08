@@ -78,7 +78,9 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     labels and image alt text are descriptive only and never authorize inline
     rendering. Chat projection keeps the agent's link label as display text,
     falling back to the recorded file name; the browser shows it inline as plain
-    text, and tiles always use the recorded name.
+    text, and tiles always use the recorded name. Attachment markers inside
+    fenced code blocks are shown verbatim in chat, matching ingest and
+    projection, which never treat fenced references as attachments.
     Failed explicit attachment references are durable additive
     `asset_import` events keyed by their owning turn record and occurrence.
     A link whose target currently exists and is not a regular file (such as a
