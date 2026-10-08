@@ -6258,3 +6258,37 @@ test("splitAssetRefs inline: absent asset map uses file fallback", () => {
   assert.equal(chatmod.renderMissingImportText(md(r.clean), r.labels), "<p>See file.</p>");
   assert.match(r.html, /missing/);
 });
+
+test("assetBubbleBodyHTML: default markdown renders inline labels and tiles", () => {
+  assert.equal(typeof chatmod.assetBubbleBodyHTML, "function", "assetBubbleBodyHTML must be exported");
+  const html = chatmod.assetBubbleBodyHTML("Created **the** [*overview*](scimux-asset:a).", "n1", inlineAssets);
+  assert.match(html, /^<p>Created <strong>the<\/strong> \*overview\*\.<\/p><div class="attrow">/);
+  assert.doesNotMatch(html, /<em>/);
+  assert.match(html, /download="overview\.md"/);
+});
+
+test("assetBubbleBodyHTML: injected markdown receives clean tokens", () => {
+  assert.equal(typeof chatmod.assetBubbleBodyHTML, "function", "assetBubbleBodyHTML must be exported");
+  let input;
+  const html = chatmod.assetBubbleBodyHTML("See [<diagram>](scimux-asset:b).", "n1", inlineAssets, {
+    markdown: clean => { input = clean; return `<section>${clean}</section>`; },
+  });
+  assert.doesNotMatch(input, /<diagram>|scimux-asset/);
+  assert.match(html, /^<section>See &lt;diagram&gt;\.<\/section><div class="attrow">/);
+  assert.match(html, /class="attthumb"/);
+});
+
+for (const text of ["", null]) {
+  test(`assetBubbleBodyHTML: handles ${JSON.stringify(text)} text`, () => {
+    assert.equal(typeof chatmod.assetBubbleBodyHTML, "function", "assetBubbleBodyHTML must be exported");
+    assert.equal(chatmod.assetBubbleBodyHTML(text, "n1", {}), "");
+  });
+}
+
+test("assetBubbleBodyHTML: preview delegates its bubble body", () => {
+  const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+  const start = appSrc.indexOf("const rows = turns.map");
+  const preview = appSrc.slice(start, appSrc.indexOf('$("#previewbody").innerHTML', start));
+  assert.match(preview, /\$\{assetBubbleBodyHTML\(/, "preview bubble must call assetBubbleBodyHTML(");
+  assert.doesNotMatch(preview, /md\(s\.clean\)/);
+});
