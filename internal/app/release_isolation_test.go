@@ -48,7 +48,7 @@ func TestWorkflowJobsUsePinnedContainersAndCleanWorkspaces(t *testing.T) {
 		{"release-worker.yml", "build-and-test:"},
 		{"release-worker.yml", "publish:"},
 	}
-	image := regexp.MustCompile(`(?m)^\s*image: golang:1\.26\.8-alpine@sha256:[0-9a-f]{64}$`)
+	image := regexp.MustCompile(`(?m)^\s*image: golang:1\.26\.9-alpine@sha256:[0-9a-f]{64}$`)
 	for _, lane := range lanes {
 		t.Run(lane.file+"/"+lane.job, func(t *testing.T) {
 			src := stripYAMLComments(mustReadFile(t, filepath.Join(repoRootFromTest(t), ".github/workflows", lane.file)))

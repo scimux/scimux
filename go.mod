@@ -7,7 +7,7 @@ go 1.26.0
 // with known standard-library defects. CI resolves this version and builds what
 // users download on a patched toolchain; a developer running GOTOOLCHAIN=local
 // may still use theirs because the release gate is enforced in the workflows.
-toolchain go1.26.8
+toolchain go1.26.9
 
 // builds/ is the gitignored directory the workflows write release binaries
 // into, and review sandboxes have parked whole GOCACHE trees under it. It
@@ -41,7 +41,7 @@ require (
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
