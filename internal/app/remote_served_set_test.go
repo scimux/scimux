@@ -125,7 +125,7 @@ func TestServedAssetInventoryIsDerivedAndNonEmpty(t *testing.T) {
 	}
 	for kind, want := range map[string]int{
 		"index": 1,
-		"js":    33,
+		"js":    34,
 		"css":   10,
 		"asset": 18,
 	} {

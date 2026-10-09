@@ -17,6 +17,7 @@ var productionJSURLs = []string{
 	"/js/bookmark-capture.js",
 	"/js/bootstrap.js",
 	"/js/bookmarks.js",
+	"/js/burger-menu.js",
 	"/js/cards.js",
 	"/js/caret.js",
 	"/js/chat.js",
