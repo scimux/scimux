@@ -25,7 +25,7 @@ You can also download a binary from the
 [releases page](https://github.com/scimux/scimux/releases) or build it yourself:
 
 Source builds require Go 1.26 or later. With Go's default
-`GOTOOLCHAIN=auto`, this module selects the patched Go 1.26.8 toolchain.
+`GOTOOLCHAIN=auto`, this module selects the patched Go 1.26.9 toolchain.
 
 ```sh
 env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux
