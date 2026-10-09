@@ -54,11 +54,11 @@ const ALLOWLIST = [
    * classification, not because the detector stopped seeing them. A URL inside
    * any wrapper other than assetURL(...) remains a finding. */
 
-  /* app.js sets the release-page href from update-check data. The value is
+  /* burger-menu.js sets the release-page href from update-check data. The value is
    * dynamic, and it is EXTERNAL by intent (a github release URL, with a
    * github fallback) — recorded here with that reason rather than omitted,
    * because a dynamic href is exactly what a syntax audit cannot classify. */
-  { file: "js/app.js", kind: "dom-url", detail: "prop:href:dynamic", count: 1 },
+  { file: "js/burger-menu.js", kind: "dom-url", detail: "prop:href:dynamic", count: 1 },
 
   /* The preview receives URLs already produced by app.js/chat.js through the
    * injected assetURL transport seam. It only assigns that opaque result to
@@ -79,7 +79,7 @@ const ALLOWLIST = [
   { file: "js/chat.js", kind: "nav-bypass", detail: "download:valued", count: 2 }, /* explicit filename required for blob URLs */
 
   /* index.html:400 — <a id="m_relurl" target="_blank"> with NO href in markup;
-   * app.js assigns it (see prop:href:dynamic above). Allowlisted with that
+   * burger-menu.js assigns it (see prop:href:dynamic above). Allowlisted with that
    * cross-reference because the element alone carries no URL to classify.
    * Owed to S8. */
   { file: "index.html", kind: "nav-bypass", detail: "blank:unknown", count: 2 }, /* release link + preview external action */

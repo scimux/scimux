@@ -21,6 +21,7 @@ var productionJSModules = []string{
 	// connection that starts it is FR-41's half of S8.
 	"web/js/bootstrap.js",
 	"web/js/bookmarks.js",
+	"web/js/burger-menu.js",
 	"web/js/cards.js",
 	"web/js/caret.js",
 	"web/js/chat.js",

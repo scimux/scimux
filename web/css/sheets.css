@@ -87,6 +87,10 @@
 /* burger menu: update row + about ([hidden] must beat the display rules above) */
 .sheet .item[hidden], .sheet .cta[hidden] { display: none; }
 #m_check { color: var(--work); font-size: 16px; line-height: 1; }
+#menu > .menu-section > summary { min-height: 44px; cursor: pointer;
+  color: var(--dim); font-size: 12px; letter-spacing: .04em; line-height: 44px; }
+#menu > .menu-section[hidden] { display: none; }
+#menu > .menu-section > summary:focus-visible { outline: 2px solid var(--work); outline-offset: 2px; }
 #menu .lic { text-decoration: underline dotted; }
 #m_notes { max-height: 40dvh; overflow-y: auto; margin-top: 12px; padding-top: 10px;
   border-top: 1px solid var(--hairline); font-size: 14px; }

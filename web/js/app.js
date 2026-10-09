@@ -108,6 +108,7 @@ import {
   createScimuxUpdateCheck, runHarnessMenuCheck, acceptHarnessMenuResult,
   updateVibeInspectControl, clearVibeInspectChoice,
 } from "./harness.js";
+import { createMenuReleaseView } from "./burger-menu.js";
 import { createAssetPreview, bindAssetPreviewLinks } from "./asset-preview.js";
 import { createSearchFeature, buildPendingJump } from "./search.js";
 import {
@@ -1837,9 +1838,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   $("#sys").addEventListener("click", (e) => {
     const badge = e.target && e.target.closest ? e.target.closest("[data-usage-off]") : null;
     if (!badge) return;
-    $("#burger").click();
-    const sec = $("#m_harnesses");
-    if (sec && sec.scrollIntoView) sec.scrollIntoView({ block: "center" });
+    openAttachmentSettings($("#burger"), $("#m_harnesses"));
   });
   $("#m_homescreen").addEventListener("click", () => {
     sheetsFeature.closeSheets();
@@ -1864,26 +1863,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      The check and the download run only on an explicit tap; the server never
      phones home on its own. The install is confirm-first, and the button walks
      through honest states (checking → available → updating → switching). */
-  function renderUpdateInfo(info){
-    const tag = $("#m_version");
-    tag.textContent = info.current;
-    $("#m_result").hidden = false;
-    $("#m_reltext").textContent = info.available
-      ? info.latest + " available" : "up to date (" + info.latest + ")";
-    $("#m_relurl").href = info.url || "https://github.com/scimux/scimux/releases";
-    $("#m_apply").hidden = !info.available;
-    $("#m_notes").innerHTML = info.available ? md(info.notes || "") : "";
-    $("#m_notes").hidden = !info.available || !info.notes;
-  }
   const scimuxUpdate = createScimuxUpdateCheck({
     read: () => api("/api/update/check"),
-    checking: () => { $("#m_version").textContent = "checking…"; },
-    result: renderUpdateInfo,
-    failed: () => {
-      $("#m_version").textContent = "check failed";
-      $("#m_apply").hidden = true;
-      $("#m_notes").hidden = true;
-    },
+    ...createMenuReleaseView($, md),
   });
   $("#m_check").addEventListener("click", () => { void scimuxUpdate.runButton($("#m_check")); });
   $("#m_apply").addEventListener("click", async () => {
