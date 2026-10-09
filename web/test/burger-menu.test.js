@@ -6,10 +6,10 @@ import { createApp, mountHarnessRows } from '../js/app.js';
 import { openAttachmentSettings } from '../js/harness.js';
 
 // Structural parser only: interaction tests below execute the shipped functions.
-function markup() {
+function markup(html = readFileSync(new URL('../index.html', import.meta.url), 'utf8')) {
   const root = { tag: 'root', attrs: {}, children: [] }, stack = [root], ids = new Map();
-  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8').replace(/<!--[\s\S]*?-->/g, '');
-  for (const m of html.matchAll(/<\/?([\w-]+)\b([^>]*)>|([^<]+)/g)) {
+  for (const m of html.matchAll(/<!--[\s\S]*?-->|<\/?([\w-]+)\b([^<>]*)>|([^<]+)/g)) {
+    if (m[0].startsWith('<!--')) continue;
     if (m[3]) { stack.at(-1).text = (stack.at(-1).text || '') + m[3]; continue; }
     if (m[0].startsWith('</')) { stack.pop(); continue; }
     const attrs = Object.fromEntries([...m[2].matchAll(/([\w-]+)(?:="([^"]*)"|='([^']*)')?/g)].map(a => [a[1], a[2] ?? a[3] ?? '']));
@@ -23,6 +23,13 @@ function markup() {
 const owner = el => { while (el && el.parent?.attrs.id !== 'menu') el = el.parent; return el?.attrs.id; };
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); await new Promise(r => setImmediate(r)); };
+
+test('structural parsing skips comments without joining fragments into new elements', () => {
+  const { ids } = markup('<div id="fixture"><!-- <input id="commented"> --><inp<!-- gap -->ut id="joined"><span id="visible">kept</span></div>');
+  assert.deepEqual([...ids.keys()], ['fixture', 'visible']);
+  assert.equal(ids.get('visible').parent, ids.get('fixture'));
+  assert.equal(ids.get('visible').text, 'kept');
+});
 
 test('four native menu sections have exact order, defaults, unique IDs and content ownership', () => {
   const { ids } = markup(), menu = ids.get('menu');
@@ -91,6 +98,8 @@ async function appFixture(t, { remote = { hosted: 'enrolled', can_pair: true }, 
 
 test('Claude usage click executes composition navigation for closed and open menus', async t => {
   const s = await appFixture(t);
+  // Exercise the menu-opening fallback with a DOM fake lacking matches().
+  s.get('menu').matches = undefined;
   for (const open of [false, true]) {
     s.get('menu').classList.toggle('open', open);
     const details = s.get('m_harness_section');
