@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3763,6 +3764,7 @@ func TestManagerClearOldApprovalBlockedOnGateRejected(t *testing.T) {
 	s := m.session("n1")
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	finished := make(chan struct{})
 	t.Cleanup(func() {
 		select {
 		case <-release:
@@ -3780,6 +3782,9 @@ func TestManagerClearOldApprovalBlockedOnGateRejected(t *testing.T) {
 			<-release
 		}
 		s.onApproval(a)
+		if a.ApprovalID == "ap-old" {
+			close(finished)
+		}
 	})
 	errc := make(chan error, 1)
 	go func() { errc <- m.Clear("n1") }()
@@ -3795,6 +3800,11 @@ func TestManagerClearOldApprovalBlockedOnGateRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("released approval callback did not finish")
+	}
 	drainGap(t, srv, m.logPath("n1"), "old-ap-gate")
 	if m.Attention("n1") == "approval" {
 		p, ok := m.Pending("n1")
@@ -3804,6 +3814,111 @@ func TestManagerClearOldApprovalBlockedOnGateRejected(t *testing.T) {
 	}
 	if p, ok := m.Pending("n1"); ok && strings.Contains(p.Title, "rm") {
 		t.Fatal("old approval became pending after seam")
+	}
+}
+
+func TestManagerStaleApprovalCallbackPreservesCurrentPending(t *testing.T) {
+	m, _, _, _ := launchOK(t, t.TempDir())
+	s := m.session("n1")
+	s.client.approvals.setRequested(Approval{
+		ApprovalID: "ap-current", SessionID: "sess-1",
+		Subject: Subject{Kind: "shell", Command: "ls"},
+		Choices: []Choice{{ChoiceID: "abort", Decision: "abort"}},
+	})
+	s.syncPendingFromClient()
+	s.mu.Lock()
+	before := s.pending
+	s.prepared = map[string]permFence{"prepared": {Incarn: "current", ApprovalID: "ap-current"}}
+	s.mu.Unlock()
+	if before == nil {
+		t.Fatal("fixture has no current approval")
+	}
+	s.onApproval(Approval{ApprovalID: "ap-foreign", SessionID: "other-session"})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending != before || len(s.prepared) != 1 || s.prepared["prepared"].ApprovalID != "ap-current" {
+		t.Fatal("foreign callback changed the current approval or prepared decision")
+	}
+}
+
+func TestManagerAdmittedCallbacksStopBeforeProcessing(t *testing.T) {
+	for _, kind := range []string{"event", "approval"} {
+		t.Run(kind, func(t *testing.T) {
+			log := &holdLog{}
+			s := &nodeSession{procAlive: true, logw: log, done: make(chan struct{})}
+			s.lockCallbacks()
+			gateHeld := true
+			callbackDone := make(chan struct{})
+			t.Cleanup(func() {
+				if gateHeld {
+					s.unlockCallbacks()
+				}
+				select {
+				case <-callbackDone:
+				case <-time.After(3 * time.Second):
+					t.Error("callback did not finish after releasing its gate")
+				}
+			})
+			go func() {
+				defer close(callbackDone)
+				if kind == "event" {
+					s.onClientEvent("", Event{T: "assistant", Text: "late output"})
+				} else {
+					s.onApproval(Approval{ApprovalID: "late-approval"})
+				}
+			}()
+
+			// The callback gate has no notification API. A goroutine snapshot
+			// proves this callback reached that gate AFTER admission, rather than
+			// guessing with a sleep or adding a hook to production. Holding the
+			// gate keeps that observed state stable until we release it.
+			buf := make([]byte, 1<<20)
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				n := runtime.Stack(buf, true)
+				if n == len(buf) {
+					buf = make([]byte, 2*len(buf))
+					continue
+				}
+				blocked := false
+				for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
+					if strings.Contains(stack, "TestManagerAdmittedCallbacksStopBeforeProcessing.") &&
+						strings.Contains(stack, "(*nodeSession).lockCallbacks(") {
+						blocked = true
+						break
+					}
+				}
+				if blocked {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("callback never reached the gate after admission")
+				}
+				runtime.Gosched()
+			}
+			stopped := make(chan error, 1)
+			go func() { stopped <- s.stop() }()
+			select {
+			case <-s.done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("stop did not close the session")
+			}
+			s.unlockCallbacks()
+			gateHeld = false
+			select {
+			case err := <-stopped:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("stop did not join the admitted callback")
+			}
+			log.mu.Lock()
+			defer log.mu.Unlock()
+			if len(log.evs) != 0 || s.Attention() != "" {
+				t.Fatal("callback published output or approval after stop")
+			}
+		})
 	}
 }
 

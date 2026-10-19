@@ -20,6 +20,25 @@ type pipeTr struct {
 	once sync.Once
 }
 
+// Peer EOF is observable before NewClient's Done-mirroring goroutine runs.
+// Neither the closed flag nor Done may hide this independently useful signal.
+func TestClientLiveSeesPeerEOFBeforeDoneMirroring(t *testing.T) {
+	peerDone := make(chan struct{})
+	c := &Client{done: make(chan struct{}), peer: &peer{closeCh: peerDone}}
+	if err := c.Live(); err != nil {
+		t.Fatalf("live peer: %v", err)
+	}
+	close(peerDone)
+	if err := c.Live(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("peer EOF: %v, want ErrClosed", err)
+	}
+	select {
+	case <-c.Done():
+		t.Fatal("fixture must observe EOF before Done mirroring")
+	default:
+	}
+}
+
 func (p *pipeTr) Stdin() io.WriteCloser { return p.w }
 func (p *pipeTr) Stdout() io.Reader     { return p.r }
 func (p *pipeTr) Close() error {

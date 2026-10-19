@@ -7,7 +7,42 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pion/webrtc/v4"
 )
+
+func TestDCStreamWriteAfterClose(t *testing.T) {
+	s := &dcStream{closeCh: make(chan struct{})}
+	close(s.closeCh)
+	if n, err := s.Write([]byte("request")); n != 0 || !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("closed write = %d, %v; want 0, ErrClosedPipe", n, err)
+	}
+}
+
+func TestDCStreamWriteBeforeDataChannelOpen(t *testing.T) {
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	dc, err := pc.CreateDataChannel("unopened", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dc.ReadyState() != webrtc.DataChannelStateConnecting {
+		t.Fatal("fixture must not negotiate a data channel")
+	}
+	s := newDCStream(dc)
+	t.Cleanup(func() { _ = s.Close() })
+	if n, err := s.Write([]byte("request")); n != 0 || err == nil {
+		t.Fatalf("unopened write = %d, %v; want 0 and a send error", n, err)
+	}
+	select {
+	case <-s.closeCh:
+		t.Fatal("send failure must precede stream closure")
+	default:
+	}
+}
 
 // TestDCStreamWaitOpen exercises waitOpen against a channel-only dcStream —
 // no pion DataChannel and no real WebRTC session.

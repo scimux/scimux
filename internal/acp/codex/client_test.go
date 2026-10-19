@@ -49,6 +49,41 @@ func newClientWithMock(t *testing.T) (*Client, *mockServer, *eventCollector) {
 	return c, ms, col
 }
 
+func TestRunTurnPeerClosedBeforeStartResponse(t *testing.T) {
+	c, ms, _ := newClientWithMock(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- c.RunTurn(ctx, "thread-closed", "hello") }()
+	req := ms.nextReq(t)
+	if req.Method != "turn/start" {
+		t.Fatalf("request = %q, want turn/start", req.Method)
+	}
+	// Deliver the lifecycle signal before releasing the RPC result. Otherwise
+	// RPC failure and Done race to report the same peer exit through two paths.
+	c.doneOnce.Do(func() { close(c.done) })
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "peer closed during turn") {
+			t.Fatalf("RunTurn after peer exit = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("peer exit did not release the turn-start wait")
+	}
+	// A detached start result arriving later must not resurrect this turn.
+	ms.reply(t, req.ID, `{"turn":{"id":"late-turn"}}`)
+	waitFor(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.unresolvedStarts) == 0
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.turnDone != nil || c.curTurnID != "" || !c.turnTerminal {
+		t.Fatal("late start response resurrected the closed turn")
+	}
+}
+
 // happy-path result body for thread/start, with the effective policy differing
 // from what a caller might request (exercises the read-back).
 const threadStartResult = `{"thread":{"id":"THREAD-1","path":"/scrubbed/rollout.jsonl"},"model":"gpt-5.5","approvalPolicy":"on-request","sandbox":{"type":"workspaceWrite"},"reasoningEffort":"high"}`

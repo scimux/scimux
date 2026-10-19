@@ -73,57 +73,76 @@ func TestS5R6_F1_HostedWait404ThenFreshChallengeStaysEnrolled(t *testing.T) {
 	waitHosted(t, cmd, "enrolled", 3*time.Second)
 }
 
-func TestS5R6_F1_HostedWait404ThenChallengeRevokeStopsEveryRID(t *testing.T) {
+func TestS5R6_F1_HostedWait404ThenChallengeRejectionRecoversEveryRID(t *testing.T) {
 	srv := newR6TransitionRV(t)
 	data := t.TempDir()
 	writeEnrolledStateWithTwoDevices(t, data)
-	cmd := &Command{
-		ExperimentalRemote: true,
-		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout:             io.Discard,
-		Stderr:             new(bytes.Buffer),
-		Home:               t.TempDir(),
-		Config: remote.Config{
-			DataDir:       data,
-			RendezvousURL: srv.URL,
-			HTTPClient:    srv.Client,
-			NewTerminal:   noTestTerminal,
-			Backoff: remote.BackoffConfig{
-				Initial:    20 * time.Millisecond,
-				Max:        200 * time.Millisecond,
-				Factor:     2,
-				Jitter:     0,
-				SuccessFor: 5 * time.Second,
-			},
-		},
-	}
+	before := readRemoteIdentity(t, data)
+	sched := newHostedRetryScheduler()
+	cmd := remoteCmd(t, data, srv.URL, srv.Client)
+	cmd.Config.Scheduler = sched
+	cmd.Config.Backoff = remote.BackoffConfig{Initial: 20 * time.Millisecond, Max: 200 * time.Millisecond, Factor: 2, SuccessFor: 5 * time.Second}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := cmd.Run(ctx); err != nil {
-		t.Fatalf("F1: run: %v", err)
+		t.Fatalf("run: %v", err)
 	}
 	t.Cleanup(func() {
 		if cmd.Client() != nil {
 			_ = cmd.Client().Close()
 		}
 	})
-
-	w1 := srv.WaitHeld(t, 5*time.Second)
-	w2 := srv.WaitHeld(t, 5*time.Second)
-	nChal := srv.ChallengeCount()
-	nWait := srv.WaitArrived()
+	w1 := srv.WaitHeld(t, 3*time.Second)
+	w2 := srv.WaitHeld(t, 3*time.Second)
+	if w1.ID == w2.ID {
+		t.Fatal("initial waits did not cover both devices")
+	}
 	assertHostedStatus(t, cmd, "enrolled")
 	srv.SetChallengeRevoke(true)
 	srv.Release(w1, waitReleaseRevoked)
 	srv.Release(w2, waitReleaseRevoked)
-	waitHosted(t, cmd, "revoked", 5*time.Second)
-	assertPersistedRemoteStatus(t, data, remote.StateRevoked)
-	if srv.ChallengeCount() <= nChal {
-		t.Fatalf("F1: wait rejection did not look up a challenge: %d -> %d", nChal, srv.ChallengeCount())
+	retries := []*hostedRetry{sched.next(t), sched.next(t)}
+	nWait := srv.WaitArrived()
+	for round := 0; round < 3; round++ {
+		for i, retry := range retries {
+			nChal := srv.ChallengeCount()
+			sched.fire(t, retry)
+			retries[i] = sched.next(t)
+			assertHostedStatus(t, cmd, "unavailable")
+			if srv.ChallengeCount() != nChal+1 || srv.WaitArrived() != nWait {
+				t.Fatal("challenge rejection did not block authentication and retain a retry")
+			}
+			if !bytes.Equal(before, readRemoteIdentity(t, data)) {
+				t.Fatal("rejection changed enrollment, keys, handle or devices")
+			}
+		}
 	}
-	time.Sleep(80 * time.Millisecond)
-	if srv.WaitArrived() > nWait+2 {
-		t.Fatalf("F1: still reconnecting after challenge revoke: waits %d -> %d", nWait, srv.WaitArrived())
+	// Neither loop can recover until all failure-state observations are made.
+	srv.SetChallengeRevoke(false)
+	for _, retry := range retries {
+		sched.fire(t, retry)
+	}
+	resumed := []*r6HeldWait{srv.WaitHeld(t, 3*time.Second), srv.WaitHeld(t, 3*time.Second)}
+	seen := map[string]bool{}
+	for _, wait := range resumed {
+		if wait.Challenge == w1.Challenge || wait.Challenge == w2.Challenge {
+			t.Fatal("recovery reused a rejected challenge")
+		}
+		assertHostedWaitSignature(t, before, wait.Challenge, wait.Sig)
+		seen[wait.ID] = true
+		srv.Release(wait, waitReleaseNoContent)
+		_ = sched.next(t)
+	}
+	if !seen[w1.ID] || !seen[w2.ID] {
+		t.Fatal("both device loops did not recover")
+	}
+	assertHostedStatus(t, cmd, "enrolled")
+	if !bytes.Equal(before, readRemoteIdentity(t, data)) {
+		t.Fatal("recovery changed enrollment or devices")
+	}
+	devices, err := cmd.Client().Devices()
+	if err != nil || len(devices) != 2 {
+		t.Fatalf("recovered devices = %v, %v", devices, err)
 	}
 }
 
@@ -179,6 +198,8 @@ type r6HeldWait struct {
 	release   chan int
 	done      chan struct{}
 	Challenge string
+	Sig       string
+	ID        string
 }
 
 type r6TransitionRV struct {
@@ -276,9 +297,11 @@ func (s *r6TransitionRV) serve(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		var req struct {
 			Challenge string `json:"challenge"`
+			Sig       string `json:"sig"`
+			ID        string `json:"id"`
 		}
 		_ = json.Unmarshal(body, &req)
-		h := &r6HeldWait{w: w, r: r, release: make(chan int, 1), done: make(chan struct{}), Challenge: req.Challenge}
+		h := &r6HeldWait{w: w, r: r, release: make(chan int, 1), done: make(chan struct{}), Challenge: req.Challenge, Sig: req.Sig, ID: req.ID}
 		s.held <- h
 		how := waitReleaseNoContent
 		select {
