@@ -1,6 +1,8 @@
 package acp
 
 import (
+	"bufio"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,14 +96,39 @@ func TestTerminateGroupStopsWatchingOnceTheGroupHasLeft(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process-group signalling is POSIX-specific")
 	}
-	cmd := exec.Command("bash", "--norc", "-c", "exit 0")
+	// Keep cat alive until TerminateGroup sends SIGTERM. An immediate
+	// exit could take the already-gone fast path without testing the reaper.
+	cmd := exec.Command("cat")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	pgid := cmd.Process.Pid
-	t.Cleanup(func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
-	go func() { _ = cmd.Wait() }()
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() {
+		_ = in.Close()
+		select {
+		case <-reaped:
+		default:
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			<-reaped
+		}
+	})
+	if _, err := io.WriteString(in, "ready\n"); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(out).ReadString('\n'); err != nil || line != "ready\n" {
+		t.Fatalf("cat readiness = %q, %v", line, err)
+	}
 
 	start := time.Now()
 	TerminateGroup(pgid)
@@ -109,5 +136,15 @@ func TestTerminateGroupStopsWatchingOnceTheGroupHasLeft(t *testing.T) {
 	// grace period elapses, so a return inside it is a SIGKILL not sent.
 	if waited := time.Since(start); waited >= groupTermGrace {
 		t.Fatalf("watched an already-empty group for the full grace period: %v", waited)
+	}
+	<-reaped
+	if err := syscall.Kill(-pgid, 0); err != syscall.ESRCH {
+		t.Fatalf("terminated group still exists: %v", err)
+	}
+	// The same operation must also return promptly for an already reaped group.
+	start = time.Now()
+	TerminateGroup(pgid)
+	if waited := time.Since(start); waited >= groupTermGrace {
+		t.Fatalf("waited for an already reaped group: %v", waited)
 	}
 }

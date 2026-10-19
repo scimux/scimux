@@ -479,8 +479,20 @@ func TestS5R4_F4_DeviceMutationValidation(t *testing.T) {
 		_ = c2.Close()
 		cfg.InviteFile = ""
 		c3 := NewClient(cfg)
-		if err := c3.Start(ctx); err == nil || classOf(err) != ClassRevoked {
-			t.Fatalf("F4: want revoked start, got %v", err)
+		if err := c3.Start(ctx); err != nil || c3.HostedStatus() != "unavailable" {
+			t.Fatalf("F4: server rejection must remain recoverable: hosted=%q err=%v", c3.HostedStatus(), err)
+		}
+		_ = c3.Close()
+		// Only an explicitly persisted revoked record rejects local operations.
+		st := mustState(t, c3.StatePath())
+		st.Status = StateRevoked
+		writeState(t, c3, st)
+		c3 = NewClient(cfg)
+		defer c3.Close()
+		n := fake.RequestCount()
+		requireClass(t, c3.Start(ctx), ClassRevoked)
+		if fake.RequestCount() != n {
+			t.Fatal("persisted revocation contacted rendezvous")
 		}
 		assertUnchanged(t, c3, func() error {
 			_, err := c3.RegisterDevice(ctx, DeviceRecord{ID: "phone", PubKey: goodKey})

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,30 +24,15 @@ func TestS5R5_F2_HostedStatusWaitChallengeTransitions(t *testing.T) {
 	srv := newTransitionRV(t)
 	data := t.TempDir()
 	writeEnrolledStateWithDevice(t, data)
-	cmd := &Command{
-		ExperimentalRemote: true,
-		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout:             io.Discard,
-		Stderr:             new(bytes.Buffer),
-		Home:               t.TempDir(),
-		Config: remote.Config{
-			DataDir:       data,
-			RendezvousURL: srv.URL,
-			HTTPClient:    srv.Client,
-			NewTerminal:   noTestTerminal,
-			Backoff: remote.BackoffConfig{
-				Initial:    20 * time.Millisecond,
-				Max:        200 * time.Millisecond,
-				Factor:     2,
-				Jitter:     0,
-				SuccessFor: 5 * time.Second,
-			},
-		},
-	}
+	before := readRemoteIdentity(t, data)
+	sched := newHostedRetryScheduler()
+	cmd := remoteCmd(t, data, srv.URL, srv.Client)
+	cmd.Config.Scheduler = sched
+	cmd.Config.Backoff = remote.BackoffConfig{Initial: 20 * time.Millisecond, Max: 200 * time.Millisecond, Factor: 2, SuccessFor: 5 * time.Second}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if err := cmd.Run(ctx); err != nil {
-		t.Fatalf("F2: run: %v", err)
+		t.Fatalf("run: %v", err)
 	}
 	t.Cleanup(func() {
 		if cmd.Client() != nil {
@@ -56,45 +40,57 @@ func TestS5R5_F2_HostedStatusWaitChallengeTransitions(t *testing.T) {
 		}
 	})
 
-	w1 := srv.WaitHeld(t, 5*time.Second)
+	w1 := srv.WaitHeld(t, 3*time.Second)
 	assertHostedStatus(t, cmd, "enrolled")
 	srv.Release(w1, waitReleaseNoContent)
+	retry := sched.next(t)
+	sched.fire(t, retry)
 
-	w2 := srv.WaitHeld(t, 5*time.Second)
+	w2 := srv.WaitHeld(t, 3*time.Second)
 	srv.Release(w2, waitReleaseHangup)
-	waitHosted(t, cmd, "unavailable", 3*time.Second)
+	retry = sched.next(t)
+	assertHostedStatus(t, cmd, "unavailable")
+	sched.fire(t, retry)
 
-	w3 := srv.WaitHeld(t, 5*time.Second)
+	w3 := srv.WaitHeld(t, 3*time.Second)
 	assertHostedStatus(t, cmd, "unavailable")
 	srv.Release(w3, waitReleaseNoContent)
-	waitHosted(t, cmd, "enrolled", 3*time.Second)
+	retry = sched.next(t)
+	assertHostedStatus(t, cmd, "enrolled")
+	sched.fire(t, retry)
 
-	nChal := srv.ChallengeCount()
-	nWait := srv.WaitArrived()
-	w4 := srv.WaitHeld(t, 5*time.Second)
+	w4 := srv.WaitHeld(t, 3*time.Second)
 	assertHostedStatus(t, cmd, "enrolled")
 	srv.SetRevoke(true)
 	srv.Release(w4, waitReleaseRevoked)
-	waitHosted(t, cmd, "revoked", 3*time.Second)
-
-	raw, err := os.ReadFile(filepath.Join(data, remote.PrivateDirName, remote.StateFileName))
-	if err != nil {
-		t.Fatal(err)
+	retry = sched.next(t)
+	nWait := srv.WaitArrived()
+	for i := 0; i < 3; i++ {
+		nChal := srv.ChallengeCount()
+		sched.fire(t, retry)
+		retry = sched.next(t)
+		assertHostedStatus(t, cmd, "unavailable")
+		if srv.ChallengeCount() != nChal+1 || srv.WaitArrived() != nWait {
+			t.Fatal("rejected challenge did not block authentication and schedule a fresh attempt")
+		}
+		if !bytes.Equal(before, readRemoteIdentity(t, data)) {
+			t.Fatal("rejection rewrote enrollment")
+		}
 	}
-	var st remote.PersistedState
-	if err := json.Unmarshal(raw, &st); err != nil {
-		t.Fatal(err)
+	// Observe failures before allowing recovery.
+	srv.SetRevoke(false)
+	sched.fire(t, retry)
+	recovered := srv.WaitHeld(t, 3*time.Second)
+	if recovered.Challenge == w4.Challenge {
+		t.Fatal("recovery reused the rejected wait's challenge")
 	}
-	if st.Status != remote.StateRevoked {
-		t.Fatalf("F2: persisted status = %q, want revoked; bytes=%s", st.Status, raw)
-	}
-
-	time.Sleep(80 * time.Millisecond)
-	if srv.WaitArrived() > nWait+1 {
-		t.Fatalf("F2: still reconnecting after revoke: waits %d -> %d", nWait, srv.WaitArrived())
-	}
-	if srv.ChallengeCount() <= nChal {
-		t.Fatalf("F2: wait rejection did not look up a fresh challenge: chal %d -> %d", nChal, srv.ChallengeCount())
+	assertHostedWaitSignature(t, before, recovered.Challenge, recovered.Sig)
+	assertHostedStatus(t, cmd, "unavailable")
+	srv.Release(recovered, waitReleaseNoContent)
+	_ = sched.next(t)
+	assertHostedStatus(t, cmd, "enrolled")
+	if !bytes.Equal(before, readRemoteIdentity(t, data)) {
+		t.Fatal("recovery changed identity or devices")
 	}
 }
 
@@ -162,6 +158,9 @@ const (
 )
 
 type heldWait struct {
+	Challenge string
+	Sig       string
+
 	w       http.ResponseWriter
 	r       *http.Request
 	release chan int
@@ -241,6 +240,7 @@ func (s *transitionRV) serve(w http.ResponseWriter, r *http.Request) {
 	case "/v1/challenge":
 		s.mu.Lock()
 		s.challenges++
+		n := s.challenges
 		s.mu.Unlock()
 		if s.revoke.Load() {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -251,7 +251,7 @@ func (s *transitionRV) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		fmt.Fprintf(w, `{"challenge":"%s","v":1}`+"\n", strings.Repeat("22", 32))
+		fmt.Fprintf(w, `{"challenge":"%s","v":1}`+"\n", hex.EncodeToString(bytes.Repeat([]byte{byte(n)}, 32)))
 	case "/v1/verify":
 		w.WriteHeader(http.StatusNoContent)
 	case "/v1/wait":
@@ -265,7 +265,9 @@ func (s *transitionRV) serve(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, "not found\n")
 			return
 		}
-		h := &heldWait{w: w, r: r, release: make(chan int, 1), done: make(chan struct{})}
+		var req struct{ Challenge, Sig string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		h := &heldWait{w: w, r: r, Challenge: req.Challenge, Sig: req.Sig, release: make(chan int, 1), done: make(chan struct{})}
 		s.held <- h
 		how := waitReleaseNoContent
 		select {
@@ -300,5 +302,70 @@ func (s *transitionRV) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// Each event is installed after the client has processed a wait result. Tests
+// fire only the selected retry, leaving other device loops parked.
+type hostedRetry struct {
+	delay     time.Duration
+	fire      func()
+	cancelled bool
+}
+type hostedRetryScheduler struct {
+	mu    sync.Mutex
+	ready chan *hostedRetry
+}
+
+func newHostedRetryScheduler() *hostedRetryScheduler {
+	return &hostedRetryScheduler{ready: make(chan *hostedRetry, 32)}
+}
+func (s *hostedRetryScheduler) After(delay time.Duration, fn func()) func() {
+	retry := &hostedRetry{delay: delay, fire: fn}
+	s.ready <- retry
+	return func() { s.mu.Lock(); retry.cancelled = true; s.mu.Unlock() }
+}
+func (s *hostedRetryScheduler) next(t *testing.T) *hostedRetry {
+	t.Helper()
+	select {
+	case retry := <-s.ready:
+		return retry
+	case <-time.After(3 * time.Second):
+		t.Fatal("device loop did not schedule a retry")
+		return nil
+	}
+}
+func (s *hostedRetryScheduler) fire(t *testing.T, retry *hostedRetry) {
+	t.Helper()
+	s.mu.Lock()
+	cancelled := retry.cancelled
+	s.mu.Unlock()
+	if cancelled {
+		t.Fatal("device retry was cancelled")
+	}
+	if retry.delay <= 0 || retry.delay > 200*time.Millisecond {
+		t.Fatalf("retry delay = %s, outside configured backoff", retry.delay)
+	}
+	retry.fire()
+}
+
+func assertHostedWaitSignature(t *testing.T, identity []byte, challenge, signature string) {
+	t.Helper()
+	var st remote.PersistedState
+	if err := json.Unmarshal(identity, &st); err != nil {
+		t.Fatal(err)
+	}
+	pub, err := hex.DecodeString(st.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chal, err := hex.DecodeString(challenge)
+	if err != nil || len(chal) != 32 {
+		t.Fatal("malformed recovery challenge")
+	}
+	sig, err := hex.DecodeString(signature)
+	msg := append([]byte("scimux-rv/auth/v1\x00"+st.Origin+"\x001\x00/v1/wait\x00"+st.Handle+"\x00"), chal...)
+	if err != nil || !ed25519.Verify(pub, msg, sig) {
+		t.Fatal("recovered wait was not signed over the fresh challenge")
 	}
 }
