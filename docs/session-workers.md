@@ -85,9 +85,14 @@ The bundle's minted capability, not the current process environment, decides
 an already launched chat. Optional state may carry one current interaction.
 The worker remains the only session-log writer. The owning worker retires
 stale interaction state on startup and on each poll after the helper deadline,
-and a replacement may do the same. Raw payloads are removed. An emitted
+or as soon as a marked helper's waiter lock is released. A replacement may do
+the same without a second PID owner claim. Raw payloads and claims are removed. An emitted
 cancellation keeps a minimal turn fence so settlement can still run; that
 fence is not replayed. The replay fence and the append-only audit remain.
+The audit records intent before publication, followed by a correlated
+outcome if post-audit validation or publication fails: known rejection is
+`not_delivered`, while I/O uncertainty stays `unconfirmed`. Helper
+stdout is emission evidence; no consumption-confirmation hook is registered.
 The worker's submitted caller generation comes from the node's binding when
 that generation is at least 1, and otherwise from `perm/generation.json`.
 That file is the helper process's authority for generation, node, and session.

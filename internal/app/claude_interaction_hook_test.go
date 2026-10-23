@@ -28,7 +28,6 @@ func interactionDirs() []string {
 		"perm/interact/expired",
 		"perm/interact/interrupted",
 		"perm/interact/waiter",
-		"perm/interact/confirmed",
 		"perm/interact/cancel",
 	}
 }
@@ -247,20 +246,7 @@ func TestClaudeInteractionHookCapableBundle(t *testing.T) {
 	if !bundleCompleteCurrent(bundle) {
 		t.Fatal("extra interaction dirs must not make the bundle incomplete")
 	}
-	off := addPermissionRequestTimeout([]byte(`{"hooks":{}}`), interactionHookTimeoutSec)
-	if string(off) != `{"hooks":{}}` {
-		t.Fatalf("missing permission entry changed: %s", off)
-	}
-	if string(addPermissionRequestTimeout([]byte(`not-json`), 180)) != "not-json" {
-		t.Fatal("unrecognized settings were rewritten")
-	}
-	if got := addPermissionRequestTimeout([]byte(`{"ok":1}`), 0); string(got) != `{"ok":1}` {
-		t.Fatalf("zero timeout rewrote settings: %s", got)
-	}
-	partial := []byte(`"PermissionRequest":[{"hooks":[{"command":"x"`)
-	if string(addPermissionRequestTimeout(partial, interactionHookTimeoutSec)) != string(partial) {
-		t.Fatal("missing type marker was rewritten")
-	}
+
 }
 
 func TestClaudeInteractionHookOrdinaryAllowUnchanged(t *testing.T) {
@@ -501,9 +487,7 @@ func TestClaudeInteractionHookSubmitAuditAndPhases(t *testing.T) {
 	if err := noteClaudeInteractionEmission(dir, rec.ID, claudeInteractionAck{Emitted: false}); !errors.Is(err, errInteractionConflict) {
 		t.Fatalf("second ack err = %v", err)
 	}
-	if word, err := noteClaudeInteractionObservation(dir, rec.ID, "not a plan"); err != nil || word != "unconfirmed" {
-		t.Fatalf("question observation = %s %v", word, err)
-	}
+
 }
 
 func TestClaudeInteractionHookAuditFailureEmitsNothing(t *testing.T) {
@@ -641,17 +625,8 @@ func TestClaudeInteractionHookDiscussApproveCancelTerminal(t *testing.T) {
 	if strings.Contains(ans, "addRules") || strings.Contains(ans, "bypassPermissions") || !strings.Contains(ans, `"destination":"session"`) {
 		t.Fatalf("approve ans = %s", ans)
 	}
-	if word, err := noteClaudeInteractionObservation(dir, plan.ID, "## Synthetic\nOnly a plan."); err != nil || word != "confirmed" {
-		t.Fatalf("confirm = %s %v", word, err)
-	}
-	if word, err := noteClaudeInteractionObservation(dir, plan.ID, "## Synthetic\nOnly a plan."); err != nil || word != "confirmed" {
-		t.Fatalf("repeat confirm = %s %v", word, err)
-	}
-	if _, err := os.Stat("/plans/not-read.md"); err == nil {
-		t.Fatal("observation read the plan file")
-	}
-	if claudeInteractionPhase(dir, plan.ID, now) != "confirmed" {
-		t.Fatalf("phase = %s", claudeInteractionPhase(dir, plan.ID, now))
+	if claudeInteractionPhase(dir, plan.ID, now) != "recorded" {
+		t.Fatal("approval receipt invented confirmation")
 	}
 
 	dir = interactionBundle(t)
@@ -663,11 +638,8 @@ func TestClaudeInteractionHookDiscussApproveCancelTerminal(t *testing.T) {
 	if _, err := submitClaudeInteraction(dir, sampleCaller(dir), plan.ID, claudeInteractionReply{Action: "approve", Mode: "restore"}, now, func(sessionlog.Event) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if word, err := noteClaudeInteractionObservation(dir, plan.ID, "different plan"); err != nil || word != "unconfirmed" {
-		t.Fatalf("mismatch = %s %v", word, err)
-	}
-	if claudeInteractionPhase(dir, plan.ID, now) == "confirmed" {
-		t.Fatal("mismatch was relabeled confirmed")
+	if claudeInteractionPhase(dir, plan.ID, now) != "recorded" {
+		t.Fatal("restored-mode approval invented confirmation")
 	}
 
 	dir = interactionBundle(t)
@@ -771,7 +743,7 @@ func TestClaudeInteractionHookStdoutAndExpiry(t *testing.T) {
 	if !handled || !errors.Is(err, io.ErrShortWrite) || sw.buf.Len() >= len(env.Stdout) {
 		t.Fatalf("short handled=%v err=%v n=%d", handled, err, sw.buf.Len())
 	}
-	if claudeInteractionPhase(dir, "req-short", now) != "unconfirmed" {
+	if claudeInteractionPhase(dir, "req-short", now) != "expired" {
 		t.Fatalf("phase = %s", claudeInteractionPhase(dir, "req-short", now))
 	}
 	_ = rec
@@ -874,46 +846,9 @@ func TestClaudeInteractionHookRacesAndIsolation(t *testing.T) {
 	}
 }
 
-func TestClaudeInteractionHookOwnerAndScratch(t *testing.T) {
-	dir := interactionBundle(t)
+func TestClaudeInteractionHookExpiredScratch(t *testing.T) {
 	now := time.Now().UTC()
-	if err := claimClaudeInteractionOwner(dir, "inst-a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := claimClaudeInteractionOwner(dir, "inst-a"); err != nil {
-		t.Fatalf("same instance reconnect: %v", err)
-	}
-	if err := claimClaudeInteractionOwner(dir, "inst-b"); !errors.Is(err, errInteractionConflict) {
-		t.Fatalf("foreign claim err = %v", err)
-	}
-	rec := sampleRequest(dir, now)
-	publishInteraction(t, dir, rec)
-	status, err := retireForeignClaudeInteraction(dir, "inst-b", now)
-	if err != nil || status != "released" {
-		t.Fatalf("release = %s %v", status, err)
-	}
-	ans := mustRead(t, filepath.Join(dir, "perm", "interact", "ans", rec.ID+".json"))
-	if !bytes.Contains(ans, []byte(`"terminal":true`)) {
-		t.Fatalf("release ans = %s", ans)
-	}
-	status, err = retireForeignClaudeInteraction(dir, "inst-b", now)
-	if err != nil || status != "foreign-answered" {
-		t.Fatalf("replay status = %s %v", status, err)
-	}
-	if !bytes.Equal(mustRead(t, filepath.Join(dir, "perm", "interact", "ans", rec.ID+".json")), ans) {
-		t.Fatal("foreign worker rewrote the answer")
-	}
-	kept, err := retireForeignClaudeInteraction(dir, "inst-a", now)
-	if err != nil || kept != "kept" {
-		t.Fatalf("owner = %s %v", kept, err)
-	}
 	empty := interactionBundle(t)
-	if status, err := retireForeignClaudeInteraction(empty, "inst-a", now); err != nil || status != "absent" {
-		t.Fatalf("absent = %s %v", status, err)
-	}
-	if err := claimClaudeInteractionOwner(empty, "inst-a"); err != nil {
-		t.Fatal(err)
-	}
 	stale := sampleRequest(empty, now.Add(-time.Hour))
 	stale.HelperUntil = now.Add(-time.Minute).UTC().Format(time.RFC3339Nano)
 	if err := writeClaudePermFile(filepath.Join(empty, "perm", "interact", "req", stale.ID+".json"), stale); err != nil {
@@ -949,7 +884,7 @@ func TestClaudeInteractionHookOwnerAndScratch(t *testing.T) {
 	if err := writeClaudePermFile(filepath.Join(other, "perm", "interact", "req", "req-foreign.json"), stale); err != nil {
 		t.Fatal(err)
 	}
-	if err := retireOwnClaudeInteractionScratch(empty, "inst-a", now); err != nil {
+	if err := retireExpiredInteractionPayloads(empty, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(empty, "perm", "interact", "req", stale.ID+".json")); !os.IsNotExist(err) {
@@ -979,32 +914,13 @@ func TestClaudeInteractionHookOwnerAndScratch(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(other, "perm", "interact", "req", "req-foreign.json")); err != nil {
 		t.Fatal("other bundle was cleaned")
 	}
-	if err := retireOwnClaudeInteractionScratch(empty, "inst-b", now); !errors.Is(err, errInteractionConflict) {
-		t.Fatalf("foreign cleanup err = %v", err)
-	}
 	if err := os.RemoveAll(filepath.Join(empty, "perm", "interact", "req")); err != nil {
 		t.Fatal(err)
 	}
-	if err := retireOwnClaudeInteractionScratch(empty, "inst-a", now); !errors.Is(err, errInteractionIO) {
+	if err := retireExpiredInteractionPayloads(empty, now); !errors.Is(err, errInteractionIO) {
 		t.Fatalf("missing scratch dir err = %v", err)
 	}
-	blocked := interactionBundle(t)
-	if err := os.Mkdir(filepath.Join(blocked, "perm", "interact", "owner"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := retireForeignClaudeInteraction(blocked, "inst-a", now); !errors.Is(err, errInteractionIO) {
-		t.Fatalf("owner directory err = %v", err)
-	}
-	if err := claimClaudeInteractionOwner(blocked, "inst-a"); !errors.Is(err, errInteractionIO) {
-		t.Fatalf("owner create err = %v", err)
-	}
-	loose := interactionBundle(t)
-	if err := claimClaudeInteractionOwner(loose, "inst-a"); err != nil {
-		t.Fatal(err)
-	}
-	if status, err := retireForeignClaudeInteraction(loose, "inst-b", now); err != nil || status != "released" {
-		t.Fatalf("idle release = %s %v", status, err)
-	}
+
 }
 
 func TestClaudeInteractionHookCancelSettlement(t *testing.T) {
@@ -1164,9 +1080,7 @@ func TestClaudeInteractionHookProtections(t *testing.T) {
 	if _, err := submitClaudeInteraction("relative", sampleCaller(dir), rec.ID, letterReply(), now, func(sessionlog.Event) error { return nil }); !errors.Is(err, errInteractionBadRequest) {
 		t.Fatalf("relative bundle err = %v", err)
 	}
-	if err := claimClaudeInteractionOwner(dir, "../inst"); !errors.Is(err, errInteractionBadRequest) {
-		t.Fatalf("owner path err = %v", err)
-	}
+
 	if _, err := serveClaudeInteraction(dir, claudePermissionEvent{
 		HookEventName: "PermissionRequest", SessionID: hookSIDOwn, ToolName: "AskUserQuestion", ToolInput: letterQuestionRaw(),
 	}, "../req", io.Discard, time.Millisecond, time.Millisecond, func() time.Time { return now }, func(time.Duration) {}); !errors.Is(err, errInteractionBadRequest) {
@@ -1216,14 +1130,14 @@ func TestClaudeInteractionHookProtections(t *testing.T) {
 		audits++
 		return nil
 	})
-	if !errors.Is(err, errInteractionIO) || audits != 1 {
+	if !errors.Is(err, errInteractionIO) || audits != 2 {
 		t.Fatalf("io err=%v audits=%d", err, audits)
 	}
 	_, err = submitClaudeInteraction(dir, sampleCaller(dir), rec.ID, letterReply(), now, func(sessionlog.Event) error {
 		audits++
 		return nil
 	})
-	if !errors.Is(err, errInteractionConflict) || audits != 1 {
+	if !errors.Is(err, errInteractionConflict) || audits != 2 {
 		t.Fatalf("retry err=%v audits=%d", err, audits)
 	}
 }
@@ -1432,7 +1346,7 @@ func TestClaudeInteractionHookFaultPaths(t *testing.T) {
 	if _, err := submitClaudeInteraction(recordedDir, sampleCaller(recordedDir), recordedRec.ID, letterReply(), now, func(sessionlog.Event) error {
 		audits++
 		return nil
-	}); !errors.Is(err, errInteractionIO) || audits != 1 {
+	}); !errors.Is(err, errInteractionIO) || audits != 2 {
 		t.Fatalf("recorded err=%v audits=%d", err, audits)
 	}
 
@@ -1464,27 +1378,6 @@ func TestClaudeInteractionHookFaultPaths(t *testing.T) {
 	}
 	if err := noteClaudeInteractionEmission(ackDir, "req-letter", claudeInteractionAck{Emitted: true}); !errors.Is(err, errInteractionIO) {
 		t.Fatalf("ack io err = %v", err)
-	}
-
-	planDir := interactionBundle(t)
-	plan := sampleRequest(planDir, now)
-	plan.ID = "req-plan"
-	plan.Tool = "ExitPlanMode"
-	plan.Original = append([]byte(nil), tinyPlanRaw()...)
-	if err := writeClaudePermFile(filepath.Join(planDir, "perm", "interact", "req", plan.ID+".json"), plan); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(planDir, "perm", "interact", "confirmed")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(planDir, "perm", "interact", "confirmed"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := noteClaudeInteractionObservation(planDir, plan.ID, "## Synthetic\nOnly a plan."); !errors.Is(err, errInteractionIO) {
-		t.Fatalf("confirm io err = %v", err)
-	}
-	if _, err := noteClaudeInteractionObservation(planDir, "../x", "plan"); !errors.Is(err, errInteractionBadRequest) {
-		t.Fatalf("confirm escape err = %v", err)
 	}
 
 	past := sampleRequest(dir, now)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -45,7 +46,6 @@ var claudeInteractionSubdirs = []string{
 	filepath.Join("perm", "interact", "expired"),
 	filepath.Join("perm", "interact", "interrupted"),
 	filepath.Join("perm", "interact", "waiter"),
-	filepath.Join("perm", "interact", "confirmed"),
 	filepath.Join("perm", "interact", "cancel"),
 }
 
@@ -89,6 +89,7 @@ type claudeInteractionRequest struct {
 	HelperUntil    string          `json:"helper_until"`
 	Original       json.RawMessage `json:"original"`
 	Digest         string          `json:"digest"`
+	HelperWaiter   bool            `json:"helper_waiter,omitempty"`
 }
 
 type interactionSyncFile interface {
@@ -118,36 +119,42 @@ func interactionAnswerDeadline(start time.Time, budget time.Duration) time.Time 
 	return start.Add(budget - margin)
 }
 
+var interactionReadCapabilities = readClaudeHookCapabilities
+
+type interactionCapabilityCacheEntry struct {
+	info os.FileInfo
+	caps claudeHookCapabilities
+}
+
+var interactionCapabilityCache sync.Map
+
 func bundleSupportsInteraction(bundle string) bool {
-	caps, ok := readClaudeHookCapabilities(bundle)
-	if !ok || caps.Interaction < 1 || !claudeBundleExecUsable(caps) {
+	info, err := os.Stat(filepath.Join(bundle, "capabilities.json"))
+	if err != nil {
+		interactionCapabilityCache.Delete(bundle)
+		return false
+	}
+	var caps claudeHookCapabilities
+	if value, ok := interactionCapabilityCache.Load(bundle); ok && sameInteractionFile(value.(interactionCapabilityCacheEntry).info, info) {
+		caps = value.(interactionCapabilityCacheEntry).caps
+	} else {
+		var valid bool
+		caps, valid = interactionReadCapabilities(bundle)
+		if !valid {
+			return false
+		}
+		interactionCapabilityCache.Store(bundle, interactionCapabilityCacheEntry{info: info, caps: caps})
+	}
+	// Capabilities are immutable after minting. Detect replacement anyway,
+	// and keep checking the executable so a moved binary fails closed.
+	if caps.Interaction < 1 || !claudeBundleExecUsable(caps) {
 		return false
 	}
 	return true
 }
 
-func addPermissionRequestTimeout(raw []byte, timeout int) []byte {
-	out := append([]byte(nil), raw...)
-	if timeout <= 0 {
-		return out
-	}
-	needle := []byte(`"PermissionRequest":[{"hooks":[{"command":`)
-	i := bytes.Index(out, needle)
-	if i < 0 {
-		return out
-	}
-	marker := []byte(`"type":"command"}`)
-	j := bytes.Index(out[i:], marker)
-	if j < 0 {
-		return out
-	}
-	end := i + j + len(marker) - 1
-	extra := []byte(`,"timeout":` + fmt.Sprintf("%d", timeout))
-	rewritten := make([]byte, 0, len(out)+len(extra))
-	rewritten = append(rewritten, out[:end]...)
-	rewritten = append(rewritten, extra...)
-	rewritten = append(rewritten, out[end:]...)
-	return rewritten
+func sameInteractionFile(a, b os.FileInfo) bool {
+	return os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
 func maybeServeClaudeInteraction(dir string, ev claudePermissionEvent, id string, stdout io.Writer, deadline, every time.Duration) (bool, error) {
@@ -171,6 +178,7 @@ func serveClaudeInteraction(dir string, ev claudePermissionEvent, id string, std
 	if _, err := os.Stat(filepath.Join(dir, "perm", "interact")); err != nil {
 		return true, fmt.Errorf("%w: interact directory", errInteractionIO)
 	}
+	_ = retireExpiredInteractionPayloads(dir, now())
 	activeID, activeOK := readInteractionActive(dir)
 	if activeOK && activeID != id {
 		return true, nil
@@ -182,6 +190,14 @@ func serveClaudeInteraction(dir string, ev claudePermissionEvent, id string, std
 	waiter := filepath.Join(dir, "perm", "interact", "waiter", id)
 	if err := exclWrite(waiter, []byte(id)); err != nil {
 		return true, nil
+	}
+	live, err := os.OpenFile(waiter, os.O_RDWR, 0)
+	if err != nil {
+		return true, err
+	}
+	defer live.Close()
+	if err := interactionFlock(int(live.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true, err
 	}
 	start := now()
 	if !activeOK {
@@ -266,8 +282,7 @@ func interactionReplayBlocked(dir, id string) bool {
 	}
 	return interactionFileExists(dir, "expired", id) ||
 		interactionFileExists(dir, "interrupted", id) ||
-		interactionFileExists(dir, "closed", id) ||
-		interactionFileExists(dir, "confirmed", id)
+		interactionFileExists(dir, "closed", id)
 }
 
 func finishInteractionTerminal(dir, id string) (bool, error) {
@@ -286,6 +301,14 @@ func emitInteractionAnswer(dir, id string, ans []byte, stdout io.Writer, now fun
 		return finishInteractionTerminal(dir, id)
 	}
 	if !helperMayContinue(dir, id, now(), helperUntil) || !interactionTurnAuthoritative(dir, id) {
+		_ = expireInteraction(dir, id)
+		return true, nil
+	}
+	// Reading an answer before taking the fence is only a readiness hint.
+	// Publication can still fail and withdraw that name before the fence is
+	// released. Never emit bytes whose published file no longer matches.
+	published, err := readInteractionAns(dir, id)
+	if err != nil || !bytes.Equal(published, ans) {
 		_ = expireInteraction(dir, id)
 		return true, nil
 	}
@@ -527,6 +550,22 @@ func expireInteraction(dir, id string) error {
 	return nil
 }
 
+func expireClaudeInteractionSession(bundle, sessionID string) {
+	unlock, err := lockInteractionFence(bundle)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	id, ok := readInteractionActive(bundle)
+	if !ok {
+		return
+	}
+	rec, err := readInteractionRequest(bundle, id)
+	if err == nil && rec.SessionID == sessionID {
+		_ = expireInteraction(bundle, id)
+	}
+}
+
 func removeInteractionActive(dir, id string) {
 	active, ok := readInteractionActive(dir)
 	if ok && active != id {
@@ -553,6 +592,7 @@ func publishInteractionRequest(dir string, ev claudePermissionEvent, id string, 
 		HelperUntil:    start.Add(budget).UTC().Format(time.RFC3339Nano),
 		Original:       append([]byte(nil), model.Original...),
 		Digest:         model.Digest,
+		HelperWaiter:   interactionFileExists(dir, "waiter", id),
 	}
 	if turn, ok := readClaudeAcceptedTurn(filepath.Join(dir, "perm")); ok {
 		rec.Turn = turn.Turn
@@ -580,7 +620,7 @@ func submitClaudeInteraction(bundle string, caller claudeInteractionCaller, requ
 	return submitClaudeInteractionClock(bundle, caller, requestID, reply, func() time.Time { return frozen }, audit)
 }
 
-func submitClaudeInteractionClock(bundle string, caller claudeInteractionCaller, requestID string, reply claudeInteractionReply, now func() time.Time, audit func(sessionlog.Event) error) (claudeInteractionReceipt, error) {
+func submitClaudeInteractionClock(bundle string, caller claudeInteractionCaller, requestID string, reply claudeInteractionReply, now func() time.Time, audit func(sessionlog.Event) error) (receipt claudeInteractionReceipt, resultErr error) {
 	var zero claudeInteractionReceipt
 	if now == nil {
 		now = time.Now
@@ -636,6 +676,29 @@ func submitClaudeInteractionClock(bundle string, caller claudeInteractionCaller,
 		_ = os.Remove(claim)
 		return zero, fmt.Errorf("%w: %v", errInteractionAudit, err)
 	}
+	// The first record is the human's intent, not a delivery claim. If anything
+	// after that append fails, leave a correlated application-authored outcome.
+	// Registered before the unlock defer, this runs after the fence is released.
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		decision, manual := *event.Decision, *event.Decision.Manual
+		manual.Delivery = "not_delivered"
+		manual.AppContext = "Application delivery outcome: this submission was rejected before delivery. " + resultErr.Error()
+		decision.Manual = &manual
+		decision.Selected = sessionlog.DecOption{Name: "Not delivered", Kind: "not_delivered"}
+		if !errors.Is(resultErr, errInteractionConflict) {
+			// An I/O error cannot attest withdrawal or non-consumption. Keep
+			// uncertainty explicit instead of inventing a negative receipt.
+			manual.Delivery = "unconfirmed"
+			manual.AppContext = "Application delivery outcome: submission failed; delivery is unconfirmed. " + resultErr.Error()
+			decision.Selected = sessionlog.DecOption{Name: "Delivery unconfirmed", Kind: "unconfirmed"}
+		}
+		if err := audit(sessionlog.NewDecision(decision)); err != nil {
+			resultErr = fmt.Errorf("%w: outcome for %v: %v", errInteractionAudit, resultErr, err)
+		}
+	}()
 	unlock, lockErr := lockInteractionFence(bundle)
 	if lockErr != nil {
 		_ = os.Remove(claim)
@@ -683,6 +746,9 @@ func submitClaudeInteractionClock(bundle string, caller claudeInteractionCaller,
 }
 
 func interactionSubmissionExpired(bundle, id string, rec claudeInteractionRequest, now time.Time) bool {
+	if interactionHelperExited(bundle, rec) {
+		return true
+	}
 	if interactionFileExists(bundle, "expired", id) {
 		return true
 	}
@@ -753,34 +819,12 @@ func noteClaudeInteractionEmission(bundle, id string, ack claudeInteractionAck) 
 	return nil
 }
 
-func noteClaudeInteractionObservation(bundle, id, observed string) (string, error) {
-	rec, err := readInteractionRequest(bundle, id)
-	if err != nil {
-		return "", err
-	}
-	model, _ := classifyClaudeInteraction(rec.Tool, rec.Original)
-	if model.Tool != "ExitPlanMode" || model.Native {
-		return interactionDeliveryUnconfirmed, nil
-	}
-	word := confirmClaudePlanDelivery(model.Plan, observed)
-	if word != interactionDeliveryConfirmed {
-		return interactionDeliveryUnconfirmed, nil
-	}
-	if err := exclWrite(filepath.Join(bundle, "perm", "interact", "confirmed", id), []byte("confirmed")); err != nil && !os.IsExist(err) {
-		return "", fmt.Errorf("%w: confirmed", errInteractionIO)
-	}
-	return interactionDeliveryConfirmed, nil
-}
-
 func claudeInteractionPhase(bundle, id string, now time.Time) string {
 	if !safePathComponent(id) {
 		return ""
 	}
 	if interactionFileExists(bundle, "interrupted", id) {
 		return "interrupted"
-	}
-	if interactionFileExists(bundle, "confirmed", id) {
-		return "confirmed"
 	}
 	if interactionFileExists(bundle, "expired", id) {
 		return "expired"
@@ -800,6 +844,9 @@ func claudeInteractionPhase(bundle, id string, now time.Time) string {
 			return "unconfirmed"
 		}
 		return ""
+	}
+	if interactionHelperExited(bundle, rec) {
+		return "expired"
 	}
 	// A dead helper must not keep recorded, claimed, or unconfirmed authority
 	// after its deadline. Successful emission stays emitted; everything else
@@ -825,65 +872,9 @@ func claudeInteractionPhase(bundle, id string, now time.Time) string {
 	return ""
 }
 
-func claimClaudeInteractionOwner(bundle, instance string) error {
-	if !safePathComponent(instance) {
-		return errInteractionBadRequest
-	}
-	path := filepath.Join(bundle, "perm", "interact", "owner")
-	if b, err := os.ReadFile(path); err == nil {
-		if strings.TrimSpace(string(b)) == instance {
-			return nil
-		}
-		return fmt.Errorf("%w: owner", errInteractionConflict)
-	}
-	if err := exclWrite(path, []byte(instance)); err != nil {
-		return fmt.Errorf("%w: owner", errInteractionIO)
-	}
-	return nil
-}
-
-func retireForeignClaudeInteraction(bundle, instance string, now time.Time) (string, error) {
-	_ = now
-	path := filepath.Join(bundle, "perm", "interact", "owner")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "absent", nil
-		}
-		return "", fmt.Errorf("%w: owner", errInteractionIO)
-	}
-	if strings.TrimSpace(string(b)) == instance {
-		return "kept", nil
-	}
-	active, ok := readInteractionActive(bundle)
-	if ok {
-		if ans, aerr := readInteractionAns(bundle, active); aerr == nil && len(ans) > 0 {
-			return "foreign-answered", nil
-		}
-		closed, cerr := interactionChild(bundle, "closed", active)
-		if cerr == nil {
-			_ = exclWrite(closed, []byte("closed"))
-		}
-		ansPath, aerr := interactionChild(bundle, "ans", active+".json")
-		if aerr == nil {
-			_ = exclWrite(ansPath, []byte(interactionTerminalJSON))
-		}
-	}
-	return "released", nil
-}
-
-func retireOwnClaudeInteractionScratch(bundle, instance string, now time.Time) error {
-	owner := filepath.Join(bundle, "perm", "interact", "owner")
-	b, err := os.ReadFile(owner)
-	if err != nil || strings.TrimSpace(string(b)) != instance {
-		return fmt.Errorf("%w: owner", errInteractionConflict)
-	}
-	return retireExpiredInteractionPayloads(bundle, now)
-}
-
 // recoverClaudeInteractionBundle releases authority the helper can no longer
-// exercise. A foreign owner file does not skip the sweep: the worker that
-// polls the bundle is the lifecycle owner after a restart.
+// exercise. The worker that polls the bundle already owns its lifecycle;
+// no second PID-based owner claim is needed after a restart.
 func recoverClaudeInteractionBundle(bundle string, now time.Time) {
 	if bundle == "" || !bundleSupportsInteraction(bundle) {
 		return
@@ -896,12 +887,7 @@ func recoverClaudeInteractionBundle(bundle string, now time.Time) {
 	if statErr != nil || !st.IsDir() {
 		return
 	}
-	_ = claimClaudeInteractionOwner(bundle, claudeInteractionOwnerID())
 	_ = retireExpiredInteractionPayloads(bundle, now)
-}
-
-func claudeInteractionOwnerID() string {
-	return fmt.Sprintf("w-%d", os.Getpid())
 }
 
 func retireExpiredInteractionPayloads(bundle string, now time.Time) error {
@@ -924,7 +910,7 @@ func releaseExpiredInteraction(bundle, id string, now time.Time) {
 	if err != nil {
 		return
 	}
-	if interactionDeadlineOpen(now, parseInteractionTime(rec.HelperUntil)) {
+	if interactionDeadlineOpen(now, parseInteractionTime(rec.HelperUntil)) && !interactionHelperExited(bundle, rec) {
 		return
 	}
 	ack, ackOK := readInteractionAck(bundle, id)
@@ -947,6 +933,28 @@ func releaseExpiredInteraction(bundle, id string, now time.Time) {
 	_ = os.Remove(filepath.Join(bundle, "perm", "interact", "req", id+".json"))
 	_ = os.Remove(filepath.Join(bundle, "perm", "interact", "ans", id+".json"))
 	_ = os.Remove(filepath.Join(bundle, "perm", "interact", "recorded", id))
+	_ = os.Remove(filepath.Join(bundle, "perm", "interact", "claim", id))
+}
+
+// interactionHelperExited probes the lock held from before publication through
+// the helper's last stdout write. The kernel releases it on exit, including SIGKILL. Legacy
+// requests without the marker retain their deadline-only contract.
+func interactionHelperExited(bundle string, rec claudeInteractionRequest) bool {
+	if !rec.HelperWaiter {
+		return false
+	}
+	f, err := os.OpenFile(filepath.Join(bundle, "perm", "interact", "waiter", rec.ID), os.O_RDWR, 0)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	if err := interactionFlock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN)
+	}
+	// Close releases the acquired probe lock. Successful stdout is still only
+	// emission evidence; keep it until its ordinary payload-retirement deadline.
+	ack, ok := readInteractionAck(bundle, rec.ID)
+	return !ok || !ack.Emitted
 }
 
 // claudeInteractionCancelFence is the only state settlement needs once the
@@ -1119,6 +1127,16 @@ func (a *app) noteClaudeInteractionInterrupt(n *Node, tl *transcript.Tailer) {
 type claudeInterruptWatermark struct {
 	path   string
 	offset int64
+	cache  *claudeInterruptPrefixCache
+}
+
+// At most the current prefix and the accepted-turn prefix are cached. The
+// cache belongs to that accepted turn, never to an unbounded transcript list.
+type claudeInterruptPrefixCache struct {
+	mu      sync.Mutex
+	path    string
+	info    os.FileInfo
+	entries map[int64]*transcript.Tailer
 }
 
 type claudeInterruptWatermarkKey struct {
@@ -1132,17 +1150,22 @@ func rememberClaudeInterruptWatermark(a *app, n *Node) {
 	if a == nil || n == nil {
 		return
 	}
-	key := claudeInterruptWatermarkKey{app: a, nodeID: n.ID}
-	if n.Transcript == "" {
-		claudeInterruptWatermarks.Delete(key)
+	a.mu.Lock()
+	nodeID, path := n.ID, n.Transcript
+	a.mu.Unlock()
+	key := claudeInterruptWatermarkKey{app: a, nodeID: nodeID}
+	mark := claudeInterruptWatermark{cache: &claudeInterruptPrefixCache{}}
+	if path == "" {
+		claudeInterruptWatermarks.Store(key, mark)
 		return
 	}
-	st, err := os.Stat(n.Transcript)
+	st, err := os.Stat(path)
 	if err != nil {
-		claudeInterruptWatermarks.Delete(key)
+		claudeInterruptWatermarks.Store(key, mark)
 		return
 	}
-	claudeInterruptWatermarks.Store(key, claudeInterruptWatermark{path: n.Transcript, offset: st.Size()})
+	mark.path, mark.offset = path, st.Size()
+	claudeInterruptWatermarks.Store(key, mark)
 }
 
 func claudeInterruptWatermarkOf(a *app, nodeID string) claudeInterruptWatermark {
@@ -1173,7 +1196,7 @@ func interactionInterruptIsFresh(tl *transcript.Tailer, turn claudeAcceptedTurn,
 	// coherent snapshot. Reuse the parser on a private copy of the committed
 	// prefix, then refuse an incomplete copy or a concurrently advanced tail.
 	offset, _ := tl.Progress()
-	snapshot, err := interruptPrefixTailer(tl.Path, offset)
+	snapshot, err := cachedInterruptPrefix(tl.Path, offset, mark.cache)
 	if err != nil {
 		return false
 	}
@@ -1182,7 +1205,6 @@ func interactionInterruptIsFresh(tl *transcript.Tailer, turn claudeAcceptedTurn,
 	if copied != offset || current != offset {
 		return false
 	}
-	snapshot.Path = tl.Path
 	tl = snapshot
 	if !tl.EndTurn() || tl.Delivered() || tl.Unparseable() {
 		return false
@@ -1242,7 +1264,7 @@ func undatedInterruptNewlyObserved(tl *transcript.Tailer, at time.Time, mark cla
 	if mark.path == tl.Path && off <= mark.offset {
 		return false
 	}
-	if mark.path == tl.Path && interruptBoundaryAlreadyPresent(tl.Path, mark.offset, tl) {
+	if mark.path == tl.Path && interruptBoundaryAlreadyPresent(tl.Path, mark.offset, tl, mark.cache) {
 		return false
 	}
 	return true
@@ -1262,11 +1284,11 @@ var writeInterruptPrefix = func(f *os.File, b []byte) error {
 // interruptBoundaryAlreadyPresent reports whether the live interruption is
 // the same terminal notice already contained in path's prefix. A prefix that
 // cannot be read fails closed: the caller must not treat the boundary as new.
-func interruptBoundaryAlreadyPresent(path string, offset int64, live *transcript.Tailer) bool {
+func interruptBoundaryAlreadyPresent(path string, offset int64, live *transcript.Tailer, cache *claudeInterruptPrefixCache) bool {
 	if offset <= 0 {
 		return false
 	}
-	earlier, err := interruptPrefixTailer(path, offset)
+	earlier, err := cachedInterruptPrefix(path, offset, cache)
 	if err != nil {
 		return true
 	}
@@ -1287,6 +1309,34 @@ func interruptBoundaryAlreadyPresent(path string, offset int64, live *transcript
 	return len(earlier.Turns) == len(live.Turns) && before.Text == after.Text && before.Time == after.Time
 }
 
+func cachedInterruptPrefix(path string, offset int64, cache *claudeInterruptPrefixCache) (*transcript.Tailer, error) {
+	if cache == nil {
+		return interruptPrefixTailer(path, offset)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.path != path || cache.info == nil || !sameInteractionFile(cache.info, info) {
+		cache.path, cache.info = path, info
+		cache.entries = make(map[int64]*transcript.Tailer)
+	}
+	if snapshot := cache.entries[offset]; snapshot != nil {
+		return snapshot, nil
+	}
+	snapshot, err := interruptPrefixTailer(path, offset)
+	if err != nil {
+		return nil, err
+	}
+	if len(cache.entries) >= 2 {
+		cache.entries = make(map[int64]*transcript.Tailer)
+	}
+	cache.entries[offset] = snapshot
+	return snapshot, nil
+}
+
 // interruptPrefixTailer reuses the transcript tailer on a copy of the bytes
 // that were already present. It does not parse the file a second way.
 func interruptPrefixTailer(path string, offset int64) (*transcript.Tailer, error) {
@@ -1295,12 +1345,13 @@ func interruptPrefixTailer(path string, offset int64) (*transcript.Tailer, error
 		return nil, err
 	}
 	defer f.Close()
-	buf := make([]byte, offset)
-	n, _ := f.Read(buf)
-	if n == 0 {
+	if offset <= 0 {
 		return nil, errors.New("interrupt prefix unreadable")
 	}
-	buf = buf[:n]
+	buf := make([]byte, offset)
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return nil, err
+	}
 	if len(bytes.TrimSpace(buf)) == 0 {
 		return &transcript.Tailer{}, nil
 	}
@@ -1319,6 +1370,7 @@ func interruptPrefixTailer(path string, offset int64) (*transcript.Tailer, error
 	}
 	tl := &transcript.Tailer{Path: tmpPath}
 	_ = tl.Poll()
+	tl.Path = path
 	return tl, nil
 }
 
@@ -1333,18 +1385,33 @@ func interactionCancelTargetsTurn(cancelTurn string, current, closing claudeAcce
 }
 
 func pendingCancelInteractions(bundle string) []string {
-	dir := filepath.Join(bundle, "perm", "interact", "ack")
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var ids []string
-	for _, ent := range ents {
-		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+	// Requests are short lived; cancellation fences index only still-relevant
+	// retired cancels. Historical acknowledgements are replay fences, not an
+	// inbox to rescan on every node poll.
+	candidates := map[string]bool{}
+	for _, kind := range []string{"req", "cancel"} {
+		ents, err := os.ReadDir(filepath.Join(bundle, "perm", "interact", kind))
+		if err != nil {
 			continue
 		}
-		id := strings.TrimSuffix(ent.Name(), ".json")
+		for _, ent := range ents {
+			if ent.IsDir() {
+				continue
+			}
+			id := ent.Name()
+			if kind == "req" {
+				if !strings.HasSuffix(id, ".json") {
+					continue
+				}
+				id = strings.TrimSuffix(id, ".json")
+			}
+			candidates[id] = true
+		}
+	}
+	var ids []string
+	for id := range candidates {
 		if interactionFileExists(bundle, "interrupted", id) {
+			_ = os.Remove(filepath.Join(bundle, "perm", "interact", "cancel", id))
 			continue
 		}
 		ack, ok := readInteractionAck(bundle, id)
@@ -1359,6 +1426,7 @@ func pendingCancelInteractions(bundle string) []string {
 		}
 		ids = append(ids, id)
 	}
+	sort.Strings(ids)
 	return ids
 }
 
@@ -1407,15 +1475,15 @@ func interactionSelected(action, modeLabel string) sessionlog.DecOption {
 	name := action
 	switch action {
 	case "answer":
-		name = "Answered"
+		name = "Answer recorded"
 	case "discuss":
 		name = "Discuss"
 	case "request_changes":
 		name = "Request changes"
 	case "approve":
-		name = modeLabel
+		name = "Approval recorded: " + modeLabel
 	case "cancel":
-		name = "Interrupted"
+		name = "Cancellation recorded"
 	case "terminal":
 		name = "Terminal handoff"
 	}

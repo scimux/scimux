@@ -403,9 +403,6 @@ func TestReviewOldCancelCannotHideCurrentCancel(t *testing.T) {
 func TestReviewPayloadRetirementCoversEveryOutcome(t *testing.T) {
 	dir := interactionBundle(t)
 	now := time.Now().UTC()
-	if err := claimClaudeInteractionOwner(dir, "inst-a"); err != nil {
-		t.Fatal(err)
-	}
 	answer := []byte(`{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`)
 	type outcome struct {
 		id     string
@@ -455,7 +452,7 @@ func TestReviewPayloadRetirementCoversEveryOutcome(t *testing.T) {
 	if err := writeClaudePermFile(filepath.Join(dir, "perm", "interact", "req", fresh.ID+".json"), fresh); err != nil {
 		t.Fatal(err)
 	}
-	if err := retireOwnClaudeInteractionScratch(dir, "inst-a", now); err != nil {
+	if err := retireExpiredInteractionPayloads(dir, now); err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
@@ -784,7 +781,7 @@ func TestReviewFenceAndRecoveryPaths(t *testing.T) {
 	h.recoverInteractions(now)
 
 	owned := interactionBundle(t)
-	if err := claimClaudeInteractionOwner(owned, "someone-else"); err != nil {
+	if err := os.WriteFile(filepath.Join(owned, "perm", "interact", "owner"), []byte("legacy-owner"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	stale := sampleRequest(owned, now.Add(-2*time.Hour))
@@ -832,7 +829,6 @@ func TestReviewReplayFencesAndSubmissionFailures(t *testing.T) {
 		{"req-fence-expired", "expired", "req-fence-expired"},
 		{"req-fence-interrupted", "interrupted", "req-fence-interrupted"},
 		{"req-fence-closed", "closed", "req-fence-closed"},
-		{"req-fence-confirmed", "confirmed", "req-fence-confirmed"},
 	}
 	for _, fence := range fences {
 		body := []byte(fence.id)
@@ -1040,8 +1036,8 @@ func TestReviewRemainingDecisionPaths(t *testing.T) {
 		t.Fatal("non-canonical bundle path mutated interaction state")
 	}
 	recoverClaudeInteractionBundle(dir, time.Now())
-	if _, err := os.Stat(filepath.Join(dir, "perm", "interact", "owner")); err != nil {
-		t.Fatalf("canonical recovery did not claim the bundle: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "perm", "interact", "owner")); !os.IsNotExist(err) {
+		t.Fatal("canonical recovery created a redundant PID owner")
 	}
 
 	past := sampleRequest(dir, time.Now())

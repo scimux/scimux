@@ -157,7 +157,7 @@ func TestClaudeInteractionClassifyNativeFallback(t *testing.T) {
 		{"AskUserQuestion", `{"questions":[]}`, "question count"},
 		{"AskUserQuestion", `{"questions":[{"header":"H","options":[{"label":"A","description":""},{"label":"B","description":""}]}]}`, "empty question"},
 		{"AskUserQuestion", `{"questions":[{"question":"Pick?","header":"H"}]}`, "option count"},
-		{"AskUserQuestion", `{"questions":[{"question":"\uD800","header":"H","options":[{"label":"A","description":""},{"label":"B","description":""}]}]}`, "question type"},
+		{"AskUserQuestion", `{"questions":[{"question":"\uD800","header":"H","options":[{"label":"A","description":""},{"label":"B","description":""}]}]}`, "question shape"},
 		{"AskUserQuestion", `{"questions":[1,]}`, "malformed json"},
 		{"AskUserQuestion", `{"questions":[1 2]}`, "malformed json"},
 		{"AskUserQuestion", `{"questions":[{},{},{},{},{}]}`, "question count"},
@@ -639,19 +639,6 @@ func answerObject(t *testing.T, updated json.RawMessage) []byte {
 }
 
 func TestClaudeInteractionPlanPolicy(t *testing.T) {
-	reviewed := "## Synthetic\nOnly a plan."
-	if confirmClaudePlanDelivery(reviewed, reviewed) != interactionDeliveryConfirmed {
-		t.Fatal("matching plan text was not confirmed")
-	}
-	if confirmClaudePlanDelivery(reviewed, reviewed+"\nextra") != interactionDeliveryUnconfirmed {
-		t.Fatal("mismatched plan text was relabeled confirmed")
-	}
-	if confirmClaudePlanDelivery(reviewed, "") != interactionDeliveryUnconfirmed {
-		t.Fatal("missing observed plan was relabeled confirmed")
-	}
-	if confirmClaudePlanDelivery("", "") != interactionDeliveryUnconfirmed {
-		t.Fatal("empty plan text was confirmed")
-	}
 	plan := mustClassify(t, "ExitPlanMode", tinyPlanRaw())
 	if strings.Contains(plan.Plan, "not-read.md") {
 		t.Fatal("plan text was replaced by the file path")

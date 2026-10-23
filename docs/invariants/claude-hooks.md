@@ -230,13 +230,26 @@ request settles only its own accepted turn through the explicit interrupt
 boundary. The boundary is the tailer's last visible turn, and only when its
 text is the interruption notice. A late notice for turn N cannot close turn N+1.
 
-A REST `202` means the worker durably recorded the decision. It does not mean
-Claude consumed the reply. A killed helper or a short stdout write leaves
-delivery unconfirmed, and an uncertain reply is not replayed into a new
-helper or turn. The owning worker releases that authority on startup and on
-each poll once the helper deadline has passed, even when the helper process
-is already gone. Raw request and answer files are deleted after that
-deadline. An emitted cancellation keeps only a minimal fence — action, turn,
+A REST `202` means the worker durably recorded the human's intent. It does not
+mean Claude consumed the reply. That first audit row makes no delivery claim.
+If revalidation or answer publication fails after the audit append, the worker
+appends a correlated, application-authored outcome after releasing the fence:
+known stale/expired rejection is `not_delivered`; I/O failure leaves delivery
+`unconfirmed`, since an I/O error cannot prove withdrawal or non-consumption.
+The original row is never rewritten. No answer is published when
+the initial audit fails. Failure to append the outcome is itself an audit error.
+A killed helper or a short stdout write leaves delivery unconfirmed, and an
+uncertain reply is not replayed into a new helper or turn. No hook is registered
+to confirm consumption: `emitted` attests only a complete stdout write.
+
+Before publishing a request, the helper locks its request-specific waiter file
+and holds that lock through stdout. The kernel releases the lock when the helper
+exits, including on SIGKILL. Submission and native-key guards detect that loss
+without waiting for the deadline. Recovery and a successor helper release the
+dead slot and retire its payload. Legacy requests without the lock marker retain
+the deadline-only bound. Recovery uses the existing worker's ownership; it never
+claims a second PID owner file. Raw payloads are otherwise deleted after the
+helper deadline. An emitted cancellation keeps only a minimal fence — action, turn,
 and turn generation — so a later interrupt can still settle after the payload
 is gone, including across a worker restart. That fence is not hook stdout and
 is not replayed. Settlement still requires the emitted acknowledgement and a
@@ -248,16 +261,27 @@ timestamp does not refresh an older notice. An undated notice can close the
 turn only when that transcript can be read, its modification time is strictly
 after the turn was accepted, the tailer has consumed the file through its end,
 and the notice itself was not already present in the bytes on disk when the
-turn began. Boundary inspection reparses a private copy of the tailer's
-consumed prefix with the existing parser; it never reads the shared mutable
-turn slice. An incomplete copy, an advancing tailer, or an unparseable
-historical prefix leaves freshness unproved. Bytes appended after that size refresh the boundary only when they
+turn began. Boundary inspection reparses a private copy of the tailer's consumed
+prefix with the existing parser; it never reads the shared mutable turn slice.
+At most two immutable prefixes are cached per accepted turn, invalidated by a
+different path, file identity, size, or modification time. Unchanged polls do not
+copy and parse the transcript again. Prefix reads must be complete. An incomplete
+copy, an advancing tailer, or an unparseable historical prefix leaves freshness
+unproved. Bytes appended after that size refresh the boundary only when they
 add the notice. A metadata record, a missing timestamp, a lagged read, or an
 unreadable file does not close the turn, and the same consumed notice does not
 close a successor turn. The helper
 deadline for these two tools is 150 seconds inside a 180-second hook
 registration, and the app stops accepting decisions at 135 seconds. The
-ordinary 5-second auxiliary permission deadline is unchanged.
+ordinary 5-second auxiliary permission deadline is unchanged. The timeout is a
+field in the settings document before serialization, never a JSON byte patch.
+Immutable capability manifests are cached with file-identity checks; enabled
+bundles still check that the baked executable remains usable.
+
+Cancellation polling scans current requests and minimal cancellation fences,
+not the historical acknowledgement directory. Payload retirement also removes
+the claim. Small request-specific replay fences remain for the bundle's lifetime
+so an old helper identity cannot emit twice.
 
 The helper-visible binding fence is `perm/generation.json`. The owning worker
 is its only writer. The file records the authoritative generation, node, and
@@ -266,6 +290,8 @@ interaction capability. A muxer projection or a recovery snapshot must not
 rewrite it. A generation of 0 does not replace a file that is already there,
 and an empty session does not clear a session the fence already records.
 Emission reads the fence again under the same lock publication holds. A
+helper also re-reads the published answer under that lock: bytes read before
+a failed publication withdrew the file are not authority to emit. A
 request stamped with a generation does not write stdout when the fence is
 missing, unreadable, corrupt, or names a different generation, node, or
 session. A request with no such binding and no fence remains a legacy request.

@@ -1,7 +1,7 @@
 /* Structured Claude question and plan card.
    The browser posts typed ids only. It does not send hook JSON, paths, or
    permission updates. A 202 is recorded, not delivered to Claude.
-   Feedback and free-text limits match the server: 4096 UTF-16 code units. */
+   Feedback and free-text limits match the server: 4096 UTF-8 bytes. */
 
 const FEEDBACK_MAX = 4096;
 const FREE_TEXT_MAX = 4096;
@@ -58,7 +58,7 @@ export function manualDecisionRowHTML(surface, options){
   const context = manual.app_context ? escText(manual.app_context) : "";
   const reviewed = manual.reviewed ? escText(manual.reviewed) : "";
   const modeLabel = manual.mode_label ? escText(manual.mode_label) : "";
-  const delivery = manual.delivery ? escText(manual.delivery) : "";
+  const delivery = manual.delivery ? escText(String(manual.delivery).replaceAll("_", " ")) : "";
   const selections = Array.isArray(manual.selections) ? manual.selections : [];
   const selectionHTML = selections.map(item => {
     const labels = Array.isArray(item.labels) ? item.labels.map(escText).join(", ") : "";
@@ -257,7 +257,7 @@ export function createClaudeInteractionCard(deps){
       const state = live.answers[question.id] || { optionIds: [], freeText: "" };
       const text = String(state.freeText || "");
       if (!question.multi && text.trim() !== ""){
-        if (text.length > FREE_TEXT_MAX) return { error: "Free text is too long." };
+        if (new TextEncoder().encode(text).length > FREE_TEXT_MAX) return { error: "Free text is too long (maximum 4096 UTF-8 bytes)." };
         answers.push({ question_id: question.id, free_text: text });
         continue;
       }
@@ -277,7 +277,7 @@ export function createClaudeInteractionCard(deps){
     const live = readDraft();
     const text = String(live.feedback || "");
     if (text.trim() === "") return { error: "Feedback is required." };
-    if (text.length > FEEDBACK_MAX) return { error: "Feedback is too long." };
+    if (new TextEncoder().encode(text).length > FEEDBACK_MAX) return { error: "Feedback is too long (maximum 4096 UTF-8 bytes)." };
     return { body: { request_id: view.request_id, action, feedback: text } };
   }
 

@@ -79,10 +79,16 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     transiently until the helper deadline. After that deadline the owning
     worker removes the raw request and response copies, including answered,
     canceled, handed-off, and uncertain ones, and leaves a request-specific
-    replay fence. The durable manual decision is a
+    replay fence. Marked helpers that exit early release ownership and their
+    payloads through the same recovery path. The durable manual decision is a
     bounded append-only exception on the existing decision record: request
     identity, reviewed content and its digest, the human's selections or
-    feedback, any chosen execution mode, and the delivery outcome.
+    feedback, any chosen execution mode, and the delivery outcome. The initial
+    row records intent, without claiming delivery. A later validation or
+    publication failure appends a correlated application-authored outcome,
+    never a rewrite of the intent row. Known stale/expired rejection is
+    `not_delivered`; an I/O error cannot prove non-consumption and stays
+    `unconfirmed`.
     Application context is stored apart from human feedback. The record is
     not a new conversation role, a fake user prompt, a seam, or a rewrite of
     an earlier row, and it is not a license to log raw hook input for

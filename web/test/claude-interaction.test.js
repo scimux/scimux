@@ -441,6 +441,16 @@ test("manual audit rows are not labeled Auto-approved; auto rows stay labeled", 
   const direct = manualDecisionRowHTML(manual);
   assert.match(direct, /Manual/);
   assert.doesNotMatch(direct, /Auto-approved/);
+  const failed = manualDecisionRowHTML({
+    record: 5,
+    decision: { source: "manual", request_id: "req-letter", manual: {
+      action: "answer", delivery: "not_delivered",
+      app_context: "Application delivery outcome: <rejected> before publication.",
+    } },
+  });
+  assert.match(failed, /not delivered/);
+  assert.match(failed, /&lt;rejected&gt;/);
+  assert.doesNotMatch(failed, /Auto-approved/);
   const empty = manualDecisionRowHTML(undefined);
   assert.match(empty, /Manual/);
   assert.doesNotMatch(empty, /decision-action/);
@@ -658,6 +668,25 @@ test("an incomplete batch and blank feedback do not post", () => {
   fire(typed, "input");
   long.parent.querySelector(".ci-answer").click();
   assert.equal(long.posts[0].body.answers[0].free_text.length, 4096);
+});
+
+test("Unicode feedback and free text use UTF-8 byte limits", () => {
+  for (const [char, bytes] of [["界", 3], ["😀", 4]]) {
+    for (const kind of ["feedback", "free"]) {
+      const box = mountCard(radioQuestion(`utf8-${kind}-${bytes}`));
+      const field = box.parent.querySelector(kind === "feedback" ? ".ci-feedback" : ".ci-free");
+      const action = box.parent.querySelector(kind === "feedback" ? ".ci-discuss" : ".ci-answer");
+      field.value = char.repeat(Math.floor(4096 / bytes) + 1);
+      fire(field, "input");
+      action.click();
+      assert.equal(box.posts.length, 0, `${kind} accepted more than 4096 UTF-8 bytes`);
+      assert.match(box.parent.querySelector(".ci-status").textContent, /too long/);
+      field.value = char.repeat(Math.floor(4096 / bytes)) + "x".repeat(4096 % bytes);
+      fire(field, "input");
+      action.click();
+      assert.equal(box.posts.length, 1, `${kind} rejected exactly 4096 UTF-8 bytes`);
+    }
+  }
 });
 
 test("plan approval, request changes, cancel, and terminal post only their fields", () => {

@@ -242,7 +242,8 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 		ops.RemoveAll(dir)
 		return "", err
 	}
-	raw, err := claudeHookSettingsJSON(execPath, dir)
+	interaction := claudeInteractionsEnvEnabled(os.Getenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS"))
+	raw, err := claudeHookSettingsForInteraction(execPath, dir, interaction)
 	if err != nil {
 		ops.RemoveAll(dir)
 		return "", err
@@ -257,9 +258,8 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 	// "interaction" is minted only for the exact experimental gate value, and
 	// only on this new bundle. An already launched bundle is never rewritten.
 	capsDoc := claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Exec: execPath}
-	if claudeInteractionsEnvEnabled(os.Getenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS")) {
+	if interaction {
 		capsDoc.Interaction = 1
-		raw = addPermissionRequestTimeout(raw, interactionHookTimeoutSec)
 		for _, sub := range claudeInteractionSubdirs {
 			p := filepath.Join(dir, sub)
 			if err := ops.MkdirAll(p, 0o700); err != nil {
@@ -302,6 +302,10 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 }
 
 func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
+	return claudeHookSettingsForInteraction(execPath, hookDir, claudeInteractionsEnvEnabled(os.Getenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS")))
+}
+
+func claudeHookSettingsForInteraction(execPath, hookDir string, interaction bool) ([]byte, error) {
 	if execPath == "" || hookDir == "" {
 		return nil, fmt.Errorf("claude hook settings: %w", errClaudeHookRejected)
 	}
@@ -360,10 +364,14 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 			},
 		},
 	}
+	permissionHook := map[string]any{"type": "command", "command": permCmd}
+	if interaction {
+		permissionHook["timeout"] = interactionHookTimeoutSec
+	}
 	doc := map[string]any{
 		"hooks": map[string]any{
 			"SessionStart":      entry(cmd),
-			"PermissionRequest": entry(permCmd),
+			"PermissionRequest": []any{map[string]any{"hooks": []any{permissionHook}}},
 			"Notification":      notifyEntry,
 			"Stop":              entry(stopCmd),
 			"StopFailure":       entry(stopCmd),
@@ -660,7 +668,7 @@ func (a *app) bindClaudeClear(nodeID string, ev claudeSessionStartEvent, capture
 	}
 	if n.Transcript == ev.TranscriptPath && n.SessionID == ev.SessionID {
 		a.mu.Unlock()
-		return nil
+		return a.finishClaudeResumeRemainder(nodeID, ev)
 	}
 	if a.pathClaimedLocked(ev.TranscriptPath, nodeID) {
 		a.mu.Unlock()
@@ -690,10 +698,23 @@ func (a *app) bindClaudeClear(nodeID string, ev claudeSessionStartEvent, capture
 	if err := a.commitClaudeBinding(nodeID, hookID, capturedGen, ev, "clear", retirePath, retireSID); err != nil {
 		a.mu.Lock()
 		delete(a.pathClaims, ev.TranscriptPath)
+		current := a.byID[nodeID]
+		committed := current != nil && current.SessionID == ev.SessionID && current.Transcript == ev.TranscriptPath
 		a.mu.Unlock()
-		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+		if !committed {
+			a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+			return err
+		}
+		bundle := a.claudeHookBundlePath(hookID)
+		claudeResumeRemainders.Store(claudeResumeRemainderKey{app: a, nodeID: nodeID}, claudeResumeRemainder{
+			sessionID: ev.SessionID, path: ev.TranscriptPath, oldPath: oldPath, oldSID: oldSID, bundle: bundle, gen: capturedGen,
+		})
+		a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, needPage)
+		clearClaudeElicitationsForSession(bundle, oldSID)
+		a.recordClaudeLaunchError(nodeID, claudeResumeFenceExplain)
 		return err
 	}
+	claudeResumeRemainders.Delete(claudeResumeRemainderKey{app: a, nodeID: nodeID})
 	if needPage {
 		a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, true)
 		clearClaudeElicitationsForSession(a.claudeHookBundlePath(hookID), oldSID)
@@ -854,7 +875,7 @@ func (a *app) applyClaudeCompact(nodeID string, ev claudeSessionStartEvent) erro
 	return nil
 }
 
-// claudeResumeRemainder is the cleanup still owed after a resume binding is
+// claudeResumeRemainder is the cleanup still owed after a clear or resume binding is
 // durable and only helper-fence publication failed. Append-only history
 // cannot roll the new session back, so the next same-identity SessionStart
 // republishes the fence and finishes retirement.
@@ -987,7 +1008,9 @@ func (a *app) applyRetiredClaudeTranscript(nodeID, oldPath, oldSID string, pageT
 		delete(a.mirrors, nodeID)
 		delete(a.piMirrors, nodeID)
 	}
+	bundle := a.claudePermBundleLocked(nodeID)
 	a.mu.Unlock()
+	expireClaudeInteractionSession(bundle, oldSID)
 	if !pageTurn || a.sessionsDir == "" || n == nil {
 		return
 	}

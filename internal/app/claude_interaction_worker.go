@@ -114,7 +114,13 @@ func (h *claudeSessionHarness) ClaudeInteraction(context.Context) (sessionworker
 
 func (h *claudeSessionHarness) SubmitClaudeInteraction(_ context.Context, action sessionworker.InteractionAction) (sessionworker.InteractionResult, error) {
 	defer h.refreshState()
-	n := h.node()
+	h.app.mu.Lock()
+	n := h.app.byID[h.nodeID]
+	if n != nil {
+		copyNode := *n
+		n = &copyNode
+	}
+	h.app.mu.Unlock()
 	if n == nil {
 		return sessionworker.InteractionResult{}, errClaudeWorkerConflict
 	}

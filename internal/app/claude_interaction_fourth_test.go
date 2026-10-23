@@ -339,49 +339,49 @@ func TestInterruptPrefixFailuresDoNotInventABoundary(t *testing.T) {
 	if _, ok := interruptBoundaryTurn(&transcript.Tailer{}); ok {
 		t.Fatal("an empty tailer invented an interruption")
 	}
-	if interruptBoundaryAlreadyPresent(filepath.Join(t.TempDir(), "missing.jsonl"), 4, nil) != true {
+	if interruptBoundaryAlreadyPresent(filepath.Join(t.TempDir(), "missing.jsonl"), 4, nil, nil) != true {
 		t.Fatal("an unreadable prefix was treated as a new interruption")
 	}
 	path := filepath.Join(t.TempDir(), "prefix.jsonl")
 	writeTranscript(t, path, interruptLine("", notice))
 	live := pollTranscript(t, path)
-	if interruptBoundaryAlreadyPresent(path, 0, live) {
+	if interruptBoundaryAlreadyPresent(path, 0, live, nil) {
 		t.Fatal("an empty prefix invented a boundary that was already present")
 	}
 	dir := t.TempDir()
-	if !interruptBoundaryAlreadyPresent(dir, 1, live) {
+	if !interruptBoundaryAlreadyPresent(dir, 1, live, nil) {
 		t.Fatal("a prefix that cannot be read was treated as a new interruption")
 	}
 	spaces := filepath.Join(t.TempDir(), "spaces.jsonl")
 	writeTranscript(t, spaces, " \n")
-	if interruptBoundaryAlreadyPresent(spaces, 2, live) {
+	if interruptBoundaryAlreadyPresent(spaces, 2, live, nil) {
 		t.Fatal("whitespace before the turn was treated as the interruption")
 	}
 	prompt := filepath.Join(t.TempDir(), "prompt.jsonl")
 	writeTranscript(t, prompt, userLine("2001-01-01T00:00:00Z", "older synthetic prompt"))
-	if interruptBoundaryAlreadyPresent(prompt, int64(len(userLine("2001-01-01T00:00:00Z", "older synthetic prompt"))), live) {
+	if interruptBoundaryAlreadyPresent(prompt, int64(len(userLine("2001-01-01T00:00:00Z", "older synthetic prompt"))), live, nil) {
 		t.Fatal("a prompt that is not an interruption notice was treated as one")
 	}
-	if !interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), &transcript.Tailer{}) {
+	if !interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), &transcript.Tailer{}, nil) {
 		t.Fatal("a live tailer that lost the notice was treated as a new interruption")
 	}
 	same := pollTranscript(t, path)
-	if !interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), same) {
+	if !interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), same, nil) {
 		t.Fatal("the same undated notice was treated as new")
 	}
 	retimed := filepath.Join(t.TempDir(), "retimed.jsonl")
 	writeTranscript(t, retimed, interruptLine("2001-01-01T00:00:00Z", notice))
-	if interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), pollTranscript(t, retimed)) {
+	if interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), pollTranscript(t, retimed), nil) {
 		t.Fatal("a dated copy of an undated notice was treated as the same boundary")
 	}
 	tool := filepath.Join(t.TempDir(), "tool.jsonl")
 	writeTranscript(t, tool, interruptLine("", toolNotice))
-	if interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), pollTranscript(t, tool)) {
+	if interruptBoundaryAlreadyPresent(path, int64(len(interruptLine("", notice))), pollTranscript(t, tool), nil) {
 		t.Fatal("a different interruption notice was treated as the same boundary")
 	}
 	delivered := filepath.Join(t.TempDir(), "delivered.jsonl")
 	writeTranscript(t, delivered, `{"type":"assistant","timestamp":"2001-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}}`+"\n")
-	if interruptBoundaryAlreadyPresent(delivered, int64(mustSize(t, delivered)), live) {
+	if interruptBoundaryAlreadyPresent(delivered, int64(mustSize(t, delivered)), live, nil) {
 		t.Fatal("a delivered completion was treated as an interruption that was already present")
 	}
 	garbage := filepath.Join(t.TempDir(), "garbage.jsonl")
@@ -390,7 +390,7 @@ func TestInterruptPrefixFailuresDoNotInventABoundary(t *testing.T) {
 		unrecognized.WriteString("not-a-record\n")
 	}
 	writeTranscript(t, garbage, unrecognized.String())
-	if !interruptBoundaryAlreadyPresent(garbage, int64(len(unrecognized.String())), live) {
+	if !interruptBoundaryAlreadyPresent(garbage, int64(len(unrecognized.String())), live, nil) {
 		t.Fatal("an unparseable prefix was treated as proof of a new interruption")
 	}
 	structural := filepath.Join(t.TempDir(), "structural.jsonl")
@@ -401,7 +401,7 @@ func TestInterruptPrefixFailuresDoNotInventABoundary(t *testing.T) {
 	if !structuralTL.EndTurn() || structuralTL.Delivered() {
 		t.Fatal("setup: structural prefix was not an interruption boundary")
 	}
-	if interruptBoundaryAlreadyPresent(structural, int64(len(structuralBody)), live) {
+	if interruptBoundaryAlreadyPresent(structural, int64(len(structuralBody)), live, nil) {
 		t.Fatal("an interruption the tailer did not parse as a notice was treated as already present")
 	}
 
@@ -411,7 +411,7 @@ func TestInterruptPrefixFailuresDoNotInventABoundary(t *testing.T) {
 	prevDir := interruptPrefixTempDir
 	interruptPrefixTempDir = blocked
 	t.Cleanup(func() { interruptPrefixTempDir = prevDir })
-	if !interruptBoundaryAlreadyPresent(prompt, promptLen, live) {
+	if !interruptBoundaryAlreadyPresent(prompt, promptLen, live, nil) {
 		t.Fatal("a prefix that cannot be copied was treated as a new interruption")
 	}
 	interruptPrefixTempDir = prevDir
@@ -419,7 +419,7 @@ func TestInterruptPrefixFailuresDoNotInventABoundary(t *testing.T) {
 	prevWrite := writeInterruptPrefix
 	writeInterruptPrefix = func(*os.File, []byte) error { return os.ErrClosed }
 	t.Cleanup(func() { writeInterruptPrefix = prevWrite })
-	if !interruptBoundaryAlreadyPresent(prompt, promptLen, live) {
+	if !interruptBoundaryAlreadyPresent(prompt, promptLen, live, nil) {
 		t.Fatal("a prefix copy that fails to write was treated as a new interruption")
 	}
 	writeInterruptPrefix = prevWrite

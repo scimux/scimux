@@ -759,17 +759,24 @@ document.
 
 `202` means the owning worker durably recorded the decision (`status:
 accepted`, `delivery: recorded`, `emitted: false`). It does not mean Claude
-consumed the reply. Later phases distinguish emitted from confirmed.
-Unconfirmed delivery is not replayed. A known stale, replaced, canceled,
+consumed the reply. `emitted` means only a complete helper stdout write;
+this feature does not register a consumption-confirmation hook. Unconfirmed
+delivery is not replayed. A failed post-audit submission appends a correlated
+manual outcome (`not_delivered` for known rejection, `unconfirmed` for I/O
+uncertainty); recording intent does not assert approval reached
+Claude. A known stale, replaced, canceled,
 handed-off, expired, or competing request is `409`. Malformed or incomplete
 input is `400`, including a body over 32 KiB. Feedback and each free-text
-answer are at most 4096 bytes. `/send` stays `413` at 1 MiB. An unsupported
+answer are at most 4096 UTF-8 bytes, checked by both browser and server.
+`/send` stays `413` at 1 MiB. An unsupported
 node, a worker that does not advertise `claude-interaction-v1`, or a hook
 bundle minted with `SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS` unset is `404`.
 While the interaction owns the request, `POST …/key` for that node is `409`
 and no native key is delivered, including when ownership appears after the
 key was prepared. `terminal` revokes that ownership first; the
-visible-dialog epoch on `…/key` is then authoritative again. A recorded
+visible-dialog epoch on `…/key` is then authoritative again. Loss of the helper's
+waiter lock rejects answers and releases native controls before the deadline;
+recovery removes that dead request's active slot. A recorded
 cancellation settles only when an emitted cancel and a fresh interruption
 for that accepted turn are both present. The interruption is the notice
 itself. A previous completion does not settle it, and retiring the raw

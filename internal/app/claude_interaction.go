@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -62,18 +63,13 @@ const (
 const (
 	interactionContextDiscuss = "scimux sent this as discussion. The human did not select an option. Claude should stay on this question and may revise its next question. This application context is not the human's feedback."
 	interactionContextChanges = "scimux sent this as a request to revise the plan. The human did not approve the plan. Stay in plan mode and do not start implementation. This application context is not the human's feedback."
-	interactionContextCancel  = "scimux interrupted this interaction at the human's request. This is not an answer, not feedback, and not a mode change."
+	interactionContextCancel  = "The human requested interruption of this interaction. This is not an answer, not feedback, and not a mode change."
 )
 
 const (
 	interactionModeRestoreLabel = "Restore Claude's previous mode"
 	interactionModeDefaultLabel = "Manual review (default)"
 	interactionModeEditsLabel   = "Accept edits for this session"
-)
-
-const (
-	interactionDeliveryConfirmed   = "confirmed"
-	interactionDeliveryUnconfirmed = "unconfirmed"
 )
 
 // claudeInteractionModel is the server-held view of one supported request.
@@ -471,8 +467,12 @@ func decodeJSONStringValue(raw []byte) (string, bool) {
 	if len(text) < 2 || text[0] != '"' {
 		return "", false
 	}
-	value, err := strconv.Unquote(string(text))
-	if err != nil || !utf8.ValidString(value) {
+	if _, err := endJSONString(text, 0); err != nil || !utf8.Valid(text) {
+		return "", false
+	}
+	var value string
+	err := json.Unmarshal(text, &value)
+	if err != nil {
 		return "", false
 	}
 	return value, true
@@ -487,13 +487,6 @@ func decodeJSONBool(raw []byte) (bool, bool) {
 	default:
 		return false, false
 	}
-}
-
-func confirmClaudePlanDelivery(reviewed, observed string) string {
-	if reviewed != "" && reviewed == observed {
-		return interactionDeliveryConfirmed
-	}
-	return interactionDeliveryUnconfirmed
 }
 
 func claudeMultiJoinAmbiguous(labels []string) bool {
@@ -1090,10 +1083,10 @@ func decodeJSONString(raw []byte, i int) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	value, err := strconv.Unquote(string(raw[i:end]))
-	if err != nil {
-		return "", 0, err
-	}
+	var value string
+	// endJSONString validated the JSON string grammar. Use JSON's escaping
+	// rules (including surrogate pairs), never Go source-literal rules.
+	_ = json.Unmarshal(raw[i:end], &value)
 	return value, end, nil
 }
 
@@ -1121,6 +1114,17 @@ func endJSONString(raw []byte, i int) (int, error) {
 					if !isHex(c) {
 						return 0, errors.New("json string is incomplete")
 					}
+				}
+				u, _ := strconv.ParseUint(string(raw[i+2:i+6]), 16, 16)
+				if utf16.IsSurrogate(rune(u)) {
+					if i+12 > len(raw) || raw[i+6] != '\\' || raw[i+7] != 'u' {
+						return 0, errors.New("json surrogate is incomplete")
+					}
+					v, err := strconv.ParseUint(string(raw[i+8:i+12]), 16, 16)
+					if err != nil || utf16.DecodeRune(rune(u), rune(v)) == utf8.RuneError {
+						return 0, errors.New("json surrogate pair is invalid")
+					}
+					i += 6
 				}
 				i += 6
 			default:
