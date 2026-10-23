@@ -233,7 +233,9 @@ text is the interruption notice. A late notice for turn N cannot close turn N+1.
 A REST `202` means the worker durably recorded the human's intent. It does not
 mean Claude consumed the reply. That first audit row makes no delivery claim.
 If revalidation or answer publication fails after the audit append, the worker
-appends a correlated, application-authored outcome after releasing the fence:
+appends a correlated outcome with source `application` after releasing the fence.
+Its `outcome` contains only delivery status and fixed context, never repeated
+human content or raw errors. Chat labels this row Application. The statuses are:
 known stale/expired rejection is `not_delivered`; I/O failure leaves delivery
 `unconfirmed`, since an I/O error cannot prove withdrawal or non-consumption.
 The original row is never rewritten. No answer is published when

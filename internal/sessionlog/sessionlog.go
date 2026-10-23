@@ -72,15 +72,16 @@ type Event struct {
 	Prov json.RawMessage `json:"prov,omitempty"`
 }
 
-// DecisionEvent is an audited automatic or manual permission choice.
-// Appended and fsynced before the structured transport delivers the selected
-// option. Additive schema: old readers ignore t:"decision"; it is never a
+// DecisionEvent is an audited permission choice or application delivery outcome.
+// Choice rows are appended and fsynced before the structured transport delivers
+// the selected option. Additive schema: old readers ignore t:"decision"; it is never a
 // turn, seam, fare hit, tool interval, attention edge, or asset anchor.
 // Source "auto" is an automatic approval. Source "manual" is a human answer
 // to a Claude question or plan; Manual carries that record and is absent on
-// automatic rows.
+// automatic rows. Source "application" reports a delivery outcome, correlated
+// by RequestID, with no human choice or feedback repeated in the outcome.
 type DecisionEvent struct {
-	Source    string             `json:"source"`              // "auto" | "manual"
+	Source    string             `json:"source"`              // "auto" | "manual" | "application"
 	LeaseID   string             `json:"lease_id"`            // opaque lease that authorized this decision
 	RequestID string             `json:"request_id"`          // stable pending-request identity
 	Agent     string             `json:"agent,omitempty"`     // node agent at decision time
@@ -88,8 +89,16 @@ type DecisionEvent struct {
 	Title     string             `json:"title,omitempty"`     // full pending title/command
 	Reason    string             `json:"reason,omitempty"`    // full reason when known
 	Options   []DecOption        `json:"options,omitempty"`   // every offered option
-	Selected  DecOption          `json:"selected"`            // the option scimux authorized
-	Manual    *ManualInteraction `json:"manual,omitempty"`    // human question/plan decision; nil on auto rows
+	Selected  DecOption          `json:"selected"`            // authorized option, or application outcome label
+	Manual    *ManualInteraction `json:"manual,omitempty"`    // human question/plan decision; nil on auto/application rows
+	Outcome   *DeliveryOutcome   `json:"outcome,omitempty"`   // application-authored status; nil on choice rows
+}
+
+// DeliveryOutcome carries only application-authored delivery status. AppContext
+// is fixed explanatory text, never human feedback or a raw transport/OS error.
+type DeliveryOutcome struct {
+	Delivery   string `json:"delivery"`
+	AppContext string `json:"app_context"`
 }
 
 // ManualInteraction is the bounded human record for one Claude question or

@@ -86,7 +86,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     feedback, any chosen execution mode, and the delivery outcome. The initial
     row records intent, without claiming delivery. A later validation or
     publication failure appends a correlated application-authored outcome,
-    never a rewrite of the intent row. Known stale/expired rejection is
+    never a rewrite of the intent row. Its source is `application`, with only
+    delivery status and fixed explanatory context in `outcome`, correlated by
+    `request_id`. It repeats no human action, feedback, selections, or reviewed
+    content, and stores no raw error text. Known stale/expired rejection is
     `not_delivered`; an I/O error cannot prove non-consumption and stays
     `unconfirmed`.
     Application context is stored apart from human feedback. The record is

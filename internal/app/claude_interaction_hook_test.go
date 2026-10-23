@@ -109,8 +109,14 @@ func letterReply() claudeInteractionReply {
 func recordingAudit(t *testing.T, events *[]sessionlog.Event) func(sessionlog.Event) error {
 	t.Helper()
 	return func(ev sessionlog.Event) error {
-		if ev.T != "decision" || ev.Decision == nil || ev.Decision.Source != "manual" || ev.Decision.Manual == nil {
+		if ev.T != "decision" || ev.Decision == nil {
 			t.Errorf("audit event = %+v", ev.Decision)
+		} else if ev.Decision.Source == "application" {
+			if ev.Decision.Outcome == nil || ev.Decision.Manual != nil {
+				t.Errorf("application outcome = %+v", ev.Decision)
+			}
+		} else if ev.Decision.Source != "manual" || ev.Decision.Manual == nil || ev.Decision.Outcome != nil {
+			t.Errorf("manual intent = %+v", ev.Decision)
 		}
 		*events = append(*events, ev)
 		return nil

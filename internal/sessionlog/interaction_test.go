@@ -1,11 +1,41 @@
 package sessionlog
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestApplicationOutcomeRoundTripAndProjection(t *testing.T) {
+	// This schema is independently synthetic. An application outcome is an
+	// audit surface, never another human decision, conversation turn, or seam.
+	raw := []byte(`{"t":"decision","decision":{"source":"application","request_id":"req-synthetic","agent":"claude","selected":{"key":"","name":"Not delivered","kind":"not_delivered"},"outcome":{"delivery":"not_delivered","app_context":"Application delivery outcome."}}}`)
+	var ev Event
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	w := &Writer{Path: path}
+	if err := w.Append(ev); err != nil {
+		t.Fatal(err)
+	}
+	seg := ReadSegment(path)
+	if len(seg.Decisions) != 1 || len(seg.Turns) != 0 || len(seg.ClearTimes) != 0 {
+		t.Fatalf("outcome became conversation content: %+v", seg)
+	}
+	got, err := json.Marshal(seg.Decisions[0].Decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"source":"application"`) || !strings.Contains(string(got), `"outcome":{"delivery":"not_delivered","app_context":"Application delivery outcome."}`) || strings.Contains(string(got), `"manual"`) {
+		t.Fatalf("application provenance lost in projection: %s", got)
+	}
+	if turns := ReadTurns(path); len(turns) != 0 {
+		t.Fatalf("outcome became a turn: %+v", turns)
+	}
+}
 
 func TestManualDecisionRoundTripStaysDistinctFromAuto(t *testing.T) {
 	dir := t.TempDir()

@@ -683,16 +683,23 @@ func submitClaudeInteractionClock(bundle string, caller claudeInteractionCaller,
 		if resultErr == nil {
 			return
 		}
-		decision, manual := *event.Decision, *event.Decision.Manual
-		manual.Delivery = "not_delivered"
-		manual.AppContext = "Application delivery outcome: this submission was rejected before delivery. " + resultErr.Error()
-		decision.Manual = &manual
-		decision.Selected = sessionlog.DecOption{Name: "Not delivered", Kind: "not_delivered"}
+		// Build a separate application record: cloning intent would repeat human
+		// authorship and content. Raw errors can contain private filesystem paths.
+		decision := sessionlog.DecisionEvent{
+			Source:    "application",
+			RequestID: requestID,
+			Agent:     "claude",
+			Selected:  sessionlog.DecOption{Name: "Not delivered", Kind: "not_delivered"},
+			Outcome: &sessionlog.DeliveryOutcome{
+				Delivery:   "not_delivered",
+				AppContext: "Application delivery outcome: this submission was rejected before delivery.",
+			},
+		}
 		if !errors.Is(resultErr, errInteractionConflict) {
 			// An I/O error cannot attest withdrawal or non-consumption. Keep
 			// uncertainty explicit instead of inventing a negative receipt.
-			manual.Delivery = "unconfirmed"
-			manual.AppContext = "Application delivery outcome: submission failed; delivery is unconfirmed. " + resultErr.Error()
+			decision.Outcome.Delivery = "unconfirmed"
+			decision.Outcome.AppContext = "Application delivery outcome: submission failed; delivery is unconfirmed."
 			decision.Selected = sessionlog.DecOption{Name: "Delivery unconfirmed", Kind: "unconfirmed"}
 		}
 		if err := audit(sessionlog.NewDecision(decision)); err != nil {

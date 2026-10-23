@@ -90,7 +90,9 @@ the same without a second PID owner claim. Raw payloads and claims are removed. 
 cancellation keeps a minimal turn fence so settlement can still run; that
 fence is not replayed. The replay fence and the append-only audit remain.
 The audit records intent before publication, followed by a correlated
-outcome if post-audit validation or publication fails: known rejection is
+outcome with source `application` if post-audit validation or publication fails.
+Only fixed context and delivery status are stored in `outcome`, linked by
+`request_id`, without repeating human content or raw errors. Known rejection is
 `not_delivered`, while I/O uncertainty stays `unconfirmed`. Helper
 stdout is emission evidence; no consumption-confirmation hook is registered.
 The worker's submitted caller generation comes from the node's binding when

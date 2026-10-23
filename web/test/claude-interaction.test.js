@@ -410,6 +410,39 @@ test("chat signature and decision hash include the interaction and the manual re
   assert.notEqual(approved, noMode);
 });
 
+test("application outcomes have their own provenance and repaint signature", () => {
+  const outcome = {
+    record: 5,
+    time: "2026-10-21T00:00:00Z",
+    decision: {
+      source: "application",
+      request_id: `req-<&"`,
+      outcome: {
+        delivery: "not_delivered",
+        app_context: "Application delivery outcome: <rejected>.",
+      },
+      // An application row must never render a human payload, even if one
+      // accompanies it in an older or malformed response.
+      manual: { action: "answer", feedback: "human words", selections: [{ labels: ["Alpha"] }] },
+    },
+  };
+  const html = decisionRowHTML(outcome, { fmtTime: () => "<time>" });
+  assert.match(html, /decision-state">Application</);
+  assert.match(html, /data-request="req-&lt;&amp;&quot;"/);
+  assert.match(html, /not delivered/);
+  assert.match(html, /&lt;rejected&gt;/);
+  assert.match(html, /&lt;time&gt;/);
+  assert.doesNotMatch(html, /Manual|Auto-approved|Feedback|human words|Alpha|decision-action/);
+  assert.match(manualDecisionRowHTML(outcome), /Application/);
+  assert.match(decisionRowHTML({ decision: { source: "application" } }), /Application/);
+  const same = { ...outcome, decision: { ...outcome.decision, manual: undefined } };
+  assert.match(decisionRowHTML(same), /Application/);
+  const hash = decisionsHash([same]);
+  assert.notEqual(hash, decisionsHash([{ ...same, decision: { ...same.decision, source: "manual" } }]));
+  assert.notEqual(hash, decisionsHash([{ ...same, decision: { ...same.decision, outcome: { ...same.decision.outcome, delivery: "unconfirmed" } } }]));
+  assert.notEqual(hash, decisionsHash([{ ...same, decision: { ...same.decision, outcome: { ...same.decision.outcome, app_context: "Different context" } } }]));
+});
+
 test("manual audit rows are not labeled Auto-approved; auto rows stay labeled", () => {
   const manual = {
     record: 4,

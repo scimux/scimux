@@ -762,8 +762,10 @@ accepted`, `delivery: recorded`, `emitted: false`). It does not mean Claude
 consumed the reply. `emitted` means only a complete helper stdout write;
 this feature does not register a consumption-confirmation hook. Unconfirmed
 delivery is not replayed. A failed post-audit submission appends a correlated
-manual outcome (`not_delivered` for known rejection, `unconfirmed` for I/O
-uncertainty); recording intent does not assert approval reached
+application outcome (`source: application`, correlated by `request_id`, with
+only delivery status and fixed context in `outcome`). It repeats no human
+content or raw errors: `not_delivered` means known rejection, `unconfirmed`
+means I/O uncertainty. Recording intent does not assert approval reached
 Claude. A known stale, replaced, canceled,
 handed-off, expired, or competing request is `409`. Malformed or incomplete
 input is `400`, including a body over 32 KiB. Feedback and each free-text

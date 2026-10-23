@@ -208,13 +208,13 @@ func TestSixthPostAuditRejectionHasDurableOutcome(t *testing.T) {
 				// An I/O failure cannot prove withdrawal or non-consumption.
 				wantDelivery = "unconfirmed"
 			}
-			if durable := sessionlog.ReadEvents(logPath); len(durable) != 2 || durable[1].Decision.Manual.Delivery != wantDelivery {
+			if durable := sessionlog.ReadEvents(logPath); len(durable) != 2 || durable[1].Decision.Outcome == nil || durable[1].Decision.Outcome.Delivery != wantDelivery {
 				t.Fatalf("failure outcome was not durable: %+v", durable)
 			}
-			if first.Manual.Delivery != "recorded" || last.Manual.Delivery != wantDelivery || last.RequestID != first.RequestID {
+			if first.Source != "manual" || first.Manual.Delivery != "recorded" || last.Source != "application" || last.Manual != nil || last.Outcome.Delivery != wantDelivery || last.RequestID != first.RequestID {
 				t.Fatalf("audit outcomes: %+v %+v", first, last)
 			}
-			if !strings.Contains(last.Manual.AppContext, "Application") {
+			if !strings.Contains(last.Outcome.AppContext, "Application") {
 				t.Fatal("failure provenance is not application-authored")
 			}
 			if strings.Contains(first.Selected.Name, "Answered") {

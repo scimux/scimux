@@ -1134,13 +1134,14 @@ export function decisionsHash(decisions){
     const dec = (d && d.decision) || d || {};
     const sel = dec.selected || {};
     const manual = dec.manual || {};
+    const outcome = dec.outcome || {};
     const selections = Array.isArray(manual.selections) ? manual.selections : [];
     return [
       d && d.record != null ? d.record : "",
       dec.request_id || "",
       sel.key || "",
       dec.lease_id || "",
-      dec.source === "manual" ? "manual" : "",
+      dec.source || "",
       manual.action || "",
       manual.mode || "",
       manual.feedback || "",
@@ -1149,6 +1150,8 @@ export function decisionsHash(decisions){
         Array.isArray(item && item.option_ids) ? item.option_ids.join(",") : "",
         item && item.free_text || "",
       ].join("=")).join(","),
+      outcome.delivery || "",
+      outcome.app_context || "",
     ].join(":");
   }).join("|");
 }
@@ -1196,7 +1199,7 @@ export function decisionRowHTML(surface, {
 } = {}){
   const s = surface || {};
   const d = s.decision || {};
-  if (d.source === "manual" || d.manual){
+  if (d.source === "application" || d.source === "manual" || d.manual){
     return manualDecisionRowHTML(s, { escape, fmtTime });
   }
   const sel = d.selected || {};

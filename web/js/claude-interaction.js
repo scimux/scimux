@@ -47,10 +47,12 @@ export function interactionBlocksNativeKeys(view){
   return !!(view && view.request_id && view.native_keys === false);
 }
 
+// Human intent and correlated application outcomes retain distinct authorship.
 export function manualDecisionRowHTML(surface, options){
   const s = surface || {};
   const d = s.decision || {};
-  const manual = d.manual || {};
+  const application = d.source === "application";
+  const manual = application ? d.outcome || {} : d.manual || {};
   const fmtTime = options && typeof options.fmtTime === "function" ? options.fmtTime : null;
   const when = s.time && fmtTime ? escText(fmtTime(s.time)) : "";
   const action = manual.action ? escText(manual.action) : "";
@@ -67,7 +69,7 @@ export function manualDecisionRowHTML(surface, options){
     return `<li>${question}${labels ? ` ${labels}` : ""}${free ? ` ${free}` : ""}</li>`;
   }).join("");
   return `<div class="decision" data-record="${escText(s.record ?? "")}" data-request="${escText(d.request_id || "")}">` +
-    `<div class="decision-head"><span class="decision-state">Manual</span>` +
+    `<div class="decision-head"><span class="decision-state">${application ? "Application" : "Manual"}</span>` +
     (action ? ` <span class="decision-action">${action}</span>` : "") +
     `</div>` +
     (reviewed ? `<div class="decision-reviewed">${reviewed}</div>` : "") +
