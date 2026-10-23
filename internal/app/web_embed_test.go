@@ -25,6 +25,7 @@ var productionJSModules = []string{
 	"web/js/cards.js",
 	"web/js/caret.js",
 	"web/js/chat.js",
+	"web/js/claude-interaction.js",
 	"web/js/composer.js",
 	"web/js/format.js",
 	"web/js/harness.js",

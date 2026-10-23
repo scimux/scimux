@@ -57,12 +57,21 @@ func writeClaudeAcceptedTurn(perm string, t claudeAcceptedTurn) error {
 	if st, err := os.Stat(perm); err != nil || !st.IsDir() {
 		return errClaudeHookRejected
 	}
+	unlock, err := lockInteractionFence(filepath.Dir(perm))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return writeClaudePermFile(claudeTurnPath(perm), t)
 }
 
 func clearClaudeAcceptedTurnFile(perm string) {
 	if perm == "" {
 		return
+	}
+	unlock, err := lockInteractionFence(filepath.Dir(perm))
+	if err == nil {
+		defer unlock()
 	}
 	_ = os.Remove(claudeTurnPath(perm))
 }
@@ -156,6 +165,7 @@ func (a *app) beginClaudeAcceptedTurn(n *Node) (claudeAcceptedTurn, error) {
 		clearClaudeAcceptedTurnFileIf(filepath.Join(bundle, "perm"), next.Turn)
 		return empty, errClaudeTurnMarker
 	}
+	rememberClaudeInterruptWatermark(a, n)
 	return next, nil
 }
 

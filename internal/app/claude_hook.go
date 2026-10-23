@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scimux/scimux/internal/sessionlog"
@@ -35,6 +36,11 @@ var (
 	errClaudeHookPending        = errors.New("claude hook pending")
 	errClaudeHookHeld           = errors.New("claude hook held")
 )
+
+// claudeResumeFenceExplain is the diagnostic for a binding that is already
+// durable when helper-fence publication fails. It must not claim the previous
+// transcript is still attached.
+const claudeResumeFenceExplain = "Claude bound the new transcript, but its helper fence could not be published. Sending stays blocked until that fence is published."
 
 // claudeSessionStartEvent is the documented SessionStart stdin payload.
 // Unknown JSON fields are ignored at decode time.
@@ -248,7 +254,25 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 	// attention backstop. "exec" records the binary settings.json just baked in,
 	// as JSON rather than a shell string to re-parse, so both gates can check
 	// that the hooks can still run at all (claudeBundleExecUsable).
-	caps, err := json.Marshal(claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Exec: execPath})
+	// "interaction" is minted only for the exact experimental gate value, and
+	// only on this new bundle. An already launched bundle is never rewritten.
+	capsDoc := claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Exec: execPath}
+	if claudeInteractionsEnvEnabled(os.Getenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS")) {
+		capsDoc.Interaction = 1
+		raw = addPermissionRequestTimeout(raw, interactionHookTimeoutSec)
+		for _, sub := range claudeInteractionSubdirs {
+			p := filepath.Join(dir, sub)
+			if err := ops.MkdirAll(p, 0o700); err != nil {
+				ops.RemoveAll(dir)
+				return "", err
+			}
+			if err := ops.Chmod(p, 0o700); err != nil {
+				ops.RemoveAll(dir)
+				return "", err
+			}
+		}
+	}
+	caps, err := json.Marshal(capsDoc)
 	if err != nil {
 		ops.RemoveAll(dir)
 		return "", err
@@ -570,6 +594,7 @@ func (a *app) noteClaudeHookCapabilitiesForNode(nodeID string) {
 	a.noteClaudePermCapability(hookID)
 	a.noteClaudeAskedCapability(hookID)
 	a.noteClaudeStrictCapability(hookID)
+	a.publishClaudeBindingFence(nodeID)
 }
 
 func (a *app) bindClaudeStartup(nodeID string, ev claudeSessionStartEvent, capturedGen int) error {
@@ -699,6 +724,14 @@ func (a *app) clearClaudeClearPendingLocked(nodeID string) {
 	delete(a.claudeClearSent, nodeID)
 }
 
+// claudeClearGenerationPause is nil in production. Tests use it to move the
+// binding after the durable append and before that generation is published.
+var claudeClearGenerationPause func(*app)
+
+// claudeBindingMemoryPause is nil in production. Tests use it to remove the
+// node after the binding record is durable and before memory is updated.
+var claudeBindingMemoryPause func(*app)
+
 // persistClaudeClearGeneration is called only while claudeBindLock(nodeID) is
 // held. Validate before append; after a successful append no competing bind or
 // web clear can move the generation before memory is updated.
@@ -714,15 +747,20 @@ func (a *app) persistClaudeClearGeneration(nodeID, hookID string, captured int) 
 	if err := a.appendRecord(storeRecord{Type: "claude-hook", ID: nodeID, HookID: hookID, Generation: next}); err != nil {
 		return err
 	}
+	if pause := claudeClearGenerationPause; pause != nil {
+		pause(a)
+	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.byID[nodeID] == nil || a.claudeHookIDLocked(nodeID) != hookID || a.claudeGenerationLocked(nodeID) != captured {
+		a.mu.Unlock()
 		return errClaudeHookRejected
 	}
 	if a.claudeGens == nil {
 		a.claudeGens = map[string]int{}
 	}
 	a.claudeGens[nodeID] = next
+	a.mu.Unlock()
+	a.publishClaudeBindingFence(nodeID)
 	return nil
 }
 
@@ -773,11 +811,14 @@ func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessi
 	// The committed record is durable. All generation mutations use the same
 	// per-node bind lock, so the validated generation cannot move between the
 	// append and this in-memory application.
+	if pause := claudeBindingMemoryPause; pause != nil {
+		pause(a)
+	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	n := a.byID[nodeID]
 	if n == nil {
 		delete(a.pathClaims, ev.TranscriptPath)
+		a.mu.Unlock()
 		return errClaudeHookRejected
 	}
 	n.Transcript = ev.TranscriptPath
@@ -787,6 +828,13 @@ func (a *app) commitClaudeBinding(nodeID, hookID string, gen int, ev claudeSessi
 	}
 	a.clearClaudeClearPendingLocked(nodeID)
 	delete(a.pathClaims, ev.TranscriptPath)
+	bundle := a.claudePermBundleLocked(nodeID)
+	a.mu.Unlock()
+	// Publish under the emission lock before this commit returns. The helper
+	// then sees the new session, or no fence at all if the write fails.
+	if err := publishClaudeBindingFenceExclusive(bundle, nodeID, ev.SessionID, gen); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -806,13 +854,35 @@ func (a *app) applyClaudeCompact(nodeID string, ev claudeSessionStartEvent) erro
 	return nil
 }
 
+// claudeResumeRemainder is the cleanup still owed after a resume binding is
+// durable and only helper-fence publication failed. Append-only history
+// cannot roll the new session back, so the next same-identity SessionStart
+// republishes the fence and finishes retirement.
+type claudeResumeRemainder struct {
+	sessionID string
+	path      string
+	oldPath   string
+	oldSID    string
+	bundle    string
+	gen       int
+}
+
+type claudeResumeRemainderKey struct {
+	app    *app
+	nodeID string
+}
+
+var claudeResumeRemainders sync.Map
+
 func (a *app) applyClaudeResume(nodeID string, ev claudeSessionStartEvent, capturedGen int) error {
-	// Resume is accepted and never becomes inspect. Same identity is a
-	// no-op. A valid changed session/path is rebound with the current
-	// generation, path-claim, tombstone, persistence, and source-seam
-	// rules. The new binding is committed before the old transcript is
-	// retired. Failure is an inline error, not inspect, and keeps the
-	// previous valid binding.
+	// Resume is accepted and never becomes inspect. Same identity finishes
+	// a fence publication that failed after the new binding was committed,
+	// and otherwise leaves launch errors and elicitations alone. A valid
+	// changed session/path is rebound with the current generation,
+	// path-claim, tombstone, persistence, and source-seam rules. The new
+	// binding is committed before the old transcript is retired. A failure
+	// before that commit keeps the previous binding. A failure after it
+	// stands, and only the helper fence remains to be published.
 	if err := a.validateClaudeHookEvent(nodeID, ev, false); err != nil {
 		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
 		return err
@@ -825,7 +895,7 @@ func (a *app) applyClaudeResume(nodeID string, ev claudeSessionStartEvent, captu
 	}
 	if n.SessionID == ev.SessionID && n.Transcript == ev.TranscriptPath {
 		a.mu.Unlock()
-		return nil
+		return a.finishClaudeResumeRemainder(nodeID, ev)
 	}
 	hookID := a.claudeHookIDLocked(nodeID)
 	gen := a.claudeGenerationLocked(nodeID)
@@ -846,13 +916,57 @@ func (a *app) applyClaudeResume(nodeID string, ev claudeSessionStartEvent, captu
 	if err := a.commitClaudeBinding(nodeID, hookID, gen, ev, "resume", oldPath, oldSID); err != nil {
 		a.mu.Lock()
 		delete(a.pathClaims, ev.TranscriptPath)
+		n := a.byID[nodeID]
+		committed := n != nil && n.SessionID == ev.SessionID && n.Transcript == ev.TranscriptPath
 		a.mu.Unlock()
-		a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+		if !committed {
+			a.recordClaudeLaunchError(nodeID, claudeResumeExplain)
+			return err
+		}
+		bundle := a.claudeHookBundlePath(hookID)
+		claudeResumeRemainders.Store(claudeResumeRemainderKey{app: a, nodeID: nodeID}, claudeResumeRemainder{
+			sessionID: ev.SessionID,
+			path:      ev.TranscriptPath,
+			oldPath:   oldPath,
+			oldSID:    oldSID,
+			bundle:    bundle,
+			gen:       gen,
+		})
+		a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, false)
+		clearClaudeElicitationsForSession(bundle, oldSID)
+		a.recordClaudeLaunchError(nodeID, claudeResumeFenceExplain)
 		return err
 	}
+	claudeResumeRemainders.Delete(claudeResumeRemainderKey{app: a, nodeID: nodeID})
 	a.applyRetiredClaudeTranscript(nodeID, oldPath, oldSID, false)
 	a.clearClaudeLaunchError(nodeID)
 	clearClaudeElicitationsForSession(a.claudeHookBundlePath(hookID), oldSID)
+	return nil
+}
+
+func (a *app) finishClaudeResumeRemainder(nodeID string, ev claudeSessionStartEvent) error {
+	key := claudeResumeRemainderKey{app: a, nodeID: nodeID}
+	v, ok := claudeResumeRemainders.Load(key)
+	if !ok {
+		return nil
+	}
+	rem, ok := v.(claudeResumeRemainder)
+	if !ok {
+		claudeResumeRemainders.Delete(key)
+		return nil
+	}
+	if rem.sessionID != ev.SessionID || rem.path != ev.TranscriptPath {
+		return nil
+	}
+	if err := publishClaudeBindingFenceExclusive(rem.bundle, nodeID, ev.SessionID, rem.gen); err != nil {
+		return err
+	}
+	a.applyRetiredClaudeTranscript(nodeID, rem.oldPath, rem.oldSID, false)
+	clearClaudeElicitationsForSession(rem.bundle, rem.oldSID)
+	if a.claudeLaunchError(nodeID) == claudeResumeFenceExplain {
+		a.clearClaudeLaunchError(nodeID)
+	}
+	claudeResumeRemainders.Delete(key)
 	return nil
 }
 

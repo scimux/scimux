@@ -74,6 +74,20 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   Deterministic heuristics may read it. It must never be used to train,
   fine-tune, distill, or otherwise develop a model — do not turn it into a
   training dataset.
+  - Ordinary disarmed Claude tool calls keep digest-only permission evidence.
+    A pending human question or plan may hold its original bounded payload
+    transiently until the helper deadline. After that deadline the owning
+    worker removes the raw request and response copies, including answered,
+    canceled, handed-off, and uncertain ones, and leaves a request-specific
+    replay fence. The durable manual decision is a
+    bounded append-only exception on the existing decision record: request
+    identity, reviewed content and its digest, the human's selections or
+    feedback, any chosen execution mode, and the delivery outcome.
+    Application context is stored apart from human feedback. The record is
+    not a new conversation role, a fake user prompt, a seam, or a rewrite of
+    an earlier row, and it is not a license to log raw hook input for
+    ordinary tool calls. The question and plan text come from the hook
+    payload the helper already held. `planFilePath` is not read.
   - Agent file imports record the file's actual basename and extension; link
     labels and image alt text are descriptive only and never authorize inline
     rendering. Chat projection keeps the agent's link label as display text,

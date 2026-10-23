@@ -47,6 +47,14 @@ node never raises inspect from quietness, AX, owing or transcript faults.
 - Claude's explicit interrupted-message record is a completed turn boundary
   even though Claude writes it with role `user`; it clears Owing/pending and
   releases the next-prompt gate.
+- A current worker-owned structured Claude interaction is a narrow attention
+  source of kind `question` while its phase is pending or claimed, including
+  while an auto-approve lease is armed. The owning worker releases it after
+  the helper deadline, so a dead helper does not leave the question in
+  attention. It does not change mechanical
+  liveness, does not authorize pane-text attention, and does not apply to
+  gate-off, legacy, or unsupported sessions. Those keep the existing policy.
+  Stopping or failing hooks are not required to clear it.
 - `handlePeek` runs the same quiet-branch predicate one-shot when a human
   opens the terminal view, so a late-flush dialog is visible without an
   unresolved call in the transcript. It is deliberately *not* quiet-gated —

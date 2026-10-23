@@ -37,6 +37,7 @@
  *   - GET  /api/nodes/:id/chat?history=1
  *   - GET  /api/nodes/:id/peek[?mode=visible]
  *   - POST /api/nodes/:id/key
+ *   - POST /api/nodes/:id/claude-interaction
  *   - POST /api/nodes/:id/send/resolve
  *   - POST /api/nodes/:id/auto-approve
  *   - PATCH /api/nodes/:id  (description only, from details editor)
@@ -87,6 +88,12 @@ import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
 import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
+import {
+  interactionSignature,
+  interactionBlocksNativeKeys,
+  manualDecisionRowHTML,
+  createClaudeInteractionCard,
+} from "./claude-interaction.js";
 import {
   readPendingForwards,
   clearPendingForwards,
@@ -277,6 +284,7 @@ export function buildChatSignature(parts){
     p.expanded ? "1" : "0",
     p.compacting ? "1" : "0",
     p.elicitationKey || "",
+    p.interactionKey || "",
   ].join("|");
 }
 
@@ -1125,11 +1133,22 @@ export function decisionsHash(decisions){
   return (decisions || []).map(d => {
     const dec = (d && d.decision) || d || {};
     const sel = dec.selected || {};
+    const manual = dec.manual || {};
+    const selections = Array.isArray(manual.selections) ? manual.selections : [];
     return [
       d && d.record != null ? d.record : "",
       dec.request_id || "",
       sel.key || "",
       dec.lease_id || "",
+      dec.source === "manual" ? "manual" : "",
+      manual.action || "",
+      manual.mode || "",
+      manual.feedback || "",
+      selections.map(item => [
+        item && item.question_id || "",
+        Array.isArray(item && item.option_ids) ? item.option_ids.join(",") : "",
+        item && item.free_text || "",
+      ].join("=")).join(","),
     ].join(":");
   }).join("|");
 }
@@ -1177,6 +1196,9 @@ export function decisionRowHTML(surface, {
 } = {}){
   const s = surface || {};
   const d = s.decision || {};
+  if (d.source === "manual" || d.manual){
+    return manualDecisionRowHTML(s, { escape, fmtTime });
+  }
   const sel = d.selected || {};
   const title = d.title != null ? String(d.title) : "";
   const selName = sel.name != null ? String(sel.name) : (sel.key != null ? String(sel.key) : "");
@@ -1275,6 +1297,10 @@ export function createChatFeature(deps){
   const autoapprove = roots.autoapprove;
   const scrollend = roots.scrollend;
   const workpulse = roots.workpulse;
+  const interactionCard = createClaudeInteractionCard({
+    document: doc,
+    api: (path, opts) => api(path, opts),
+  });
 
   /* feature-owned state */
   let chatSig = "";
@@ -1645,6 +1671,7 @@ export function createChatFeature(deps){
   }
 
   function onSelectChange(){
+    interactionCard.retire();
     chatSig = "";
     syncMuseSchemaWarning(nodeById(g("sel", "")));
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
@@ -2130,6 +2157,7 @@ export function createChatFeature(deps){
       expanded,
       compacting: !!data.compacting,
       elicitationKey: elicitationKey(data),
+      interactionKey: interactionSignature(data.claude_interaction),
     });
     const label = unconfirmed
       ? "Send unconfirmed \u2014 check the terminal"
@@ -2259,6 +2287,13 @@ export function createChatFeature(deps){
       renderedCleanups.push(() => node.removeEventListener(event, handler));
     };
     if (keyrow){
+      const interactionView = data.claude_interaction || null;
+      if (interactionBlocksNativeKeys(interactionView)){
+        interactionCard.capture();
+        keyrow.innerHTML = "";
+        interactionCard.update(keyrow, interactionView, { nodeId: n.id });
+      } else {
+      interactionCard.unmount();
       /* Preserve .permask scrollTop across poll rebuilds (expanded path only).
          Same spirit as withCardEditsPreserved: snapshot before innerHTML write,
          restore after if still the same node and still expanded. Clamped mode
@@ -2299,6 +2334,7 @@ export function createChatFeature(deps){
          its clamp vertically. Runs here only — not on the skip path, not a
          second render. Same pattern as bookmarkClampState + applyRefClamps. */
       revealPermMoreIfNeeded();
+      }
     }
     endChatLoad();
   }
@@ -2795,6 +2831,7 @@ export function createChatFeature(deps){
   }
 
   function destroy(){
+    interactionCard.destroy();
     while (cleanups.length){
       try { cleanups.pop()(); } catch { /* ignore */ }
     }

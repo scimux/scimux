@@ -745,6 +745,47 @@ Every accepted key is recorded in the store together with decision evidence
 structured transports the decision is persisted *before* the agent learns
 the answer.
 
+### `POST /api/nodes/{id}/claude-interaction`
+
+Body: `{"request_id","action"}` plus the fields that action uses. `action`
+is `answer`, `discuss`, `approve`, `request_changes`, `cancel`, or
+`terminal`. `answer` carries `answers` of `{question_id, option_ids,
+free_text}`. `discuss` and `request_changes` carry non-empty `feedback`.
+`approve` may carry `mode` of exactly `restore`, `default`, or
+`acceptEdits`. The server looks up question text, option labels, and plan
+text from the hook request it already holds. The body cannot replace that
+request, supply hook JSON, a filesystem path, or any `updatedPermissions`
+document.
+
+`202` means the owning worker durably recorded the decision (`status:
+accepted`, `delivery: recorded`, `emitted: false`). It does not mean Claude
+consumed the reply. Later phases distinguish emitted from confirmed.
+Unconfirmed delivery is not replayed. A known stale, replaced, canceled,
+handed-off, expired, or competing request is `409`. Malformed or incomplete
+input is `400`, including a body over 32 KiB. Feedback and each free-text
+answer are at most 4096 bytes. `/send` stays `413` at 1 MiB. An unsupported
+node, a worker that does not advertise `claude-interaction-v1`, or a hook
+bundle minted with `SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS` unset is `404`.
+While the interaction owns the request, `POST …/key` for that node is `409`
+and no native key is delivered, including when ownership appears after the
+key was prepared. `terminal` revokes that ownership first; the
+visible-dialog epoch on `…/key` is then authoritative again. A recorded
+cancellation settles only when an emitted cancel and a fresh interruption
+for that accepted turn are both present. The interruption is the notice
+itself. A previous completion does not settle it, and retiring the raw
+payload does not drop that boundary. A dated notice is fresh only from its
+own timestamp. An undated notice is fresh only when its transcript is
+readable, modified strictly after the turn was accepted, fully consumed, and
+the notice was not already in the bytes recorded when the turn began. A
+later record's timestamp, a metadata append, or a missing timestamp does not
+make an older consumed notice fresh.
+`perm_dialog_id` stays that epoch and is not the hook request id. Questions
+and plans are never auto-approved, including while a lease is armed.
+
+The current chat snapshot may include `claude_interaction` (`request_id`,
+`phase`, `tool`, questions or plan text, mode choices, `native_keys`).
+`GET …/chat?history=1` does not.
+
 ### `POST /api/nodes/{id}/auto-approve`
 
 Body: `{"enabled": true}`. Arms or disarms the server-owned, one-turn

@@ -574,3 +574,16 @@ func TestPermOptionAliasesAgentpermOption(t *testing.T) {
 	_ = shared
 	_ = local
 }
+
+func TestRemovePendingPreservesOtherPermissions(t *testing.T) {
+	first, middle, last := &pendingPermission{seq: 1}, &pendingPermission{seq: 2}, &pendingPermission{seq: 3}
+	s := &Session{pending: []*pendingPermission{first, middle, last}}
+	s.removePending(middle)
+	if len(s.pending) != 2 || s.pending[0] != first || s.pending[1] != last {
+		t.Fatal("removing a permission changed another pending permission")
+	}
+	s.removePending(middle)
+	if len(s.pending) != 2 {
+		t.Fatal("repeated removal changed the queue")
+	}
+}

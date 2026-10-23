@@ -1966,3 +1966,27 @@ func TestCloseResolveOwnershipStress(t *testing.T) {
 		}
 	}
 }
+
+type v5PeerDiscard struct{ io.Writer }
+
+func (v5PeerDiscard) Close() error { return nil }
+
+type v5CloseOnRead struct{ p *peer }
+
+func (r *v5CloseOnRead) Read(buf []byte) (int, error) {
+	r.p.Close()
+	return copy(buf, []byte("{\"method\":\"synthetic/event\"}\n")), nil
+}
+func TestReadLoopRejectsFrameArrivingAfterClose(t *testing.T) {
+	r := &v5CloseOnRead{}
+	p := newPeer(r, v5PeerDiscard{io.Discard})
+	r.p = p
+	if err := p.readLoop(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("read after close = %v", err)
+	}
+	select {
+	case <-p.readFinished():
+	default:
+		t.Fatal("read loop did not retire")
+	}
+}

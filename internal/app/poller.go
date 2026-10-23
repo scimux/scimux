@@ -236,6 +236,7 @@ func (a *app) poll() {
 				quietTl = a.tailerFor(n)
 				if quietTl != nil {
 					quietTl.Poll()
+					a.noteClaudeInteractionInterrupt(n, quietTl)
 					off, prog := quietTl.Progress()
 					a.noteChatProgress(n.ID, off, prog, prev == "active")
 					refreshClaudeDlg(quietTl)
@@ -243,11 +244,18 @@ func (a *app) poll() {
 			} else if state == "active" {
 				if tl := a.tailerFor(n); tl != nil {
 					tl.Poll()
+					a.noteClaudeInteractionInterrupt(n, tl)
 					refreshClaudeDlg(tl)
 				}
 			}
 			askAttn, askCapable = "", false
 			if claudeSup == claudeSupStrict && a.claudeElicitationWaiting(n) && attn == "" {
+				attn, freshAttn = "question", true
+			}
+			// A structured question or plan is a human decision even while a
+			// permission dialog is also visible and even while a lease is armed.
+			// It overrides dialog attention. It does not change pane liveness.
+			if claudeSup == claudeSupStrict && a.claudeInteractionNeedsAttention(n) {
 				attn, freshAttn = "question", true
 			}
 		} else if state == "quiet" {
@@ -566,6 +574,9 @@ func (a *app) projectWorkerClaudeHook(nodeID string, state sessionworker.State) 
 	a.mu.Lock()
 	a.claudeHooks[nodeID], a.claudeGens[nodeID] = state.HookID, generation
 	a.mu.Unlock()
+	// The worker owns perm/generation.json. A cached observation can be newer
+	// than this muxer's last generation and still older than the worker, so
+	// projecting it must not rewrite the helper fence.
 }
 
 // reconcileClaudeClear gives up waiting for the SessionStart source:"clear"

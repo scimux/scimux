@@ -3450,3 +3450,12 @@ func TestCloseReleasesSessionOpWaiter(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMalformedUserInputReportsErrorSynchronously(t *testing.T) {
+	var events []Event
+	c := &Client{sink: func(ev Event) { events = append(events, ev) }}
+	c.declineUserInput("", json.RawMessage("}"))
+	if len(events) != 1 || events[0].T != "error" || events[0].Error != "malformed user input request" {
+		t.Fatalf("malformed input events = %+v", events)
+	}
+}

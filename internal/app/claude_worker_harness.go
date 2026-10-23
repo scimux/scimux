@@ -74,6 +74,7 @@ func newClaudeSessionHarness(config sessionWorkerConfig) (*claudeSessionHarness,
 
 func (h *claudeSessionHarness) startLanes() {
 	h.start.Do(func() {
+		h.recoverInteractions(time.Now())
 		go func() {
 			defer close(h.done)
 			poll := time.NewTicker(2 * time.Second)
@@ -97,9 +98,22 @@ func (h *claudeSessionHarness) startLanes() {
 func (h *claudeSessionHarness) poll() {
 	h.pollMu.Lock()
 	defer h.pollMu.Unlock()
+	h.recoverInteractions(time.Now())
 	h.app.poll()
 	h.snapshot = h.projectState()
 	h.ready = true
+}
+
+func (h *claudeSessionHarness) recoverInteractions(now time.Time) {
+	if h == nil || h.app == nil {
+		return
+	}
+	n := h.node()
+	if n == nil {
+		return
+	}
+	h.app.publishClaudeBindingFence(n.ID)
+	recoverClaudeInteractionBundle(h.app.claudeHookBundle(n), now)
 }
 
 func (h *claudeSessionHarness) refreshState() {
@@ -181,6 +195,7 @@ func (h *claudeSessionHarness) Launch(_ context.Context, req sessionworker.Launc
 			}
 			h.app.mu.Unlock()
 			h.app.noteClaudeHookCapabilitiesForNode(n.ID)
+			h.app.publishClaudeBindingFence(n.ID)
 		}
 		h.startLanes()
 		return sid, nil
@@ -202,6 +217,7 @@ func (h *claudeSessionHarness) Launch(_ context.Context, req sessionworker.Launc
 		h.app.claudeHooks[n.ID], h.app.claudeGens[n.ID] = hookID, 1
 		h.app.sendState[n.ID] = sendSubmitting
 		h.app.mu.Unlock()
+		h.app.publishClaudeBindingFence(n.ID)
 	}
 	h.startLanes()
 	go h.app.runClaudeInitialDelivery(n)
@@ -286,6 +302,9 @@ func (h *claudeSessionHarness) PreparePermission(_ context.Context, decision ses
 	if n == nil {
 		return sessionworker.PreparedPermission{}, errClaudeWorkerConflict
 	}
+	if h.app.claudeInteractionBlocksNativeKey(n) {
+		return sessionworker.PreparedPermission{}, errClaudeWorkerConflict
+	}
 	dlg := h.app.claudeVisibleDialog(n)
 	if decision.RequestID == "" || decision.RequestID != dlg.DialogID {
 		return sessionworker.PreparedPermission{}, errClaudeWorkerConflict
@@ -313,8 +332,18 @@ func (h *claudeSessionHarness) PreparePermission(_ context.Context, decision ses
 	return sessionworker.PreparedPermission{Token: token, Evidence: lastLines(cap, 12), Keys: keys}, nil
 }
 
+// claudeNativeDeliveryPause is nil in production. Tests use it to publish
+// structured ownership after the initial guard and before the delivery lock.
+var claudeNativeDeliveryPause func(*claudeSessionHarness)
+
 func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string) error {
 	defer h.refreshState()
+	if h.app.claudeInteractionBlocksNativeKey(h.node()) {
+		return errClaudeWorkerConflict
+	}
+	if pause := claudeNativeDeliveryPause; pause != nil {
+		pause(h)
+	}
 	h.answerMu.Lock()
 	prepared, ok := h.answers[token]
 	delete(h.answers, token)
@@ -335,7 +364,7 @@ func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string
 			return errClaudeWorkerConflict
 		}
 	}
-	if err := h.app.server.Session(n.ID).SendKeys(prepared.keys...); err != nil {
+	if err := h.sendPreparedNativeKeys(n, prepared.keys); err != nil {
 		return err
 	}
 	h.app.retireClaudeVisibleDialog(n, prepared.dialogID)
@@ -346,6 +375,24 @@ func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string
 	h.app.mu.Unlock()
 	h.app.persistAttentionTransition(n, prev, "")
 	return nil
+}
+
+// sendPreparedNativeKeys rechecks structured ownership while holding the
+// interaction fence, then sends. Publication takes the same fence, so an
+// owner cannot appear between the check and the keystrokes.
+func (h *claudeSessionHarness) sendPreparedNativeKeys(n *Node, keys []string) error {
+	bundle := h.app.claudeHookBundle(n)
+	if bundle != "" && bundleSupportsInteraction(bundle) {
+		unlock, err := lockInteractionFence(bundle)
+		if err != nil {
+			return errClaudeWorkerConflict
+		}
+		defer unlock()
+		if h.app.claudeInteractionBlocksNativeKey(n) {
+			return errClaudeWorkerConflict
+		}
+	}
+	return h.app.server.Session(n.ID).SendKeys(keys...)
 }
 
 func (h *claudeSessionHarness) State(context.Context) sessionworker.State {
@@ -424,6 +471,10 @@ func (h *claudeSessionHarness) projectState() sessionworker.State {
 	views, _ := overlay["elicitations"].([]claudeElicitationView)
 	for _, view := range views {
 		state.Elicitations = append(state.Elicitations, sessionworker.Elicitation{Server: view.Server, Message: view.Message, Mode: view.Mode, URL: view.URL})
+	}
+	if interaction, ok := overlay["claude_interaction"].(sessionworker.InteractionView); ok {
+		copied := interaction
+		state.ClaudeInteraction = &copied
 	}
 	return state
 }

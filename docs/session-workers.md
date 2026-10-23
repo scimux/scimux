@@ -76,6 +76,32 @@ record's `backingId` content reference. A replacement muxer reconnecting to an
 older worker must append a self-contained asset record instead; an older JSON
 decoder legitimately ignores the unknown field before its sole-writer append.
 
+`claude-interaction-v1` is an optional Hello capability, not a new protocol
+major and not a mandatory `Harness` method. Only the Claude harness implements
+it. A worker that omits the capability, or a harness that does not implement
+the optional owner, reports the interaction unsupported. New muxers reconnect
+to old workers and do not enable the feature by rewriting an active bundle.
+The bundle's minted capability, not the current process environment, decides
+an already launched chat. Optional state may carry one current interaction.
+The worker remains the only session-log writer. The owning worker retires
+stale interaction state on startup and on each poll after the helper deadline,
+and a replacement may do the same. Raw payloads are removed. An emitted
+cancellation keeps a minimal turn fence so settlement can still run; that
+fence is not replayed. The replay fence and the append-only audit remain.
+The worker's submitted caller generation comes from the node's binding when
+that generation is at least 1, and otherwise from `perm/generation.json`.
+That file is the helper process's authority for generation, node, and session.
+The owning worker is the only writer. Muxer projection and recovery record the
+snapshot they observed and must not publish it over the worker's fence. A
+request that was bound to a generation fails closed when the fence is missing
+or unreadable. Rebinding the session at the same generation revokes answers
+stamped for the previous session. When the binding record is already durable
+and only the helper fence failed, the worker republishes the fence. The same
+SessionStart then finishes retirement of the previous transcript. Ordinary
+sending stays blocked until that fence is published.
+Native key delivery checks structured ownership again before the keys are
+sent. It must not replay an uncertain decision into a new helper or turn.
+
 Workers do not broadcast. Broadcast discovery would add races, spoofing, and
 platform-specific behavior without identifying ownership. Each worker instead
 holds a kernel lock for its node lifetime and atomically publishes an
@@ -136,6 +162,7 @@ fails closed rather than risking an ordinary stop against an external pane.
 Worker-reported liveness, attention, delivery and permission mechanics are
 derived state, not another durable registry. The worker reconstructs them from
 its provider connection, hook journal, tmux pane and canonical session log; the
-muxer reconstructs its projection by polling `State`. For Claude, the worker's
+muxer reconstructs its projection by polling `State` and does not write the
+worker's `perm/generation.json` from that snapshot. For Claude, the worker's
 fixed two-second supervision lane produces that snapshot. Browser reads return
 the last snapshot and never trigger pane polling or append audit records.

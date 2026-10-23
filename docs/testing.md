@@ -64,7 +64,23 @@ can exceed the platform socket-path limit and produce unrelated failures.
   best-effort it — litter nobody is told about is litter nobody clears. Never
   run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`,
   `cursor-agent`, `dsh`, `muse`, `vibe-acp`) in tests — wrapped test commands are
-  `bash --norc` or `cat`.
+  `bash --norc` or `cat`. The Claude question and plan interaction tests are
+  offline and run in the `-short` lane. Their fixtures are synthetic protocol
+  values, not live CLI captures. `go test` coverage counts statements and
+  basic blocks, not branches. The browser checker in
+  `web/test/claude-interaction-coverage.mjs` compares integer coverage counts
+  and retained V8 ranges. A changed JavaScript line is covered only when every
+  executable offset on that line has its own positive range strictly inside
+  the uncovered range. Whitespace and comments are not executable; one positive
+  intersection with part of a line is not coverage of the rest. A slash-star
+  inside a regex literal is not a comment. An ambiguous lexical shape is not
+  treated as a comment in order to prove coverage. A slash that could be
+  division or a regex conservatively keeps the rest of the source executable,
+  including later multiline templates. Coverage comparisons use the tested observation
+  merge, range analyzer, changed-span audit, and retained-range comparator;
+  a positive parent never covers a cold child. The checker
+  must not relabel a Go statement count as branch coverage of test code. Test
+  files stay outside the Go production denominator.
 - The fuzz targets state contracts as properties over all inputs; seed
   corpora run under plain `go test`. `FuzzParseLine` guards defensive parsing in
   `docs/invariants/storage.md`; `FuzzClaudeHookStdin` guards that no Claude hook helper writes to

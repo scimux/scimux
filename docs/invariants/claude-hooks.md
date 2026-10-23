@@ -44,9 +44,14 @@ startup/hook-health acknowledgement. The undocumented transcript
   are accepted and never become inspect attention; `fork` is rejected. A
   valid changed session/path is rebound under the full
   path-claim/tombstone/persistence/seam rules — never left silently on the
-  old transcript — and the commit is transactional: a failed rebind keeps
-  the previous binding in memory and in replay, and surfaces an inline error
-  rather than inspect.
+  old transcript. A rebind that fails before the binding record is durable
+  keeps the previous binding in memory and in replay, and surfaces an inline
+  error rather than inspect. Once that record is durable and the node names
+  the new session, the commit stands and the old path stays tombstoned. If
+  the helper fence cannot be published, sending stays blocked with that fence
+  failure. The worker republishes the fence, and the same SessionStart
+  finishes retirement. That failure is not reported as if the previous
+  transcript were still attached.
 - Capability is **fail-closed**: no complete current bundle means
   `claude_unsupported` with an inline explanation — never inspect/fallback
   supervision, never an owner guessed from the pane cmdline. Adopted,
@@ -194,7 +199,89 @@ the turn is still open.
   session-log audit still has it. Disabling auto-approve reevaluates a
   still-current dialog epoch and only then publishes attention.
 - AskUserQuestion, ExitPlanMode, plan choices, deny rules and unknown modes
-  are **never** auto-answered.
+  are **never** auto-answered. A human reply to the first two is a different
+  path, described below. It does not arm, count, or satisfy the lease.
+
+## Structured question and plan replies stay on PermissionRequest
+
+`PreToolUse` stays unregistered. Only a bundle minted while
+`SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS` is exactly `1` advertises manual
+interaction. The gate is read at mint time. An already launched chat follows
+that bundle, not a later environment value. Old bundles are not rewritten.
+
+On a capable bundle, `AskUserQuestion` and `ExitPlanMode` take a narrow
+`PermissionRequest` branch before ordinary auto-approval. Every other tool,
+and every gate-off or legacy bundle, keeps the existing helper behavior,
+including the empty `{"behavior":"allow"}` stdout. That empty allow is not a
+human answer: it omits `updatedInput`. A human answer may send `updatedInput`
+only to preserve the hook's original tool input and append `answers`. Plan
+approval may also attach one server-built, session-scoped `setMode` of
+`default` or `acceptEdits` when the human selected that mode. `restore`
+changes nothing and must not be described as manual review. The browser
+cannot supply `updatedPermissions`. No persistent allow rule is emitted, and
+`bypassPermissions` is not offered.
+
+Discussion and a request to revise the plan use `decision.behavior: deny`,
+`interrupt: false`, and the human's non-empty feedback, with application
+context kept separate from that feedback. Cancellation uses deny with
+`interrupt: true`. `continue: false` alone is not a cancellation. Stop and
+`PostToolUseFailure` are not guaranteed after that cancellation, so the
+request settles only its own accepted turn through the explicit interrupt
+boundary. The boundary is the tailer's last visible turn, and only when its
+text is the interruption notice. A late notice for turn N cannot close turn N+1.
+
+A REST `202` means the worker durably recorded the decision. It does not mean
+Claude consumed the reply. A killed helper or a short stdout write leaves
+delivery unconfirmed, and an uncertain reply is not replayed into a new
+helper or turn. The owning worker releases that authority on startup and on
+each poll once the helper deadline has passed, even when the helper process
+is already gone. Raw request and answer files are deleted after that
+deadline. An emitted cancellation keeps only a minimal fence — action, turn,
+and turn generation — so a later interrupt can still settle after the payload
+is gone, including across a worker restart. That fence is not hook stdout and
+is not replayed. Settlement still requires the emitted acknowledgement and a
+fresh interruption boundary for that same accepted turn. A previous assistant
+completion, an unparseable tail, a turn with no stamp, or a notice that was
+not parsed as that text does not close it. A dated notice is fresh only when
+its own timestamp is at or after the turn was accepted. A later record's
+timestamp does not refresh an older notice. An undated notice can close the
+turn only when that transcript can be read, its modification time is strictly
+after the turn was accepted, the tailer has consumed the file through its end,
+and the notice itself was not already present in the bytes on disk when the
+turn began. Boundary inspection reparses a private copy of the tailer's
+consumed prefix with the existing parser; it never reads the shared mutable
+turn slice. An incomplete copy, an advancing tailer, or an unparseable
+historical prefix leaves freshness unproved. Bytes appended after that size refresh the boundary only when they
+add the notice. A metadata record, a missing timestamp, a lagged read, or an
+unreadable file does not close the turn, and the same consumed notice does not
+close a successor turn. The helper
+deadline for these two tools is 150 seconds inside a 180-second hook
+registration, and the app stops accepting decisions at 135 seconds. The
+ordinary 5-second auxiliary permission deadline is unchanged.
+
+The helper-visible binding fence is `perm/generation.json`. The owning worker
+is its only writer. The file records the authoritative generation, node, and
+session when that generation is at least 1 and the bundle was minted with the
+interaction capability. A muxer projection or a recovery snapshot must not
+rewrite it. A generation of 0 does not replace a file that is already there,
+and an empty session does not clear a session the fence already records.
+Emission reads the fence again under the same lock publication holds. A
+request stamped with a generation does not write stdout when the fence is
+missing, unreadable, corrupt, or names a different generation, node, or
+session. A request with no such binding and no fence remains a legacy request.
+A publication that cannot install the new session removes the fence instead of
+leaving the previous one authoritative. Gate-off and legacy bundles do not
+grow this file.
+
+While the structured request owns the turn, native `/key` delivery is refused.
+The check runs again at the moment of delivery, holding the same interaction
+fence that publication holds, so a request that arrives after the first check
+cannot be followed by native keys. `terminal` revokes that ownership before
+the existing visible-dialog epoch is authoritative again.
+
+The reply shapes were qualified on Claude Code 2.1.304. They are not a claim
+about every later CLI build. Multi-select labels are joined with `", "` in
+option order on that version only.
 
 ## Strict terminal policy
 

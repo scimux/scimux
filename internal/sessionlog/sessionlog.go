@@ -72,20 +72,58 @@ type Event struct {
 	Prov json.RawMessage `json:"prov,omitempty"`
 }
 
-// DecisionEvent is an audited automatic (or future manual) permission choice.
+// DecisionEvent is an audited automatic or manual permission choice.
 // Appended and fsynced before the structured transport delivers the selected
 // option. Additive schema: old readers ignore t:"decision"; it is never a
 // turn, seam, fare hit, tool interval, attention edge, or asset anchor.
+// Source "auto" is an automatic approval. Source "manual" is a human answer
+// to a Claude question or plan; Manual carries that record and is absent on
+// automatic rows.
 type DecisionEvent struct {
-	Source    string      `json:"source"`              // "auto"
-	LeaseID   string      `json:"lease_id"`            // opaque lease that authorized this decision
-	RequestID string      `json:"request_id"`          // stable pending-request identity
-	Agent     string      `json:"agent,omitempty"`     // node agent at decision time
-	ToolKind  string      `json:"tool_kind,omitempty"` // structured tool kind when known
-	Title     string      `json:"title,omitempty"`     // full pending title/command
-	Reason    string      `json:"reason,omitempty"`    // full reason when known
-	Options   []DecOption `json:"options,omitempty"`   // every offered option
-	Selected  DecOption   `json:"selected"`            // the option scimux authorized
+	Source    string             `json:"source"`              // "auto" | "manual"
+	LeaseID   string             `json:"lease_id"`            // opaque lease that authorized this decision
+	RequestID string             `json:"request_id"`          // stable pending-request identity
+	Agent     string             `json:"agent,omitempty"`     // node agent at decision time
+	ToolKind  string             `json:"tool_kind,omitempty"` // structured tool kind when known
+	Title     string             `json:"title,omitempty"`     // full pending title/command
+	Reason    string             `json:"reason,omitempty"`    // full reason when known
+	Options   []DecOption        `json:"options,omitempty"`   // every offered option
+	Selected  DecOption          `json:"selected"`            // the option scimux authorized
+	Manual    *ManualInteraction `json:"manual,omitempty"`    // human question/plan decision; nil on auto rows
+}
+
+// ManualInteraction is the bounded human record for one Claude question or
+// plan decision. Feedback is only text the human typed. AppContext is
+// application-authored and is not feedback. Reviewed is the plan or question
+// text the human was shown, never a file read from PlanFilePath.
+type ManualInteraction struct {
+	Action          string            `json:"action"`
+	Tool            string            `json:"tool,omitempty"`
+	InputDigest     string            `json:"input_digest,omitempty"`
+	Reviewed        string            `json:"reviewed,omitempty"`
+	Selections      []ManualSelection `json:"selections,omitempty"`
+	Feedback        string            `json:"feedback,omitempty"`
+	AppContext      string            `json:"app_context,omitempty"`
+	Mode            string            `json:"mode,omitempty"`
+	ModeLabel       string            `json:"mode_label,omitempty"`
+	EstablishedMode string            `json:"established_mode,omitempty"`
+	Delivery        string            `json:"delivery,omitempty"`
+	Turn            string            `json:"turn,omitempty"`
+	TurnGen         int               `json:"turn_gen,omitempty"`
+	SessionID       string            `json:"session_id,omitempty"`
+	BundleID        string            `json:"bundle_id,omitempty"`
+	Generation      int               `json:"generation,omitempty"`
+}
+
+// ManualSelection is one answered question. Kind is "option", "multi", or
+// "free_text". Free text is not relabeled as an option when it matches a label.
+type ManualSelection struct {
+	QuestionID string   `json:"question_id"`
+	Question   string   `json:"question,omitempty"`
+	OptionIDs  []string `json:"option_ids,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
+	FreeText   string   `json:"free_text,omitempty"`
+	Kind       string   `json:"kind,omitempty"`
 }
 
 // DecOption is one permission choice in a DecisionEvent: key, display name,

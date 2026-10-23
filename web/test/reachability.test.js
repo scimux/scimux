@@ -29,6 +29,7 @@ const ALLOWED_TEST_LOCAL = new Set([
   "./s2-helpers.js",
   // CLI coverage-verification scaffolding; exports no browser/product behavior.
   "./menu-coverage-ranges.mjs",
+  "./claude-interaction-coverage.mjs",
 ]);
 
 // The other kind of waiver, matching the Go half's reachOpenFindings: a

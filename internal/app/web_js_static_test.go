@@ -21,6 +21,7 @@ var productionJSURLs = []string{
 	"/js/cards.js",
 	"/js/caret.js",
 	"/js/chat.js",
+	"/js/claude-interaction.js",
 	"/js/composer.js",
 	"/js/format.js",
 	"/js/harness.js",
