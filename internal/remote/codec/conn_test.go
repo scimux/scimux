@@ -61,6 +61,23 @@ func TestReadLoopDoesNotReadAfterClose(t *testing.T) {
 	}
 }
 
+func TestClientIgnoresBodyForUnknownRequest(t *testing.T) {
+	var output bytes.Buffer
+	c := NewConn(strings.NewReader(""), &output, RoleInitiator)
+	payload, err := encodeBodyPayload("synthetic-retired-request", []byte("late body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.acceptClientBody(payload)
+	if len(c.pending) != 0 || output.Len() != 0 {
+		t.Fatal("unsolicited body admitted a request or wrote to the peer")
+	}
+	// Close also proves the ignored frame released the connection lock.
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFramePayloadReadPreservesTransportError(t *testing.T) {
 	// A complete header followed by a transport error is not a truncated
 	// peer frame: callers need the original error to diagnose the channel.
