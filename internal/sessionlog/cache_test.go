@@ -306,3 +306,20 @@ func TestLogCacheSegmentProvIsCallerPrivate(t *testing.T) {
 	third := c.Segment(path)
 	assertRawEqual(t, third.Turns[0].Prov, saved)
 }
+
+func TestMalformedToolTimeDoesNotEndRideTool(t *testing.T) {
+	c := &LogCache{}
+	c.ingest(NewSource("synthetic.jsonl", "synthetic-session"), 0)
+	if len(c.rideSegs) != 1 {
+		t.Fatal("source did not open a ride segment")
+	}
+	c.ingest(Event{T: "tool", Time: "invalid", Tool: &ToolEvent{ID: "synthetic-tool", Status: "completed"}}, 1)
+	s := &c.rideSegs[0]
+	if len(s.toolEnds) != 0 || len(s.toolStarts) != 0 || s.hasToolStart {
+		t.Fatal("an invalid timestamp changed tool timing")
+	}
+	c.ingest(Event{T: "tool", Time: "2001-01-01T00:00:00Z", Tool: &ToolEvent{ID: "synthetic-tool", Status: "completed"}}, 2)
+	if len(s.toolEnds) != 1 {
+		t.Fatal("a valid tool completion was not retained")
+	}
+}

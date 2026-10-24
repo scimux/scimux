@@ -64,7 +64,9 @@ can exceed the platform socket-path limit and produce unrelated failures.
   best-effort it — litter nobody is told about is litter nobody clears. Never
   run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`,
   `cursor-agent`, `dsh`, `muse`, `vibe-acp`) in tests — wrapped test commands are
-  `bash --norc` or `cat`.
+  `bash --norc` or `cat`. The Claude question and plan interaction tests are
+  offline and run in the `-short` lane. Their fixtures are synthetic protocol
+  values, not live CLI captures.
 - The fuzz targets state contracts as properties over all inputs; seed
   corpora run under plain `go test`. `FuzzParseLine` guards defensive parsing in
   `docs/invariants/storage.md`; `FuzzClaudeHookStdin` guards that no Claude hook helper writes to

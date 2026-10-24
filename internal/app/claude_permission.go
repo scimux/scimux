@@ -5,8 +5,12 @@
 // Claude offers this hook no menu. The payload describes the tool call; the
 // once/always distinction lives entirely on the answer side, where
 // `{"behavior":"allow"}` grants exactly the one call being decided and
-// `updatedPermissions` would persist a rule. scimux never writes that member,
-// so "allow once only" is an omission, not a policy check.
+// `updatedPermissions` would persist a rule. Ordinary auto-approval never
+// writes updatedInput or updatedPermissions, so "allow once only" is an
+// omission, not a policy check. A human reply to AskUserQuestion or
+// ExitPlanMode is a separate path: it may echo the original tool input and
+// append answers, or attach one server-built session setMode. It still never
+// writes a persistent allow rule.
 //
 // Emitting no decision is the escalate: the normal permission flow proceeds
 // and the human answers the dialog in the pane, exactly as today.
@@ -50,11 +54,13 @@ const (
 	permAnswerWindow = permHookDeadline - 1*time.Second
 )
 
-// claudePermAllowJSON is the only thing this helper ever prints. Pinned
-// byte-exact: `hookSpecificOutput.decision` is an object union in the CLI's
-// schema (the published docs' string form is wrong), and the two optional
-// members it omits — updatedInput, updatedPermissions — are precisely what
-// would rewrite the call or persist a permission rule.
+// claudePermAllowJSON is the only auto-approval stdout. Pinned byte-exact:
+// `hookSpecificOutput.decision` is an object union in the CLI's schema (the
+// published docs' string form is wrong), and the two optional members it
+// omits — updatedInput, updatedPermissions — are precisely what would rewrite
+// the call or persist a permission rule. Human interaction replies are not
+// this constant. They are built only for AskUserQuestion and ExitPlanMode on
+// a bundle that supports structured questions and plans.
 const claudePermAllowJSON = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
 
 // claudePermissionEvent is the PermissionRequest stdin payload. Unlike
@@ -125,8 +131,9 @@ type claudePermContext struct {
 }
 
 // claudeQuestionTools are the tools whose "permission" is really a question
-// to the human. fixes-2 forbids auto-answering those, and Claude itself
-// discards a hook allow for them, so this fence is belt-and-braces.
+// to the human. They stay ineligible for automatic approval. An empty allow
+// is not a human answer; a human-supplied updatedInput is produced only by
+// the interaction path, never by eligibleClaudePermission.
 var claudeQuestionTools = map[string]bool{
 	"ExitPlanMode":    true,
 	"AskUserQuestion": true,
@@ -278,6 +285,14 @@ func runClaudePermissionHook(dir string, r io.Reader, stdout, stderr io.Writer, 
 	// become one. Writing it before the lease check is what lets scimux tell
 	// "no dialog is on screen" from "the hook is inert" — see claude_asked.go.
 	writeClaudeAskedNotice(perm, id, ev, time.Now())
+
+	// Manual question and plan replies are owned by the interaction rendezvous.
+	// Only a bundle with interaction support can enter it, and only
+	// for the two question tools. Every other call keeps the lease path below,
+	// including a capable bundle asked about an ordinary tool.
+	if handled, ierr := maybeServeClaudeInteraction(dir, ev, id, stdout, deadline, every); handled {
+		return ierr
+	}
 
 	// Fast path: no armed lease is the state every session is in unless a
 	// human has just toggled auto-approve on. One read, no wait, and no
@@ -469,6 +484,9 @@ type claudeHookCapabilities struct {
 	Compact     int    `json:"compact"`
 	Elicitation int    `json:"elicitation"`
 	Exec        string `json:"exec,omitempty"`
+	// Interaction is present on every new bundle. An absent member identifies
+	// an older bundle whose helper does not support structured replies.
+	Interaction int `json:"interaction,omitempty"`
 }
 
 func readClaudeHookCapabilities(bundle string) (claudeHookCapabilities, bool) {

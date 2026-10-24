@@ -74,6 +74,29 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   Deterministic heuristics may read it. It must never be used to train,
   fine-tune, distill, or otherwise develop a model — do not turn it into a
   training dataset.
+  - Ordinary disarmed Claude tool calls keep digest-only permission evidence.
+    A pending human question or plan may hold its original bounded payload
+    transiently until the helper deadline. After that deadline the owning
+    worker removes the raw request and response copies, including answered,
+    canceled, handed-off, and uncertain ones, and leaves a request-specific
+    replay fence. Marked helpers that exit early release ownership and their
+    payloads through the same recovery path. The durable manual decision is a
+    bounded append-only exception on the existing decision record: request
+    identity, reviewed content and its digest, the human's selections or
+    feedback, any chosen execution mode, and the delivery outcome. The initial
+    row records intent, without claiming delivery. A later validation or
+    publication failure appends a correlated application-authored outcome,
+    never a rewrite of the intent row. Its source is `application`, with only
+    delivery status and fixed explanatory context in `outcome`, correlated by
+    `request_id`. It repeats no human action, feedback, selections, or reviewed
+    content, and stores no raw error text. Known stale/expired rejection is
+    `not_delivered`; an I/O error cannot prove non-consumption and stays
+    `unconfirmed`.
+    Application context is stored apart from human feedback. The record is
+    not a new conversation role, a fake user prompt, a seam, or a rewrite of
+    an earlier row, and it is not a license to log raw hook input for
+    ordinary tool calls. The question and plan text come from the hook
+    payload the helper already held. `planFilePath` is not read.
   - Agent file imports record the file's actual basename and extension; link
     labels and image alt text are descriptive only and never authorize inline
     rendering. Chat projection keeps the agent's link label as display text,

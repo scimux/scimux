@@ -300,3 +300,33 @@ func as(err error, target **rpcError) bool {
 	}
 	return false
 }
+
+// A transport failure must not leave a registered call waiting for a reply.
+type v5FailingPeerWriter struct {
+	p          *peer
+	registered bool
+}
+
+func (w *v5FailingPeerWriter) Write([]byte) (int, error) {
+	w.p.mu.Lock()
+	w.registered = len(w.p.pending) == 1
+	w.p.mu.Unlock()
+	return 0, io.ErrClosedPipe
+}
+func TestPendingCallRemovedAfterSendFailure(t *testing.T) {
+	w := &v5FailingPeerWriter{}
+	p := newPeer(w, nil)
+	w.p = p
+	_, err := p.call("synthetic/request", nil)
+	if err != io.ErrClosedPipe {
+		t.Fatalf("send error = %v", err)
+	}
+	if !w.registered {
+		t.Fatal("send failed before the pending call was registered")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.pending) != 0 {
+		t.Fatal("failed send left a pending call")
+	}
+}
