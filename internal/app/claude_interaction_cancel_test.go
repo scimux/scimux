@@ -636,3 +636,110 @@ func pollQuiet(a *app, f *fakeTmux, id string) {
 	a.mu.Unlock()
 	a.poll()
 }
+
+// red: a quiet tick settles an emitted cancel and must not restore the dialog
+// snapshot taken before that settlement. No transcript and no tailer.
+func TestCancelQuietSettlementLeavesAttentionEmpty(t *testing.T) {
+	fx := newPollCancel(t, "")
+	fx.app.mu.Lock()
+	delete(fx.app.autoApprove, fx.node.ID)
+	fx.app.mu.Unlock()
+	fx.app.retractClaudeLease(fx.bundle)
+	perm := filepath.Join(fx.bundle, "perm")
+	if _, err := mintClaudeVisibleEpoch(perm, fx.node.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if dlg := fx.app.claudeVisibleDialog(fx.node); dlg.Attn == "" {
+		t.Fatal("setup: no visible dialog")
+	}
+	if fx.node.Transcript != "" {
+		t.Fatal("setup: transcript is present")
+	}
+	pollQuiet(fx.app, fx.tmux, fx.node.ID)
+	if claudeInteractionPhase(fx.bundle, fx.id, time.Now()) != "interrupted" {
+		t.Fatal("quiet tick did not settle the emitted cancel")
+	}
+	if got := fx.app.claudeAcceptedTurnOf(fx.node.ID).Turn; got != "" {
+		t.Fatalf("turn = %q, want closed", got)
+	}
+	if _, ok := readClaudeVisibleEpoch(perm); ok {
+		t.Fatal("visible epoch still present after settlement")
+	}
+	fx.app.mu.Lock()
+	attn := fx.app.attn[fx.node.ID]
+	live := fx.app.live[fx.node.ID]
+	fx.app.mu.Unlock()
+	if live != "quiet" {
+		t.Fatalf("liveness = %q, want quiet", live)
+	}
+	if attn != "" {
+		t.Fatalf("settled cancel restored stale dialog attention: %q", attn)
+	}
+}
+
+// red: the same quiet settlement must not republish the pre-settlement dialog
+// when a tailer runs and does not retire that dialog itself.
+func TestCancelQuietSettlementWithTailerLeavesAttentionEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "quiet.jsonl")
+	writeTranscript(t, path, "{\"type\":\"user\",\"timestamp\":\"t1\",\"message\":{\"role\":\"user\",\"content\":\"synthetic\"}}\n")
+	fx := newPollCancel(t, path)
+	fx.app.mu.Lock()
+	delete(fx.app.autoApprove, fx.node.ID)
+	fx.app.mu.Unlock()
+	fx.app.retractClaudeLease(fx.bundle)
+	perm := filepath.Join(fx.bundle, "perm")
+	if _, err := mintClaudeVisibleEpoch(perm, fx.node.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if fx.app.tailerFor(fx.node) == nil {
+		t.Fatal("setup: no tailer")
+	}
+	pollQuiet(fx.app, fx.tmux, fx.node.ID)
+	if claudeInteractionPhase(fx.bundle, fx.id, time.Now()) != "interrupted" {
+		t.Fatal("quiet tick did not settle the emitted cancel")
+	}
+	if got := fx.app.claudeAcceptedTurnOf(fx.node.ID).Turn; got != "" {
+		t.Fatalf("turn = %q, want closed", got)
+	}
+	if _, ok := readClaudeVisibleEpoch(perm); ok {
+		t.Fatal("visible epoch still present after settlement")
+	}
+	fx.app.mu.Lock()
+	attn := fx.app.attn[fx.node.ID]
+	fx.app.mu.Unlock()
+	if attn != "" {
+		t.Fatalf("settled cancel restored stale dialog attention: %q", attn)
+	}
+}
+
+// pin: a quiet tick keeps attention that still belongs to a current dialog.
+func TestClaudeInteractionQuietTickKeepsCurrentDialogAttention(t *testing.T) {
+	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
+	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: "pane-a"}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+	perm := filepath.Join(bundle, "perm")
+	if _, err := mintClaudeVisibleEpoch(perm, n.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if dlg := a.claudeVisibleDialog(n); dlg.Attn == "" {
+		t.Fatal("setup: no visible dialog")
+	}
+	pollQuiet(a, f, n.ID)
+	a.mu.Lock()
+	attn := a.attn[n.ID]
+	live := a.live[n.ID]
+	a.mu.Unlock()
+	if live != "quiet" {
+		t.Fatalf("liveness = %q, want quiet", live)
+	}
+	if attn == "" {
+		t.Fatal("quiet tick cleared current dialog attention")
+	}
+	if _, ok := readClaudeVisibleEpoch(perm); !ok {
+		t.Fatal("quiet tick removed the current visible epoch")
+	}
+	if got := a.claudeAcceptedTurnOf(n.ID).Turn; got != "" {
+		t.Fatalf("turn = %q, want untouched", got)
+	}
+}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 )
 
@@ -361,6 +362,138 @@ func TestWalkJSONObjectRejectsReplacementKey(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := walkJSONObject(tc.raw); err == nil {
 				t.Fatal("replacement key was accepted")
+			}
+		})
+	}
+}
+
+// red: an overflowing number must not stop the scan before a later replacement.
+func TestClaudeInteractionJSONHasReplacementAfterOverflow(t *testing.T) {
+	trueCases := []string{
+		`{"plan":"P","allowedPrompts":[1e1000,{"prompt":"\ud800"}]}`,
+		`{"plan":"P","allowedPrompts":[1e1000,{"prompt":"\ufffd"}]}`,
+		"{\"plan\":\"P\",\"allowedPrompts\":[1e1000,{\"prompt\":\"\uFFFD\"}]}",
+		`{"plan":"P","allowedPrompts":[1e1000,{"\ud800":"x"}]}`,
+		`{"plan":"P","allowedPrompts":[1e1000,{"\ufffd":""}]}`,
+		"{\"plan\":\"P\",\"allowedPrompts\":[1e1000,{\"\uFFFD\":1}]}",
+		`{"n":1e1000,"\ud800":1}`,
+		`{"n":1e1000,"\ufffd":"x"}`,
+		"{\"n\":1e1000,\"\uFFFD\":1}",
+	}
+	for _, raw := range trueCases {
+		if !json.Valid([]byte(raw)) {
+			t.Fatalf("probe is not valid JSON: %s", raw)
+		}
+		if !jsonHasReplacementRune([]byte(raw)) {
+			t.Errorf("replacement after overflowing number was missed: %s", raw)
+		}
+	}
+	falseCases := []string{
+		`{"plan":"P","allowedPrompts":[1e1000]}`,
+		`{"plan":"P","allowedPrompts":[-1e1000,{"prompt":"keep"}]}`,
+		`{"allowedPrompts":[1e309],"plan":"P"}`,
+		`{"a":1e1000,"b":"ok","face":"\ud83d\ude00"}`,
+		`{"a":1e1000,}`,
+		`{"a":1e1000`,
+		`1e1000`,
+	}
+	for _, raw := range falseCases {
+		if jsonHasReplacementRune([]byte(raw)) {
+			t.Errorf("clean or invalid large number reported a replacement: %s", raw)
+		}
+	}
+}
+
+// red: classify follows the replacement policy after an overflowing number.
+func TestClaudeInteractionReplacementAfterOverflowingNumber(t *testing.T) {
+	rows := []struct {
+		name, raw string
+	}{
+		{"nested value lone high", `{"plan":"P","allowedPrompts":[1e1000,{"prompt":"\ud800"}]}`},
+		{"nested value escaped replacement", `{"plan":"P","allowedPrompts":[1e1000,{"prompt":"\ufffd"}]}`},
+		{"nested value literal replacement", "{\"plan\":\"P\",\"allowedPrompts\":[1e1000,{\"prompt\":\"\uFFFD\"}]}"},
+		{"nested key lone high", `{"plan":"P","allowedPrompts":[1e1000,{"\ud800":"x"}]}`},
+		{"nested key escaped replacement", `{"plan":"P","allowedPrompts":[1e1000,{"\ufffd":""}]}`},
+		{"nested key literal replacement", "{\"plan\":\"P\",\"allowedPrompts\":[1e1000,{\"\uFFFD\":1}]}"},
+		{"top-level key after number", `{"plan":"P","allowedPrompts":[1e1000],"\ufffd":""}`},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if !json.Valid([]byte(row.raw)) {
+				t.Fatal("probe is not valid JSON")
+			}
+			model, err := classifyClaudeInteraction("ExitPlanMode", []byte(row.raw))
+			if err != nil {
+				t.Fatalf("classify: %v", err)
+			}
+			if !model.Native || model.NativeReason != "malformed json" {
+				t.Fatalf("got native=%v reason=%q, want native malformed json", model.Native, model.NativeReason)
+			}
+		})
+	}
+}
+
+// pin: a large number with no replacement stays a supported plan, stdout included.
+func TestClaudeInteractionCleanOverflowingNumber(t *testing.T) {
+	rows := []struct {
+		name, raw, stdout string
+	}{
+		{
+			name:   "array number",
+			raw:    `{"plan":"P","allowedPrompts":[1e1000]}`,
+			stdout: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"plan":"P","allowedPrompts":[1e1000]}}}}`,
+		},
+		{
+			name:   "number then clean object",
+			raw:    `{"plan":"P","allowedPrompts":[-1e1000,{"prompt":"keep"}]}`,
+			stdout: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"plan":"P","allowedPrompts":[-1e1000,{"prompt":"keep"}]}}}}`,
+		},
+		{
+			name:   "number before plan",
+			raw:    `{"allowedPrompts":[1e309],"plan":"P"}`,
+			stdout: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"allowedPrompts":[1e309],"plan":"P"}}}}`,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			model, err := classifyClaudeInteraction("ExitPlanMode", []byte(row.raw))
+			if err != nil {
+				t.Fatalf("classify: %v", err)
+			}
+			if model.Native || model.NativeReason != "" || model.Plan != "P" {
+				t.Fatalf("native=%v reason=%q plan=%q, want a supported plan P", model.Native, model.NativeReason, model.Plan)
+			}
+			env, err := buildClaudeInteractionReply(model, claudeInteractionReply{Action: "approve", Mode: "restore"})
+			if err != nil {
+				t.Fatalf("reply: %v", err)
+			}
+			if !bytes.Equal(env.Stdout, []byte(row.stdout)) {
+				t.Fatalf("stdout = %s, want %s", env.Stdout, row.stdout)
+			}
+		})
+	}
+}
+
+// pin: the four guards before the replacement scan still win for a large number.
+func TestClaudeInteractionOverflowNumberGuardOrder(t *testing.T) {
+	raw := []byte(`{"plan":"P","allowedPrompts":[1e1000,{"prompt":"\ud800"}]}`)
+	cases := []struct {
+		name, tool, reason string
+		input              []byte
+	}{
+		{name: "unsupported tool", tool: "Bash", reason: "unsupported tool", input: raw},
+		{name: "invalid utf-8", tool: "ExitPlanMode", reason: "invalid utf-8", input: []byte{'{', 0xff, '}'}},
+		{name: "not object", tool: "ExitPlanMode", reason: "not object", input: []byte(`1e1000`)},
+		{name: "malformed json", tool: "ExitPlanMode", reason: "malformed json", input: []byte(`{"plan":"P","allowedPrompts":[1e1000,]}`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model, err := classifyClaudeInteraction(tc.tool, tc.input)
+			if err != nil {
+				t.Fatalf("classify: %v", err)
+			}
+			if !model.Native || model.NativeReason != tc.reason {
+				t.Fatalf("native=%v reason=%q, want native %q", model.Native, model.NativeReason, tc.reason)
 			}
 		})
 	}

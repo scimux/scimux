@@ -234,6 +234,22 @@ func (a *app) poll() {
 			}
 			if state == "quiet" {
 				a.settleEmittedClaudeInteractionCancels(n)
+				// claudeDlg was read before settlement. Settlement clears the
+				// visible epoch and attention; publishing that snapshot would
+				// restore them. Re-read and recompute dialog attention only.
+				// A dialog that is still current stays. Elicitation and a
+				// structured interaction are applied later in this tick.
+				if claudeSup == claudeSupStrict {
+					claudeDlg = a.claudeVisibleDialog(n)
+					a.mu.Lock()
+					claudeArmed = a.claudeAutoApproveArmedLocked(n)
+					a.mu.Unlock()
+					if claudeDlg.Attn != "" && !claudeArmed {
+						attn, freshAttn = claudeDlg.Attn, true
+					} else if attn != "" && claudeDlg.Attn == "" {
+						attn, freshAttn = "", false
+					}
+				}
 				quietTl = a.tailerFor(n)
 				if quietTl != nil {
 					quietTl.Poll()

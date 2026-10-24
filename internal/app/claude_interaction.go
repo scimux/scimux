@@ -154,6 +154,10 @@ func interactionNative(reason string) (claudeInteractionModel, error) {
 // keys, decodes to text containing U+FFFD. Invalid JSON returns false.
 func jsonHasReplacementRune(raw []byte) bool {
 	dec := json.NewDecoder(bytes.NewReader(raw))
+	// A number outside float64 range is still valid JSON. UseNumber keeps
+	// scanning so a later string is not skipped. A decoder error is not itself
+	// a replacement character.
+	dec.UseNumber()
 	for {
 		tok, err := dec.Token()
 		if err != nil {

@@ -778,13 +778,15 @@ and no native key is delivered, including when ownership appears after the
 key was prepared. `terminal` revokes that ownership first; the
 visible-dialog epoch on `…/key` is then authoritative again. Loss of the helper's
 waiter lock rejects answers and releases native controls before the deadline;
-recovery removes that dead request's active slot. A recorded
+recovery removes that dead request's active slot. An emitted
 cancellation settles on the first quiet pane tick while its accepted turn is
-still current or closing. It does not read the transcript, and it does not
-settle on an active tick. Settlement closes that accepted-turn token. A cancel
-for a turn never closes the next one. The cancel fence kept after payload
-retirement still settles, including across a worker restart. Quiet is a pane
-snapshot, not proof that Claude consumed the reply.
+still current or closing. A `202` proves the cancellation was recorded, not
+that it was emitted or that Claude consumed the reply. Settlement does not
+read the transcript, and it does not settle on an active tick. Settlement
+closes that accepted-turn token. A cancel for a turn never closes the next
+one. The cancel fence kept after payload retirement still settles, including
+across a worker restart. Quiet is a pane snapshot, not proof that Claude
+consumed the reply.
 `perm_dialog_id` stays that epoch and is not the hook request id. Questions
 and plans are never auto-approved, including while a lease is armed.
 
