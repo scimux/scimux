@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/scimux/scimux/internal/sessionlog"
-	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Synthetic schedule tests for the reviewed interaction defects.
@@ -382,13 +381,7 @@ func TestReviewOldCancelCannotHideCurrentCancel(t *testing.T) {
 	if err := noteClaudeInteractionEmission(bundle, current.ID, claudeInteractionAck{Emitted: true}); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "boundary.jsonl")
-	if err := os.WriteFile(path, []byte(`{"type":"user","timestamp":"`+time.Now().UTC().Format(time.RFC3339Nano)+`","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tl := &transcript.Tailer{Path: path}
-	_ = tl.Poll()
-	a.noteClaudeInteractionInterrupt(n, tl)
+	a.settleEmittedClaudeInteractionCancels(n)
 	if got := a.claudeAcceptedTurnOf(n.ID).Turn; got == next.Turn {
 		t.Fatalf("historical cancels hid %s; turn still %s", current.ID, got)
 	}
@@ -663,14 +656,6 @@ func TestReviewFenceAndRecoveryPaths(t *testing.T) {
 	if !interactionAnswerReady([]byte(`{"hookSpecificOutput":{"decision":{"behavior":"deny"}}}`)) || !interactionAnswerReady([]byte(`{"terminal":true}`)) {
 		t.Fatal("complete answer was not ready")
 	}
-	if interactionCancelTargetsTurn("", claudeAcceptedTurn{Turn: "a"}, claudeAcceptedTurn{}) ||
-		interactionCancelTargetsTurn("old", claudeAcceptedTurn{Turn: "new"}, claudeAcceptedTurn{Turn: "old"}) ||
-		!interactionCancelTargetsTurn("new", claudeAcceptedTurn{Turn: "new"}, claudeAcceptedTurn{}) ||
-		!interactionCancelTargetsTurn("old", claudeAcceptedTurn{}, claudeAcceptedTurn{Turn: "old"}) ||
-		interactionCancelTargetsTurn("old", claudeAcceptedTurn{}, claudeAcceptedTurn{}) {
-		t.Fatal("cancel turn match was wrong")
-	}
-
 	dir := interactionBundle(t)
 	origFlock := interactionFlock
 	t.Cleanup(func() { interactionFlock = origFlock })
@@ -1091,13 +1076,7 @@ func TestReviewUnreadableCancelDoesNotHideCurrent(t *testing.T) {
 	if err := noteClaudeInteractionEmission(bundle, current.ID, claudeInteractionAck{Emitted: true}); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "boundary.jsonl")
-	if err := os.WriteFile(path, []byte(`{"type":"user","timestamp":"`+time.Now().UTC().Format(time.RFC3339Nano)+`","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tl := &transcript.Tailer{Path: path}
-	_ = tl.Poll()
-	a.noteClaudeInteractionInterrupt(n, tl)
+	a.settleEmittedClaudeInteractionCancels(n)
 	if got := a.claudeAcceptedTurnOf(n.ID).Turn; got == next.Turn {
 		t.Fatalf("unreadable cancel hid %s; turn still %s", current.ID, got)
 	}

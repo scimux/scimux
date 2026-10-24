@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/scimux/scimux/internal/sessionlog"
-	"github.com/scimux/scimux/internal/transcript"
 )
 
 // Manual Claude question and plan replies. The ordinary auto-approval helper
@@ -1019,12 +1018,9 @@ func readInteractionCancelFence(bundle, id string) (claudeInteractionCancelFence
 	return zero, true
 }
 
-func claudeInteractionCancelMaySettle(emitted, endTurn bool, cancelTurn string, current, closing claudeAcceptedTurn) (bool, string) {
+func claudeInteractionCancelMaySettle(emitted bool, cancelTurn string, current, closing claudeAcceptedTurn) (bool, string) {
 	if !emitted {
 		return false, "not emitted"
-	}
-	if !endTurn {
-		return false, "no interruption evidence"
 	}
 	if cancelTurn == "" {
 		return false, "turn mismatch"
@@ -1038,7 +1034,7 @@ func claudeInteractionCancelMaySettle(emitted, endTurn bool, cancelTurn string, 
 	return false, "turn mismatch"
 }
 
-func (a *app) settleClaudeInteractionCancel(n *Node, requestID string, endTurn bool) (bool, string) {
+func (a *app) settleClaudeInteractionCancel(n *Node, requestID string) (bool, string) {
 	if a == nil || n == nil || !safePathComponent(requestID) {
 		return false, "turn mismatch"
 	}
@@ -1071,7 +1067,7 @@ func (a *app) settleClaudeInteractionCancel(n *Node, requestID string, endTurn b
 	current := a.claudeTurns[n.ID]
 	closing := a.claudeClosing[n.ID]
 	a.mu.Unlock()
-	ok, why := claudeInteractionCancelMaySettle(emitted, endTurn, rec.Turn, current, closing)
+	ok, why := claudeInteractionCancelMaySettle(emitted, rec.Turn, current, closing)
 	if !ok {
 		return false, why
 	}
@@ -1086,309 +1082,15 @@ func (a *app) settleClaudeInteractionCancel(n *Node, requestID string, endTurn b
 	return true, "settled"
 }
 
-func (a *app) noteClaudeInteractionInterrupt(n *Node, tl *transcript.Tailer) {
-	if a == nil || n == nil || tl == nil || !tl.EndTurn() {
-		return
-	}
+func (a *app) settleEmittedClaudeInteractionCancels(n *Node) {
 	a.mu.Lock()
 	bundle := a.claudePermBundleLocked(n.ID)
 	a.mu.Unlock()
-	if bundle == "" {
-		return
-	}
 	for _, id := range pendingCancelInteractions(bundle) {
-		rec, err := readInteractionRequest(bundle, id)
-		if err != nil {
-			fence, ok := readInteractionCancelFence(bundle, id)
-			if !ok {
-				continue
-			}
-			rec.Turn = fence.Turn
-		}
-		a.mu.Lock()
-		current := a.claudeTurns[n.ID]
-		closing := a.claudeClosing[n.ID]
-		a.mu.Unlock()
-		if !interactionCancelTargetsTurn(rec.Turn, current, closing) {
-			continue
-		}
-		target := current
-		if current.Turn == "" {
-			target = closing
-		}
-		if !interactionInterruptIsFresh(tl, target, claudeInterruptWatermarkOf(a, n.ID)) {
-			continue
-		}
-		ok, _ := a.settleClaudeInteractionCancel(n, id, true)
-		if ok {
+		if ok, _ := a.settleClaudeInteractionCancel(n, id); ok {
 			return
 		}
 	}
-}
-
-// claudeInterruptWatermark is the transcript size already on disk when the
-// accepted turn began. An undated interruption is new only when this tailer
-// has consumed bytes past that size and those earlier bytes do not already
-// end on the same interruption notice. The mark is absent when the turn has
-// no transcript path. A missing timestamp is not freshness by itself.
-type claudeInterruptWatermark struct {
-	path   string
-	offset int64
-	cache  *claudeInterruptPrefixCache
-}
-
-// At most the current prefix and the accepted-turn prefix are cached. The
-// cache belongs to that accepted turn, never to an unbounded transcript list.
-type claudeInterruptPrefixCache struct {
-	mu      sync.Mutex
-	path    string
-	info    os.FileInfo
-	entries map[int64]*transcript.Tailer
-}
-
-type claudeInterruptWatermarkKey struct {
-	app    *app
-	nodeID string
-}
-
-var claudeInterruptWatermarks sync.Map
-
-func rememberClaudeInterruptWatermark(a *app, n *Node) {
-	if a == nil || n == nil {
-		return
-	}
-	a.mu.Lock()
-	nodeID, path := n.ID, n.Transcript
-	a.mu.Unlock()
-	key := claudeInterruptWatermarkKey{app: a, nodeID: nodeID}
-	mark := claudeInterruptWatermark{cache: &claudeInterruptPrefixCache{}}
-	if path == "" {
-		claudeInterruptWatermarks.Store(key, mark)
-		return
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		claudeInterruptWatermarks.Store(key, mark)
-		return
-	}
-	mark.path, mark.offset = path, st.Size()
-	claudeInterruptWatermarks.Store(key, mark)
-}
-
-func claudeInterruptWatermarkOf(a *app, nodeID string) claudeInterruptWatermark {
-	v, ok := claudeInterruptWatermarks.Load(claudeInterruptWatermarkKey{app: a, nodeID: nodeID})
-	if !ok {
-		return claudeInterruptWatermark{}
-	}
-	mark, _ := v.(claudeInterruptWatermark)
-	return mark
-}
-
-// interactionInterruptIsFresh requires the interruption itself to be new for
-// this accepted turn. The boundary is the tailer's last visible turn, and only
-// when that turn is an interruption notice. An assistant end_turn, an
-// unparseable tail, a missing turn stamp, or a notice dated before the turn
-// was accepted belongs to an earlier turn. Another record's timestamp does
-// not refresh it. An undated notice is evidence only when the file can be
-// read, was modified after the turn was accepted, this tailer has consumed
-// that file, and the notice was not already the terminal boundary in the
-// bytes present when the turn began. A failed or lagged read keeps the
-// boundary the tailer already had.
-func interactionInterruptIsFresh(tl *transcript.Tailer, turn claudeAcceptedTurn, mark claudeInterruptWatermark) bool {
-	if tl == nil {
-		return false
-	}
-	// Poll can run concurrently in prompt delivery. Its exported Turns slice
-	// cannot be inspected safely, and separate status methods are not a
-	// coherent snapshot. Reuse the parser on a private copy of the committed
-	// prefix, then refuse an incomplete copy or a concurrently advanced tail.
-	offset, _ := tl.Progress()
-	snapshot, err := cachedInterruptPrefix(tl.Path, offset, mark.cache)
-	if err != nil {
-		return false
-	}
-	copied, _ := snapshot.Progress()
-	current, _ := tl.Progress()
-	if copied != offset || current != offset {
-		return false
-	}
-	tl = snapshot
-	if !tl.EndTurn() || tl.Delivered() || tl.Unparseable() {
-		return false
-	}
-	at := parseInteractionTime(turn.At)
-	if at.IsZero() {
-		return false
-	}
-	boundary, ok := interruptBoundaryTurn(tl)
-	if !ok {
-		return false
-	}
-	if stamp := parseInteractionTime(boundary.Time); !stamp.IsZero() {
-		return !stamp.Before(at)
-	}
-	return undatedInterruptNewlyObserved(tl, at, mark)
-}
-
-func interruptNoticeText(text string) bool {
-	switch strings.TrimSpace(text) {
-	case "[Request interrupted by user]", "[Request interrupted by user for tool use]":
-		return true
-	default:
-		return false
-	}
-}
-
-func interruptBoundaryTurn(tl *transcript.Tailer) (transcript.Turn, bool) {
-	// Callers inspect only their private prefix tailer, never a shared tailer.
-	if tl == nil || len(tl.Turns) == 0 {
-		return transcript.Turn{}, false
-	}
-	last := tl.Turns[len(tl.Turns)-1]
-	if !interruptNoticeText(last.Text) {
-		return transcript.Turn{}, false
-	}
-	return last, true
-}
-
-func undatedInterruptNewlyObserved(tl *transcript.Tailer, at time.Time, mark claudeInterruptWatermark) bool {
-	if tl.Path == "" {
-		return false
-	}
-	f, err := os.Open(tl.Path)
-	if err != nil {
-		return false
-	}
-	st, err := f.Stat()
-	_ = f.Close()
-	if err != nil || !st.ModTime().After(at) {
-		return false
-	}
-	off, _ := tl.Progress()
-	if off != st.Size() {
-		return false
-	}
-	if mark.path == tl.Path && off <= mark.offset {
-		return false
-	}
-	if mark.path == tl.Path && interruptBoundaryAlreadyPresent(tl.Path, mark.offset, tl, mark.cache) {
-		return false
-	}
-	return true
-}
-
-// interruptPrefixTempDir is empty in production. A test points it at a file
-// so the prefix copy cannot be created and freshness fails closed.
-var interruptPrefixTempDir string
-
-// writeInterruptPrefix copies the bytes that were already on disk when the
-// turn began. A test replaces it to force that copy to fail.
-var writeInterruptPrefix = func(f *os.File, b []byte) error {
-	_, err := f.Write(b)
-	return err
-}
-
-// interruptBoundaryAlreadyPresent reports whether the live interruption is
-// the same terminal notice already contained in path's prefix. A prefix that
-// cannot be read fails closed: the caller must not treat the boundary as new.
-func interruptBoundaryAlreadyPresent(path string, offset int64, live *transcript.Tailer, cache *claudeInterruptPrefixCache) bool {
-	if offset <= 0 {
-		return false
-	}
-	earlier, err := cachedInterruptPrefix(path, offset, cache)
-	if err != nil {
-		return true
-	}
-	if earlier.Unparseable() {
-		return true
-	}
-	if !earlier.EndTurn() || earlier.Delivered() {
-		return false
-	}
-	before, beforeOK := interruptBoundaryTurn(earlier)
-	if !beforeOK {
-		return false
-	}
-	after, afterOK := interruptBoundaryTurn(live)
-	if !afterOK {
-		return true
-	}
-	return len(earlier.Turns) == len(live.Turns) && before.Text == after.Text && before.Time == after.Time
-}
-
-func cachedInterruptPrefix(path string, offset int64, cache *claudeInterruptPrefixCache) (*transcript.Tailer, error) {
-	if cache == nil {
-		return interruptPrefixTailer(path, offset)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	if cache.path != path || cache.info == nil || !sameInteractionFile(cache.info, info) {
-		cache.path, cache.info = path, info
-		cache.entries = make(map[int64]*transcript.Tailer)
-	}
-	if snapshot := cache.entries[offset]; snapshot != nil {
-		return snapshot, nil
-	}
-	snapshot, err := interruptPrefixTailer(path, offset)
-	if err != nil {
-		return nil, err
-	}
-	if len(cache.entries) >= 2 {
-		cache.entries = make(map[int64]*transcript.Tailer)
-	}
-	cache.entries[offset] = snapshot
-	return snapshot, nil
-}
-
-// interruptPrefixTailer reuses the transcript tailer on a copy of the bytes
-// that were already present. It does not parse the file a second way.
-func interruptPrefixTailer(path string, offset int64) (*transcript.Tailer, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	if offset <= 0 {
-		return nil, errors.New("interrupt prefix unreadable")
-	}
-	buf := make([]byte, offset)
-	if _, err := io.ReadFull(f, buf); err != nil {
-		return nil, err
-	}
-	if len(bytes.TrimSpace(buf)) == 0 {
-		return &transcript.Tailer{}, nil
-	}
-	tmp, err := os.CreateTemp(interruptPrefixTempDir, "interrupt-prefix-*.jsonl")
-	if err != nil {
-		return nil, err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	werr := writeInterruptPrefix(tmp, buf)
-	if cerr := tmp.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		return nil, werr
-	}
-	tl := &transcript.Tailer{Path: tmpPath}
-	_ = tl.Poll()
-	tl.Path = path
-	return tl, nil
-}
-
-func interactionCancelTargetsTurn(cancelTurn string, current, closing claudeAcceptedTurn) bool {
-	if cancelTurn == "" {
-		return false
-	}
-	if current.Turn != "" {
-		return cancelTurn == current.Turn
-	}
-	return closing.Turn != "" && cancelTurn == closing.Turn
 }
 
 func pendingCancelInteractions(bundle string) []string {

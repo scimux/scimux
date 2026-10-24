@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/scimux/scimux/internal/sessionlog"
-	"github.com/scimux/scimux/internal/transcript"
 )
 
 func interactionDirs() []string {
@@ -935,23 +934,21 @@ func TestClaudeInteractionHookCancelSettlement(t *testing.T) {
 	cases := []struct {
 		name    string
 		emitted bool
-		end     bool
 		turn    string
 		current claudeAcceptedTurn
 		closing claudeAcceptedTurn
 		wantOK  bool
 		wantWhy string
 	}{
-		{"settled", true, true, "turn-n", cur, closing, true, "settled"},
-		{"not emitted", false, true, "turn-n", cur, closing, false, "not emitted"},
-		{"no interrupt evidence", true, false, "turn-n", cur, closing, false, "no interruption evidence"},
-		{"successor", true, true, "turn-n", claudeAcceptedTurn{Turn: "turn-n1", Gen: 3}, cur, false, "successor turn"},
-		{"closing match", true, true, "turn-prev", claudeAcceptedTurn{}, closing, true, "settled"},
-		{"empty", true, true, "", claudeAcceptedTurn{}, claudeAcceptedTurn{}, false, "turn mismatch"},
-		{"closing mismatch", true, true, "turn-n", claudeAcceptedTurn{}, claudeAcceptedTurn{Turn: "other", Gen: 1}, false, "turn mismatch"},
+		{"settled", true, "turn-n", cur, closing, true, "settled"},
+		{"not emitted", false, "turn-n", cur, closing, false, "not emitted"},
+		{"successor", true, "turn-n", claudeAcceptedTurn{Turn: "turn-n1", Gen: 3}, cur, false, "successor turn"},
+		{"closing match", true, "turn-prev", claudeAcceptedTurn{}, closing, true, "settled"},
+		{"empty", true, "", claudeAcceptedTurn{}, claudeAcceptedTurn{}, false, "turn mismatch"},
+		{"closing mismatch", true, "turn-n", claudeAcceptedTurn{}, claudeAcceptedTurn{Turn: "other", Gen: 1}, false, "turn mismatch"},
 	}
 	for _, tc := range cases {
-		ok, why := claudeInteractionCancelMaySettle(tc.emitted, tc.end, tc.turn, tc.current, tc.closing)
+		ok, why := claudeInteractionCancelMaySettle(tc.emitted, tc.turn, tc.current, tc.closing)
 		if ok != tc.wantOK || why != tc.wantWhy {
 			t.Fatalf("%s = %v %q", tc.name, ok, why)
 		}
@@ -1007,23 +1004,7 @@ func TestClaudeInteractionHookCancelSettlement(t *testing.T) {
 	if err := writeClaudePermFile(filepath.Join(ackDir, "req-quiet.json"), claudeInteractionAck{Emitted: false}); err != nil {
 		t.Fatal(err)
 	}
-	if ok, why := a.settleClaudeInteractionCancel(n, rec.ID, false); ok || why != "no interruption evidence" {
-		t.Fatalf("without evidence = %v %s", ok, why)
-	}
-	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("turn closed without interruption evidence")
-	}
-	path := filepath.Join(t.TempDir(), "interrupt.jsonl")
-	line := `{"type":"user","timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","message":{"role":"user","content":"[Request interrupted by user]"}}` + "\n"
-	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tl := &transcript.Tailer{Path: path}
-	_ = tl.Poll()
-	if !tl.EndTurn() {
-		t.Fatal("synthetic interrupt was not recognized")
-	}
-	a.noteClaudeInteractionInterrupt(n, tl)
+	a.settleEmittedClaudeInteractionCancels(n)
 	if a.claudeAcceptedTurnOf(n.ID).Turn != "" {
 		t.Fatal("cancel did not settle the matching turn")
 	}
@@ -1037,33 +1018,31 @@ func TestClaudeInteractionHookCancelSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.noteClaudeInteractionInterrupt(n, tl)
+	a.settleEmittedClaudeInteractionCancels(n)
 	if a.claudeAcceptedTurnOf(n.ID).Turn != next.Turn {
 		t.Fatal("stale cancel closed the successor")
 	}
-	a.noteClaudeInteractionInterrupt(nil, tl)
-	a.noteClaudeInteractionInterrupt(n, nil)
 	var dead *app
-	if ok, why := dead.settleClaudeInteractionCancel(n, rec.ID, true); ok || why != "turn mismatch" {
+	if ok, why := dead.settleClaudeInteractionCancel(n, rec.ID); ok || why != "turn mismatch" {
 		t.Fatalf("nil app = %v %s", ok, why)
 	}
-	if ok, why := a.settleClaudeInteractionCancel(nil, rec.ID, true); ok || why != "turn mismatch" {
+	if ok, why := a.settleClaudeInteractionCancel(nil, rec.ID); ok || why != "turn mismatch" {
 		t.Fatalf("nil node = %v %s", ok, why)
 	}
-	if ok, why := a.settleClaudeInteractionCancel(n, "../req", true); ok || why != "turn mismatch" {
+	if ok, why := a.settleClaudeInteractionCancel(n, "../req"); ok || why != "turn mismatch" {
 		t.Fatalf("bad id = %v %s", ok, why)
 	}
 	if ids := pendingCancelInteractions(t.TempDir()); len(ids) != 0 {
 		t.Fatalf("missing ack directory returned a cancel: %v", ids)
 	}
-	if ok, why := a.settleClaudeInteractionCancel(n, "req-absent", true); ok || why != "turn mismatch" {
+	if ok, why := a.settleClaudeInteractionCancel(n, "req-absent"); ok || why != "turn mismatch" {
 		t.Fatalf("missing request = %v %s", ok, why)
 	}
 	a.mu.Lock()
 	delete(a.claudeHooks, n.ID)
 	a.mu.Unlock()
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if ok, why := a.settleClaudeInteractionCancel(n, rec.ID, true); ok || why != "turn mismatch" {
+	a.settleEmittedClaudeInteractionCancels(n)
+	if ok, why := a.settleClaudeInteractionCancel(n, rec.ID); ok || why != "turn mismatch" {
 		t.Fatalf("missing bundle = %v %s", ok, why)
 	}
 }

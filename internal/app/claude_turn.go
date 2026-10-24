@@ -165,7 +165,6 @@ func (a *app) beginClaudeAcceptedTurn(n *Node) (claudeAcceptedTurn, error) {
 		clearClaudeAcceptedTurnFileIf(filepath.Join(bundle, "perm"), next.Turn)
 		return empty, errClaudeTurnMarker
 	}
-	rememberClaudeInterruptWatermark(a, n)
 	return next, nil
 }
 

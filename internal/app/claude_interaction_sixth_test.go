@@ -111,7 +111,6 @@ func TestSixthWatermarkAndSubmitSnapshotMutableNodeFields(t *testing.T) {
 	}()
 	close(start)
 	for i := 0; i < 1000; i++ {
-		rememberClaudeInterruptWatermark(a, n)
 		_, _ = h.SubmitClaudeInteraction(t.Context(), sessionworker.InteractionAction{RequestID: rec.ID, Action: "cancel"})
 	}
 	wg.Wait()
@@ -291,45 +290,6 @@ func TestSixthAuditFailureStillPreventsAnswer(t *testing.T) {
 	}
 }
 
-func TestSixthUnchangedCancelDoesNotReparseTranscript(t *testing.T) {
-	a := newTestApp(t, &fakeTmux{})
-	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, "")
-	path := filepath.Join(t.TempDir(), "cached.jsonl")
-	writeTranscript(t, path, interruptLine("2099-01-01T00:00:00Z", "[Request interrupted by user]"))
-	n.Transcript = path
-	rememberClaudeInterruptWatermark(a, n)
-	mark := claudeInterruptWatermarkOf(a, n.ID)
-	tl := pollTranscript(t, path)
-	previous := writeInterruptPrefix
-	copies := 0
-	writeInterruptPrefix = func(f *os.File, b []byte) error { copies++; return previous(f, b) }
-	t.Cleanup(func() { writeInterruptPrefix = previous })
-	turn := claudeAcceptedTurn{At: "2001-01-01T00:00:00Z"}
-	if !interactionInterruptIsFresh(tl, turn, mark) {
-		t.Fatal("fresh dated interruption rejected")
-	}
-	first := copies
-	for i := 0; i < 10; i++ {
-		if !interactionInterruptIsFresh(tl, turn, mark) {
-			t.Fatal("cached interruption changed")
-		}
-	}
-	if copies != first {
-		t.Fatalf("unchanged prefix reparsed %d extra times", copies-first)
-	}
-	appendTranscript(t, path, userLine("2099-01-01T00:00:01Z", "new prompt"))
-	tl.Poll()
-	if interactionInterruptIsFresh(tl, turn, mark) {
-		t.Fatal("cache revived the old interruption after a new prompt")
-	}
-	if copies <= first {
-		t.Fatal("changed prefix was not reparsed")
-	}
-	if _, err := interruptPrefixTailer(path, mustSize(t, path)+1); err == nil {
-		t.Fatal("short prefix read was accepted")
-	}
-}
-
 func TestSixthRecoveryDoesNotInventConfirmationOrOwner(t *testing.T) {
 	bundle := interactionBundle(t)
 	now := time.Now()
@@ -462,33 +422,6 @@ func TestSixthCachesRemainBoundedAndFailClosed(t *testing.T) {
 	if bundleSupportsInteraction(bundle) {
 		t.Fatal("malformed capability manifest accepted")
 	}
-	path := filepath.Join(t.TempDir(), "prefix.jsonl")
-	line := userLine("", "synthetic prompt")
-	writeTranscript(t, path, strings.Repeat(line, 3))
-	cache := &claudeInterruptPrefixCache{}
-	for n := 1; n <= 3; n++ {
-		snapshot, err := cachedInterruptPrefix(path, int64(n*len(line)), cache)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if offset, _ := snapshot.Progress(); offset != int64(n*len(line)) {
-			t.Fatal("prefix was not read completely")
-		}
-		if len(cache.entries) > 2 {
-			t.Fatal("accepted-turn cache grew without a bound")
-		}
-	}
-	if _, err := interruptPrefixTailer(path, 0); err == nil {
-		t.Fatal("empty committed prefix accepted")
-	}
-	for _, raw := range []string{`"ok" trailing`, `"\ud800\u0041"`, `"\ud800\uZZZZ"`, `"\udc00\ud800"`} {
-		if _, ok := decodeJSONStringValue([]byte(raw)); ok {
-			t.Fatalf("invalid Unicode or trailing data accepted: %s", raw)
-		}
-	}
-	if _, ok := decodeJSONStringValue([]byte{'"', 0xff, '"'}); ok {
-		t.Fatal("invalid UTF-8 accepted")
-	}
 }
 
 func TestSixthHelperWaiterFailuresNeverPublish(t *testing.T) {
@@ -549,9 +482,6 @@ func TestSixthLifecycleGuardsStillProtectMalformedAndLegacyRequests(t *testing.T
 	if _, ok := readInteractionCancelFence("relative", rec.ID); ok {
 		t.Fatal("unsafe cancel path accepted")
 	}
-	if mark := claudeInterruptWatermarkOf(nil, "absent"); mark.path != "" || mark.offset != 0 {
-		t.Fatal("missing watermark invented freshness")
-	}
 	if err := os.WriteFile(filepath.Join(bundle, "perm", "interact", "req", "not-json"), []byte("irrelevant"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +507,7 @@ func TestSixthLifecycleGuardsStillProtectMalformedAndLegacyRequests(t *testing.T
 	if err := os.WriteFile(filepath.Join(bundle, "perm", "interact", "req", rec.ID+".json"), []byte("{"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	a.noteClaudeInteractionInterrupt(n, pollLines(t, interruptLine("2099-01-01T00:00:00Z", "[Request interrupted by user]")))
+	a.settleEmittedClaudeInteractionCancels(n)
 	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
 		t.Fatal("corrupt request settled a turn")
 	}

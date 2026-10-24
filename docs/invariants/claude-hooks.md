@@ -225,10 +225,20 @@ Discussion and a request to revise the plan use `decision.behavior: deny`,
 `interrupt: false`, and the human's non-empty feedback, with application
 context kept separate from that feedback. Cancellation uses deny with
 `interrupt: true`. `continue: false` alone is not a cancellation. Stop and
-`PostToolUseFailure` are not guaranteed after that cancellation, so the
-request settles only its own accepted turn through the explicit interrupt
-boundary. The boundary is the tailer's last visible turn, and only when its
-text is the interruption notice. A late notice for turn N cannot close turn N+1.
+`PostToolUseFailure` are not guaranteed after that cancellation. An emitted
+cancel settles on the first poller tick where the node's pane is quiet and
+the cancel's accepted turn is still current or closing. Settlement does not
+wait for transcript evidence and needs neither a transcript path nor a
+tailer. It never settles on an active tick, even when the transcript already
+shows an interruption notice. Settlement has the same effects as Interrupt:
+it retracts the lease, clears auto-approve and attention, tombstones the
+session's asked notices, clears the visible-dialog epoch, marks the turn
+closed, clears elicitations, drops the notify inbox, closes the accepted-turn
+token, clears the dialog note, and writes the interrupted marker. Closing
+the accepted-turn token lets a new send begin. The quiet pane is a heuristic
+snapshot, not proof that Claude consumed the reply. A static modal can look
+quiet before Claude reads the emitted reply, so a new send can begin in that
+window. A cancel for turn N never closes turn N+1.
 
 A REST `202` means the worker durably recorded the human's intent. It does not
 mean Claude consumed the reply. That first audit row makes no delivery claim.
@@ -252,27 +262,9 @@ dead slot and retire its payload. Legacy requests without the lock marker retain
 the deadline-only bound. Recovery uses the existing worker's ownership; it never
 claims a second PID owner file. Raw payloads are otherwise deleted after the
 helper deadline. An emitted cancellation keeps only a minimal fence — action, turn,
-and turn generation — so a later interrupt can still settle after the payload
-is gone, including across a worker restart. That fence is not hook stdout and
-is not replayed. Settlement still requires the emitted acknowledgement and a
-fresh interruption boundary for that same accepted turn. A previous assistant
-completion, an unparseable tail, a turn with no stamp, or a notice that was
-not parsed as that text does not close it. A dated notice is fresh only when
-its own timestamp is at or after the turn was accepted. A later record's
-timestamp does not refresh an older notice. An undated notice can close the
-turn only when that transcript can be read, its modification time is strictly
-after the turn was accepted, the tailer has consumed the file through its end,
-and the notice itself was not already present in the bytes on disk when the
-turn began. Boundary inspection reparses a private copy of the tailer's consumed
-prefix with the existing parser; it never reads the shared mutable turn slice.
-At most two immutable prefixes are cached per accepted turn, invalidated by a
-different path, file identity, size, or modification time. Unchanged polls do not
-copy and parse the transcript again. Prefix reads must be complete. An incomplete
-copy, an advancing tailer, or an unparseable historical prefix leaves freshness
-unproved. Bytes appended after that size refresh the boundary only when they
-add the notice. A metadata record, a missing timestamp, a lagged read, or an
-unreadable file does not close the turn, and the same consumed notice does not
-close a successor turn. The helper
+and turn generation — so settlement still works after the payload is gone,
+including across a worker restart. That fence is not hook stdout and is not
+replayed. The helper
 deadline for these two tools is 150 seconds inside a 180-second hook
 registration, and the app stops accepting decisions at 135 seconds. The
 ordinary 5-second auxiliary permission deadline is unchanged. The timeout is a

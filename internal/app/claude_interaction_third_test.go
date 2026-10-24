@@ -13,7 +13,6 @@ import (
 
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/sessionworker"
-	"github.com/scimux/scimux/internal/transcript"
 )
 
 // The helper child is a separate process. It cannot see this process's
@@ -160,32 +159,6 @@ func runThirdFenceHelper(t *testing.T, dir, id string, ev claudePermissionEvent,
 	return stdout.Bytes()
 }
 
-func TestThirdReviewStaleUndatedInterruptMustNotSettle(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	path := filepath.Join(t.TempDir(), "old-interrupt.jsonl")
-	if err := os.WriteFile(path, []byte(`{"type":"user","message":{"content":"[Request interrupted by user]"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tl := &transcript.Tailer{Path: path}
-	_ = tl.Poll()
-	turn, err := a.beginClaudeAcceptedTurn(n)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := sampleRequest(bundle, time.Now())
-	rec.ID = "review-stale-undated"
-	rec.Turn = turn.Turn
-	rec.TurnGen = turn.Gen
-	rec.SessionID = n.SessionID
-	publishEmittedCancel(t, bundle, rec)
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn == "" {
-		t.Fatal("an undated interrupt observed before the turn started unlocked its new cancellation")
-	}
-}
-
 func TestThirdReviewMuxerProjectionMustNotRollBackWorkerFence(t *testing.T) {
 	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	worker := newTestApp(t, &fakeTmux{})
@@ -299,46 +272,6 @@ func TestThirdReviewResumeSessionChangeMustRevokeOldAnswer(t *testing.T) {
 	}
 }
 
-func TestThirdReviewTouchedUndatedTranscriptMustNotSettle(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	path := filepath.Join(t.TempDir(), "watched-interrupt.jsonl")
-	line := `{"type":"user","message":{"content":"[Request interrupted by user]"}}` + "\n"
-	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tl := &transcript.Tailer{Path: path}
-	_ = tl.Poll()
-	if !tl.EndTurn() || tl.Delivered() {
-		t.Fatal("setup: undated interrupt was not a boundary")
-	}
-	n.Transcript = path
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "touched-undated")
-	if err := os.Chtimes(path, time.Now().Add(2*time.Second), time.Now().Add(2*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("touching an already consumed undated transcript settled the current cancellation")
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write([]byte(line)); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	_ = tl.Poll()
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != "" {
-		t.Fatal("bytes appended after the turn did not settle the undated cancellation")
-	}
-}
-
 func TestThirdReviewPublicationLockFailureMustRevokeOldAnswer(t *testing.T) {
 	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
@@ -399,153 +332,10 @@ func TestThirdReviewPublicationLockFailureMustRevokeOldAnswer(t *testing.T) {
 	}
 }
 
-func TestThirdReviewUndatedEvidence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	line := `{"type":"user","message":{"content":"[Request interrupted by user]"}}` + "\n"
-
-	t.Run("lag", func(t *testing.T) {
-		turn := seedEmittedCancelOnTurn(t, a, n, bundle, "undated-lag")
-		path := filepath.Join(t.TempDir(), "lag.jsonl")
-		if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		tl := &transcript.Tailer{Path: path}
-		_ = tl.Poll()
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.Write([]byte(`{"type":"user"`)); err != nil {
-			t.Fatal(err)
-		}
-		if err := f.Close(); err != nil {
-			t.Fatal(err)
-		}
-		a.noteClaudeInteractionInterrupt(n, tl)
-		if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-			t.Fatal("an undated interrupt with unread trailing bytes settled the cancellation")
-		}
-	})
-
-	t.Run("read failure", func(t *testing.T) {
-		_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-		a.closeClaudeAcceptedTurnLocked(n.ID)
-		turn := seedEmittedCancelOnTurn(t, a, n, bundle, "undated-unreadable")
-		tl := undatedInterruptTailer(t)
-		if err := os.Chmod(tl.Path, 0); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(tl.Path, 0o600) })
-		a.noteClaudeInteractionInterrupt(n, tl)
-		if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-			t.Fatal("an unreadable undated transcript settled the cancellation")
-		}
-	})
-
-	t.Run("deleted file", func(t *testing.T) {
-		_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-		a.closeClaudeAcceptedTurnLocked(n.ID)
-		turn := seedEmittedCancelOnTurn(t, a, n, bundle, "undated-deleted")
-		tl := undatedInterruptTailer(t)
-		if err := os.Remove(tl.Path); err != nil {
-			t.Fatal(err)
-		}
-		a.noteClaudeInteractionInterrupt(n, tl)
-		if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-			t.Fatal("a deleted undated transcript settled the cancellation")
-		}
-	})
-
-	t.Run("empty path", func(t *testing.T) {
-		_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-		a.closeClaudeAcceptedTurnLocked(n.ID)
-		turn := seedEmittedCancelOnTurn(t, a, n, bundle, "undated-empty-path")
-		tl := undatedInterruptTailer(t)
-		tl.Path = ""
-		if interactionInterruptIsFresh(tl, turn, claudeInterruptWatermark{}) {
-			t.Fatal("an undated boundary with no transcript path was fresh")
-		}
-		a.noteClaudeInteractionInterrupt(n, tl)
-		if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-			t.Fatal("a pathless undated boundary settled the cancellation")
-		}
-	})
-
-	t.Run("successor", func(t *testing.T) {
-		_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-		a.closeClaudeAcceptedTurnLocked(n.ID)
-		path := filepath.Join(t.TempDir(), "old-successor.jsonl")
-		if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		tl := &transcript.Tailer{Path: path}
-		_ = tl.Poll()
-		next, err := a.beginClaudeAcceptedTurn(n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := sampleRequest(bundle, time.Now().UTC())
-		rec.ID = "undated-successor"
-		rec.SessionID = n.SessionID
-		rec.Turn = next.Turn
-		rec.TurnGen = next.Gen
-		_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-		publishEmittedCancel(t, bundle, rec)
-		a.noteClaudeInteractionInterrupt(n, tl)
-		if a.claudeAcceptedTurnOf(n.ID).Turn != next.Turn {
-			t.Fatal("an undated interrupt from before the successor settled it")
-		}
-	})
-
-	t.Run("retirement", func(t *testing.T) {
-		_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-		a.closeClaudeAcceptedTurnLocked(n.ID)
-		path := filepath.Join(t.TempDir(), "retired-stale.jsonl")
-		if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		tl := &transcript.Tailer{Path: path}
-		_ = tl.Poll()
-		turn, err := a.beginClaudeAcceptedTurn(n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		now := time.Now().UTC()
-		rec := sampleRequest(bundle, now.Add(-2*time.Minute))
-		rec.ID = "undated-retired"
-		rec.SessionID = n.SessionID
-		rec.Turn = turn.Turn
-		rec.TurnGen = turn.Gen
-		rec.HelperUntil = now.Add(-time.Millisecond).UTC().Format(time.RFC3339Nano)
-		_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-		publishEmittedCancel(t, bundle, rec)
-		testClaudeSessionHarness(a, n.ID).recoverInteractions(now)
-		a.noteClaudeInteractionInterrupt(n, tl)
-		if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-			t.Fatal("retiring the raw payload let a stale undated interrupt settle")
-		}
-	})
-}
-
 func TestThirdReviewWatermarkAndFenceBranches(t *testing.T) {
 	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	rememberClaudeInterruptWatermark(nil, nil)
-	rememberClaudeInterruptWatermark(a, nil)
-	rememberClaudeInterruptWatermark(a, &Node{ID: "absent", Transcript: filepath.Join(t.TempDir(), "missing.jsonl")})
-	n.Transcript = ""
-	rememberClaudeInterruptWatermark(a, n)
-	if mark := claudeInterruptWatermarkOf(a, n.ID); mark.path != "" {
-		t.Fatalf("empty transcript left watermark %q", mark.path)
-	}
-	claudeInterruptWatermarks.Store(claudeInterruptWatermarkKey{app: a, nodeID: n.ID}, "not-a-mark")
-	if mark := claudeInterruptWatermarkOf(a, n.ID); mark.path != "" || mark.offset != 0 {
-		t.Fatalf("foreign watermark = %+v", mark)
-	}
-
 	a.mu.Lock()
 	a.claudeGens[n.ID] = 1
 	a.mu.Unlock()

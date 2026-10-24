@@ -233,10 +233,10 @@ func (a *app) poll() {
 				}
 			}
 			if state == "quiet" {
+				a.settleEmittedClaudeInteractionCancels(n)
 				quietTl = a.tailerFor(n)
 				if quietTl != nil {
 					quietTl.Poll()
-					a.noteClaudeInteractionInterrupt(n, quietTl)
 					off, prog := quietTl.Progress()
 					a.noteChatProgress(n.ID, off, prog, prev == "active")
 					refreshClaudeDlg(quietTl)
@@ -244,7 +244,6 @@ func (a *app) poll() {
 			} else if state == "active" {
 				if tl := a.tailerFor(n); tl != nil {
 					tl.Poll()
-					a.noteClaudeInteractionInterrupt(n, tl)
 					refreshClaudeDlg(tl)
 				}
 			}

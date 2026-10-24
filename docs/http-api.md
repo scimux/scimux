@@ -779,15 +779,12 @@ key was prepared. `terminal` revokes that ownership first; the
 visible-dialog epoch on `…/key` is then authoritative again. Loss of the helper's
 waiter lock rejects answers and releases native controls before the deadline;
 recovery removes that dead request's active slot. A recorded
-cancellation settles only when an emitted cancel and a fresh interruption
-for that accepted turn are both present. The interruption is the notice
-itself. A previous completion does not settle it, and retiring the raw
-payload does not drop that boundary. A dated notice is fresh only from its
-own timestamp. An undated notice is fresh only when its transcript is
-readable, modified strictly after the turn was accepted, fully consumed, and
-the notice was not already in the bytes recorded when the turn began. A
-later record's timestamp, a metadata append, or a missing timestamp does not
-make an older consumed notice fresh.
+cancellation settles on the first quiet pane tick while its accepted turn is
+still current or closing. It does not read the transcript, and it does not
+settle on an active tick. Settlement closes that accepted-turn token. A cancel
+for a turn never closes the next one. The cancel fence kept after payload
+retirement still settles, including across a worker restart. Quiet is a pane
+snapshot, not proof that Claude consumed the reply.
 `perm_dialog_id` stays that epoch and is not the hook request id. Questions
 and plans are never auto-approved, including while a lease is armed.
 

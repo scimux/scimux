@@ -65,9 +65,8 @@ func TestCancellationSurvivesPayloadRetirement(t *testing.T) {
 	rec.TurnGen = turn.Gen
 	rec.HelperUntil = now.Add(-time.Millisecond).UTC().Format(time.RFC3339Nano)
 	publishEmittedCancel(t, bundle, rec)
-	tl := undatedInterruptTailer(t)
 
-	// The worker poll recovers expired payloads before it reads the transcript.
+	// The worker poll recovers expired payloads before settlement.
 	h := testClaudeSessionHarness(a, n.ID)
 	h.recoverInteractions(now)
 	if _, err := os.Stat(filepath.Join(bundle, "perm", "interact", "req", rec.ID+".json")); !os.IsNotExist(err) {
@@ -76,7 +75,7 @@ func TestCancellationSurvivesPayloadRetirement(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(bundle, "perm", "interact", "ans", rec.ID+".json")); !os.IsNotExist(err) {
 		t.Fatal("recovery left the raw answer in place")
 	}
-	a.noteClaudeInteractionInterrupt(n, tl)
+	a.settleEmittedClaudeInteractionCancels(n)
 	if got := a.claudeAcceptedTurnOf(n.ID).Turn; got == turn.Turn {
 		t.Fatal("cleanup deleted the request and answer needed to settle an emitted cancellation; accepted turn remains locked")
 	}
@@ -131,13 +130,7 @@ func TestCancellationSurvivesPayloadRetirement(t *testing.T) {
 	}
 	second := testClaudeSessionHarness(restart, rn.ID)
 	second.recoverInteractions(now)
-	delayed := filepath.Join(t.TempDir(), "delayed.jsonl")
-	if err := os.WriteFile(delayed, []byte(`{"type":"user","message":{"content":"[Request interrupted by user]"}}`+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dtl := &transcript.Tailer{Path: delayed}
-	_ = dtl.Poll()
-	restart.noteClaudeInteractionInterrupt(rn, dtl)
+	restart.settleEmittedClaudeInteractionCancels(rn)
 	if got := restart.claudeAcceptedTurnOf(rn.ID).Turn; got == rturn.Turn {
 		t.Fatal("late acknowledgement plus a restarted worker left the accepted turn locked")
 	}
@@ -145,7 +138,7 @@ func TestCancellationSurvivesPayloadRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restart.noteClaudeInteractionInterrupt(rn, dtl)
+	restart.settleEmittedClaudeInteractionCancels(rn)
 	if got := restart.claudeAcceptedTurnOf(rn.ID).Turn; got != next.Turn {
 		t.Fatal("retired cancellation closed the successor turn")
 	}
@@ -297,11 +290,11 @@ func TestCorruptCancelFenceDoesNotSettle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundle, "perm", "interact", "cancel", rec.ID), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a.noteClaudeInteractionInterrupt(n, undatedInterruptTailer(t))
+	a.settleEmittedClaudeInteractionCancels(n)
 	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
 		t.Fatal("a corrupt cancel fence settled the turn")
 	}
-	if ok, why := a.settleClaudeInteractionCancel(n, rec.ID, true); ok || why != "turn mismatch" {
+	if ok, why := a.settleClaudeInteractionCancel(n, rec.ID); ok || why != "turn mismatch" {
 		t.Fatalf("corrupt fence settle = %v %s", ok, why)
 	}
 }
@@ -331,120 +324,6 @@ func pollLines(t *testing.T, body string) *transcript.Tailer {
 	tl := &transcript.Tailer{Path: path}
 	_ = tl.Poll()
 	return tl
-}
-
-func TestStaleAssistantCompletionDoesNotSettleCancel(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	tl := pollLines(t, `{"type":"assistant","timestamp":"2001-01-01T00:00:00Z","message":{"content":[{"type":"text","text":"Earlier completed turn"}],"stop_reason":"end_turn"}}`+"\n")
-	if !tl.EndTurn() || !tl.Delivered() {
-		t.Fatal("setup: previous assistant completion was not recognized")
-	}
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "stale-completion")
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn == "" {
-		t.Fatal("old assistant end_turn unlocked a current cancellation without fresh interruption evidence")
-	}
-	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("stale completion changed the accepted turn")
-	}
-}
-
-func TestStaleDatedInterruptDoesNotSettleCancel(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "stale-interrupt")
-	tl := pollLines(t, `{"type":"user","timestamp":"2001-01-01T00:00:00Z","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n")
-	if !tl.EndTurn() || tl.Delivered() {
-		t.Fatal("setup: dated interrupt was not an interruption")
-	}
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("an interruption dated before the accepted turn closed it")
-	}
-}
-
-func TestUnparseableTranscriptDoesNotSettleCancel(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "unparseable-interrupt")
-	var body strings.Builder
-	body.WriteString(`{"type":"user","message":{"content":"[Request interrupted by user]"}}` + "\n")
-	for i := 0; i < 10; i++ {
-		body.WriteString("not-json\n")
-	}
-	tl := pollLines(t, body.String())
-	if !tl.EndTurn() || !tl.Unparseable() {
-		t.Fatal("setup: transcript was not an unparseable interruption")
-	}
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("an unparseable transcript settled the cancellation")
-	}
-}
-
-func TestTranscriptReadLagKeepsPreviousCompletion(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	tl := pollLines(t, `{"type":"assistant","timestamp":"2001-01-01T00:00:00Z","message":{"content":[{"type":"text","text":"Earlier completed turn"}],"stop_reason":"end_turn"}}`+"\n")
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "lagging-read")
-	if err := os.Chmod(tl.Path, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(tl.Path, 0o600) })
-	_ = tl.Poll()
-	if !tl.EndTurn() {
-		t.Fatal("setup: a failed reread cleared the previous completion")
-	}
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("a lagged transcript read settled the cancellation from the previous completion")
-	}
-}
-
-func TestMissingTurnStampDoesNotSettleCancel(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "undated-turn")
-	a.mu.Lock()
-	cur := a.claudeTurns[n.ID]
-	cur.At = ""
-	a.claudeTurns[n.ID] = cur
-	a.mu.Unlock()
-	a.noteClaudeInteractionInterrupt(n, undatedInterruptTailer(t))
-	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("an accepted turn with no stamp was closed")
-	}
-	if interactionInterruptIsFresh(nil, turn, claudeInterruptWatermark{}) || interactionInterruptIsFresh(&transcript.Tailer{}, turn, claudeInterruptWatermark{}) {
-		t.Fatal("missing transcript evidence was treated as a fresh interruption")
-	}
-}
-
-func TestClosingTurnNeedsFreshInterrupt(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "closing-stale")
-	a.closeClaudeAcceptedTurnLocked(n.ID)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != "" || a.claudeClosingTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("setup: turn did not move to closing")
-	}
-	stale := pollLines(t, `{"type":"user","timestamp":"2001-01-01T00:00:00Z","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n")
-	a.noteClaudeInteractionInterrupt(n, stale)
-	if phase := claudeInteractionPhase(bundle, "closing-stale", time.Now()); phase == "interrupted" {
-		t.Fatal("a stale interruption settled the closing turn")
-	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	fresh := pollLines(t, `{"type":"user","timestamp":"`+stamp+`","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n")
-	a.noteClaudeInteractionInterrupt(n, fresh)
-	if phase := claudeInteractionPhase(bundle, "closing-stale", time.Now()); phase != "interrupted" {
-		t.Fatalf("fresh interruption left the closing turn phase %s", phase)
-	}
 }
 
 func TestPublishedIdentityUsesBindingGeneration(t *testing.T) {
@@ -636,45 +515,6 @@ func TestCorruptGenerationFenceBlocksEmission(t *testing.T) {
 	}
 	if out.Len() > 0 {
 		t.Fatal("helper emitted an answer while the binding fence was unreadable")
-	}
-}
-
-func TestFreshInterruptSettlesCancelAndNotSuccessor(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
-	a := newTestApp(t, &fakeTmux{})
-	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
-	turn := seedEmittedCancelOnTurn(t, a, n, bundle, "fresh-interrupt")
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	tl := pollLines(t, `{"type":"user","timestamp":"`+stamp+`","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n")
-	if !tl.EndTurn() || tl.Delivered() {
-		t.Fatal("setup: fresh interrupt was not recognized")
-	}
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != "" || a.claudeClosingTurnOf(n.ID).Turn != turn.Turn {
-		t.Fatal("a fresh interruption did not settle the matching cancellation")
-	}
-	if claudeInteractionPhase(bundle, "fresh-interrupt", time.Now()) != "interrupted" {
-		t.Fatal("fresh cancellation was not marked interrupted")
-	}
-	next, err := a.beginClaudeAcceptedTurn(n)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.noteClaudeInteractionInterrupt(n, tl)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != next.Turn {
-		t.Fatal("stale interruption evidence closed the successor")
-	}
-	stale := pollLines(t, `{"type":"user","timestamp":"2001-01-01T00:00:00Z","message":{"role":"user","content":"[Request interrupted by user]"}}`+"\n")
-	rec := sampleRequest(bundle, time.Now().UTC())
-	rec.ID = "successor-cancel"
-	rec.SessionID = n.SessionID
-	rec.Turn = next.Turn
-	rec.TurnGen = next.Gen
-	_ = os.Remove(filepath.Join(bundle, "perm", "interact", "active.json"))
-	publishEmittedCancel(t, bundle, rec)
-	a.noteClaudeInteractionInterrupt(n, stale)
-	if a.claudeAcceptedTurnOf(n.ID).Turn != next.Turn {
-		t.Fatal("a previous interruption closed the successor cancellation")
 	}
 }
 
@@ -874,7 +714,7 @@ func TestCancelFenceAlreadyPresentIsNotRewritten(t *testing.T) {
 	if err != nil || string(got) != string(kept) {
 		t.Fatalf("existing fence rewritten: %s %v", got, err)
 	}
-	a.noteClaudeInteractionInterrupt(n, undatedInterruptTailer(t))
+	a.settleEmittedClaudeInteractionCancels(n)
 	if a.claudeAcceptedTurnOf(n.ID).Turn == turn.Turn {
 		t.Fatal("a pre-existing cancel fence did not settle after the payload was retired")
 	}
@@ -967,7 +807,7 @@ func TestUnusableCancelFenceDoesNotSettle(t *testing.T) {
 			t.Fatalf("pending cancellation included %s", id)
 		}
 	}
-	a.noteClaudeInteractionInterrupt(n, undatedInterruptTailer(t))
+	a.settleEmittedClaudeInteractionCancels(n)
 	if a.claudeAcceptedTurnOf(n.ID).Turn != turn.Turn {
 		t.Fatal("an allow fence, a blank turn, or an unnameable ack settled the cancellation")
 	}
