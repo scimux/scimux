@@ -157,7 +157,7 @@ func TestClaudeInteractionClassifyNativeFallback(t *testing.T) {
 		{"AskUserQuestion", `{"questions":[]}`, "question count"},
 		{"AskUserQuestion", `{"questions":[{"header":"H","options":[{"label":"A","description":""},{"label":"B","description":""}]}]}`, "empty question"},
 		{"AskUserQuestion", `{"questions":[{"question":"Pick?","header":"H"}]}`, "option count"},
-		{"AskUserQuestion", `{"questions":[{"question":"\uD800","header":"H","options":[{"label":"A","description":""},{"label":"B","description":""}]}]}`, "question shape"},
+		{"AskUserQuestion", `{"questions":[{"question":"\uD800","header":"H","options":[{"label":"A","description":""},{"label":"B","description":""}]}]}`, "malformed json"},
 		{"AskUserQuestion", `{"questions":[1,]}`, "malformed json"},
 		{"AskUserQuestion", `{"questions":[1 2]}`, "malformed json"},
 		{"AskUserQuestion", `{"questions":[{},{},{},{},{}]}`, "question count"},
@@ -720,57 +720,12 @@ func TestClaudeInteractionJSONWalk(t *testing.T) {
 	if benignJSONValue([]byte(`nope`)) || benignJSONValue([]byte(`false true`)) {
 		t.Fatal("benign check accepted damaged JSON")
 	}
-	if _, err := endJSONString([]byte(`abc`), 0); err == nil {
-		t.Fatal("endJSONString accepted a non-string")
-	}
-	if _, err := endJSONString([]byte(`"\`), 0); err == nil {
-		t.Fatal("endJSONString accepted a truncated escape")
-	}
-	if _, err := endJSONString([]byte(`"\u12"`), 0); err == nil {
-		t.Fatal("endJSONString accepted a short unicode escape")
-	}
-	if _, err := endJSONString([]byte(`"\uGGGG"`), 0); err == nil {
-		t.Fatal("endJSONString accepted a bad hex escape")
-	}
-	if _, err := endJSONString([]byte(`"unterminated`), 0); err == nil {
-		t.Fatal("endJSONString accepted an unterminated string")
-	}
-	if _, _, err := decodeJSONString([]byte(`"\q"`), 0); err == nil {
-		t.Fatal("decodeJSONString accepted a bad escape")
-	}
-	if _, err := skipJSONContainer([]byte{}, 0, '{', '}'); err == nil {
-		t.Fatal("skipJSONContainer accepted an empty buffer")
-	}
-	if _, err := skipInteractionValue([]byte{}, 0); err == nil {
-		t.Fatal("skipInteractionValue accepted an empty buffer")
-	}
-	if _, err := objectFields([]byte(`{"a":1`)); err == nil {
-		t.Fatal("objectFields accepted a truncated object")
-	}
-	if _, err := arrayElements([]byte(`[1`)); err == nil {
-		t.Fatal("arrayElements accepted a truncated array")
-	}
-	if _, err := arrayElements([]byte(`[1 2]`)); err == nil {
-		t.Fatal("arrayElements accepted a missing comma")
-	}
-	if _, err := arrayElements([]byte(`[1,]`)); err == nil {
-		t.Fatal("arrayElements accepted a trailing comma")
-	}
 	if _, err := walkJSONArray([]byte(`[1] x`)); err == nil {
 		t.Fatal("walkJSONArray accepted trailing bytes")
 	}
 	if _, err := walkJSONArray([]byte(`[`)); err == nil {
 		t.Fatal("walkJSONArray accepted a truncated array")
 	}
-	if _, err := arrayElements([]byte(`[`)); err == nil {
-		t.Fatal("arrayElements accepted a missing value")
-	}
-	defer func() {
-		if recover() == nil {
-			t.Fatal("marshal accepted a function")
-		}
-	}()
-	marshalInteractionValue(func() {})
 }
 
 func TestClaudeInteractionQuestionsStayIneligibleForLease(t *testing.T) {

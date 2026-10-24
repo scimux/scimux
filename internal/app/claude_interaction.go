@@ -34,11 +34,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/bits"
-	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -151,6 +150,21 @@ func interactionNative(reason string) (claudeInteractionModel, error) {
 	return claudeInteractionModel{Native: true, NativeReason: reason}, nil
 }
 
+// jsonHasReplacementRune reports whether any JSON string, including object
+// keys, decodes to text containing U+FFFD. Invalid JSON returns false.
+func jsonHasReplacementRune(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if s, ok := tok.(string); ok && strings.ContainsRune(s, utf8.RuneError) {
+			return true
+		}
+	}
+}
+
 func classifyClaudeInteraction(tool string, raw []byte) (claudeInteractionModel, error) {
 	if tool != "AskUserQuestion" && tool != "ExitPlanMode" {
 		return interactionNative("unsupported tool")
@@ -163,6 +177,9 @@ func classifyClaudeInteraction(tool string, raw []byte) (claudeInteractionModel,
 		return interactionNative("not object")
 	}
 	if !json.Valid(raw) {
+		return interactionNative("malformed json")
+	}
+	if jsonHasReplacementRune(raw) {
 		return interactionNative("malformed json")
 	}
 	fields, err := walkJSONObject(raw)
@@ -464,15 +481,14 @@ func jsonNull(raw []byte) bool {
 
 func decodeJSONStringValue(raw []byte) (string, bool) {
 	text := bytes.TrimSpace(raw)
-	if len(text) < 2 || text[0] != '"' {
-		return "", false
-	}
-	if _, err := endJSONString(text, 0); err != nil || !utf8.Valid(text) {
+	if len(text) == 0 || text[0] != '"' {
 		return "", false
 	}
 	var value string
-	err := json.Unmarshal(text, &value)
-	if err != nil {
+	if err := json.Unmarshal(text, &value); err != nil {
+		return "", false
+	}
+	if strings.ContainsRune(value, utf8.RuneError) {
 		return "", false
 	}
 	return value, true
@@ -826,332 +842,79 @@ func appendJSONString(buf *bytes.Buffer, value string) error {
 }
 
 func spliceJSONMember(object []byte, key string, value []byte) ([]byte, error) {
-	fields, closeAt, err := scanJSONObject(object)
+	fields, err := walkJSONObject(object)
 	if err != nil {
 		return nil, err
 	}
+	// walkJSONObject accepted the object, so the last non-space byte is '}'.
+	trimmed := bytes.TrimRight(object, " \t\r\n")
+	closeAt := len(trimmed) - 1
 	var buf bytes.Buffer
 	buf.Write(object[:closeAt])
 	if len(fields) > 0 {
 		buf.WriteByte(',')
 	}
-	buf.WriteByte('"')
-	buf.WriteString(key)
-	buf.WriteString(`":`)
+	if err := appendJSONString(&buf, key); err != nil {
+		return nil, err
+	}
+	buf.WriteByte(':')
 	buf.Write(value)
 	buf.Write(object[closeAt:])
 	return buf.Bytes(), nil
 }
 
 func walkJSONObject(raw []byte) ([]jsonField, error) {
-	fields, _, err := scanJSONObject(raw)
-	return fields, err
-}
-
-func scanJSONObject(raw []byte) ([]jsonField, int, error) {
-	i := skipWS(raw, 0)
-	if i >= len(raw) || raw[i] != '{' {
-		return nil, 0, errors.New("json value is not an object")
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return nil, errors.New("json value is not an object")
 	}
-	end, err := skipJSONContainer(raw, i, '{', '}')
-	if err != nil {
-		return nil, 0, err
-	}
-	if skipWS(raw, end) != len(raw) {
-		return nil, 0, errors.New("json object has trailing bytes")
-	}
-	fields, err := objectFields(raw[i:end])
-	if err != nil {
-		return nil, 0, err
-	}
-	return fields, end - 1, nil
-}
-
-func objectFields(raw []byte) ([]jsonField, error) {
-	i := 1
-	i = skipWS(raw, i)
 	var fields []jsonField
 	seen := map[string]bool{}
-	if i < len(raw) && raw[i] == '}' {
-		return fields, nil
-	}
-	for {
-		if i >= len(raw) || raw[i] != '"' {
-			return nil, errors.New("json object key is missing")
-		}
-		key, next, err := decodeJSONString(raw, i)
+	for dec.More() {
+		keyTok, err := dec.Token()
 		if err != nil {
 			return nil, err
+		}
+		// encoding/json yields object keys as strings. Reject a key containing
+		// U+FFFD before duplicate detection: lone surrogates, a literal
+		// U+FFFD, and \ufffd all decode to RuneError.
+		key := keyTok.(string)
+		if strings.ContainsRune(key, utf8.RuneError) {
+			return nil, errors.New("json object key is invalid")
 		}
 		if seen[key] {
 			return nil, errors.New("json object repeats a key")
 		}
 		seen[key] = true
-		i = skipWS(raw, next)
-		if i >= len(raw) || raw[i] != ':' {
-			return nil, errors.New("json object is missing a colon")
-		}
-		i++
-		i = skipWS(raw, i)
-		start := i
-		valueEnd, err := skipInteractionValue(raw, i)
-		if err != nil {
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
 			return nil, err
 		}
-		fields = append(fields, jsonField{Key: key, Raw: append([]byte(nil), raw[start:valueEnd]...)})
-		i = skipWS(raw, valueEnd)
-		if i >= len(raw) {
-			return nil, errors.New("json object is truncated")
-		}
-		if raw[i] == '}' {
-			return fields, nil
-		}
-		if raw[i] != ',' {
-			return nil, errors.New("json object is missing a comma")
-		}
-		i++
-		i = skipWS(raw, i)
-		if i < len(raw) && raw[i] == '}' {
-			return nil, errors.New("json object has a trailing comma")
-		}
+		fields = append(fields, jsonField{Key: key, Raw: append([]byte(nil), value...)})
 	}
+	tok, err = dec.Token()
+	if err != nil || tok != json.Delim('}') {
+		return nil, errors.New("json object is truncated")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("json object has trailing bytes")
+	}
+	return fields, nil
 }
 
 func walkJSONArray(raw []byte) ([][]byte, error) {
-	i := skipWS(raw, 0)
-	if i >= len(raw) || raw[i] != '[' {
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return nil, errors.New("json value is not an array")
 	}
-	end, err := skipJSONContainer(raw, i, '[', ']')
-	if err != nil {
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
 		return nil, err
 	}
-	if skipWS(raw, end) != len(raw) {
-		return nil, errors.New("json array has trailing bytes")
+	out := make([][]byte, len(elems))
+	for i, elem := range elems {
+		out[i] = append([]byte(nil), elem...)
 	}
-	return arrayElements(raw[i:end])
-}
-
-func arrayElements(raw []byte) ([][]byte, error) {
-	i := 1
-	i = skipWS(raw, i)
-	var elems [][]byte
-	if i < len(raw) && raw[i] == ']' {
-		return elems, nil
-	}
-	for {
-		start := i
-		valueEnd, err := skipInteractionValue(raw, i)
-		if err != nil {
-			return nil, err
-		}
-		elems = append(elems, append([]byte(nil), raw[start:valueEnd]...))
-		i = skipWS(raw, valueEnd)
-		if i >= len(raw) {
-			return nil, errors.New("json array is truncated")
-		}
-		if raw[i] == ']' {
-			return elems, nil
-		}
-		if raw[i] != ',' {
-			return nil, errors.New("json array is missing a comma")
-		}
-		i++
-		i = skipWS(raw, i)
-		if i < len(raw) && raw[i] == ']' {
-			return nil, errors.New("json array has a trailing comma")
-		}
-	}
-}
-
-func skipJSONContainer(raw []byte, i int, open, close byte) (int, error) {
-	if i >= len(raw) || raw[i] != open {
-		return 0, errors.New("json container is incomplete")
-	}
-	depth := 0
-	inString := false
-	escaped := false
-	for ; i < len(raw); i++ {
-		c := raw[i]
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if c == '\\' {
-				escaped = true
-				continue
-			}
-			if c == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case open:
-			depth++
-		case close:
-			depth--
-			if depth == 0 {
-				return i + 1, nil
-			}
-		}
-	}
-	return 0, errors.New("json container is truncated")
-}
-
-func skipInteractionValue(raw []byte, i int) (int, error) {
-	if i >= len(raw) {
-		return 0, errors.New("json value is missing")
-	}
-	switch raw[i] {
-	case '"':
-		return endJSONString(raw, i)
-	case '{':
-		return skipJSONContainer(raw, i, '{', '}')
-	case '[':
-		return skipJSONContainer(raw, i, '[', ']')
-	case 't':
-		return skipJSONLiteral(raw, i, "true")
-	case 'f':
-		return skipJSONLiteral(raw, i, "false")
-	case 'n':
-		return skipJSONLiteral(raw, i, "null")
-	default:
-		return skipJSONNumber(raw, i)
-	}
-}
-
-func skipJSONLiteral(raw []byte, i int, lit string) (int, error) {
-	end := i + len(lit)
-	if end > len(raw) || string(raw[i:end]) != lit {
-		return 0, errors.New("json literal is incomplete")
-	}
-	if end < len(raw) {
-		c := raw[end]
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
-			return 0, errors.New("json literal is incomplete")
-		}
-	}
-	return end, nil
-}
-
-func skipJSONNumber(raw []byte, i int) (int, error) {
-	if i < len(raw) && raw[i] == '-' {
-		i++
-	}
-	if i >= len(raw) || raw[i] < '0' || raw[i] > '9' {
-		return 0, errors.New("json number is incomplete")
-	}
-	if raw[i] == '0' {
-		i++
-	} else {
-		for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
-			i++
-		}
-	}
-	if i < len(raw) && raw[i] == '.' {
-		i++
-		start := i
-		for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
-			i++
-		}
-		if i == start {
-			return 0, errors.New("json number is incomplete")
-		}
-	}
-	if i < len(raw) && (raw[i] == 'e' || raw[i] == 'E') {
-		i++
-		if i < len(raw) && (raw[i] == '+' || raw[i] == '-') {
-			i++
-		}
-		start := i
-		for i < len(raw) && raw[i] >= '0' && raw[i] <= '9' {
-			i++
-		}
-		if i == start {
-			return 0, errors.New("json number is incomplete")
-		}
-	}
-	return i, nil
-}
-
-func decodeJSONString(raw []byte, i int) (string, int, error) {
-	end, err := endJSONString(raw, i)
-	if err != nil {
-		return "", 0, err
-	}
-	var value string
-	// endJSONString validated the JSON string grammar. Use JSON's escaping
-	// rules (including surrogate pairs), never Go source-literal rules.
-	_ = json.Unmarshal(raw[i:end], &value)
-	return value, end, nil
-}
-
-func endJSONString(raw []byte, i int) (int, error) {
-	if i >= len(raw) || raw[i] != '"' {
-		return 0, errors.New("json string is incomplete")
-	}
-	i++
-	for i < len(raw) {
-		switch raw[i] {
-		case '"':
-			return i + 1, nil
-		case '\\':
-			if i+1 >= len(raw) {
-				return 0, errors.New("json string is incomplete")
-			}
-			switch raw[i+1] {
-			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
-				i += 2
-			case 'u':
-				if i+6 > len(raw) {
-					return 0, errors.New("json string is incomplete")
-				}
-				for _, c := range raw[i+2 : i+6] {
-					if !isHex(c) {
-						return 0, errors.New("json string is incomplete")
-					}
-				}
-				u, _ := strconv.ParseUint(string(raw[i+2:i+6]), 16, 16)
-				if utf16.IsSurrogate(rune(u)) {
-					if i+12 > len(raw) || raw[i+6] != '\\' || raw[i+7] != 'u' {
-						return 0, errors.New("json surrogate is incomplete")
-					}
-					v, err := strconv.ParseUint(string(raw[i+8:i+12]), 16, 16)
-					if err != nil || utf16.DecodeRune(rune(u), rune(v)) == utf8.RuneError {
-						return 0, errors.New("json surrogate pair is invalid")
-					}
-					i += 6
-				}
-				i += 6
-			default:
-				return 0, errors.New("json string is incomplete")
-			}
-		default:
-			if raw[i] < 0x20 {
-				return 0, errors.New("json string is incomplete")
-			}
-			i++
-		}
-	}
-	return 0, errors.New("json string is incomplete")
-}
-
-func isHex(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-}
-
-func skipWS(raw []byte, i int) int {
-	for i < len(raw) {
-		switch raw[i] {
-		case ' ', '\n', '\r', '\t':
-			i++
-		default:
-			return i
-		}
-	}
-	return i
+	return out, nil
 }
