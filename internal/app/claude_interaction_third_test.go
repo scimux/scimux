@@ -160,7 +160,6 @@ func runThirdFenceHelper(t *testing.T, dir, id string, ev claudePermissionEvent,
 }
 
 func TestThirdReviewMuxerProjectionMustNotRollBackWorkerFence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	worker := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, worker, "n1", hookSIDOwn)
 	worker.mu.Lock()
@@ -229,7 +228,6 @@ func TestThirdReviewMissingGenerationFenceMustRejectEmission(t *testing.T) {
 }
 
 func TestThirdReviewResumeSessionChangeMustRevokeOldAnswer(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -273,7 +271,6 @@ func TestThirdReviewResumeSessionChangeMustRevokeOldAnswer(t *testing.T) {
 }
 
 func TestThirdReviewPublicationLockFailureMustRevokeOldAnswer(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -333,7 +330,6 @@ func TestThirdReviewPublicationLockFailureMustRevokeOldAnswer(t *testing.T) {
 }
 
 func TestThirdReviewWatermarkAndFenceBranches(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -412,7 +408,6 @@ func TestThirdReviewWatermarkAndFenceBranches(t *testing.T) {
 }
 
 func TestThirdReviewBindingCommitFailureKeepsFence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -475,7 +470,6 @@ func TestThirdReviewBindingCommitFailureKeepsFence(t *testing.T) {
 }
 
 func TestThirdReviewPublicationWriteFailureRemovesFence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -527,7 +521,6 @@ func TestThirdReviewPublicationWriteFailureRemovesFence(t *testing.T) {
 }
 
 func TestThirdReviewSameSessionResumeKeepsAnswer(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	path := filepath.Join(a.home, ".claude", "projects", "synthetic", hookSIDOwn+".jsonl")
@@ -563,7 +556,6 @@ func TestThirdReviewSameSessionResumeKeepsAnswer(t *testing.T) {
 }
 
 func TestThirdReviewInvalidResumeKeepsAnswer(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -589,7 +581,6 @@ func TestThirdReviewInvalidResumeKeepsAnswer(t *testing.T) {
 }
 
 func TestThirdReviewClearGenerationRevokesOldAnswer(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	hookID := a.claudeHookID(n.ID)
@@ -630,7 +621,6 @@ func TestThirdReviewClearGenerationRevokesOldAnswer(t *testing.T) {
 }
 
 func TestThirdReviewSubmitRejectsFenceSession(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, dir := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -658,7 +648,6 @@ func TestThirdReviewSubmitRejectsFenceSession(t *testing.T) {
 }
 
 func TestThirdReviewRecoveryMustNotRollBackWorkerFence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	worker := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, worker, "n1", hookSIDOwn)
 	worker.mu.Lock()

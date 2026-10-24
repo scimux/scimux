@@ -53,7 +53,7 @@ node never raises inspect from quietness, AX, owing or transcript faults.
   the helper deadline, so a dead helper does not leave the question in
   attention. It does not change mechanical
   liveness, does not authorize pane-text attention, and does not apply to
-  gate-off, legacy, or unsupported sessions. Those keep the existing policy.
+  legacy or unsupported sessions. Those keep the existing policy.
   Stopping or failing hooks are not required to clear it.
 - `handlePeek` runs the same quiet-branch predicate one-shot when a human
   opens the terminal view, so a late-flush dialog is visible without an

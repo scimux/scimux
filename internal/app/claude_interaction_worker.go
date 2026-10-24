@@ -39,7 +39,7 @@ func interactionNeedsAttention(phase string) bool {
 }
 
 // claudeInteractionView is the browser projection of the one active manual
-// interaction. It is empty when the bundle was not minted with the gate, or
+// interaction. It is empty when a legacy bundle lacks interaction support, or
 // when no request owns the slot. PlanFilePath is never copied.
 func (a *app) claudeInteractionView(n *Node) (sessionworker.InteractionView, bool) {
 	var zero sessionworker.InteractionView

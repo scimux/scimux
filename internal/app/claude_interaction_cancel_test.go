@@ -436,7 +436,6 @@ func TestPollDoesNotSettleCancelWithoutTranscriptOnActiveTick(t *testing.T) {
 
 func beginCancelTurn(t *testing.T, id string) (*app, *Node, string, claudeAcceptedTurn) {
 	t.Helper()
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, id, hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -603,7 +602,6 @@ type pollCancel struct {
 
 func newPollCancel(t *testing.T, transcript string) pollCancel {
 	t.Helper()
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: "pane-a"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
@@ -714,7 +712,6 @@ func TestCancelQuietSettlementWithTailerLeavesAttentionEmpty(t *testing.T) {
 
 // pin: a quiet tick keeps attention that still belongs to a current dialog.
 func TestClaudeInteractionQuietTickKeepsCurrentDialogAttention(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: "pane-a"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)

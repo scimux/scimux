@@ -144,8 +144,6 @@ type jsonField struct {
 	Raw []byte
 }
 
-func claudeInteractionsEnvEnabled(v string) bool { return v == "1" }
-
 func interactionNative(reason string) (claudeInteractionModel, error) {
 	return claudeInteractionModel{Native: true, NativeReason: reason}, nil
 }

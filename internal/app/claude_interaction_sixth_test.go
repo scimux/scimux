@@ -83,7 +83,6 @@ func TestSixthKilledHelperImmediatelyReleasesOwnership(t *testing.T) {
 }
 
 func TestSixthWatermarkAndSubmitSnapshotMutableNodeFields(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	p1, p2 := filepath.Join(t.TempDir(), "one.jsonl"), filepath.Join(t.TempDir(), "two.jsonl")
@@ -117,7 +116,6 @@ func TestSixthWatermarkAndSubmitSnapshotMutableNodeFields(t *testing.T) {
 }
 
 func TestSixthClearCompletesCommittedBindingAfterFenceFailure(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", 0))
@@ -224,7 +222,6 @@ func TestSixthPostAuditRejectionHasDurableOutcome(t *testing.T) {
 }
 
 func TestSixthTimeoutIsPresentInSettingsBuilder(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	raw, err := claudeHookSettingsJSON("/synthetic/scimux", "/synthetic/bundle")
 	if err != nil {
 		t.Fatal(err)
@@ -493,7 +490,6 @@ func TestSixthLifecycleGuardsStillProtectMalformedAndLegacyRequests(t *testing.T
 	}
 	// A corrupt request with a real emitted cancel is a candidate but cannot
 	// retire an accepted turn without a readable request or minimal fence.
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -576,7 +572,6 @@ func TestSixthCancelAuditDescribesTheRequest(t *testing.T) {
 }
 
 func TestSixthClearFailureBeforeCommitPreservesPreviousBinding(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, _ := seedPermClaude(t, a, "n1", hookSIDOwn)
 	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", 0))

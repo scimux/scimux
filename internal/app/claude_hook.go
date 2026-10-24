@@ -242,8 +242,7 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 		ops.RemoveAll(dir)
 		return "", err
 	}
-	interaction := claudeInteractionsEnvEnabled(os.Getenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS"))
-	raw, err := claudeHookSettingsForInteraction(execPath, dir, interaction)
+	raw, err := claudeHookSettingsJSON(execPath, dir)
 	if err != nil {
 		ops.RemoveAll(dir)
 		return "", err
@@ -255,21 +254,18 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 	// attention backstop. "exec" records the binary settings.json just baked in,
 	// as JSON rather than a shell string to re-parse, so both gates can check
 	// that the hooks can still run at all (claudeBundleExecUsable).
-	// "interaction" is minted only for the exact experimental gate value, and
-	// only on this new bundle. An already launched bundle is never rewritten.
-	capsDoc := claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Exec: execPath}
-	if interaction {
-		capsDoc.Interaction = 1
-		for _, sub := range claudeInteractionSubdirs {
-			p := filepath.Join(dir, sub)
-			if err := ops.MkdirAll(p, 0o700); err != nil {
-				ops.RemoveAll(dir)
-				return "", err
-			}
-			if err := ops.Chmod(p, 0o700); err != nil {
-				ops.RemoveAll(dir)
-				return "", err
-			}
+	// Every new bundle supports structured questions and plans. Existing
+	// bundles retain the capabilities proved by their original executable.
+	capsDoc := claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Interaction: 1, Exec: execPath}
+	for _, sub := range claudeInteractionSubdirs {
+		p := filepath.Join(dir, sub)
+		if err := ops.MkdirAll(p, 0o700); err != nil {
+			ops.RemoveAll(dir)
+			return "", err
+		}
+		if err := ops.Chmod(p, 0o700); err != nil {
+			ops.RemoveAll(dir)
+			return "", err
 		}
 	}
 	caps, err := json.Marshal(capsDoc)
@@ -302,10 +298,6 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 }
 
 func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
-	return claudeHookSettingsForInteraction(execPath, hookDir, claudeInteractionsEnvEnabled(os.Getenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS")))
-}
-
-func claudeHookSettingsForInteraction(execPath, hookDir string, interaction bool) ([]byte, error) {
 	if execPath == "" || hookDir == "" {
 		return nil, fmt.Errorf("claude hook settings: %w", errClaudeHookRejected)
 	}
@@ -364,10 +356,7 @@ func claudeHookSettingsForInteraction(execPath, hookDir string, interaction bool
 			},
 		},
 	}
-	permissionHook := map[string]any{"type": "command", "command": permCmd}
-	if interaction {
-		permissionHook["timeout"] = interactionHookTimeoutSec
-	}
+	permissionHook := map[string]any{"type": "command", "command": permCmd, "timeout": interactionHookTimeoutSec}
 	doc := map[string]any{
 		"hooks": map[string]any{
 			"SessionStart":      entry(cmd),

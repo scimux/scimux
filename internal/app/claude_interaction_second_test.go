@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -50,7 +51,6 @@ func publishEmittedCancel(t *testing.T, bundle string, rec claudeInteractionRequ
 }
 
 func TestCancellationSurvivesPayloadRetirement(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -175,7 +175,6 @@ func TestCancellationSurvivesPayloadRetirement(t *testing.T) {
 }
 
 func TestCancellationFenceRetainsNothingWithoutATurn(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -221,7 +220,6 @@ func TestCancellationFenceRetainsNothingWithoutATurn(t *testing.T) {
 }
 
 func TestCancellationFenceWriteFailureKeepsPayload(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -267,7 +265,6 @@ func TestCancellationFenceWriteFailureKeepsPayload(t *testing.T) {
 }
 
 func TestCorruptCancelFenceDoesNotSettle(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -327,7 +324,6 @@ func pollLines(t *testing.T, body string) *transcript.Tailer {
 }
 
 func TestPublishedIdentityUsesBindingGeneration(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -348,7 +344,6 @@ func TestPublishedIdentityUsesBindingGeneration(t *testing.T) {
 }
 
 func TestWorkerProjectionPublishesBindingFence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	hookID := a.claudeHookID(n.ID)
@@ -454,7 +449,6 @@ func TestHelperRejectsGenerationRevokedAfterApproval(t *testing.T) {
 }
 
 func TestLegacyGenerationFileStaysAuthoritative(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	// A seeded node starts at generation 1. Clearing that binding leaves the
@@ -480,14 +474,24 @@ func TestLegacyGenerationFileStaysAuthoritative(t *testing.T) {
 	}
 }
 
-func TestGateOffBindingDoesNotWriteGenerationFence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "0")
+func TestLegacyBindingDoesNotWriteGenerationFence(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
+	var caps claudeHookCapabilities
+	if err := json.Unmarshal(mustRead(t, filepath.Join(bundle, "capabilities.json")), &caps); err != nil {
+		t.Fatal(err)
+	}
+	caps.Interaction = 0
+	if err := writeClaudePermFile(filepath.Join(bundle, "capabilities.json"), caps); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(bundle, "perm", "generation.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	hookID := a.claudeHookID(n.ID)
 	a.projectWorkerClaudeHook(n.ID, sessionworker.State{HookID: hookID, HookGeneration: 2})
 	if _, err := os.Stat(filepath.Join(bundle, "perm", "generation.json")); !os.IsNotExist(err) {
-		t.Fatalf("gate-off bundle wrote generation.json: %v", err)
+		t.Fatalf("legacy bundle wrote generation.json: %v", err)
 	}
 }
 
@@ -542,7 +546,6 @@ func prepareNativeKey(t *testing.T, h *claudeSessionHarness, epoch string) sessi
 }
 
 func TestNativeDeliveryRefusesStructuredOwnership(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: axPermissionPane}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
@@ -611,7 +614,6 @@ func TestNativeDeliveryRefusesStructuredOwnership(t *testing.T) {
 }
 
 func TestNativeDeliveryRefusesWhenFenceCannotBeLocked(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: axPermissionPane}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
@@ -683,7 +685,6 @@ func TestUnusableBundlePathDoesNotRetainCancelFence(t *testing.T) {
 }
 
 func TestCancelFenceAlreadyPresentIsNotRewritten(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -721,7 +722,6 @@ func TestCancelFenceAlreadyPresentIsNotRewritten(t *testing.T) {
 }
 
 func TestReservedRequestIDKeepsCancelPayload(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -759,7 +759,6 @@ func TestReservedRequestIDKeepsCancelPayload(t *testing.T) {
 }
 
 func TestUnusableCancelFenceDoesNotSettle(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	turn, err := a.beginClaudeAcceptedTurn(n)
@@ -814,7 +813,6 @@ func TestUnusableCancelFenceDoesNotSettle(t *testing.T) {
 }
 
 func TestLiveBindingAuthorizesSubmitAfterFileLoss(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -851,7 +849,6 @@ func TestLiveBindingAuthorizesSubmitAfterFileLoss(t *testing.T) {
 }
 
 func TestSubmitUsesFileWhenLiveBindingIsUnset(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -881,7 +878,6 @@ func TestSubmitUsesFileWhenLiveBindingIsUnset(t *testing.T) {
 }
 
 func TestDetachedRegistryCannotOverrideBindingFile(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -910,7 +906,6 @@ func TestDetachedRegistryCannotOverrideBindingFile(t *testing.T) {
 }
 
 func TestBindingRegistryIgnoresEmptyOwners(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	registerClaudeBindingOwner("", a, n.ID)
@@ -932,7 +927,6 @@ func TestBindingRegistryIgnoresEmptyOwners(t *testing.T) {
 }
 
 func TestBindingFenceRejectsBrokenPerm(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	perm := filepath.Join(bundle, "perm")
@@ -959,7 +953,6 @@ func TestBindingFenceRejectsBrokenPerm(t *testing.T) {
 }
 
 func TestStampRefusesUnrefreshableGenerationFence(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	a.mu.Lock()
@@ -984,7 +977,6 @@ func TestStampRefusesUnrefreshableGenerationFence(t *testing.T) {
 }
 
 func TestEmissionRejectsLiveNodeMismatch(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	t.Cleanup(func() { claudeBindingOwners.Delete(bundle) })
@@ -1023,7 +1015,6 @@ func TestEmissionRejectsLiveNodeMismatch(t *testing.T) {
 }
 
 func TestClearGenerationRejectsBindingMovedDuringAppend(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	hookID := a.claudeHookID(n.ID)

@@ -68,7 +68,6 @@ func attachInteractionWorker(t *testing.T, a *app, n *Node) *claudeSessionHarnes
 }
 
 func TestClaudeInteractionAPIPublicContract(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: axPermissionPane}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
@@ -215,7 +214,6 @@ func TestClaudeInteractionAPIPublicContract(t *testing.T) {
 }
 
 func TestClaudeInteractionAPIPlanModesAndNativeHandoff(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"plan-1"}, alive: map[string]bool{"plan-1": true}, capture: axPermissionPane}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "plan-1", hookSIDOwn)
@@ -293,7 +291,6 @@ func TestClaudeInteractionAPIPlanModesAndNativeHandoff(t *testing.T) {
 }
 
 func TestClaudeInteractionPollAttentionAndMonolithKey(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"attn-1"}, alive: map[string]bool{"attn-1": true}, capture: axPermissionPane}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "attn-1", hookSIDOwn)
@@ -331,28 +328,40 @@ func TestClaudeInteractionPollAttentionAndMonolithKey(t *testing.T) {
 	}
 }
 
-func TestClaudeInteractionAPIGateOffAndSnapshot(t *testing.T) {
+func TestClaudeInteractionAPILegacyBundleAndSnapshot(t *testing.T) {
 	f := &fakeTmux{list: []string{"off-1"}, alive: map[string]bool{"off-1": true}, capture: "idle\n"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "off-1", hookSIDOwn)
+	var caps claudeHookCapabilities
+	if err := json.Unmarshal(mustRead(t, filepath.Join(bundle, "capabilities.json")), &caps); err != nil {
+		t.Fatal(err)
+	}
+	caps.Interaction = 0
+	if err := writeClaudePermFile(filepath.Join(bundle, "capabilities.json"), caps); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(bundle, "perm", "interact")); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := os.Stat(filepath.Join(bundle, "perm", "interact")); !os.IsNotExist(err) {
-		t.Fatal("gate-off bundle created an interaction directory")
+		t.Fatal("legacy bundle created an interaction directory")
 	}
 	h := attachInteractionWorker(t, a, n)
 	if _, err := h.ClaudeInteraction(context.Background()); !errors.Is(err, sessionworker.ErrInteractionUnsupported) {
-		t.Fatalf("gate-off view = %v", err)
+		t.Fatalf("legacy view = %v", err)
 	}
 	if _, err := h.SubmitClaudeInteraction(context.Background(), sessionworker.InteractionAction{RequestID: "req-letter", Action: "cancel"}); !errors.Is(err, sessionworker.ErrInteractionUnsupported) {
-		t.Fatalf("gate-off submit = %v", err)
+		t.Fatalf("legacy submit = %v", err)
 	}
 	handler := newTestHandler(t, a)
 	etag1 := routeRequest(handler, http.MethodGet, "/api/nodes/"+n.ID+"/chat", "", false).Header().Get("ETag")
 	if rec := postInteraction(handler, n.ID, `{"request_id":"req-letter","action":"cancel"}`, true); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "unsupported") {
-		t.Fatalf("gate off = %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("legacy = %d %s", rec.Code, rec.Body.String())
 	}
 	etag2 := routeRequest(handler, http.MethodGet, "/api/nodes/"+n.ID+"/chat", "", false).Header().Get("ETag")
 	if etag1 == "" || etag1 != etag2 {
-		t.Fatalf("gate-off chat ETag changed: %q %q", etag1, etag2)
+		t.Fatalf("legacy chat ETag changed: %q %q", etag1, etag2)
 	}
 	a.poll()
 	a.mu.Lock()
@@ -360,7 +369,7 @@ func TestClaudeInteractionAPIGateOffAndSnapshot(t *testing.T) {
 	live := a.live[n.ID]
 	a.mu.Unlock()
 	if attn == "question" {
-		t.Fatalf("gate-off poll raised interaction attention, live=%s", live)
+		t.Fatalf("legacy poll raised interaction attention, live=%s", live)
 	}
 	a.mu.Lock()
 	delete(a.byID, n.ID)
@@ -374,7 +383,6 @@ func TestClaudeInteractionAPIGateOffAndSnapshot(t *testing.T) {
 }
 
 func TestClaudeInteractionViewRejectsUnownedAndUnsafePaths(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "view-1", hookSIDOwn)
 	if _, ok := a.claudeInteractionView(n); ok {
@@ -412,7 +420,6 @@ func TestClaudeInteractionViewRejectsUnownedAndUnsafePaths(t *testing.T) {
 }
 
 func TestClaudeInteractionTerminalHandoffReenablesNativeKey(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"hand-1"}, alive: map[string]bool{"hand-1": true}, capture: axPermissionPane}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "hand-1", hookSIDOwn)
@@ -456,7 +463,6 @@ func TestClaudeInteractionTerminalHandoffReenablesNativeKey(t *testing.T) {
 }
 
 func TestClaudeInteractionAPIAuditFailureEmitsNothing(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"audit-1"}, alive: map[string]bool{"audit-1": true}, capture: "idle\n"}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "audit-1", hookSIDOwn)

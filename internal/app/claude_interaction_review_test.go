@@ -287,7 +287,6 @@ func TestReviewDeadHelperReleasesRecordedOwnership(t *testing.T) {
 }
 
 func TestReviewWorkerPollRecoversDeadInteraction(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	now := time.Now().UTC()
@@ -336,7 +335,6 @@ func TestReviewWorkerPollRecoversDeadInteraction(t *testing.T) {
 }
 
 func TestReviewOldCancelCannotHideCurrentCancel(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	old, err := a.beginClaudeAcceptedTurn(n)
@@ -1047,7 +1045,6 @@ func TestReviewRemainingDecisionPaths(t *testing.T) {
 }
 
 func TestReviewUnreadableCancelDoesNotHideCurrent(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	env, err := buildClaudeInteractionReply(mustClassify(t, "AskUserQuestion", letterQuestionRaw()), claudeInteractionReply{Action: "cancel"})

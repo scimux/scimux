@@ -13,7 +13,6 @@ import (
 )
 
 func TestClearGenerationWriteFailurePreservesBindingAndHistory(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	old := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("old", 0))

@@ -771,8 +771,9 @@ handed-off, expired, or competing request is `409`. Malformed or incomplete
 input is `400`, including a body over 32 KiB. Feedback and each free-text
 answer are at most 4096 UTF-8 bytes, checked by both browser and server.
 `/send` stays `413` at 1 MiB. An unsupported
-node, a worker that does not advertise `claude-interaction-v1`, or a hook
-bundle minted with `SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS` unset is `404`.
+node, a worker that does not advertise `claude-interaction-v1`, or a legacy hook
+bundle without interaction support is `404`. All new Claude hook bundles
+support structured questions and plans without a feature flag.
 While the interaction owns the request, `POST …/key` for that node is `409`
 and no native key is delivered, including when ownership appears after the
 key was prepared. `terminal` revokes that ownership first; the

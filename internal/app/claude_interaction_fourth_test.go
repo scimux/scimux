@@ -87,7 +87,6 @@ func mustSize(t *testing.T, path string) int64 {
 }
 
 func TestRecoveredFenceFinishesCommittedRebind(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}}
 	a := newTestApp(t, f)
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
@@ -201,7 +200,6 @@ func TestRecoveredFenceFinishesCommittedRebind(t *testing.T) {
 }
 
 func TestSameIdentityResumeKeepsUnrelatedLaunchError(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n, bundle := seedPermClaude(t, a, "n1", hookSIDOwn)
 	cur := writeClaudeProject(t, a.home, "-w-proj", hookSIDOwn, claudeUserLine("keep", 0))

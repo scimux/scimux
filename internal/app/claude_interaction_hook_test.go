@@ -146,66 +146,76 @@ func TestClaudeInteractionHookDeadlineMath(t *testing.T) {
 	}
 }
 
-func TestClaudeInteractionHookGateOffBundle(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "0")
+// New bundles always support questions and plans, regardless of the retired flag.
+func TestClaudeInteractionHookBundlesAlwaysSupportInteractions(t *testing.T) {
+	for _, value := range []string{"", "0", "false", "true", "1", " 1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", value)
+			a := newTestApp(t, &fakeTmux{})
+			n := seedOwnedClaude(t, a, "n1", hookSIDOwn, "")
+			id, settings, err := a.prepareClaudeHookBundle(n.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bundle := filepath.Join(a.claudeHooksDir(), id)
+			if !bundleSupportsInteraction(bundle) {
+				t.Fatal("new bundle does not support structured interactions")
+			}
+			for _, sub := range interactionDirs() {
+				st, err := os.Stat(filepath.Join(bundle, sub))
+				if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
+					t.Fatalf("%s: %v %v", sub, st, err)
+				}
+			}
+			raw := mustRead(t, settings)
+			if !bytes.Contains(raw, []byte(`"timeout":180`)) || bytes.Contains(raw, []byte("PreToolUse")) {
+				t.Fatalf("unexpected hook registration: %s", raw)
+			}
+		})
+	}
+}
+
+// Legacy bundles remain unsupported; their immutable capability record is
+// the compatibility boundary, independent of how new bundles are minted.
+func TestClaudeInteractionHookLegacyBundle(t *testing.T) {
 	a := newTestApp(t, &fakeTmux{})
 	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, "")
-	hookID, settingsPath, err := a.prepareClaudeHookBundle(n.ID)
+	id, _, err := a.prepareClaudeHookBundle(n.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle := filepath.Join(a.claudeHooksDir(), hookID)
-	caps := mustRead(t, filepath.Join(bundle, "capabilities.json"))
-	if bytes.Contains(caps, []byte("interaction")) {
-		t.Fatalf("gate-off capabilities changed: %s", caps)
-	}
-	if _, err := os.Stat(filepath.Join(bundle, "perm", "interact")); !os.IsNotExist(err) {
-		t.Fatalf("gate-off created interact: %v", err)
-	}
-	exec := claudeHookCapabilities{}
-	if json.Unmarshal(caps, &exec) != nil || exec.Exec == "" {
-		t.Fatal("missing exec")
-	}
-	want, err := claudeHookSettingsJSON(exec.Exec, bundle)
-	if err != nil {
+	dir := filepath.Join(a.claudeHooksDir(), id)
+	var caps claudeHookCapabilities
+	if err := json.Unmarshal(mustRead(t, filepath.Join(dir, "capabilities.json")), &caps); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(mustRead(t, settingsPath), want) {
-		t.Fatal("gate-off settings bytes changed")
+	caps.Interaction = 0
+	if err := writeClaudePermFile(filepath.Join(dir, "capabilities.json"), caps); err != nil {
+		t.Fatal(err)
 	}
-	if !bundleCompleteCurrent(bundle) {
-		t.Fatal("interaction must not be required for a current bundle")
+	if err := os.RemoveAll(filepath.Join(dir, "perm", "interact")); err != nil {
+		t.Fatal(err)
 	}
-	if bundleSupportsInteraction(bundle) {
-		t.Fatal("gate-off bundle advertised interaction")
+	if bundleSupportsInteraction(dir) {
+		t.Fatal("legacy bundle advertised interaction")
+	}
+	if !bundleCompleteCurrent(dir) {
+		t.Fatal("interaction must not be required for a legacy bundle")
 	}
 	naked := t.TempDir()
 	raw, err := json.Marshal(claudeHookCapabilities{Interaction: 1, Exec: filepath.Join(naked, "missing-bin")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(naked, "capabilities.json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(naked, "capabilities.json"), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if bundleSupportsInteraction(naked) {
 		t.Fatal("unusable exec advertised interaction")
 	}
-	if strings.Contains(string(want), "PreToolUse") {
-		t.Fatal("PreToolUse registered")
-	}
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "true")
-	hookID, _, err = a.prepareClaudeHookBundle(n.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	loose := mustRead(t, filepath.Join(a.claudeHooksDir(), hookID, "capabilities.json"))
-	if bytes.Contains(loose, []byte("interaction")) {
-		t.Fatalf("non-1 gate minted interaction: %s", loose)
-	}
 }
 
 func TestClaudeInteractionHookCapableBundle(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	a := newTestApp(t, &fakeTmux{})
 	n := seedOwnedClaude(t, a, "n1", hookSIDOwn, "")
 	hookID, settingsPath, err := a.prepareClaudeHookBundle(n.ID)
@@ -1163,7 +1173,6 @@ func TestClaudeInteractionHookRecordedWithoutAnswerIsNotReplayed(t *testing.T) {
 }
 
 func TestClaudeInteractionHookBundleRollback(t *testing.T) {
-	t.Setenv("SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS", "1")
 	first := 1 + len(claudeHookBundleSubdirs) + 1
 	for _, row := range []struct {
 		name string

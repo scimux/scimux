@@ -18,8 +18,8 @@ import (
 )
 
 // Manual Claude question and plan replies. The ordinary auto-approval helper
-// stays on its existing path unless a bundle was minted with the experimental
-// gate and the tool is one of the two interaction tools.
+// stays on its existing path unless the bundle supports structured replies
+// and the tool is one of the two interaction tools.
 
 const interactionFileMax = 96 * 1024
 
@@ -32,8 +32,8 @@ var (
 	errInteractionBadRequest = errors.New("claude interaction: bad request")
 )
 
-// claudeInteractionSubdirs is created only for bundles minted with the gate on.
-// It is not part of claudeHookBundleSubdirs, so gate-off layouts stay identical.
+// claudeInteractionSubdirs is created for every new hook bundle. Older bundles
+// keep their original layout and capability record.
 var claudeInteractionSubdirs = []string{
 	filepath.Join("perm", "interact"),
 	filepath.Join("perm", "interact", "req"),

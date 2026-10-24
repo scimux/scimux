@@ -9,7 +9,7 @@ import (
 
 // CapabilityClaudeInteractionV1 is the optional worker RPC for a structured
 // Claude question or plan. It is not part of the major-1 denominator. A new
-// binary advertises it even when the chat's hook bundle left the feature off.
+// binary advertises it even when the chat uses a legacy hook bundle.
 // Callers distinguish that advertisement from the bundle's own capability.
 const CapabilityClaudeInteractionV1 = "claude-interaction-v1"
 

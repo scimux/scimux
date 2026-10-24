@@ -204,14 +204,13 @@ the turn is still open.
 
 ## Structured question and plan replies stay on PermissionRequest
 
-`PreToolUse` stays unregistered. Only a bundle minted while
-`SCIMUX_EXPERIMENTAL_CLAUDE_INTERACTIONS` is exactly `1` advertises manual
-interaction. The gate is read at mint time. An already launched chat follows
-that bundle, not a later environment value. Old bundles are not rewritten.
+`PreToolUse` stays unregistered. Every new hook bundle advertises manual
+interaction without a feature flag. An already launched chat follows its
+original bundle and executable. Old bundles are not rewritten.
 
 On a capable bundle, `AskUserQuestion` and `ExitPlanMode` take a narrow
 `PermissionRequest` branch before ordinary auto-approval. Every other tool,
-and every gate-off or legacy bundle, keeps the existing helper behavior,
+and every legacy bundle without interaction support, keeps the existing helper behavior,
 including the empty `{"behavior":"allow"}` stdout. That empty allow is not a
 human answer: it omits `updatedInput`. A human answer may send `updatedInput`
 only to preserve the hook's original tool input and append `answers`. Plan

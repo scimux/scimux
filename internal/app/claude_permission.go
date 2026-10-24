@@ -60,7 +60,7 @@ const (
 // omits — updatedInput, updatedPermissions — are precisely what would rewrite
 // the call or persist a permission rule. Human interaction replies are not
 // this constant. They are built only for AskUserQuestion and ExitPlanMode on
-// a bundle minted with the experimental gate.
+// a bundle that supports structured questions and plans.
 const claudePermAllowJSON = `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
 
 // claudePermissionEvent is the PermissionRequest stdin payload. Unlike
@@ -287,7 +287,7 @@ func runClaudePermissionHook(dir string, r io.Reader, stdout, stderr io.Writer, 
 	writeClaudeAskedNotice(perm, id, ev, time.Now())
 
 	// Manual question and plan replies are owned by the interaction rendezvous.
-	// Only a bundle minted with the experimental gate can enter it, and only
+	// Only a bundle with interaction support can enter it, and only
 	// for the two question tools. Every other call keeps the lease path below,
 	// including a capable bundle asked about an ordinary tool.
 	if handled, ierr := maybeServeClaudeInteraction(dir, ev, id, stdout, deadline, every); handled {
@@ -484,8 +484,8 @@ type claudeHookCapabilities struct {
 	Compact     int    `json:"compact"`
 	Elicitation int    `json:"elicitation"`
 	Exec        string `json:"exec,omitempty"`
-	// Interaction is set only when a bundle is minted with the experimental
-	// gate. omitempty keeps every gate-off capabilities.json byte-identical.
+	// Interaction is present on every new bundle. An absent member identifies
+	// an older bundle whose helper does not support structured replies.
 	Interaction int `json:"interaction,omitempty"`
 }
 

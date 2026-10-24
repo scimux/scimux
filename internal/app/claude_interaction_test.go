@@ -41,17 +41,6 @@ func TestClaudeInteractionLimitsPinned(t *testing.T) {
 	}
 }
 
-func TestClaudeInteractionGateIsExactOne(t *testing.T) {
-	if !claudeInteractionsEnvEnabled("1") {
-		t.Fatal("exact 1 enables a newly minted bundle")
-	}
-	for _, v := range []string{"", "0", "true", "yes", " 1", "1 ", "01", "2"} {
-		if claudeInteractionsEnvEnabled(v) {
-			t.Fatalf("%q enabled the gate", v)
-		}
-	}
-}
-
 func letterQuestionRaw() []byte {
 	return []byte(`{"z_note":"","questions":[{"question":"Pick a letter?","header":"Letter","options":[{"label":"Alpha","description":"first","extra":null},{"label":"Beta","description":"second"}],"multiSelect":false,"preview":"two glyphs"}]}`)
 }
