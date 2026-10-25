@@ -423,6 +423,11 @@ func TestHandleNewNodeNotesUsageForClaude(t *testing.T) {
 	if rec := newNode(a, `{"title":"T","prompt":"first prompt","agent":"claude","dir":"`+a.home+`"}`); rec.Code != 200 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
+	// Initial delivery is asynchronous; creation can return before its usage note.
+	deadline := time.Now().Add(testDeliverBudget)
+	for !promptNoted(a) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if !promptNoted(a) {
 		t.Fatal("node creation with a first prompt did not note a usage prompt")
 	}

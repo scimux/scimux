@@ -7,7 +7,7 @@ go 1.26.0
 // with known standard-library defects. CI resolves this version and builds what
 // users download on a patched toolchain; a developer running GOTOOLCHAIN=local
 // may still use theirs because the release gate is enforced in the workflows.
-toolchain go1.26.9
+toolchain go1.26.10
 
 // builds/ is the gitignored directory the workflows write release binaries
 // into, and review sandboxes have parked whole GOCACHE trees under it. It

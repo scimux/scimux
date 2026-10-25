@@ -30,10 +30,13 @@ func TestThirdFenceHelperProcess(t *testing.T) {
 	})
 	t.Run("unreadable fence", func(t *testing.T) {
 		assertHelperFenceRejects(t, "review-unreadable-generation", func(dir, genPath string) {
-			if err := os.Chmod(genPath, 0); err != nil {
+			// Reading a directory fails for root too, unlike chmod(000).
+			if err := os.Remove(genPath); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = os.Chmod(genPath, 0o600) })
+			if err := os.Mkdir(genPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
 		})
 	})
 	t.Run("corrupt fence", func(t *testing.T) {
@@ -297,11 +300,10 @@ func TestThirdReviewPublicationLockFailureMustRevokeOldAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	interact := filepath.Join(dir, "perm", "interact")
-	t.Cleanup(func() { _ = os.Chmod(interact, 0o700) })
 	if err := os.Remove(filepath.Join(interact, "fence.lock")); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(interact, 0o555); err != nil {
+	if err := os.Mkdir(filepath.Join(interact, "fence.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	resumePath := filepath.Join(a.home, ".claude", "projects", "synthetic", hookSIDOther+".jsonl")
@@ -314,7 +316,7 @@ func TestThirdReviewPublicationLockFailureMustRevokeOldAnswer(t *testing.T) {
 	resumeErr := a.applyClaudeResume(n.ID, claudeSessionStartEvent{
 		HookEventName: "SessionStart", Source: "resume", Cwd: n.Dir, SessionID: hookSIDOther, TranscriptPath: resumePath,
 	}, 1)
-	if err := os.Chmod(interact, 0o700); err != nil {
+	if err := os.Remove(filepath.Join(interact, "fence.lock")); err != nil {
 		t.Fatal(err)
 	}
 	if resumeErr == nil {
@@ -388,17 +390,16 @@ func TestThirdReviewWatermarkAndFenceBranches(t *testing.T) {
 	}
 
 	interact := filepath.Join(bundle, "perm", "interact")
-	t.Cleanup(func() { _ = os.Chmod(interact, 0o700) })
 	if err := os.Remove(filepath.Join(interact, "fence.lock")); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(interact, 0o555); err != nil {
+	if err := os.Mkdir(filepath.Join(interact, "fence.lock"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := publishClaudeBindingFenceExclusive(bundle, n.ID, "", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(interact, 0o700); err != nil {
+	if err := os.Remove(filepath.Join(interact, "fence.lock")); err != nil {
 		t.Fatal(err)
 	}
 	same, err := os.ReadFile(filepath.Join(bundle, "perm", "generation.json"))
