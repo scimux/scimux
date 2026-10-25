@@ -112,12 +112,97 @@ test("bookmark marker resolves durable turns and collapses duplicate section usa
   assert.deepEqual(model.destinations.map(x => x.section_id), ["s1", "s2"]);
 });
 
-test("bookmark marker supports legacy node/time/text bookmarks and hides when deleted", () => {
+test("bookmark marker supports legacy node/time/text bookmarks and note references", () => {
   const turn = { time: "2026-09-15T12:00:00Z", text: "legacy" };
   const bookmark = { t: "b1", node: "lane-a", turnTime: turn.time, text: turn.text };
   const usage = { note_id: "n1", section_id: "s1", reference_id: "r1", source: { node: "lane-a", turnTime: turn.time } };
-  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], [usage]).destinations.length, 1);
-  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [], [usage]), null);
+  const other = { t: "nope", node: "lane-b", turnTime: turn.time, text: turn.text };
+  const matched = chatmod.bookmarkMarkerModel(turn, "lane-a", [other, bookmark], [usage]);
+  assert.equal(matched.bookmark, bookmark);
+  assert.equal(matched.destinations.length, 1);
+  assert.equal(matched.destinations[0], usage);
+  const kept = chatmod.bookmarkMarkerModel(turn, "lane-a", [], [usage]);
+  assert.ok(kept, "a legacy note reference keeps the marker after the bookmark is deleted");
+  assert.equal(kept.bookmark, undefined);
+  assert.equal(kept.destinations.length, 1);
+  assert.equal(kept.destinations[0], usage);
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [], []), null);
+  const wrongText = { t: "b2", node: "lane-a", turnTime: turn.time, text: "different" };
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [wrongText], []), null);
+  const only = chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], []);
+  assert.equal(only.bookmark, bookmark);
+  assert.deepEqual(only.destinations, []);
+});
+
+test("note references resolve without a bookmark and ignore unrelated addresses", () => {
+  const turn = { uid: "u1", segment: 2, record: 7, time: "2026-10-01T00:00:00Z", text: "answer" };
+  const durable = {
+    note_id: "n1", section_id: "s1", reference_id: "durable",
+    source: { uid: "u1", segment: 2, record: 7, node: "elsewhere", turnTime: "1999-01-01T00:00:00Z" },
+  };
+  const legacy = {
+    note_id: "n2", section_id: "s2", reference_id: "legacy",
+    source: { node: "lane-a", turnTime: turn.time },
+  };
+  const unrelated = [
+    { note_id: "uid", section_id: "s", reference_id: "bad-uid", source: { uid: "other", segment: 2, record: 7, node: "lane-a", turnTime: turn.time } },
+    { note_id: "seg", section_id: "s", reference_id: "bad-segment", source: { uid: "u1", segment: 9, record: 7, node: "lane-a", turnTime: turn.time } },
+    { note_id: "rec", section_id: "s", reference_id: "bad-record", source: { uid: "u1", segment: 2, record: 8, node: "lane-a", turnTime: turn.time } },
+    { note_id: "node", section_id: "s", reference_id: "bad-node", source: { node: "other", turnTime: turn.time } },
+    { note_id: "time", section_id: "s", reference_id: "bad-time", source: { node: "lane-a", turnTime: "1999-01-01T00:00:00Z" } },
+    null,
+    {},
+  ];
+  const model = chatmod.bookmarkMarkerModel(turn, "lane-a", [], [durable, legacy, ...unrelated]);
+  assert.ok(model, "durable and legacy note references survive bookmark deletion");
+  assert.equal(model.bookmark, undefined);
+  assert.deepEqual(model.destinations.map(d => d.reference_id), ["durable", "legacy"]);
+  const bare = { text: "no clock" };
+  const emptyTime = { note_id: "n0", section_id: "s0", reference_id: "empty-time", source: { node: "lane-a", turnTime: "" } };
+  const stamped = { note_id: "nT", section_id: "sT", reference_id: "stamped", source: { node: "lane-a", turnTime: "2020-01-01T00:00:00Z" } };
+  const durableOnBare = { note_id: "nD", section_id: "sD", reference_id: "has-uid", source: { uid: "u1", segment: 0, record: 0, node: "lane-a", turnTime: "" } };
+  assert.deepEqual(
+    chatmod.bookmarkMarkerModel(bare, "lane-a", [], [emptyTime, stamped, durableOnBare]).destinations.map(d => d.reference_id),
+    ["empty-time"],
+  );
+});
+
+test("duplicate section references collapse and distinct notes stay in order", () => {
+  const turn = { uid: "u1", segment: 1, record: 1, time: "t", text: "x" };
+  const source = { uid: "u1", segment: 1, record: 1 };
+  const usages = [
+    { note_id: "n1", note_title: "Alpha", section_id: "s1", section_title: "One", reference_id: "r1", source },
+    { note_id: "n1", note_title: "Alpha", section_id: "s1", section_title: "One", reference_id: "r2", source },
+    { note_id: "n2", note_title: "Beta", section_id: "s1", section_title: "One", reference_id: "r3", source },
+    { note_id: "n1", note_title: "Alpha", section_id: "s2", section_title: "Two", reference_id: "r4", source },
+  ];
+  const model = chatmod.bookmarkMarkerModel(turn, "n", [], usages);
+  assert.ok(model, "references alone are enough to build destinations");
+  assert.deepEqual(model.destinations.map(d => d.reference_id), ["r1", "r3", "r4"]);
+});
+
+test("reference-only marker uses the generic bookmark icon", () => {
+  const one = chatmod.bubbleMarkersHTML({ destinations: [{}] }, { iconBookmark: "BOOK" });
+  const two = chatmod.bubbleMarkersHTML({ destinations: [{}, {}] }, { iconBookmark: "BOOK" });
+  assert.match(one, /data-bmarker="bookmark"/);
+  assert.match(one, />BOOK</);
+  assert.match(one, /aria-label="Open bookmark destination"/);
+  assert.doesNotMatch(one, /bmarkercount/);
+  assert.doesNotMatch(one, /aria-haspopup/);
+  assert.match(two, /aria-label="Open bookmark destination"/);
+  assert.match(two, /aria-haspopup="menu"/);
+  assert.match(two, /bmarkercount[^>]*>2</);
+  const bookmarkOnly = chatmod.bubbleMarkersHTML({ bookmark: { t: "b1" } }, { iconBookmark: "BOOK" });
+  assert.match(bookmarkOnly, /aria-label="Open bookmark"/);
+  assert.match(bookmarkOnly, />BOOK</);
+  assert.doesNotMatch(bookmarkOnly, /bmarkercount/);
+  const withSend = chatmod.bubbleMarkersHTML({
+    destinations: [{}], sentTo: [{ id: "l1" }],
+  }, { iconBookmark: "BOOK", iconInto: "SEND" });
+  assert.match(withSend, /data-bmarker="bookmark"/);
+  assert.match(withSend, /data-bmarker="sendto"/);
+  assert.match(withSend, />BOOK</);
+  assert.match(withSend, /rot180[^>]*>SEND/);
 });
 
 test("bookmark marker HTML is compact and only counts multiple destinations", () => {
@@ -5680,6 +5765,159 @@ test("Send-to marker jumps directly once and offers a chooser for several", asyn
   firstListener(ctx.roots.msgs, "click")({ target: marker });
   assert.equal(choices.length, 1);
   assert.equal(choices[0].choices.length, 2);
+});
+
+function markerChunk(html, bk){
+  const parts = String(html).split('data-bk="');
+  return parts.find(part => part.startsWith(`${bk}"`)) || "";
+}
+
+function clickBubbleMarker(ctx, bk, kind){
+  const turn = el("div", { className: "turn", dataset: { bk } });
+  const marker = el("button", { dataset: { bmarker: kind } });
+  turn.appendChild(marker);
+  ctx.roots.msgs.appendChild(turn);
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+}
+
+test("bookmark icon stays for note references after deletion and on loaded history", async () => {
+  const liveTurn = {
+    role: "assistant", text: "live answer", time: "2026-10-02T00:00:00Z",
+    uid: "uid-live", segment: 3, record: 9,
+  };
+  const bookmarkOnlyTurn = { role: "user", text: "keep this", time: "2026-10-03T00:00:00Z" };
+  const histTurn = { role: "assistant", text: "old answer", time: "2026-08-02T00:00:00Z" };
+  const liveUsage = {
+    note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings",
+    reference_id: "r-live",
+    source: { uid: "uid-live", segment: 3, record: 9, node: "elsewhere", turnTime: "1999-01-01T00:00:00Z" },
+  };
+  const histUsage = {
+    note_id: "n1", note_title: "Research", section_id: "s-old", section_title: "Earlier",
+    reference_id: "r-hist", source: { node: "n1", turnTime: histTurn.time },
+  };
+  let bookmarks = [
+    { t: "bm-live", uid: "uid-live", segment: 3, record: 9, node: "n1", turnTime: liveTurn.time, text: liveTurn.text },
+    { t: "bm-hist", node: "n1", turnTime: histTurn.time, text: histTurn.text },
+    { t: "bm-only", node: "n1", turnTime: bookmarkOnlyTurn.time, text: bookmarkOnlyTurn.text },
+  ];
+  let usages = [liveUsage, histUsage];
+  const links = [{
+    id: "l1", source: { uid: "uid-live", segment: 3, record: 9 },
+    destination: { node: "d1", text: "sent" },
+  }];
+  let generation = 1;
+  let usageVersion = 1;
+  const bookmarkOpens = [];
+  const usageOpens = [];
+  const sheets = [];
+  const jumps = [];
+  const ctx = makeFeature({
+    histSegs: [{
+      start: "2026-08-01T00:00:00Z", seam: "2026-08-01T00:00:00Z", reason: "clear",
+      turns: [histTurn],
+    }],
+    chatPayload: {
+      turns: [liveTurn, bookmarkOnlyTurn],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-10-01T00:00:00Z", prior_turns: 1, assets: {},
+    },
+    deps: {
+      bookmarks: () => bookmarks,
+      noteUsages: () => usages,
+      forwardLinks: () => links,
+      markerVersion: () => `${generation}:${usageVersion}`,
+      openBookmark: t => bookmarkOpens.push(t),
+      openNoteUsage: usage => usageOpens.push(usage),
+      openChoiceList: opts => sheets.push(opts),
+      jumpToChatAddress: address => jumps.push(address),
+      icons: {
+        ICON_TERM: "T", ICON_CHECK: "✓", ICON_CHEV_UP: "↑", ICON_CHEV_DOWN: "↓",
+        ICON_BRANCH: "B", ICON_INTO: "SEND", ICON_COPY: "C", ICON_DOWNALL: "↓↓",
+        ICON_FILE: "F", ICON_BUBBLE_BOOKMARK: "BOOK",
+      },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.loadHistory("n1", "");
+  const rendered = () => ctx.roots.msgs.innerHTML;
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "i:0"), />BOOK</);
+  assert.doesNotMatch(markerChunk(rendered(), "i:0"), /bmarkercount/);
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="sendto"/);
+  assert.match(markerChunk(rendered(), "h:0:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "h:0:0"), />BOOK</);
+  assert.match(markerChunk(rendered(), "i:1"), /aria-label="Open bookmark"/);
+
+  clickBubbleMarker(ctx, "i:0", "bookmark");
+  assert.equal(usageOpens.length, 1);
+  assert.equal(usageOpens[0], liveUsage);
+  assert.deepEqual(bookmarkOpens, []);
+  clickBubbleMarker(ctx, "i:1", "bookmark");
+  assert.deepEqual(bookmarkOpens, ["bm-only"]);
+  clickBubbleMarker(ctx, "i:0", "sendto");
+  assert.deepEqual(jumps, [{ node: "d1", text: "sent" }]);
+
+  bookmarks = bookmarks.filter(b => b.t === "bm-only");
+  generation += 1;
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="bookmark"/,
+    "deleting the bookmark keeps the icon while a note reference remains");
+  assert.match(markerChunk(rendered(), "i:0"), />BOOK</);
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="sendto"/);
+  assert.match(markerChunk(rendered(), "h:0:0"), /data-bmarker="bookmark"/,
+    "a loaded historical turn keeps the same reference marker");
+  assert.match(markerChunk(rendered(), "i:1"), /data-bmarker="bookmark"/);
+
+  usageOpens.length = 0;
+  bookmarkOpens.length = 0;
+  clickBubbleMarker(ctx, "i:0", "bookmark");
+  assert.equal(usageOpens.length, 1);
+  assert.equal(usageOpens[0].reference_id, "r-live");
+  assert.deepEqual(bookmarkOpens, []);
+  clickBubbleMarker(ctx, "h:0:0", "bookmark");
+  assert.equal(usageOpens[1], histUsage);
+
+  const second = {
+    note_id: "n2", note_title: "Risks", section_id: "s2", section_title: "Open",
+    reference_id: "r-live-2", source: { uid: "uid-live", segment: 3, record: 9 },
+  };
+  const duplicate = {
+    note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings",
+    reference_id: "r-live-dup", source: { uid: "uid-live", segment: 3, record: 9 },
+  };
+  usages = [liveUsage, duplicate, second, histUsage];
+  usageVersion += 1;
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.match(markerChunk(rendered(), "i:0"), /bmarkercount[^>]*>2</);
+  assert.match(markerChunk(rendered(), "i:0"), /aria-haspopup="menu"/);
+  clickBubbleMarker(ctx, "i:0", "bookmark");
+  assert.equal(sheets.length, 1);
+  assert.equal(sheets[0].title, "Used in…");
+  assert.deepEqual(sheets[0].choices.map(choice => choice.label), [
+    "Research › Findings", "Risks › Open",
+  ]);
+  usageOpens.length = 0;
+  sheets[0].onChoose(sheets[0].choices[1]);
+  assert.equal(usageOpens.length, 1);
+  assert.equal(usageOpens[0], second);
+
+  usages = [];
+  usageVersion += 1;
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.doesNotMatch(markerChunk(rendered(), "i:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="sendto"/);
+  assert.doesNotMatch(markerChunk(rendered(), "h:0:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "i:1"), /data-bmarker="bookmark"/);
+  bookmarkOpens.length = 0;
+  usageOpens.length = 0;
+  clickBubbleMarker(ctx, "i:1", "bookmark");
+  assert.deepEqual(bookmarkOpens, ["bm-only"]);
+  assert.deepEqual(usageOpens, []);
+  ctx.feature.destroy();
 });
 
 test("Send-to marker explains when its destination no longer resolves", async () => {

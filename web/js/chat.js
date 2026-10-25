@@ -300,23 +300,29 @@ function legacySourceMatches(turn, nodeId, value = {}){
     (!Object.prototype.hasOwnProperty.call(value, "text") || value.text === (turn.text || ""));
 }
 
+/* A note reference addresses the turn by itself. A source that already has a
+   uid never falls back to node and time when that address does not match. */
+function usageSourceMatches(turn, nodeId, usage){
+  const source = (usage && usage.source) || {};
+  const sourceKey = durableSourceKey(source);
+  if (sourceKey) return sourceKey === durableSourceKey(turn);
+  return source.node === nodeId && source.turnTime === (turn.time || "");
+}
+
 export function bookmarkMarkerModel(turn, nodeId, bookmarks = [], usages = []){
   const key = durableSourceKey(turn);
   const bookmark = bookmarks.find(b =>
     (key && durableSourceKey(b) === key) || legacySourceMatches(turn, nodeId, b));
-  if (!bookmark) return null;
-  const bookmarkKey = durableSourceKey(bookmark);
   const seen = new Set();
   const destinations = usages.filter(u => {
-    const source = (u && u.source) || {};
-    return (bookmarkKey && durableSourceKey(source) === bookmarkKey) ||
-      (!bookmarkKey && source.node === bookmark.node && source.turnTime === bookmark.turnTime);
+    return usageSourceMatches(turn, nodeId, u);
   }).filter(u => {
     const k = `${u.note_id || ""}\u0000${u.section_id || ""}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
+  if (!bookmark && !destinations.length) return null;
   return { bookmark, destinations };
 }
 
@@ -346,8 +352,9 @@ export function matchingForwardDestinationTurn(expected, turns = []){
 
 export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = "" } = {}){
   const buttons = [];
-  if (model.bookmark){
-    const n = (model.bookmarkDestinations || model.destinations || []).length;
+  const bookmarkDestinations = model.bookmarkDestinations || model.destinations || [];
+  if (model.bookmark || bookmarkDestinations.length){
+    const n = bookmarkDestinations.length;
     buttons.push(`<button type="button" class="bmarker" data-bmarker="bookmark" aria-label="${n ? "Open bookmark destination" : "Open bookmark"}"${n > 1 ? ` aria-haspopup="menu"` : ""}>${iconBookmark}${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
   }
   if (model.sentTo && model.sentTo.length){
