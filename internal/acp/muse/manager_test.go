@@ -1239,7 +1239,13 @@ func TestManagerForeignAndDuplicateTerminal(t *testing.T) {
 		t.Fatal("foreign terminal ended turn")
 	}
 	completeTurn(t, m, srv, "turn-1", "completed")
+	// Quiet can be observed while an earlier gap callback is finishing.
+	// Drain the terminal callback before taking the durable stop baseline.
+	drainGap(t, srv, logPath, "first-term")
 	nStop := countT(readLog(t, logPath), "stop")
+	if nStop != 1 {
+		t.Fatalf("first terminal stop records: %d, want 1", nStop)
+	}
 	srv.note(t, "turn/completed", map[string]any{
 		"sessionId": "sess-1", "turnId": "turn-1", "terminal": "completed",
 	})
