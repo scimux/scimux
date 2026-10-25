@@ -686,45 +686,41 @@ func TestReviewFenceAndRecoveryPaths(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Cleanup(func() { _ = os.Chmod(interact, 0o700); _ = os.Chmod(filepath.Join(dir, "perm"), 0o700) })
-	if err := os.Chmod(interact, 0o555); err != nil {
+	// A directory at the lock-file path forces OpenFile to fail even as root.
+	fence := filepath.Join(interact, "fence.lock")
+	if err := os.Mkdir(fence, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := lockInteractionFence(dir); err == nil {
-		t.Fatal("read-only interact directory locked")
-	}
-	if err := os.Chmod(interact, 0o700); err != nil {
-		t.Fatal(err)
+		t.Fatal("directory at lock-file path locked")
 	}
 	if err := writeClaudePermFile(filepath.Join(dir, "perm", "turn.json"), claudeAcceptedTurn{Turn: "turn-clear", Gen: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(interact, 0o555); err != nil {
-		t.Fatal(err)
-	}
 	clearClaudeAcceptedTurnFile(filepath.Join(dir, "perm"))
-	if err := os.Chmod(interact, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := os.Stat(filepath.Join(dir, "perm", "turn.json")); !os.IsNotExist(err) {
 		t.Fatal("turn file survived a lock failure")
-	}
-	if err := os.Chmod(interact, 0o555); err != nil {
-		t.Fatal(err)
 	}
 	if err := writeClaudeAcceptedTurn(filepath.Join(dir, "perm"), claudeAcceptedTurn{Turn: "turn-block", Gen: 2}); err == nil {
 		t.Fatal("turn publication ignored the lock failure")
 	}
-	if err := os.Chmod(interact, 0o700); err != nil {
+	if err := os.Remove(fence); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(dir, "perm"), 0); err != nil {
+	perm := filepath.Join(dir, "perm")
+	if err := os.Rename(perm, perm+"-saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(perm, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := lockInteractionFence(dir); err == nil {
-		t.Fatal("unsearchable perm directory locked")
+		t.Fatal("non-directory perm ancestor locked")
 	}
-	if err := os.Chmod(filepath.Join(dir, "perm"), 0o700); err != nil {
+	if err := os.Remove(perm); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(perm+"-saved", perm); err != nil {
 		t.Fatal(err)
 	}
 
@@ -950,11 +946,16 @@ func TestReviewReplayFencesAndSubmissionFailures(t *testing.T) {
 	lockRec := sampleRequest(locked, now)
 	publishInteraction(t, locked, lockRec)
 	interact := filepath.Join(locked, "perm", "interact")
-	t.Cleanup(func() { _ = os.Chmod(interact, 0o700) })
 	_, err = submitClaudeInteraction(locked, sampleCaller(locked), lockRec.ID, letterReply(), now, func(sessionlog.Event) error {
-		return os.Chmod(interact, 0o555)
+		fence := filepath.Join(interact, "fence.lock")
+		if err := os.Remove(fence); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(fence, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return nil
 	})
-	_ = os.Chmod(interact, 0o700)
 	if err == nil || interactionFileExists(locked, "ans", lockRec.ID+".json") {
 		t.Fatalf("fence failure published: %v", err)
 	}
