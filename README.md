@@ -96,8 +96,9 @@ when Vibe is installed and launchable. It is one-shot: scimux does not store
 it as consent.
 Inspection opens one temporary ACP session and reads the model and thinking
 menus returned by `session/new`. It never sends a prompt or changes a model.
-Protocol work has a 12-second budget after process startup, with each call
-limited to 4 seconds and close limited to 2 seconds within that budget. An explicit
+Protocol work has a 12-second budget after process startup. `initialize`,
+which also waits for the agent to start, may take up to 8 seconds; each later
+call is limited to 4 seconds and close to 2 seconds within that budget. An explicit
 model or thinking choice at chat launch uses ACP setters and, with
 Vibe 2.25, persists in Vibe's config. A failed, timed-out, or empty inspection
 leaves Vibe launchable on (default) model and (default) thinking, with no

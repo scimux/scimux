@@ -442,8 +442,10 @@ terminal access. Model ids are the advertised option values in the agent's
 order; an accidental `currentValue` is not added and is not a scimux default.
 The initial thinking menu's value ids are shown for each advertised model;
 an explicit selection is validated again against the live session at launch.
-The probe's protocol budget is 12 seconds after process startup, with each
-call limited to 4 seconds and close limited to 2 seconds within that budget.
+The probe's protocol budget is 12 seconds after process startup.
+`initialize`, which also waits for the agent to start, may take up to
+8 seconds; each later call is limited to 4 seconds and close to 2 seconds
+within that budget.
 A failed, timed-out, or empty catalog keeps the
 empty `models` list: the chat still launches on Vibe's own default, and the
 response invents no model, thinking level, or success state. After a

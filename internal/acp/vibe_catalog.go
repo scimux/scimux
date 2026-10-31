@@ -10,7 +10,9 @@ import (
 )
 
 const (
-	vibeProbeTotal      = 12 * time.Second
+	vibeProbeTotal = 12 * time.Second
+	// The first call also waits for the agent's interpreter to start, so it
+	// gets its own budget. initialize plus perCall fits within the total.
 	vibeProbeInitialize = 8 * time.Second
 	vibeProbePerCall    = 4 * time.Second
 )
@@ -58,10 +60,10 @@ func probeVibeCatalog(ctx context.Context, start func(dir string) (Process, erro
 	defer cancel()
 	client := probeClient{}
 	conn := sdk.NewClientSideConnection(client, proc.Stdin(), proc.Stdout())
-	if !probeHasRoom(ctx, perCall) {
+	if !probeHasRoom(ctx, initCall) {
 		return VibeCatalog{}, errors.New("vibe catalog: probe budget exhausted")
 	}
-	callCtx, callCancel := context.WithTimeout(ctx, perCall)
+	callCtx, callCancel := context.WithTimeout(ctx, initCall)
 	_, err = conn.Initialize(callCtx, sdk.InitializeRequest{
 		ProtocolVersion: sdk.ProtocolVersionNumber,
 		ClientCapabilities: sdk.ClientCapabilities{
