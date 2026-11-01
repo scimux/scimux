@@ -91,7 +91,9 @@ func TestVibeCatalogProbeDropsUnrelatedSecrets(t *testing.T) {
 	setVibeEnvPerimeter(t)
 	t.Setenv("PATH", dir)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// The deadline must cover the probe budget; a shorter one fails the
+	// initialize room check and kills the script before it reports.
+	ctx, cancel := context.WithTimeout(context.Background(), vibeProbeTotal+3*time.Second)
 	defer cancel()
 	_, _ = ProbeVibeCatalog(ctx, bin)
 	requireVibePerimeter(t, envMarkers(t, report))

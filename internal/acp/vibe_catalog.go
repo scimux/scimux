@@ -10,8 +10,11 @@ import (
 )
 
 const (
-	vibeProbeTotal   = 12 * time.Second
-	vibeProbePerCall = 4 * time.Second
+	vibeProbeTotal = 12 * time.Second
+	// The first call also waits for the agent's interpreter to start, so it
+	// gets its own budget. initialize plus perCall fits within the total.
+	vibeProbeInitialize = 8 * time.Second
+	vibeProbePerCall    = 4 * time.Second
 )
 
 // vibeProbeClock is the time source for the probe budget. Tests move it
@@ -35,10 +38,10 @@ func ProbeVibeCatalog(ctx context.Context, bin string) (VibeCatalog, error) {
 	}
 	return probeVibeCatalog(ctx, func(dir string) (Process, error) {
 		return startGroupedEnv([]string{bin}, dir, "", vibeChildEnv(os.Environ()))
-	}, vibeProbeTotal, vibeProbePerCall)
+	}, vibeProbeTotal, vibeProbeInitialize, vibeProbePerCall)
 }
 
-func probeVibeCatalog(ctx context.Context, start func(dir string) (Process, error), total, perCall time.Duration) (VibeCatalog, error) {
+func probeVibeCatalog(ctx context.Context, start func(dir string) (Process, error), total, initCall, perCall time.Duration) (VibeCatalog, error) {
 	dir, err := os.MkdirTemp("", "scimux-vibe-probe-")
 	if err != nil {
 		return VibeCatalog{}, err
@@ -57,10 +60,10 @@ func probeVibeCatalog(ctx context.Context, start func(dir string) (Process, erro
 	defer cancel()
 	client := probeClient{}
 	conn := sdk.NewClientSideConnection(client, proc.Stdin(), proc.Stdout())
-	if !probeHasRoom(ctx, perCall) {
+	if !probeHasRoom(ctx, initCall) {
 		return VibeCatalog{}, errors.New("vibe catalog: probe budget exhausted")
 	}
-	callCtx, callCancel := context.WithTimeout(ctx, perCall)
+	callCtx, callCancel := context.WithTimeout(ctx, initCall)
 	_, err = conn.Initialize(callCtx, sdk.InitializeRequest{
 		ProtocolVersion: sdk.ProtocolVersionNumber,
 		ClientCapabilities: sdk.ClientCapabilities{

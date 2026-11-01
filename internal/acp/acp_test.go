@@ -39,12 +39,13 @@ type fakeAgent struct {
 	configSets  []sdk.SetSessionConfigOptionRequest
 	lastModeSet *sdk.SetSessionModeRequest
 	// Catalog-probe observations. Production launch tests leave them at zero.
-	prompts  int
-	closes   int
-	blockNew bool
-	closeErr error
-	lastInit *sdk.InitializeRequest
-	lastNew  *sdk.NewSessionRequest
+	prompts   int
+	closes    int
+	blockNew  bool
+	closeErr  error
+	initDelay time.Duration // when set, Initialize answers only after this delay (or when the connection ends)
+	lastInit  *sdk.InitializeRequest
+	lastNew   *sdk.NewSessionRequest
 }
 
 var _ sdk.Agent = (*fakeAgent)(nil)
@@ -53,7 +54,15 @@ func (a *fakeAgent) Initialize(ctx context.Context, req sdk.InitializeRequest) (
 	a.mu.Lock()
 	copied := req
 	a.lastInit = &copied
+	delay := a.initDelay
 	a.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return sdk.InitializeResponse{}, ctx.Err()
+		}
+	}
 	return sdk.InitializeResponse{ProtocolVersion: sdk.ProtocolVersionNumber}, nil
 }
 func (a *fakeAgent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.NewSessionResponse, error) {
