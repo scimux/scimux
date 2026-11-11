@@ -133,6 +133,25 @@ func TestAddressLaneTextRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLaneAddressDotDotRoundTrip(t *testing.T) {
+	inst := InstallationID(validInstallationID)
+	const want = "scimux1/0123456789abcdef0123456789abcdef/lane/.."
+	got, err := LaneAddress(inst, "..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.String() != want {
+		t.Fatalf("String() = %q, want %q", got.String(), want)
+	}
+	parsed, err := ParseAddress(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed != got || parsed.String() != want {
+		t.Fatalf("parsed %+v %q", parsed, parsed.String())
+	}
+}
+
 func TestAddressChatIDShapes(t *testing.T) {
 	inst := InstallationID(validInstallationID)
 	for _, uid := range []string{"abcdef0123456789", "t18f3a2b1c0"} {
