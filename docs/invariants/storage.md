@@ -34,6 +34,11 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
 
 - **Append-only store.** `~/.scimux/nodes.jsonl` is replayed at startup;
   corrections are new records, never rewrites.
+- **Installation identity is a public label.** The data directory holds
+  `installation.json`, written once when the muxer first owns that directory.
+  The ID is not a credential and must never be accepted as proof of identity.
+  A damaged file is never regenerated automatically. Deleting the file yields
+  a new ID on the next start.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth
   (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a
   default 64 MiB free-space reserve plus optional global/per-node byte budgets

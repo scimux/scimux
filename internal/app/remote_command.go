@@ -210,6 +210,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 				c.closeOwnership()
 			}
 		}()
+		ensureInstallationIdentity(*data, c.Stderr)
 	}
 	if err := secureDataFiles(*data); err != nil {
 		return err

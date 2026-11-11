@@ -27,7 +27,9 @@ const maxAddressPartBytes = 512
 var errInvalidAddress = errors.New("identity: invalid address")
 
 // Address is one asset's global address. The zero Address is invalid.
-// Addresses compare equal exactly when their canonical text is equal.
+// Addresses compare equal exactly when their canonical text is equal. An
+// address is an identifier and must never be used as a filesystem path or
+// URL path, because parts such as "." and ".." are not escaped.
 type Address struct {
 	kind       Kind
 	inst       InstallationID
