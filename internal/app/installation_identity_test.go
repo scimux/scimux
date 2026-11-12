@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/scimux/scimux/internal/identity"
@@ -67,12 +69,37 @@ func TestEnsureInstallationIdentityReportsDamagedFile(t *testing.T) {
 	if strings.Contains(text, planted) {
 		t.Fatalf("error output contains the installation id: %q", text)
 	}
+	want := "scimux: installation identity is unavailable: " + strconv.Quote(path) +
+		" is damaged or unsupported and was left unchanged\n"
+	if text != want {
+		t.Fatalf("error output = %q, want %q", text, want)
+	}
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(body, after) {
 		t.Fatal("damaged installation file was changed")
+	}
+}
+
+func TestEnsureInstallationIdentityReportsPathAndCause(t *testing.T) {
+	// A newline in the directory name must not split the line.
+	dir := filepath.Join(t.TempDir(), "data\ndir")
+	path := filepath.Join(dir, identity.InstallationFile)
+	// A directory in place of the file fails the read for root as well.
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	ensureInstallationIdentity(dir, &out)
+	want := "scimux: installation identity is unavailable: " + strconv.Quote(path) +
+		": " + syscall.EISDIR.Error() + "\n"
+	if out.String() != want {
+		t.Fatalf("error output = %q, want %q", out.String(), want)
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("installation path was changed: %v", err)
 	}
 }
 
