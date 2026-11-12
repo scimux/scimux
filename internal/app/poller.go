@@ -233,6 +233,23 @@ func (a *app) poll() {
 				}
 			}
 			if state == "quiet" {
+				a.settleEmittedClaudeInteractionCancels(n)
+				// claudeDlg was read before settlement. Settlement clears the
+				// visible epoch and attention; publishing that snapshot would
+				// restore them. Re-read and recompute dialog attention only.
+				// A dialog that is still current stays. Elicitation and a
+				// structured interaction are applied later in this tick.
+				if claudeSup == claudeSupStrict {
+					claudeDlg = a.claudeVisibleDialog(n)
+					a.mu.Lock()
+					claudeArmed = a.claudeAutoApproveArmedLocked(n)
+					a.mu.Unlock()
+					if claudeDlg.Attn != "" && !claudeArmed {
+						attn, freshAttn = claudeDlg.Attn, true
+					} else if attn != "" && claudeDlg.Attn == "" {
+						attn, freshAttn = "", false
+					}
+				}
 				quietTl = a.tailerFor(n)
 				if quietTl != nil {
 					quietTl.Poll()
@@ -248,6 +265,12 @@ func (a *app) poll() {
 			}
 			askAttn, askCapable = "", false
 			if claudeSup == claudeSupStrict && a.claudeElicitationWaiting(n) && attn == "" {
+				attn, freshAttn = "question", true
+			}
+			// A structured question or plan is a human decision even while a
+			// permission dialog is also visible and even while a lease is armed.
+			// It overrides dialog attention. It does not change pane liveness.
+			if claudeSup == claudeSupStrict && a.claudeInteractionNeedsAttention(n) {
 				attn, freshAttn = "question", true
 			}
 		} else if state == "quiet" {
@@ -566,6 +589,9 @@ func (a *app) projectWorkerClaudeHook(nodeID string, state sessionworker.State) 
 	a.mu.Lock()
 	a.claudeHooks[nodeID], a.claudeGens[nodeID] = state.HookID, generation
 	a.mu.Unlock()
+	// The worker owns perm/generation.json. A cached observation can be newer
+	// than this muxer's last generation and still older than the worker, so
+	// projecting it must not rewrite the helper fence.
 }
 
 // reconcileClaudeClear gives up waiting for the SessionStart source:"clear"

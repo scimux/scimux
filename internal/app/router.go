@@ -58,6 +58,7 @@ func newMux(a *app, web fs.FS) (*http.ServeMux, error) {
 	mux.HandleFunc("POST /api/nodes/{id}/send/resolve", a.handleSendResolve)
 	mux.HandleFunc("POST /api/nodes/{id}/send/interrupt", a.handleSendInterrupt)
 	mux.HandleFunc("POST /api/nodes/{id}/key", a.handleKey)
+	mux.HandleFunc("POST /api/nodes/{id}/claude-interaction", a.handleClaudeInteraction)
 	mux.HandleFunc("POST /api/nodes/{id}/auto-approve", a.handleAutoApprove)
 	mux.HandleFunc("GET /api/nodes/{id}/chat", a.handleChat)
 	mux.HandleFunc("GET /api/nodes/{id}/peek", a.handlePeek)

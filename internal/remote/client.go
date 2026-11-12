@@ -260,12 +260,6 @@ func (c *Client) startOwned(ctx context.Context) error {
 					"installation to a new invite, ask whoever issued it to revoke this one first")
 		}
 		if err := c.authenticate(ctx); err != nil {
-			if classOfErr(err) == ClassRevoked {
-				c.hosted = "revoked"
-				c.st.Status = StateRevoked
-				_ = c.persist(c.snapshotState())
-				return err
-			}
 			c.hosted = "unavailable"
 			return nil
 		}
@@ -303,13 +297,7 @@ func (c *Client) enrollFresh(ctx context.Context, invite string, src inviteSrc) 
 		return err
 	}
 	if err := c.authenticate(ctx); err != nil {
-		if classOfErr(err) == ClassRevoked {
-			c.hosted = "revoked"
-			c.st.Status = StateRevoked
-			_ = c.persist(c.snapshotState())
-		} else {
-			c.hosted = "unavailable"
-		}
+		c.hosted = "unavailable"
 		return err
 	}
 	c.hosted = "enrolled"
@@ -1600,10 +1588,6 @@ func (c *Client) waitLoopRID(ctx context.Context, rid string) {
 				c.noteWaitResult(aerr)
 			}
 		}
-		if classOfErr(err) == ClassRevoked {
-			c.applyRevoked()
-			return
-		}
 		c.noteWaitResult(err)
 		var delay time.Duration
 		switch {
@@ -1646,22 +1630,6 @@ func (c *Client) noteWaitResult(err error) {
 		return
 	}
 	c.hosted = "enrolled"
-}
-
-func (c *Client) applyRevoked() {
-	c.mu.Lock()
-	c.hosted = "revoked"
-	if c.st.Status != StateRevoked {
-		c.st.Status = StateRevoked
-		_ = c.persist(c.snapshotState())
-	}
-	c.rvStopped = true
-	cancel := c.loopCancel
-	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	c.kickWaiters()
 }
 
 // postWaitRID performs one /v1/wait for rid, optionally carrying a sealed

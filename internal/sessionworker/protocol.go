@@ -57,7 +57,7 @@ var versionOneCapabilities = []string{
 	"append-session-event-v1", "resolve-delivery-v1", "auto-approve-v1",
 }
 
-var capabilities = append(append([]string(nil), versionOneCapabilities...), CapabilityAssetBackingV1)
+var capabilities = append(append([]string(nil), versionOneCapabilities...), CapabilityAssetBackingV1, CapabilityClaudeInteractionV1)
 
 // CurrentCapabilities returns a copy so callers cannot alter the protocol's
 // compatibility declaration.
@@ -227,6 +227,10 @@ type State struct {
 	// MuseSchemaMismatch preserves the existing non-fatal compatibility
 	// warning after the Muse manager moves behind the worker boundary.
 	MuseSchemaMismatch bool `json:"muse_schema_mismatch,omitempty"`
+	// ClaudeInteraction is set only by a worker that currently has a
+	// structured Claude question or plan. Old workers omit it. It is not a
+	// native permission dialog: perm_dialog_id stays the visible-dialog epoch.
+	ClaudeInteraction *InteractionView `json:"claude_interaction,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -283,6 +287,7 @@ var ErrConflict = errors.New("session worker: conflict")
 type remoteError struct {
 	message  string
 	conflict bool
+	status   int
 }
 
 func (e *remoteError) Error() string { return e.message }
@@ -427,6 +432,32 @@ func Listen(parent string, identity Identity, harness Harness) (*Server, error) 
 			return
 		}
 		writeJSON(w, http.StatusOK, state)
+	})
+	mux.HandleFunc("POST /v1/claude-interaction", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := harness.(InteractionOwner)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, wireError{Error: "claude interaction is unsupported", Class: "unsupported"})
+			return
+		}
+		var action InteractionAction
+		if !readJSON(w, r, &action) {
+			return
+		}
+		result, err := owner.SubmitClaudeInteraction(r.Context(), action)
+		if err != nil {
+			status, class := http.StatusInternalServerError, ""
+			switch {
+			case errors.Is(err, ErrInteractionUnsupported):
+				status, class = http.StatusNotFound, "unsupported"
+			case errors.Is(err, ErrInteractionBadRequest):
+				status, class = http.StatusBadRequest, "bad_request"
+			case errors.Is(err, ErrConflict) || harness.Conflict(err):
+				status, class = http.StatusConflict, "conflict"
+			}
+			writeJSON(w, status, wireError{Error: err.Error(), Class: class})
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	})
 	mux.HandleFunc("POST /v1/start-failure", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -640,7 +671,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&failure) != nil || failure.Error == "" {
 			failure.Error = resp.Status
 		}
-		return &remoteError{message: failure.Error, conflict: resp.StatusCode == http.StatusConflict && failure.Class == "conflict"}
+		return &remoteError{message: failure.Error, conflict: resp.StatusCode == http.StatusConflict && failure.Class == "conflict", status: resp.StatusCode}
 	}
 	if out != nil {
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(out); err != nil {

@@ -14,8 +14,8 @@ import (
 )
 
 func TestVibeProbeBudgetConstants(t *testing.T) {
-	if vibeProbeTotal != 12*time.Second || vibeProbePerCall != 4*time.Second {
-		t.Fatalf("probe budget = %s total, %s per call", vibeProbeTotal, vibeProbePerCall)
+	if vibeProbeTotal != 12*time.Second || vibeProbeInitialize != 8*time.Second || vibeProbePerCall != 4*time.Second || vibeProbeInitialize+vibeProbePerCall > vibeProbeTotal {
+		t.Fatalf("probe budget = %s total, %s initialize, %s per call", vibeProbeTotal, vibeProbeInitialize, vibeProbePerCall)
 	}
 }
 
@@ -35,7 +35,7 @@ func TestVibeCatalogProbeReadsModelsWithoutPrompting(t *testing.T) {
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		cwd = dir
 		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestVibeCatalogProbeNeverChangesSavedModel(t *testing.T) {
 	}}
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return fakeRunner(agent)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestVibeCatalogProbeReapsOnTimeoutAndMalformedSession(t *testing.T) {
 		var cp *countingProcess
 		_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 			return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-		}, time.Nanosecond, time.Millisecond)
+		}, time.Nanosecond, time.Millisecond, time.Millisecond)
 		if err == nil {
 			t.Fatal("an expired probe returned a catalog")
 		}
@@ -119,7 +119,7 @@ func TestVibeCatalogProbeReapsOnTimeoutAndMalformedSession(t *testing.T) {
 		var cp *countingProcess
 		_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 			return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-		}, time.Second, 200*time.Millisecond)
+		}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 		if err == nil {
 			t.Fatal("malformed session/new returned a catalog")
 		}
@@ -147,7 +147,7 @@ func TestVibeCatalogProbeDoesNotInventThinkingWithoutAnInitialMenu(t *testing.T)
 	var cp *countingProcess
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestVibeCatalogProbeKeepsEveryAdvertisedModel(t *testing.T) {
 	}
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return fakeRunner(agent)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestVibeCatalogProbeEmptyMenuIsALaunchableDefault(t *testing.T) {
 	var cp *countingProcess
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestVibeCatalogProbeRejectsAnEmptySessionID(t *testing.T) {
 	var cp *countingProcess
 	_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err == nil {
 		t.Fatal("session/new with no id returned a catalog")
 	}
@@ -270,7 +270,7 @@ func TestVibeCatalogProbeKeepsTheCatalogWhenCloseFails(t *testing.T) {
 	}
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return fakeRunner(agent)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil || len(cat.Models) != 1 || len(cat.Efforts["alpha"]) != 1 {
 		t.Fatalf("catalog after a failed close = %+v, %v", cat, err)
 	}
@@ -283,7 +283,7 @@ func TestVibeCatalogProbeHonorsACancelledParentAndThePerCallBudget(t *testing.T)
 		var cp *countingProcess
 		_, err := probeVibeCatalog(ctx, func(dir string) (Process, error) {
 			return countingRunner(&fakeAgent{}, &cp)("", "vibe", dir, "", "")
-		}, time.Second, 200*time.Millisecond)
+		}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 		if err == nil || atomic.LoadInt32(&cp.kills) != 1 {
 			t.Fatalf("cancelled probe err=%v process=%v", err, cp)
 		}
@@ -294,7 +294,7 @@ func TestVibeCatalogProbeHonorsACancelledParentAndThePerCallBudget(t *testing.T)
 		started := time.Now()
 		_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 			return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-		}, time.Second, 30*time.Millisecond)
+		}, time.Second, 30*time.Millisecond, 30*time.Millisecond)
 		if err == nil {
 			t.Fatal("a blocked session/new was treated as a catalog")
 		}
@@ -324,7 +324,7 @@ func TestVibeCatalogProbeHonorsACancelledParentAndThePerCallBudget(t *testing.T)
 		}
 		cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 			return fakeRunner(agent)("", "vibe", dir, "", "")
-		}, time.Second, 200*time.Millisecond)
+		}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -345,7 +345,7 @@ func TestVibeCatalogProbeStartFailureRemovesItsDirectory(t *testing.T) {
 	_, err := probeVibeCatalog(context.Background(), func(d string) (Process, error) {
 		dir = d
 		return nil, errors.New("binary missing")
-	}, time.Second, time.Millisecond)
+	}, time.Second, time.Millisecond, time.Millisecond)
 	if err == nil {
 		t.Fatal("a failed start returned a catalog")
 	}
@@ -381,7 +381,7 @@ func TestVibeCatalogProbeDropsBlankAndDuplicateIds(t *testing.T) {
 	}
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return fakeRunner(agent)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestVibeCatalogProbeBlankModelMenuIsTheDefault(t *testing.T) {
 	}}
 	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return fakeRunner(agent)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestVibeCatalogProbeStopsAfterInitializeWhenTheBudgetIsGone(t *testing.T) {
 	var cp *countingProcess
 	_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
 		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
-	}, time.Second, 200*time.Millisecond)
+	}, time.Second, 200*time.Millisecond, 200*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "probe budget exhausted") {
 		t.Fatalf("err = %v, want the budget exhausted after initialize", err)
 	}
@@ -448,7 +448,7 @@ func TestVibeCatalogProbeDirectoryCannotBeCreated(t *testing.T) {
 	_, err := probeVibeCatalog(context.Background(), func(string) (Process, error) {
 		t.Fatal("probe started a process without a directory")
 		return nil, errors.New("unreachable")
-	}, time.Second, time.Millisecond)
+	}, time.Second, time.Millisecond, time.Millisecond)
 	if err == nil {
 		t.Fatal("probe continued without a directory")
 	}
@@ -485,12 +485,114 @@ func TestProbeVibeCatalogClosureReapsEveryPath(t *testing.T) {
 		if err == nil {
 			t.Fatal("a process that speaks no ACP returned a catalog")
 		}
-		if time.Since(started) > 7*time.Second {
-			t.Fatalf("non-protocol probe took %s", time.Since(started))
+		elapsed := time.Since(started)
+		if elapsed < vibeProbeInitialize-500*time.Millisecond || elapsed > vibeProbeInitialize+3*time.Second {
+			t.Fatalf("non-protocol probe took %s, want about the %s initialize budget", elapsed, vibeProbeInitialize)
 		}
 		left, globErr := filepath.Glob(filepath.Join(tmp, "scimux-vibe-probe-*"))
 		if globErr != nil || len(left) != 0 {
 			t.Fatalf("probe directory left behind: %v %v", left, globErr)
 		}
 	})
+}
+
+func TestVibeCatalogProbeAllowsASlowInitializeWithinItsOwnBudget(t *testing.T) {
+	agent := &fakeAgent{
+		initDelay: 400 * time.Millisecond,
+		newSession: func() sdk.NewSessionResponse {
+			menu := vibeSelect("mdl", "Model", "model", "surprise", [][2]string{
+				{"alpha", "Alpha"},
+				{"beta", "Beta"},
+			})
+			think := vibeSelect("thinking", "Thinking", "thinking", "lvl-low", [][2]string{{"lvl-low", "Low"}, {"lvl-max", "Max"}})
+			return sdk.NewSessionResponse{SessionId: "probe-sess", ConfigOptions: []sdk.SessionConfigOption{menu, think}}
+		},
+	}
+	var cp *countingProcess
+	cat, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
+		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
+	}, 3*time.Second, 1500*time.Millisecond, 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cat.Models; len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
+		t.Fatalf("models = %v, want alpha then beta", got)
+	}
+	if len(cat.Efforts["alpha"]) == 0 || len(cat.Efforts["beta"]) == 0 {
+		t.Fatalf("efforts = %+v, want the thinking menu on each model", cat.Efforts)
+	}
+	agent.mu.Lock()
+	prompts, sets, closes := agent.prompts, len(agent.configSets), agent.closes
+	agent.mu.Unlock()
+	if prompts != 0 || sets != 0 || closes != 1 {
+		t.Fatalf("prompts=%d setters=%d closes=%d, want 0, 0, 1", prompts, sets, closes)
+	}
+	if cp == nil || atomic.LoadInt32(&cp.kills) != 1 || atomic.LoadInt32(&cp.waits) != 1 {
+		t.Fatal("slow initialize left the process")
+	}
+}
+
+func TestVibeCatalogProbeInitializeBeyondItsBudgetFailsAndReaps(t *testing.T) {
+	agent := &fakeAgent{initDelay: 5 * time.Second}
+	var cp *countingProcess
+	started := time.Now()
+	_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
+		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
+	}, 3*time.Second, 150*time.Millisecond, time.Second)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("initialize past its own budget returned a catalog")
+	}
+	if elapsed >= 800*time.Millisecond {
+		t.Fatalf("initialize budget took %s, want under 800ms", elapsed)
+	}
+	agent.mu.Lock()
+	prompts := agent.prompts
+	opened := agent.lastNew != nil
+	agent.mu.Unlock()
+	if prompts != 0 || opened {
+		t.Fatalf("prompts=%d opened=%v, want session/new unsent", prompts, opened)
+	}
+	if cp == nil || atomic.LoadInt32(&cp.kills) != 1 || atomic.LoadInt32(&cp.waits) != 1 {
+		t.Fatal("over-budget initialize left the process")
+	}
+}
+
+func TestVibeCatalogProbeChecksRoomForInitializeBeforeStarting(t *testing.T) {
+	agent := &fakeAgent{}
+	var cp *countingProcess
+	_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
+		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
+	}, 300*time.Millisecond, time.Second, 100*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "probe budget exhausted") {
+		t.Fatalf("err = %v, want the probe budget exhausted before initialize", err)
+	}
+	agent.mu.Lock()
+	sent := agent.lastInit != nil
+	agent.mu.Unlock()
+	if sent {
+		t.Fatal("initialize was sent without room for its budget")
+	}
+	if cp == nil || atomic.LoadInt32(&cp.kills) != 1 || atomic.LoadInt32(&cp.waits) != 1 {
+		t.Fatal("exhausted probe left the process")
+	}
+}
+
+func TestVibeCatalogProbeKeepsThePerCallBudgetForSessionNew(t *testing.T) {
+	agent := &fakeAgent{blockNew: true}
+	var cp *countingProcess
+	started := time.Now()
+	_, err := probeVibeCatalog(context.Background(), func(dir string) (Process, error) {
+		return countingRunner(agent, &cp)("", "vibe", dir, "", "")
+	}, 3*time.Second, 2*time.Second, 100*time.Millisecond)
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("a blocked session/new was treated as a catalog")
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("session/new budget took %s, want the per-call limit", elapsed)
+	}
+	if cp == nil || atomic.LoadInt32(&cp.kills) != 1 || atomic.LoadInt32(&cp.waits) != 1 {
+		t.Fatal("blocked session/new left the process")
+	}
 }

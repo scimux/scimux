@@ -229,7 +229,24 @@ func TestAT_FR_30_a_StateTable(t *testing.T) {
 		cfg2.InviteFile = ""
 		c2 := NewClient(cfg2)
 		err = c2.Start(ctx)
-		requireClass(t, err, ClassRevoked)
+		if err != nil || c2.HostedStatus() != "unavailable" {
+			t.Fatalf("server rejection must remain recoverable: hosted=%q err=%v", c2.HostedStatus(), err)
+		}
+		if st, err := c2.State(); err != nil || st != StateEnrolled {
+			t.Fatalf("server rejection state = %q, %v", st, err)
+		}
+		_ = c2.Close()
+		// Retain the FR-30 row for a genuinely persisted revoked installation.
+		persisted := mustState(t, c2.StatePath())
+		persisted.Status = StateRevoked
+		writeState(t, c2, persisted)
+		c2 = NewClient(cfg2)
+		defer c2.Close()
+		n := fake.RequestCount()
+		requireClass(t, c2.Start(ctx), ClassRevoked)
+		if fake.RequestCount() != n {
+			t.Fatal("persisted revocation contacted rendezvous")
+		}
 		st, err := c2.State()
 		if err != nil {
 			t.Fatalf("revoked-installation: State: %v", err)

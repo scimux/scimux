@@ -351,6 +351,22 @@ func (m *workerManager) Deliver(nodeID, token string) error {
 	})
 }
 
+// SubmitClaudeInteraction forwards one manual decision to the owning worker.
+// Binary support is the Hello capability. The worker still rejects a bundle
+// that was minted with the experimental gate off.
+func (m *workerManager) SubmitClaudeInteraction(nodeID string, action sessionworker.InteractionAction) (sessionworker.InteractionResult, error) {
+	if !m.supports(nodeID, sessionworker.CapabilityClaudeInteractionV1) {
+		return sessionworker.InteractionResult{}, sessionworker.ErrInteractionUnsupported
+	}
+	var result sessionworker.InteractionResult
+	err := m.withClient(nodeID, func(ctx context.Context, client *sessionworker.Client) error {
+		var callErr error
+		result, callErr = client.SubmitClaudeInteraction(ctx, action)
+		return callErr
+	})
+	return result, err
+}
+
 func (m *workerManager) Pending(nodeID string) (PendingPermission, bool) {
 	pending := m.observe(nodeID).Permission
 	if pending == nil {
@@ -811,6 +827,8 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 			if err := a.appendRecord(storeRecord{Type: "claude-hook", ID: node.ID, HookID: state.HookID, Generation: state.HookGeneration}); err != nil {
 				errs = append(errs, fmt.Errorf("recover worker hook %s: %w", locator.NodeID, err))
 			}
+			// The live worker republishes perm/generation.json from its own
+			// generation. This snapshot must not rewrite that fence.
 		}
 	}
 	return errors.Join(errs...)

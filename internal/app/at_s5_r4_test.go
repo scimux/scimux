@@ -132,16 +132,51 @@ func TestS5R4_F9_HostedRemoteStatusProjection(t *testing.T) {
 		}
 		assertHostedStatus(t, cmd, "unavailable")
 	})
-	t.Run("revoked", func(t *testing.T) {
+	t.Run("challenge-404-unavailable", func(t *testing.T) {
 		data := t.TempDir()
 		writeEnrolledState(t, data)
-		cmd := remoteCmd(t, data, "http://127.0.0.1:1", constantStatusHTTP(http.StatusNotFound))
+		before := readRemoteIdentity(t, data)
+		hc, calls := countedRejectionHTTP()
+		cmd := remoteCmd(t, data, "http://127.0.0.1:1", hc)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := cmd.Run(ctx); err != nil {
-			t.Fatalf("F9: revoked killed localhost: %v", err)
+			t.Fatalf("rejection killed localhost: %v", err)
 		}
+		t.Cleanup(func() {
+			if cmd.Client() != nil {
+				_ = cmd.Client().Close()
+			}
+		})
+		assertHostedStatus(t, cmd, "unavailable")
+		if calls.Load() != 1 || !bytes.Equal(before, readRemoteIdentity(t, data)) {
+			t.Fatal("challenge rejection did not preserve enrollment")
+		}
+	})
+	t.Run("revoked", func(t *testing.T) {
+		data := t.TempDir()
+		writeEnrolledState(t, data)
+		seedPersistedRemoteRevocation(t, data)
+		before := readRemoteIdentity(t, data)
+		hc, calls := countedRejectionHTTP()
+		cmd := remoteCmd(t, data, "http://127.0.0.1:1", hc)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := cmd.Run(ctx); err != nil {
+			t.Fatalf("revoked killed localhost: %v", err)
+		}
+		t.Cleanup(func() {
+			if cmd.Client() != nil {
+				_ = cmd.Client().Close()
+			}
+		})
 		assertHostedStatus(t, cmd, "revoked")
+		if calls.Load() != 0 {
+			t.Fatal("persisted revocation contacted rendezvous")
+		}
+		if !bytes.Equal(before, readRemoteIdentity(t, data)) {
+			t.Fatal("persisted revocation was rewritten")
+		}
 	})
 	t.Run("disabled", func(t *testing.T) {
 		data := t.TempDir()

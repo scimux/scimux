@@ -61,7 +61,7 @@ func (c *Client) postChallenge(ctx context.Context) ([]byte, error) {
 		return nil, classErrorf(ClassUnavailable, "challenge", "challenge response is malformed", err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, classError(ClassRevoked, "challenge", "this installation has been revoked")
+		return nil, classError(ClassUnavailable, "challenge", "rendezvous rejected the challenge request")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, classError(ClassUnavailable, "challenge", "unexpected challenge status")
@@ -103,7 +103,7 @@ func (c *Client) postVerify(ctx context.Context, chal []byte) error {
 	defer resp.Body.Close()
 	raw, boundErr := readBounded(resp.Body, verifyBodyMax)
 	if resp.StatusCode == http.StatusNotFound {
-		return classError(ClassRevoked, "verify", "this installation has been revoked")
+		return classError(ClassUnavailable, "verify", "rendezvous rejected authentication")
 	}
 	if resp.StatusCode != http.StatusNoContent {
 		return classError(ClassUnavailable, "verify", "unexpected verify status")

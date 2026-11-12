@@ -166,7 +166,7 @@ func TestS5R6_F1_Wait404AloneNeverWritesRevoked(t *testing.T) {
 	}
 }
 
-func TestS5R6_F1_Wait404ThenChallengeRevokeStopsEveryRID(t *testing.T) {
+func TestS5R6_F1_Wait404ThenChallengeRejectionRecoversEveryRID(t *testing.T) {
 	srv := newR6WaitRV(t)
 	cfg := r3ClientCfg(t, srv.URL, srv.Client)
 	pub, priv := newEd25519(t)
@@ -184,48 +184,112 @@ func TestS5R6_F1_Wait404ThenChallengeRevokeStopsEveryRID(t *testing.T) {
 			{ID: "tablet", RID: rid2, PubKey: hex.EncodeToString(testTabletPubKey)},
 		},
 	})
+	sched := newAuthRetryScheduler()
+	cfg.Scheduler = sched
 	cfg.Backoff = BackoffConfig{Initial: 20 * time.Millisecond, Max: 200 * time.Millisecond, Factor: 2, Jitter: 0, SuccessFor: 5 * time.Second}
 	ctx, cancel := ctxTO(t)
 	defer cancel()
 	c := NewClient(cfg)
+	before := authStateBytes(t, c)
 	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
 
-	w1 := srv.WaitHeld(t, 5*time.Second)
-	w2 := srv.WaitHeld(t, 5*time.Second)
-	nChal := srv.ChallengeCount()
+	w1 := srv.WaitHeld(t, 3*time.Second)
+	w2 := srv.WaitHeld(t, 3*time.Second)
+	if w1.ID == w2.ID {
+		t.Fatal("expected waits for both devices")
+	}
 	nWait := srv.WaitArrived()
 	srv.SetChallengeRevoke(true)
 	srv.Release(w1, r6WaitReleaseRevoked)
 	srv.Release(w2, r6WaitReleaseRevoked)
+	retries := []*authRetry{sched.next(t), sched.next(t)}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if c.HostedStatus() == "revoked" {
-			break
+	// Keep rejecting beyond saturation of the unchanged backoff policy.
+	// Both loops must keep scheduling; neither may authenticate or revoke.
+	for round := 0; round < 8; round++ {
+		for i, retry := range retries {
+			nChal := srv.ChallengeCount()
+			sched.fire(t, retry)
+			next := sched.next(t)
+			if srv.ChallengeCount() != nChal+1 {
+				t.Fatal("retry did not fetch exactly one fresh challenge")
+			}
+			if next.delay < retry.delay || next.delay > cfg.Backoff.Max || next.delay < cfg.Backoff.Initial {
+				t.Fatalf("retry delay %s after %s is outside backoff bounds", next.delay, retry.delay)
+			}
+			if c.HostedStatus() != "unavailable" {
+				t.Fatalf("hosted = %q, want unavailable", c.HostedStatus())
+			}
+			if !bytes.Equal(before, authStateBytes(t, c)) {
+				t.Fatal("rejection changed enrollment, identity or devices")
+			}
+			if srv.WaitArrived() != nWait || srv.InFlight() != 0 {
+				t.Fatal("server rejection allowed an authenticated wait")
+			}
+			retries[i] = next
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	if c.HostedStatus() != "revoked" {
-		t.Fatalf("F1: hosted = %q, want revoked", c.HostedStatus())
-	}
-	st, raw := mustPersisted(t, c)
-	if st.Status != StateRevoked {
-		t.Fatalf("F1: persisted status = %q, want revoked; bytes=%s", st.Status, raw)
-	}
-	if srv.ChallengeCount() <= nChal {
-		t.Fatalf("F1: challenge revocation did not follow wait rejection: chal %d -> %d", nChal, srv.ChallengeCount())
+	for _, retry := range retries {
+		if retry.delay != cfg.Backoff.Max {
+			t.Fatal("persistent rejection did not reach bounded backoff")
+		}
 	}
 
-	time.Sleep(80 * time.Millisecond)
-	if srv.WaitArrived() > nWait+2 {
-		t.Fatalf("F1: RID loops still reconnecting after challenge revoke: waits %d -> %d", nWait, srv.WaitArrived())
+	// Only recover after observing the failure and its durable-state effects.
+	srv.SetChallengeRevoke(false)
+	for _, retry := range retries {
+		sched.fire(t, retry)
 	}
-	if srv.InFlight() != 0 {
-		t.Fatalf("F1: %d waits still in flight after challenge revoke", srv.InFlight())
+	resumed := []*r6HeldWait{srv.WaitHeld(t, 3*time.Second), srv.WaitHeld(t, 3*time.Second)}
+	seen := map[string]bool{}
+	for _, wait := range resumed {
+		if wait.Challenge == w1.Challenge || wait.Challenge == w2.Challenge {
+			t.Fatal("recovery reused a rejected challenge")
+		}
+		chal, err := hex.DecodeString(wait.Challenge)
+		if err != nil || len(chal) != 32 {
+			t.Fatal("recovery challenge is malformed")
+		}
+		sig, err := hex.DecodeString(wait.Sig)
+		if err != nil || !ed25519.Verify(pub, authMessage(DefaultOrigin, ProtocolVersion, "/v1/wait", "ih_041061050R3GG28A", chal), sig) {
+			t.Fatal("recovery did not sign the fresh challenge")
+		}
+		seen[wait.ID] = true
+		srv.Release(wait, r6WaitReleaseNoContent)
+		_ = sched.next(t)
 	}
+	if !seen[rid1] || !seen[rid2] {
+		t.Fatal("both device loops did not recover")
+	}
+	if c.HostedStatus() != "enrolled" {
+		t.Fatalf("recovered hosted = %q", c.HostedStatus())
+	}
+	if !bytes.Equal(before, authStateBytes(t, c)) {
+		t.Fatal("recovery changed durable identity or devices")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// No invite is supplied at restart; the same two devices resume polling.
+	cfg.Scheduler = newAuthRetryScheduler()
+	restarted := NewClient(cfg)
+	if err := restarted.Start(ctx); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	defer restarted.Close()
+	r1 := srv.WaitHeld(t, 3*time.Second)
+	r2 := srv.WaitHeld(t, 3*time.Second)
+	if r1.ID == r2.ID || !seen[r1.ID] || !seen[r2.ID] {
+		t.Fatal("restart lost device identities")
+	}
+	if restarted.HostedStatus() != "enrolled" || !bytes.Equal(before, authStateBytes(t, restarted)) {
+		t.Fatal("restart did not preserve enrollment")
+	}
+
 }
 
 func TestS5R6_F2_SuccessfulEnrollmentRemovesInvitePath(t *testing.T) {

@@ -44,9 +44,14 @@ startup/hook-health acknowledgement. The undocumented transcript
   are accepted and never become inspect attention; `fork` is rejected. A
   valid changed session/path is rebound under the full
   path-claim/tombstone/persistence/seam rules — never left silently on the
-  old transcript — and the commit is transactional: a failed rebind keeps
-  the previous binding in memory and in replay, and surfaces an inline error
-  rather than inspect.
+  old transcript. A rebind that fails before the binding record is durable
+  keeps the previous binding in memory and in replay, and surfaces an inline
+  error rather than inspect. Once that record is durable and the node names
+  the new session, the commit stands and the old path stays tombstoned. If
+  the helper fence cannot be published, sending stays blocked with that fence
+  failure. The worker republishes the fence, and the same SessionStart
+  finishes retirement. That failure is not reported as if the previous
+  transcript were still attached.
 - Capability is **fail-closed**: no complete current bundle means
   `claude_unsupported` with an inline explanation — never inspect/fallback
   supervision, never an owner guessed from the pane cmdline. Adopted,
@@ -194,7 +199,108 @@ the turn is still open.
   session-log audit still has it. Disabling auto-approve reevaluates a
   still-current dialog epoch and only then publishes attention.
 - AskUserQuestion, ExitPlanMode, plan choices, deny rules and unknown modes
-  are **never** auto-answered.
+  are **never** auto-answered. A human reply to the first two is a different
+  path, described below. It does not arm, count, or satisfy the lease.
+
+## Structured question and plan replies stay on PermissionRequest
+
+`PreToolUse` stays unregistered. Every new hook bundle advertises manual
+interaction without a feature flag. An already launched chat follows its
+original bundle and executable. Old bundles are not rewritten.
+
+On a capable bundle, `AskUserQuestion` and `ExitPlanMode` take a narrow
+`PermissionRequest` branch before ordinary auto-approval. Every other tool,
+and every legacy bundle without interaction support, keeps the existing helper behavior,
+including the empty `{"behavior":"allow"}` stdout. That empty allow is not a
+human answer: it omits `updatedInput`. A human answer may send `updatedInput`
+only to preserve the hook's original tool input and append `answers`. Plan
+approval may also attach one server-built, session-scoped `setMode` of
+`default` or `acceptEdits` when the human selected that mode. `restore`
+changes nothing and must not be described as manual review. The browser
+cannot supply `updatedPermissions`. No persistent allow rule is emitted, and
+`bypassPermissions` is not offered.
+
+Discussion and a request to revise the plan use `decision.behavior: deny`,
+`interrupt: false`, and the human's non-empty feedback, with application
+context kept separate from that feedback. Cancellation uses deny with
+`interrupt: true`. `continue: false` alone is not a cancellation. Stop and
+`PostToolUseFailure` are not guaranteed after that cancellation. An emitted
+cancel settles on the first poller tick where the node's pane is quiet and
+the cancel's accepted turn is still current or closing. Settlement does not
+wait for transcript evidence and needs neither a transcript path nor a
+tailer. It never settles on an active tick, even when the transcript already
+shows an interruption notice. Settlement has the same effects as Interrupt:
+it retracts the lease, clears auto-approve and attention, tombstones the
+session's asked notices, clears the visible-dialog epoch, marks the turn
+closed, clears elicitations, drops the notify inbox, closes the accepted-turn
+token, clears the dialog note, and writes the interrupted marker. Closing
+the accepted-turn token lets a new send begin. The quiet pane is a heuristic
+snapshot, not proof that Claude consumed the reply. A static modal can look
+quiet before Claude reads the emitted reply, so a new send can begin in that
+window. A cancel for turn N never closes turn N+1.
+
+A REST `202` means the worker durably recorded the human's intent. It does not
+mean Claude consumed the reply. That first audit row makes no delivery claim.
+If revalidation or answer publication fails after the audit append, the worker
+appends a correlated outcome with source `application` after releasing the fence.
+Its `outcome` contains only delivery status and fixed context, never repeated
+human content or raw errors. Chat labels this row Application. The statuses are:
+known stale/expired rejection is `not_delivered`; I/O failure leaves delivery
+`unconfirmed`, since an I/O error cannot prove withdrawal or non-consumption.
+The original row is never rewritten. No answer is published when
+the initial audit fails. Failure to append the outcome is itself an audit error.
+A killed helper or a short stdout write leaves delivery unconfirmed, and an
+uncertain reply is not replayed into a new helper or turn. No hook is registered
+to confirm consumption: `emitted` attests only a complete stdout write.
+
+Before publishing a request, the helper locks its request-specific waiter file
+and holds that lock through stdout. The kernel releases the lock when the helper
+exits, including on SIGKILL. Submission and native-key guards detect that loss
+without waiting for the deadline. Recovery and a successor helper release the
+dead slot and retire its payload. Legacy requests without the lock marker retain
+the deadline-only bound. Recovery uses the existing worker's ownership; it never
+claims a second PID owner file. Raw payloads are otherwise deleted after the
+helper deadline. An emitted cancellation keeps only a minimal fence — action, turn,
+and turn generation — so settlement still works after the payload is gone,
+including across a worker restart. That fence is not hook stdout and is not
+replayed. The helper
+deadline for these two tools is 150 seconds inside a 180-second hook
+registration, and the app stops accepting decisions at 135 seconds. The
+ordinary 5-second auxiliary permission deadline is unchanged. The timeout is a
+field in the settings document before serialization, never a JSON byte patch.
+Immutable capability manifests are cached with file-identity checks; enabled
+bundles still check that the baked executable remains usable.
+
+Cancellation polling scans current requests and minimal cancellation fences,
+not the historical acknowledgement directory. Payload retirement also removes
+the claim. Small request-specific replay fences remain for the bundle's lifetime
+so an old helper identity cannot emit twice.
+
+The helper-visible binding fence is `perm/generation.json`. The owning worker
+is its only writer. The file records the authoritative generation, node, and
+session when that generation is at least 1 and the bundle was minted with the
+interaction capability. A muxer projection or a recovery snapshot must not
+rewrite it. A generation of 0 does not replace a file that is already there,
+and an empty session does not clear a session the fence already records.
+Emission reads the fence again under the same lock publication holds. A
+helper also re-reads the published answer under that lock: bytes read before
+a failed publication withdrew the file are not authority to emit. A
+request stamped with a generation does not write stdout when the fence is
+missing, unreadable, corrupt, or names a different generation, node, or
+session. A request with no such binding and no fence remains a legacy request.
+A publication that cannot install the new session removes the fence instead of
+leaving the previous one authoritative. Gate-off and legacy bundles do not
+grow this file.
+
+While the structured request owns the turn, native `/key` delivery is refused.
+The check runs again at the moment of delivery, holding the same interaction
+fence that publication holds, so a request that arrives after the first check
+cannot be followed by native keys. `terminal` revokes that ownership before
+the existing visible-dialog epoch is authoritative again.
+
+The reply shapes were qualified on Claude Code 2.1.304. They are not a claim
+about every later CLI build. Multi-select labels are joined with `", "` in
+option order on that version only.
 
 ## Strict terminal policy
 

@@ -57,35 +57,62 @@ func TestPairingSheetSlotsExist(t *testing.T) {
 	}
 }
 
-// TestRemoteAccessIsTheFirstMenuSection pins placement, not decoration.
-// Pairing hands out SSH-equivalent authority on this computer, and the list of
-// who currently holds it is the first thing a burger menu should show —
-// below the version check and the licence notices it is a setting nobody
-// finds until they are looking for it, which is too late.
-func TestRemoteAccessIsTheFirstMenuSection(t *testing.T) {
+// TestMenuSectionOrderAndInitialStates pins the agreed native disclosure
+// order. Remote remains hidden until the server reports availability.
+func TestMenuSectionOrderAndInitialStates(t *testing.T) {
 	html := readWebFile(t, "web/index.html")
 	menu := html[indexAfter(t, html, `<div class="sheet" id="menu">`):]
-	first := strings.Index(menu, `<div class="sect">`)
-	if first < 0 {
-		t.Fatal(`#menu contains no <div class="sect">`)
+	menu = menu[:indexAfter(t, menu, `<div class="assetpreview"`)]
+	want := []struct {
+		id      string
+		summary string
+		open    bool
+		hidden  bool
+	}{
+		{"m_about", "ABOUT", true, false},
+		{"m_remote", "REMOTE", false, true},
+		{"m_harness_section", "HARNESSES", false, false},
+		{"m_attachment_settings", "PREFERENCES", false, false},
 	}
-	pair := strings.Index(menu, `id="m_pair"`)
-	if pair < 0 {
-		t.Fatal(`#menu has no id="m_pair"; there is no way into the pairing flow`)
+	if got := strings.Count(menu, `class="sect menu-section"`); got != len(want) {
+		t.Fatalf("menu sections = %d, want %d", got, len(want))
 	}
-	devices := strings.Index(menu, `id="m_devices"`)
-	if devices < 0 {
-		t.Fatal(`#menu has no id="m_devices"; a grant nobody can see cannot be revoked`)
+	previous := -1
+	for _, section := range want {
+		i := strings.Index(menu, `id="`+section.id+`"`)
+		if i <= previous {
+			t.Fatalf("section %s missing or out of order", section.summary)
+		}
+		previous = i
+		start := strings.LastIndex(menu[:i], "<")
+		end := i + strings.Index(menu[i:], ">") + 1
+		tag := menu[start:end]
+		if !strings.HasPrefix(tag, "<details ") {
+			t.Errorf("%s must be a native details section: %s", section.summary, tag)
+		}
+		fields := strings.Fields(strings.TrimSuffix(tag, ">"))
+		has := func(attribute string) bool {
+			for _, field := range fields {
+				if field == attribute {
+					return true
+				}
+			}
+			return false
+		}
+		if has("open") != section.open || has("hidden") != section.hidden {
+			t.Errorf("%s initial attributes = %s, want open=%t hidden=%t", section.summary, tag, section.open, section.hidden)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(menu[end:]), "<summary>"+section.summary+"</summary>") {
+			t.Errorf("%s must begin with its native summary", section.summary)
+		}
 	}
-	second := strings.Index(menu[first+1:], `<div class="sect">`)
-	if second < 0 {
-		t.Fatal("#menu has only one section; Remote access cannot be shown to be first")
-	}
-	second += first + 1
-	if pair > second || devices > second {
-		t.Errorf("m_pair (%d) / m_devices (%d) are not inside the FIRST menu section "+
-			"(which spans %d..%d): the list of devices holding SSH-equivalent "+
-			"authority is below the version check", pair, devices, first, second)
+	remote := strings.Index(menu, `id="m_remote"`)
+	harnesses := strings.Index(menu, `id="m_harness_section"`)
+	for _, id := range []string{"m_pair", "m_devices"} {
+		i := strings.Index(menu, `id="`+id+`"`)
+		if i < remote || i > harnesses {
+			t.Errorf("%s must remain inside REMOTE", id)
+		}
 	}
 }
 

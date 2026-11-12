@@ -114,10 +114,7 @@ func ProjectAgentPaths(text string, byPath map[string]sessionlog.AssetEvent) str
 			if !ok {
 				return m
 			}
-			name := ev.Name
-			if name == "" {
-				name = "asset"
-			}
+			name := agentReferenceLabel(sub[2], ev.Name)
 			return fmt.Sprintf("%s[%s](scimux-asset:%s)", bang, name, ev.ID)
 		})
 	}
@@ -156,10 +153,7 @@ func ProjectAgentPathBindings(text string, bound map[int]sessionlog.AssetEvent, 
 			current := occurrence
 			occurrence++
 			if ev, ok := bound[current]; ok && ev.SourcePath == sub[3] {
-				name := ev.Name
-				if name == "" {
-					name = "asset"
-				}
+				name := agentReferenceLabel(sub[2], ev.Name)
 				return fmt.Sprintf("%s[%s](scimux-asset:%s)", sub[1], name, ev.ID)
 			}
 			ref, ok := byOccurrence[current]
@@ -348,4 +342,14 @@ func PlainBlockedRefs(text string) string {
 		}
 		return label
 	})
+}
+
+func agentReferenceLabel(label, name string) string {
+	if strings.TrimSpace(label) != "" {
+		return label
+	}
+	if name != "" {
+		return name
+	}
+	return "asset"
 }

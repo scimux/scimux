@@ -20,6 +20,25 @@ type pipeTr struct {
 	once sync.Once
 }
 
+// Peer EOF is observable before NewClient's Done-mirroring goroutine runs.
+// Neither the closed flag nor Done may hide this independently useful signal.
+func TestClientLiveSeesPeerEOFBeforeDoneMirroring(t *testing.T) {
+	peerDone := make(chan struct{})
+	c := &Client{done: make(chan struct{}), peer: &peer{closeCh: peerDone}}
+	if err := c.Live(); err != nil {
+		t.Fatalf("live peer: %v", err)
+	}
+	close(peerDone)
+	if err := c.Live(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("peer EOF: %v, want ErrClosed", err)
+	}
+	select {
+	case <-c.Done():
+		t.Fatal("fixture must observe EOF before Done mirroring")
+	default:
+	}
+}
+
 func (p *pipeTr) Stdin() io.WriteCloser { return p.w }
 func (p *pipeTr) Stdout() io.Reader     { return p.r }
 func (p *pipeTr) Close() error {
@@ -3429,5 +3448,14 @@ func TestCloseReleasesSessionOpWaiter(t *testing.T) {
 	h.client.op.release()
 	if err := <-closed; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMalformedUserInputReportsErrorSynchronously(t *testing.T) {
+	var events []Event
+	c := &Client{sink: func(ev Event) { events = append(events, ev) }}
+	c.declineUserInput("", json.RawMessage("}"))
+	if len(events) != 1 || events[0].T != "error" || events[0].Error != "malformed user input request" {
+		t.Fatalf("malformed input events = %+v", events)
 	}
 }

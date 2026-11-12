@@ -25,7 +25,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 // wires up fixtures or a DOM stub and asserts nothing about product
 // behaviour of its own. Adding a name here is a deliberate claim that the
 // module is scaffolding — not a way to park an implementation.
-const ALLOWED_TEST_LOCAL = new Set(["./s2-helpers.js"]);
+const ALLOWED_TEST_LOCAL = new Set([
+  "./s2-helpers.js",
+  // CLI coverage-verification scaffolding; exports no browser/product behavior.
+  "./menu-coverage-ranges.mjs",
+]);
 
 // The other kind of waiver, matching the Go half's reachOpenFindings: a
 // module that ought to be served and is not yet. These are debt, written

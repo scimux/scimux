@@ -727,7 +727,7 @@ func TestPreviewView(t *testing.T) {
 	}
 	// A live chat's assets resolve here exactly as in the chat — same node, same
 	// asset map — or the same turn would read "unavailable" one tap apart.
-	if !strings.Contains(app, `splitAssetRefs(t.text || "", previewNode, d.assets || {}, { iconFile: ICON_FILE, assetURL })`) {
+	if !strings.Contains(app, `assetBubbleBodyHTML(t.text || "", previewNode, d.assets || {}, { iconFile: ICON_FILE, assetURL })`) {
 		t.Error("preview asset projection must pass the node, its assets, ICON_FILE, and assetURL")
 	}
 }

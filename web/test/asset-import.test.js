@@ -136,3 +136,86 @@ test("oversized attachments explain the limit without retry actions", () => {
     assert.doesNotMatch(split.html, /data-asset-retry|<button/);
   }
 });
+
+
+const fencedImportsLines = "[notes.md](scimux-import:1:0:not_found)\n[x](scimux-import:2:0:retry_ready)";
+const fencedImportsText = `\`\`\`text\n${fencedImportsLines}\n\`\`\``;
+
+function fencedImportBody(result){
+  return chatmod.renderMissingImportText(md(result.clean), result.missing) + result.html;
+}
+
+test("splitImportRefs fenced: missing and blocked markers remain verbatim", () => {
+  const r = splitImportRefs(fencedImportsText, "n1");
+  assert.equal(r.clean, fencedImportsText);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.missing, []);
+  assert.doesNotMatch(fencedImportBody(r), /assetblocked|missingfile|attrow/);
+  assert.equal(fencedImportBody(r), md(fencedImportsText));
+});
+
+test("splitImportRefs fenced: outside occurrences keep blocked and missing rendering", () => {
+  const outside = "See [x](scimux-import:2:0:retry_ready) and [notes.md](scimux-import:1:0:not_found).";
+  const r = splitImportRefs(`${fencedImportsText}\n${outside}`, "n1");
+  const expected = splitImportRefs(outside, "n1");
+  assert.equal(r.html, expected.html);
+  assert.deepEqual(r.missing, expected.missing);
+  assert.equal(fencedImportBody(r), md(fencedImportsText) + fencedImportBody(expected));
+  assert.match(fencedImportBody(r), /and <span class="missingfile">notes\.md<\/span>\./);
+});
+
+test("splitImportRefs fenced: adjacency separator stops at fence boundaries", () => {
+  const a = "[a.md](scimux-import:1:0:not_found)";
+  const b = "[b.md](scimux-import:1:1:not_found)";
+  const text = `${a}${b}\n\`\`\`text ${a}\n${b}\n\`\`\`\n${a}${b}`;
+  const r = splitImportRefs(text, "n1");
+  assert.equal(r.missing.length, 4);
+  assert.equal(fencedImportBody(r),
+    '<p><span class="missingfile">a.md</span> <span class="missingfile">b.md</span></p>' +
+    md(`\`\`\`text ${a}\n${b}\n\`\`\``) +
+    '<p><span class="missingfile">a.md</span> <span class="missingfile">b.md</span></p>');
+  assert.ok(r.clean.includes(`\n\`\`\`text ${a}\n${b}\n\`\`\`\n`));
+});
+
+test("splitImportRefs fenced: blank lines remain inside and collapse outside", () => {
+  const lines = `${fencedImportsLines}\n\n\n\nend`;
+  const fence = `\`\`\`text\n${lines}\n\`\`\``;
+  const r = splitImportRefs(`before\n\n\n\n${fence}\n\n\n\nafter`, "n1");
+  assert.equal(r.clean, `before\n\n${fence}\n\nafter`);
+  assert.equal(fencedImportBody(r), md(`before\n\n${fence}\n\nafter`));
+});
+
+test("splitImportRefs fenced: unclosed fence preserves its trailing bytes", () => {
+  const text = `  \`\`\`text\n${fencedImportsLines}\n\n`;
+  const r = splitImportRefs(text, "n1");
+  assert.equal(r.clean, text);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.missing, []);
+  assert.equal(fencedImportBody(r), md(text));
+});
+
+test("splitImportRefs fenced: raw CR line breaks work without asset normalization", () => {
+  for (const newline of ["\r", "\r\n"]) {
+    const text = fencedImportsText.replaceAll("\n", newline);
+    const r = splitImportRefs(text, "n1");
+    assert.equal(r.clean, text);
+    assert.equal(r.html, "");
+    assert.deepEqual(r.missing, []);
+    assert.equal(fencedImportBody(r), md(fencedImportsText));
+  }
+});
+
+test("splitImportRefs fenced: combined asset and import render order keeps quoted syntax", () => {
+  const fence = `\`\`\`diff\nSee [quoted](scimux-asset:a)\n${fencedImportsLines}\n\`\`\``;
+  const text = `${fence}\nSee [report](scimux-asset:a) and [notes.md](scimux-import:1:0:not_found), [x](scimux-import:2:0:retry_ready).`;
+  const a = chatmod.splitAssetRefs(text, "n1", { a: { name: "report.md" } });
+  const r = splitImportRefs(a.clean, "n1");
+  const body = chatmod.renderMissingImportText(
+    chatmod.renderMissingImportText(md(r.clean), r.missing), a.labels);
+  assert.equal(body, md(fence) + '<p>See report and <span class="missingfile">notes.md</span>, .</p>');
+  assert.equal((a.html.match(/<a /g) || []).length, 1);
+  assert.equal((r.html.match(/class="assetblocked /g) || []).length, 1);
+  assert.equal(a.labels.length, 1);
+  assert.equal(r.missing.length, 1);
+  assert.notEqual(a.labels[0].token, r.missing[0].token);
+});

@@ -10,6 +10,7 @@
  * segment-wise rule: grok went 1.0.3 → 1.0.24, where a string compare says
  * the older one is newer. */
 import { esc } from "./format.js";
+import { renderMenuCheck } from "./burger-menu.js";
 import { usageAgentDisplayName } from "./usage.js";
 
 /* Numeric-prefix compare. Returns true only on evidence: anything
@@ -268,7 +269,10 @@ export function externalAttachmentNote(on){
 }
 
 export function openAttachmentSettings(burger, section){
-  burger?.click?.();
+  const menu = section?.closest?.(".sheet");
+  if (!menu?.classList.contains("open")) burger?.click?.();
+  const fold = section?.closest?.("details");
+  if (fold) fold.open = true;
   section?.scrollIntoView?.({ block: "center" });
 }
 
@@ -428,9 +432,11 @@ export async function runHarnessMenuCheck(deps) {
   const button = deps.button;
   const scimuxButton = deps.scimuxButton;
   const box = deps.box;
+  if (button && button.disabled) return;
   if (button) {
     button.disabled = true;
-    button.textContent = "checking…";
+    button.textContent = "Checking for updates";
+    renderMenuCheck(button, true, button.textContent);
   }
   if (scimuxButton) scimuxButton.disabled = true;
   const call = harnessUpdateCall(box && box.checked === true && !box.disabled);
@@ -446,10 +452,11 @@ export async function runHarnessMenuCheck(deps) {
   if (checked.harness.status === "fulfilled") {
     const payload = checked.harness.value || {};
     if (typeof deps.apply === "function") deps.apply(payload);
-    if (button) button.textContent = "Check for harness updates";
+    if (button) button.textContent = "Check for updates";
   } else if (button) {
     button.textContent = "check failed";
   }
+  if (button) renderMenuCheck(button, false, button.textContent);
   return checked;
 }
 

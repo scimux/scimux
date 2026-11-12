@@ -621,6 +621,14 @@ func TestClaudeStartupHookBindsReportedPath(t *testing.T) {
 	if recs := bindingRecs(t, a, n.ID); len(recs) != 1 || recs[0].Path != own || recs[0].Cause != "startup" {
 		t.Fatalf("binding records = %+v", recs)
 	}
+	// A repeated startup notice acknowledges the same binding. Do not depend
+	// on the poller racing a second drain to exercise this idempotent path.
+	if err := a.processClaudeHookEvent(n.ID, ev); err != nil {
+		t.Fatalf("duplicate startup event: %v", err)
+	}
+	if recs := bindingRecs(t, a, n.ID); len(recs) != 1 || n.Transcript != own || n.SessionID != hookSIDOwn {
+		t.Fatalf("duplicate startup changed the binding: records=%+v path=%q session=%q", recs, n.Transcript, n.SessionID)
+	}
 }
 
 func TestClaudeStartupHookRejectsInvalidEvents(t *testing.T) {

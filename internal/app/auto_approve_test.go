@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -800,6 +802,105 @@ func TestPollNoDoubleDeliver(t *testing.T) {
 		t.Fatalf("count = %d, want 1", a.autoApprove[n.ID].Count)
 	}
 	a.mu.Unlock()
+}
+
+// autoApproveGateLockLine is the g.Lock call between the two Attempted checks
+// in maybeAutoApprove. A waiter blocked on that line has passed the pre-check
+// and has not yet evaluated the recheck.
+const autoApproveGateLockLine = "auto_approve.go:713 +"
+
+// TestMaybeAutoApproveSecondAttemptedCheck exercises the recheck body that
+// TestPollNoDoubleDeliver reaches only when two callers pass the pre-check
+// before either records the request. The test holds the auto-gate first, waits
+// until the caller is blocked on that gate, then records the request.
+func TestMaybeAutoApproveSecondAttemptedCheck(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := seedStructuredNode(t, a, "recheck", "pi", "acp")
+	const reqID = "inc:1"
+	stub := &stubProc{
+		live: "active", hasSession: true, hasPending: true,
+		pending: allowPending(reqID), clearOnDeliver: true,
+	}
+	a.setAutoApproveEnabled(n.ID, true, "active", "inc", 0)
+	g := a.autoGateFor(n.ID)
+	g.Lock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.maybeAutoApprove(n, stub)
+	}()
+	waitUntilMaybeAutoApproveHoldsGate(t, a)
+	a.autoApprove[n.ID].Attempted[reqID] = true
+	a.mu.Unlock()
+	g.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("maybeAutoApprove did not return from the attempted recheck")
+	}
+	if stub.deliverCalls != 0 {
+		t.Fatalf("deliverCalls = %d, want 0", stub.deliverCalls)
+	}
+	a.mu.Lock()
+	if a.autoApprove[n.ID].Count != 0 {
+		t.Fatalf("count = %d, want 0", a.autoApprove[n.ID].Count)
+	}
+	if !a.autoApprove[n.ID].Attempted[reqID] {
+		t.Fatal("attempted mark was cleared")
+	}
+	a.mu.Unlock()
+}
+
+// waitUntilMaybeAutoApproveHoldsGate returns with a.mu held. The caller is
+// blocked in maybeAutoApprove at the auto-gate lock, which this test already holds.
+func waitUntilMaybeAutoApproveHoldsGate(t *testing.T, a *app) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		n := runtime.Stack(buf, true)
+		if maybeAutoApproveBlockedOnGate(buf[:n]) && a.mu.TryLock() {
+			n = runtime.Stack(buf, true)
+			if maybeAutoApproveBlockedOnGate(buf[:n]) {
+				return
+			}
+			a.mu.Unlock()
+		}
+		if time.Now().After(deadline) {
+			n = runtime.Stack(buf, true)
+			t.Fatalf("maybeAutoApprove did not block on the auto-gate\n%s", buf[:n])
+		}
+		runtime.Gosched()
+	}
+}
+
+func maybeAutoApproveBlockedOnGate(stack []byte) bool {
+	parts := bytes.Split(stack, []byte("\ngoroutine "))
+	for _, part := range parts {
+		headerEnd := bytes.IndexByte(part, '\n')
+		if headerEnd < 0 || !bytes.Contains(part[:headerEnd], []byte("[sync.Mutex.Lock]")) {
+			continue
+		}
+		idx := bytes.Index(part, []byte(".maybeAutoApprove("))
+		if idx < 0 {
+			continue
+		}
+		rest := part[idx:]
+		nl := bytes.IndexByte(rest, '\n')
+		if nl < 0 || nl+1 >= len(rest) {
+			continue
+		}
+		fileLine := rest[nl+1:]
+		if end := bytes.IndexByte(fileLine, '\n'); end >= 0 {
+			fileLine = fileLine[:end]
+		}
+		if bytes.Contains(fileLine, []byte(autoApproveGateLockLine)) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDisarmDuringAutoApproveCannotLeak(t *testing.T) {

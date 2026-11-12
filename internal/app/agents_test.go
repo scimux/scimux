@@ -1442,3 +1442,12 @@ func TestOpencodeModelsSkipsRetryWhenContextDone(t *testing.T) {
 	}
 	assertOpencodeCalls(t, counter, 1)
 }
+
+func TestCursorModelsIgnoresNonModelOutput(t *testing.T) {
+	for _, input := range []string{"", "unexpected output\nmodel heading"} {
+		got := parseCursorModels(input)
+		if len(got.Models) != 0 || len(got.ids) != 0 {
+			t.Fatalf("non-model output produced models: %+v", got)
+		}
+	}
+}

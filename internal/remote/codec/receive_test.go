@@ -8,9 +8,116 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+// Keep the upload unfinished until rejection is observed. This proves that a
+// peer can refuse a request without waiting for its body, and that the pending
+// call is retired even while the upload goroutine still owns its reader.
+func TestRoundTripRejectWhileRequestBodyBlocked(t *testing.T) {
+	cr, sw := io.Pipe()
+	sr, cw := io.Pipe()
+	client := NewConn(cr, cw, RoleInitiator)
+	body := &rejectGatedBody{entered: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+	peerDone := make(chan error, 1)
+	t.Cleanup(func() {
+		body.unblock()
+		_ = client.Close()
+		_ = sr.Close()
+		_ = sw.Close()
+	})
+	go func() {
+		peerDone <- func() error {
+			if err := peerHandshake(sr, sw, RoleResponder); err != nil {
+				return err
+			}
+			fr, err := decodeFrame(sr)
+			if err != nil {
+				return err
+			}
+			if fr.typ != typeRequest {
+				return io.ErrUnexpectedEOF
+			}
+			<-body.entered
+			payload, err := encodeRejectPayload("blocked-upload", ClassMalformed, "request")
+			if err != nil {
+				return err
+			}
+			if err := writeRawFrame(sw, typeReject, payload); err != nil {
+				return err
+			}
+			fr, err = decodeFrame(sr)
+			if err == nil && fr.typ != typeBodyEnd {
+				return io.ErrUnexpectedEOF
+			}
+			return err
+		}()
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	req := validGET("blocked-upload", "/api/state")
+	req.Body = body
+	_, err := client.RoundTrip(ctx, req)
+	wantReject(t, err, ClassMalformed)
+	client.mu.Lock()
+	remaining := len(client.pending)
+	client.mu.Unlock()
+	if remaining != 0 {
+		t.Fatal("rejected call remained pending")
+	}
+	select {
+	case <-body.closed:
+		t.Fatal("upload must remain blocked until rejection returns")
+	default:
+	}
+	body.unblock()
+	select {
+	case err := <-peerDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("peer did not finish reading the released upload")
+	}
+	select {
+	case <-body.closed:
+	case <-ctx.Done():
+		t.Fatal("upload reader was not closed")
+	}
+}
+
+type rejectGatedBody struct {
+	entered, release, closed chan struct{}
+	once                     sync.Once
+}
+
+func (b *rejectGatedBody) Read([]byte) (int, error) {
+	close(b.entered)
+	<-b.release
+	return 0, io.EOF
+}
+func (b *rejectGatedBody) Close() error { close(b.closed); return nil }
+func (b *rejectGatedBody) unblock()     { b.once.Do(func() { close(b.release) }) }
+
+func TestReadLoopAlreadyCancelled(t *testing.T) {
+	r := &cancelReadProbe{}
+	c := NewConn(r, io.Discard, RoleInitiator)
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.readLoop(ctx, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("readLoop = %v, want context.Canceled", err)
+	}
+	if r.reads != 0 {
+		t.Fatal("cancelled loop read from the transport")
+	}
+}
+
+type cancelReadProbe struct{ reads int }
+
+func (r *cancelReadProbe) Read([]byte) (int, error) { r.reads++; return 0, io.EOF }
 
 func writeRawFrame(w io.Writer, typ uint8, payload []byte) error {
 	var hdr [frameHeaderSize]byte

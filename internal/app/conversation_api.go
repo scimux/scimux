@@ -776,6 +776,9 @@ func (a *app) claudeWorkerChatInto(resp map[string]any, n *Node, state sessionwo
 			resp["perm_reason"] = pending.Reason
 		}
 	}
+	if state.ClaudeInteraction != nil {
+		resp["claude_interaction"] = *state.ClaudeInteraction
+	}
 }
 
 // projectTurns rewrites each turn's attachment markers (internal/asset.Project)
@@ -956,6 +959,20 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 			attn = ""
 		}
 	}
+	var claudeInteraction sessionworker.InteractionView
+	claudeInteractionOwned := false
+	if agent == "claude" && sup == claudeSupStrict {
+		if view, ok := a.claudeInteractionView(n); ok {
+			claudeInteraction = view
+			claudeInteractionOwned = true
+			// The chat poll can race ahead of the supervisor. A pending or
+			// claimed interaction is attention even when the stored attn map
+			// still names the visible permission dialog.
+			if !view.NativeKeys && interactionNeedsAttention(view.Phase) {
+				attn = "question"
+			}
+		}
+	}
 
 	// Diagnostics: where the chat content comes from and why attention (or
 	// its absence) looks the way it does — so a missed question is
@@ -1103,6 +1120,9 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 				resp["perm_reason"] = "A dialog is visible but its options could not be read safely. Open Terminal to respond."
 			}
 		}
+		if claudeInteractionOwned {
+			resp["claude_interaction"] = claudeInteraction
+		}
 	}
 }
 
@@ -1195,6 +1215,10 @@ func (a *app) handleKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.refuseEnded(w, n) {
+		return
+	}
+	if n.Agent == "claude" && a.claudeInteractionBlocksNativeKey(n) {
+		http.Error(w, "structured interaction owns this request", http.StatusConflict)
 		return
 	}
 	var body struct {

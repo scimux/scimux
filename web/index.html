@@ -384,60 +384,15 @@
 <div class="sheet" id="menu">
   <div class="grab"></div>
   <h3>scimux</h3>
-  <!-- Remote access is first on purpose: a paired device holds
-       SSH-equivalent authority on this computer, so the list of who holds it
-       is not a setting to be found below the version check. -->
-  <div class="sect" id="m_remote" hidden>
-    <div class="k">Remote access</div>
-    <div id="m_devices"></div>
-    <!-- Hidden until a status read says this computer could actually
-         complete a pairing. Minting is entirely local, so an unenrolled
-         computer would otherwise hand out a code and a QR for a meeting
-         that can never happen. #m_pair_note says why the button is not
-         there; a control that vanishes without a word reads as a bug. -->
-    <button class="cta" id="m_pair" hidden>Pair a device</button>
-    <div id="m_pair_note" hidden></div>
-    <!-- The counterpart to a device revoke: enrolling this computer was
-         one-way until F1, and an enrollment nobody can hand back is not
-         something to ask someone to try. -->
-    <!-- Only ever revealed on a device with a Home Screen (iPhone, iPad)
-         that reached scimux over the tunnel and is not already an icon;
-         anywhere else the advice is nonsense. The offer below is made
-         once on its own, and this is where it lives afterwards. -->
-    <button class="cta" id="m_homescreen" hidden>Add to Home Screen</button>
-    <button class="cta" id="m_unlink" hidden>Unlink from the rendezvous</button>
-    <div id="m_unlink_note" hidden></div>
-  </div>
-  <div class="sect">
+  <details class="sect menu-section" id="m_about" open>
+    <summary>ABOUT</summary>
+    <div class="hnote" id="m_description">scimux supervises agent chats from a local web page.</div>
     <div class="item"><span>Version</span><span class="tag" id="m_version">—</span>
       <button id="m_check" aria-label="check for updates" title="check for updates">&#8635;</button></div>
     <div class="item" id="m_result" hidden><span id="m_reltext"></span>
       <a class="tag" id="m_relurl" target="_blank" rel="noopener">release page</a></div>
     <button class="cta" id="m_apply" hidden>Install update</button>
     <div id="m_notes" hidden></div>
-  </div>
-  <!-- Which agent CLIs this computer actually has, and at which version.
-       The new-activity dialog offers models, so it cannot say that a harness
-       is installed-but-old; drift is what explains an agent that started
-       behaving differently. The explicit check also refreshes local model
-       catalogs and checks scimux itself; opening a menu must not call seven
-       registries or rerun every CLI discovery command. -->
-  <div class="sect">
-    <div class="k">Agent harnesses</div>
-    <div class="hnote">Provider data use and retention depend on your plan and privacy settings. Review the links below; Grok CLI also offers <code>/privacy</code> controls.</div>
-    <div id="m_harnesses"></div>
-    <label class="hswitch" id="m_vibe_inspect_row" hidden><input type="checkbox" id="m_vibe_inspect" autocomplete="off"> Inspect Mistral Vibe model and thinking choices on the next update check (opens a temporary local session).</label>
-    <button class="cta" id="m_hcheck">Check for harness updates</button>
-    <div id="m_hnote" hidden></div>
-  </div>
-  <div class="sect" id="m_attachment_settings">
-    <div class="k">Attachments</div>
-    <label class="hswitch"><input type="checkbox" id="m_external_attachments"> Allow agent attachments outside the workspace</label>
-    <div class="hnote" id="m_external_attachments_note">Allow files referenced by agents outside a chat’s working directory to be copied into its history. Imported files are available to devices that can access that chat.</div>
-    <label class="hswitch"><input type="checkbox" id="m_accent_harness_logos"> Use accent colors for CLI harnesses logos</label>
-  </div>
-  <div class="sect">
-    <div class="k">About</div>
     <!-- Said here and not only in the README because this is where a user
          asks "what is this thing?" while it is running. scimux supervises
          agents it did not write, against accounts it cannot see: the vendor
@@ -467,7 +422,43 @@
     <div class="item"><span>Nayuki QR generator (pairing)</span><button class="tag lic" data-lic="qrcodegen">MIT</button></div>
     <div class="item"><span>Font Awesome Free (interface icons)</span><button class="tag lic" data-lic="fontawesome">CC BY 4.0</button></div>
     <pre id="m_lictext" hidden></pre>
-  </div>
+  </details>
+  <details class="sect menu-section" id="m_remote" hidden>
+    <summary>REMOTE</summary>
+    <div id="m_devices"></div>
+    <!-- Hidden until a status read says this computer could actually
+         complete a pairing. Minting is entirely local, so an unenrolled
+         computer would otherwise hand out a code and a QR for a meeting
+         that can never happen. #m_pair_note says why the button is not
+         there; a control that vanishes without a word reads as a bug. -->
+    <button class="cta" id="m_pair" hidden>Pair a device</button>
+    <div id="m_pair_note" hidden></div>
+    <!-- The counterpart to a device revoke: enrolling this computer was
+         one-way until F1, and an enrollment nobody can hand back is not
+         something to ask someone to try. -->
+    <!-- Only ever revealed on a device with a Home Screen (iPhone, iPad)
+         that reached scimux over the tunnel and is not already an icon;
+         anywhere else the advice is nonsense. The offer below is made
+         once on its own, and this is where it lives afterwards. -->
+    <button class="cta" id="m_homescreen" hidden>Add to Home Screen</button>
+    <button class="cta" id="m_unlink" hidden>Unlink from the rendezvous</button>
+    <div id="m_unlink_note" hidden></div>
+  </details>
+  <details class="sect menu-section" id="m_harness_section">
+    <summary>HARNESSES</summary>
+    <div class="hnote">Provider data use and retention depend on your plan and privacy settings. Review the links below; Grok CLI also offers <code>/privacy</code> controls.</div>
+    <div id="m_harnesses"></div>
+    <label class="hswitch" id="m_vibe_inspect_row" hidden><input type="checkbox" id="m_vibe_inspect" autocomplete="off"> Inspect Mistral Vibe model and thinking choices on the next update check (opens a temporary local session).</label>
+    <div id="m_hnote" hidden></div>
+    <button class="cta" id="m_hcheck">Check for updates</button>
+  </details>
+  <details class="sect menu-section" id="m_attachment_settings">
+    <summary>PREFERENCES</summary>
+    <label class="hswitch"><input type="checkbox" id="m_external_attachments"> Allow agent attachments outside the workspace</label>
+    <div class="hnote" id="m_external_attachments_note">Allow files referenced by agents outside a chat’s working directory to be copied into its history. Imported files are available to devices that can access that chat.</div>
+    <label class="hswitch"><input type="checkbox" id="m_accent_harness_logos"> Use accent colors for CLI harnesses logos</label>
+  </details>
+
 </div>
 
 <div class="assetpreview" id="assetpreview" role="dialog" aria-modal="true" aria-labelledby="assetpreview_title" hidden>

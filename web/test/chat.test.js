@@ -53,6 +53,7 @@ import {
    send-to strip). Mechanical import-path move from chat.js. */
 import {
   ASSET_REF_RE,
+  esc,
   stripAssetRefs,
 } from "../js/format.js";
 /* Namespace import for symbols a red commit adds: a missing *named* import is a
@@ -111,12 +112,97 @@ test("bookmark marker resolves durable turns and collapses duplicate section usa
   assert.deepEqual(model.destinations.map(x => x.section_id), ["s1", "s2"]);
 });
 
-test("bookmark marker supports legacy node/time/text bookmarks and hides when deleted", () => {
+test("bookmark marker supports legacy node/time/text bookmarks and note references", () => {
   const turn = { time: "2026-09-15T12:00:00Z", text: "legacy" };
   const bookmark = { t: "b1", node: "lane-a", turnTime: turn.time, text: turn.text };
   const usage = { note_id: "n1", section_id: "s1", reference_id: "r1", source: { node: "lane-a", turnTime: turn.time } };
-  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], [usage]).destinations.length, 1);
-  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [], [usage]), null);
+  const other = { t: "nope", node: "lane-b", turnTime: turn.time, text: turn.text };
+  const matched = chatmod.bookmarkMarkerModel(turn, "lane-a", [other, bookmark], [usage]);
+  assert.equal(matched.bookmark, bookmark);
+  assert.equal(matched.destinations.length, 1);
+  assert.equal(matched.destinations[0], usage);
+  const kept = chatmod.bookmarkMarkerModel(turn, "lane-a", [], [usage]);
+  assert.ok(kept, "a legacy note reference keeps the marker after the bookmark is deleted");
+  assert.equal(kept.bookmark, undefined);
+  assert.equal(kept.destinations.length, 1);
+  assert.equal(kept.destinations[0], usage);
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [], []), null);
+  const wrongText = { t: "b2", node: "lane-a", turnTime: turn.time, text: "different" };
+  assert.equal(chatmod.bookmarkMarkerModel(turn, "lane-a", [wrongText], []), null);
+  const only = chatmod.bookmarkMarkerModel(turn, "lane-a", [bookmark], []);
+  assert.equal(only.bookmark, bookmark);
+  assert.deepEqual(only.destinations, []);
+});
+
+test("note references resolve without a bookmark and ignore unrelated addresses", () => {
+  const turn = { uid: "u1", segment: 2, record: 7, time: "2026-10-01T00:00:00Z", text: "answer" };
+  const durable = {
+    note_id: "n1", section_id: "s1", reference_id: "durable",
+    source: { uid: "u1", segment: 2, record: 7, node: "elsewhere", turnTime: "1999-01-01T00:00:00Z" },
+  };
+  const legacy = {
+    note_id: "n2", section_id: "s2", reference_id: "legacy",
+    source: { node: "lane-a", turnTime: turn.time },
+  };
+  const unrelated = [
+    { note_id: "uid", section_id: "s", reference_id: "bad-uid", source: { uid: "other", segment: 2, record: 7, node: "lane-a", turnTime: turn.time } },
+    { note_id: "seg", section_id: "s", reference_id: "bad-segment", source: { uid: "u1", segment: 9, record: 7, node: "lane-a", turnTime: turn.time } },
+    { note_id: "rec", section_id: "s", reference_id: "bad-record", source: { uid: "u1", segment: 2, record: 8, node: "lane-a", turnTime: turn.time } },
+    { note_id: "node", section_id: "s", reference_id: "bad-node", source: { node: "other", turnTime: turn.time } },
+    { note_id: "time", section_id: "s", reference_id: "bad-time", source: { node: "lane-a", turnTime: "1999-01-01T00:00:00Z" } },
+    null,
+    {},
+  ];
+  const model = chatmod.bookmarkMarkerModel(turn, "lane-a", [], [durable, legacy, ...unrelated]);
+  assert.ok(model, "durable and legacy note references survive bookmark deletion");
+  assert.equal(model.bookmark, undefined);
+  assert.deepEqual(model.destinations.map(d => d.reference_id), ["durable", "legacy"]);
+  const bare = { text: "no clock" };
+  const emptyTime = { note_id: "n0", section_id: "s0", reference_id: "empty-time", source: { node: "lane-a", turnTime: "" } };
+  const stamped = { note_id: "nT", section_id: "sT", reference_id: "stamped", source: { node: "lane-a", turnTime: "2020-01-01T00:00:00Z" } };
+  const durableOnBare = { note_id: "nD", section_id: "sD", reference_id: "has-uid", source: { uid: "u1", segment: 0, record: 0, node: "lane-a", turnTime: "" } };
+  assert.deepEqual(
+    chatmod.bookmarkMarkerModel(bare, "lane-a", [], [emptyTime, stamped, durableOnBare]).destinations.map(d => d.reference_id),
+    ["empty-time"],
+  );
+});
+
+test("duplicate section references collapse and distinct notes stay in order", () => {
+  const turn = { uid: "u1", segment: 1, record: 1, time: "t", text: "x" };
+  const source = { uid: "u1", segment: 1, record: 1 };
+  const usages = [
+    { note_id: "n1", note_title: "Alpha", section_id: "s1", section_title: "One", reference_id: "r1", source },
+    { note_id: "n1", note_title: "Alpha", section_id: "s1", section_title: "One", reference_id: "r2", source },
+    { note_id: "n2", note_title: "Beta", section_id: "s1", section_title: "One", reference_id: "r3", source },
+    { note_id: "n1", note_title: "Alpha", section_id: "s2", section_title: "Two", reference_id: "r4", source },
+  ];
+  const model = chatmod.bookmarkMarkerModel(turn, "n", [], usages);
+  assert.ok(model, "references alone are enough to build destinations");
+  assert.deepEqual(model.destinations.map(d => d.reference_id), ["r1", "r3", "r4"]);
+});
+
+test("reference-only marker uses the generic bookmark icon", () => {
+  const one = chatmod.bubbleMarkersHTML({ destinations: [{}] }, { iconBookmark: "BOOK" });
+  const two = chatmod.bubbleMarkersHTML({ destinations: [{}, {}] }, { iconBookmark: "BOOK" });
+  assert.match(one, /data-bmarker="bookmark"/);
+  assert.match(one, />BOOK</);
+  assert.match(one, /aria-label="Open bookmark destination"/);
+  assert.doesNotMatch(one, /bmarkercount/);
+  assert.doesNotMatch(one, /aria-haspopup/);
+  assert.match(two, /aria-label="Open bookmark destination"/);
+  assert.match(two, /aria-haspopup="menu"/);
+  assert.match(two, /bmarkercount[^>]*>2</);
+  const bookmarkOnly = chatmod.bubbleMarkersHTML({ bookmark: { t: "b1" } }, { iconBookmark: "BOOK" });
+  assert.match(bookmarkOnly, /aria-label="Open bookmark"/);
+  assert.match(bookmarkOnly, />BOOK</);
+  assert.doesNotMatch(bookmarkOnly, /bmarkercount/);
+  const withSend = chatmod.bubbleMarkersHTML({
+    destinations: [{}], sentTo: [{ id: "l1" }],
+  }, { iconBookmark: "BOOK", iconInto: "SEND" });
+  assert.match(withSend, /data-bmarker="bookmark"/);
+  assert.match(withSend, /data-bmarker="sendto"/);
+  assert.match(withSend, />BOOK</);
+  assert.match(withSend, /rot180[^>]*>SEND/);
 });
 
 test("bookmark marker HTML is compact and only counts multiple destinations", () => {
@@ -5681,6 +5767,159 @@ test("Send-to marker jumps directly once and offers a chooser for several", asyn
   assert.equal(choices[0].choices.length, 2);
 });
 
+function markerChunk(html, bk){
+  const parts = String(html).split('data-bk="');
+  return parts.find(part => part.startsWith(`${bk}"`)) || "";
+}
+
+function clickBubbleMarker(ctx, bk, kind){
+  const turn = el("div", { className: "turn", dataset: { bk } });
+  const marker = el("button", { dataset: { bmarker: kind } });
+  turn.appendChild(marker);
+  ctx.roots.msgs.appendChild(turn);
+  firstListener(ctx.roots.msgs, "click")({ target: marker });
+}
+
+test("bookmark icon stays for note references after deletion and on loaded history", async () => {
+  const liveTurn = {
+    role: "assistant", text: "live answer", time: "2026-10-02T00:00:00Z",
+    uid: "uid-live", segment: 3, record: 9,
+  };
+  const bookmarkOnlyTurn = { role: "user", text: "keep this", time: "2026-10-03T00:00:00Z" };
+  const histTurn = { role: "assistant", text: "old answer", time: "2026-08-02T00:00:00Z" };
+  const liveUsage = {
+    note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings",
+    reference_id: "r-live",
+    source: { uid: "uid-live", segment: 3, record: 9, node: "elsewhere", turnTime: "1999-01-01T00:00:00Z" },
+  };
+  const histUsage = {
+    note_id: "n1", note_title: "Research", section_id: "s-old", section_title: "Earlier",
+    reference_id: "r-hist", source: { node: "n1", turnTime: histTurn.time },
+  };
+  let bookmarks = [
+    { t: "bm-live", uid: "uid-live", segment: 3, record: 9, node: "n1", turnTime: liveTurn.time, text: liveTurn.text },
+    { t: "bm-hist", node: "n1", turnTime: histTurn.time, text: histTurn.text },
+    { t: "bm-only", node: "n1", turnTime: bookmarkOnlyTurn.time, text: bookmarkOnlyTurn.text },
+  ];
+  let usages = [liveUsage, histUsage];
+  const links = [{
+    id: "l1", source: { uid: "uid-live", segment: 3, record: 9 },
+    destination: { node: "d1", text: "sent" },
+  }];
+  let generation = 1;
+  let usageVersion = 1;
+  const bookmarkOpens = [];
+  const usageOpens = [];
+  const sheets = [];
+  const jumps = [];
+  const ctx = makeFeature({
+    histSegs: [{
+      start: "2026-08-01T00:00:00Z", seam: "2026-08-01T00:00:00Z", reason: "clear",
+      turns: [histTurn],
+    }],
+    chatPayload: {
+      turns: [liveTurn, bookmarkOnlyTurn],
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-10-01T00:00:00Z", prior_turns: 1, assets: {},
+    },
+    deps: {
+      bookmarks: () => bookmarks,
+      noteUsages: () => usages,
+      forwardLinks: () => links,
+      markerVersion: () => `${generation}:${usageVersion}`,
+      openBookmark: t => bookmarkOpens.push(t),
+      openNoteUsage: usage => usageOpens.push(usage),
+      openChoiceList: opts => sheets.push(opts),
+      jumpToChatAddress: address => jumps.push(address),
+      icons: {
+        ICON_TERM: "T", ICON_CHECK: "✓", ICON_CHEV_UP: "↑", ICON_CHEV_DOWN: "↓",
+        ICON_BRANCH: "B", ICON_INTO: "SEND", ICON_COPY: "C", ICON_DOWNALL: "↓↓",
+        ICON_FILE: "F", ICON_BUBBLE_BOOKMARK: "BOOK",
+      },
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.loadHistory("n1", "");
+  const rendered = () => ctx.roots.msgs.innerHTML;
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "i:0"), />BOOK</);
+  assert.doesNotMatch(markerChunk(rendered(), "i:0"), /bmarkercount/);
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="sendto"/);
+  assert.match(markerChunk(rendered(), "h:0:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "h:0:0"), />BOOK</);
+  assert.match(markerChunk(rendered(), "i:1"), /aria-label="Open bookmark"/);
+
+  clickBubbleMarker(ctx, "i:0", "bookmark");
+  assert.equal(usageOpens.length, 1);
+  assert.equal(usageOpens[0], liveUsage);
+  assert.deepEqual(bookmarkOpens, []);
+  clickBubbleMarker(ctx, "i:1", "bookmark");
+  assert.deepEqual(bookmarkOpens, ["bm-only"]);
+  clickBubbleMarker(ctx, "i:0", "sendto");
+  assert.deepEqual(jumps, [{ node: "d1", text: "sent" }]);
+
+  bookmarks = bookmarks.filter(b => b.t === "bm-only");
+  generation += 1;
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="bookmark"/,
+    "deleting the bookmark keeps the icon while a note reference remains");
+  assert.match(markerChunk(rendered(), "i:0"), />BOOK</);
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="sendto"/);
+  assert.match(markerChunk(rendered(), "h:0:0"), /data-bmarker="bookmark"/,
+    "a loaded historical turn keeps the same reference marker");
+  assert.match(markerChunk(rendered(), "i:1"), /data-bmarker="bookmark"/);
+
+  usageOpens.length = 0;
+  bookmarkOpens.length = 0;
+  clickBubbleMarker(ctx, "i:0", "bookmark");
+  assert.equal(usageOpens.length, 1);
+  assert.equal(usageOpens[0].reference_id, "r-live");
+  assert.deepEqual(bookmarkOpens, []);
+  clickBubbleMarker(ctx, "h:0:0", "bookmark");
+  assert.equal(usageOpens[1], histUsage);
+
+  const second = {
+    note_id: "n2", note_title: "Risks", section_id: "s2", section_title: "Open",
+    reference_id: "r-live-2", source: { uid: "uid-live", segment: 3, record: 9 },
+  };
+  const duplicate = {
+    note_id: "n1", note_title: "Research", section_id: "s1", section_title: "Findings",
+    reference_id: "r-live-dup", source: { uid: "uid-live", segment: 3, record: 9 },
+  };
+  usages = [liveUsage, duplicate, second, histUsage];
+  usageVersion += 1;
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.match(markerChunk(rendered(), "i:0"), /bmarkercount[^>]*>2</);
+  assert.match(markerChunk(rendered(), "i:0"), /aria-haspopup="menu"/);
+  clickBubbleMarker(ctx, "i:0", "bookmark");
+  assert.equal(sheets.length, 1);
+  assert.equal(sheets[0].title, "Used in…");
+  assert.deepEqual(sheets[0].choices.map(choice => choice.label), [
+    "Research › Findings", "Risks › Open",
+  ]);
+  usageOpens.length = 0;
+  sheets[0].onChoose(sheets[0].choices[1]);
+  assert.equal(usageOpens.length, 1);
+  assert.equal(usageOpens[0], second);
+
+  usages = [];
+  usageVersion += 1;
+  ctx.feature.invalidate();
+  await ctx.feature.render();
+  assert.doesNotMatch(markerChunk(rendered(), "i:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "i:0"), /data-bmarker="sendto"/);
+  assert.doesNotMatch(markerChunk(rendered(), "h:0:0"), /data-bmarker="bookmark"/);
+  assert.match(markerChunk(rendered(), "i:1"), /data-bmarker="bookmark"/);
+  bookmarkOpens.length = 0;
+  usageOpens.length = 0;
+  clickBubbleMarker(ctx, "i:1", "bookmark");
+  assert.deepEqual(bookmarkOpens, ["bm-only"]);
+  assert.deepEqual(usageOpens, []);
+  ctx.feature.destroy();
+});
+
 test("Send-to marker explains when its destination no longer resolves", async () => {
   const toasts = [];
   const links = [{ id: "l1", source: { node: "n1", turnTime: "T" }, destination: { node: "gone" } }];
@@ -6108,4 +6347,306 @@ test("retry button retirement follows the stable failure reason", () => {
   for (const reason of ["", "unreadable", "storage", "outside_workspace", "not_regular", "chat_unavailable", "unknown"]) {
     assert.equal(chatmod.retryFailureRetiresButton(reason), false, reason);
   }
+});
+
+/* Inline attachment labels are substituted only after Markdown rendering. */
+import { md } from "../js/format.js";
+
+function inlineAssetResult(text, assets = {}, deps = {}){
+  const split = splitAssetRefs(text, "n1", assets, deps);
+  return { ...split, body: chatmod.renderMissingImportText(md(split.clean), split.labels) };
+}
+
+const inlineAssets = {
+  a: { name: "overview.md" },
+  b: { name: "chart.png", mime: "image/png" },
+};
+
+test("splitAssetRefs inline: mid-sentence file keeps label and one tile", () => {
+  const r = inlineAssetResult("Created the [research overview](scimux-asset:a), using", inlineAssets);
+  assert.equal(r.body, "<p>Created the research overview, using</p>");
+  assert.equal((r.html.match(/<a /g) || []).length, 1);
+  assert.match(r.html, /overview\.md/);
+});
+
+test("splitAssetRefs inline: mid-sentence image keeps alt and thumbnail", () => {
+  const r = inlineAssetResult("See ![the diagram](scimux-asset:b) here", inlineAssets);
+  assert.equal(r.body, "<p>See the diagram here</p>");
+  assert.match(r.html, /class="attthumb"/);
+});
+
+test("splitAssetRefs inline: image alone has no body", () => {
+  const r = splitAssetRefs("![the diagram](scimux-asset:b)", "n1", inlineAssets);
+  assert.equal(r.clean, "");
+  assert.deepEqual(r.labels, []);
+  assert.match(r.html, /attthumb/);
+});
+
+for (const [name, newline] of [["LF", "\n"], ["CR", "\r"], ["CRLF", "\r\n"]]) {
+  test(`splitAssetRefs inline: user attachment on its own line (${name})`, () => {
+    const r = inlineAssetResult(`look${newline}${newline}[report.pdf](scimux-asset:a)`, inlineAssets);
+    assert.equal(r.body, "<p>look</p>");
+    assert.doesNotMatch(r.body, /report\.pdf/);
+    assert.match(r.html, /attfile/);
+    assert.deepEqual(r.labels, []);
+  });
+}
+
+test("splitAssetRefs inline: refs and whitespace alone are all dropped", () => {
+  const r = splitAssetRefs(" \t[a.md](scimux-asset:a) \t ![chart](scimux-asset:b) \t", "n1", inlineAssets);
+  assert.equal(r.clean, "");
+  assert.deepEqual(r.labels, []);
+  assert.equal((r.html.match(/<a /g) || []).length, 2);
+});
+
+test("splitAssetRefs inline: list marker counts as text", () => {
+  const r = inlineAssetResult("- [a.md](scimux-asset:a)", inlineAssets);
+  assert.equal(r.body, "<ul><li>a.md</li></ul>");
+});
+
+for (const [name, label, assets, expected] of [
+  ["empty label", "", inlineAssets, "overview.md"],
+  ["whitespace label", " \t ", inlineAssets, "overview.md"],
+  ["missing record", "", undefined, "file"],
+  ["empty record name", "", { a: { name: "" } }, "file"],
+]) {
+  test(`splitAssetRefs inline: fallback for ${name}`, () => {
+    const r = inlineAssetResult(`See [${label}](scimux-asset:a).`, assets);
+    assert.equal(r.body, `<p>See ${expected}.</p>`);
+  });
+}
+
+for (const [label, expected] of [
+  ['<b>"x"</b>', '&lt;b&gt;&quot;x&quot;&lt;/b&gt;'],
+  ["*x*", "*x*"],
+  ["`x`", "`x`"],
+  [" scimux-import:1:0:not_found scimux-asset:a ", " scimux-import:1:0:not_found scimux-asset:a "],
+]) {
+  test(`splitAssetRefs inline: inert label ${label}`, () => {
+    const r = inlineAssetResult(`See [${label}](scimux-asset:a).`, inlineAssets);
+    assert.equal(r.body, `<p>See ${expected}.</p>`);
+    assert.doesNotMatch(r.body, /<b>|<em>|<code>|missingfile|attrow/);
+    assert.equal(r.labels.length, 1);
+  });
+}
+
+test("splitAssetRefs inline: source tokens survive without collisions", () => {
+  const original = "\uE0000\uE001 \uE0001\uE001";
+  const source = `${original} [overview](scimux-asset:a) and [diagram](scimux-asset:b)`;
+  const r = inlineAssetResult(source, inlineAssets);
+  assert.equal(r.body, `<p>${original} overview and diagram</p>`);
+  assert.equal(new Set(r.labels.map(item => item.token)).size, 2);
+  for (const item of r.labels) assert.equal(source.includes(item.token), false);
+});
+
+test("splitAssetRefs inline: asset and missing import tokens coexist", () => {
+  const a = splitAssetRefs("See [the overview](scimux-asset:a) and [missing%20notes.md](scimux-import:1:0:not_found).", "n1", inlineAssets);
+  const blocked = chatmod.splitImportRefs(a.clean, "n1");
+  const body = chatmod.renderMissingImportText(
+    chatmod.renderMissingImportText(md(blocked.clean), blocked.missing), a.labels);
+  assert.equal(body, '<p>See the overview and <span class="missingfile">missing notes.md</span>.</p>');
+  assert.notEqual(a.labels[0].token, blocked.missing[0].token);
+});
+
+test("splitAssetRefs inline: repeated id keeps both labels and one tile", () => {
+  const r = inlineAssetResult("See [first](scimux-asset:a) then [second](scimux-asset:a).", inlineAssets);
+  assert.equal(r.body, "<p>See first then second.</p>");
+  assert.equal((r.html.match(/<a /g) || []).length, 1);
+});
+
+test("splitAssetRefs inline: distinct tiles follow first appearance", () => {
+  const r = inlineAssetResult("[first](scimux-asset:a), [diagram](scimux-asset:b), [again](scimux-asset:a)", inlineAssets);
+  assert.equal(r.body, "<p>first, diagram, again</p>");
+  assert.deepEqual([...r.html.matchAll(/href="[^"]*\/assets\/([^"/]+)"/g)].map(m => m[1]), ["a", "b"]);
+});
+
+for (const text of ["plain text", "", null]) {
+  test(`splitAssetRefs inline: stable no-ref shape for ${JSON.stringify(text)}`, () => {
+    assert.deepEqual(splitAssetRefs(text, "n1", {}), { clean: text || "", html: "", labels: [] });
+  });
+}
+
+test("splitAssetRefs inline: injected regex and escape apply to label", () => {
+  const r = splitAssetRefs("See [overview](scimux-asset:a)", "n1", inlineAssets, {
+    assetRefRe: /(!?)\[([^\]]*)\]\(scimux-asset:([\w-]+)\)/g,
+    escape: value => `ESC(${value})`,
+  });
+  assert.equal(chatmod.renderMissingImportText(md(r.clean), r.labels), "<p>See ESC(overview)</p>");
+});
+
+test("splitAssetRefs inline: live render keeps media only for image-only turn", async () => {
+  const ctx = makeFeature({ chatPayload: {
+    ...defaultChatPayload(),
+    turns: [
+      { role: "assistant", text: "![diagram](scimux-asset:b)" },
+      { role: "assistant", text: "See [research overview](scimux-asset:a), using" },
+    ],
+    assets: inlineAssets,
+  } });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const html = ctx.roots.msgs.innerHTML;
+  assert.match(html, /class="turn assistant media"/);
+  assert.match(html, /class="turn assistant"/);
+  assert.match(html, /See research overview, using/);
+  ctx.feature.destroy();
+});
+
+test("splitAssetRefs inline: absent asset map uses file fallback", () => {
+  const r = splitAssetRefs("See [](scimux-asset:a).", "n1", null);
+  assert.equal(chatmod.renderMissingImportText(md(r.clean), r.labels), "<p>See file.</p>");
+  assert.match(r.html, /missing/);
+});
+
+test("assetBubbleBodyHTML: default markdown renders inline labels and tiles", () => {
+  assert.equal(typeof chatmod.assetBubbleBodyHTML, "function", "assetBubbleBodyHTML must be exported");
+  const html = chatmod.assetBubbleBodyHTML("Created **the** [*overview*](scimux-asset:a).", "n1", inlineAssets);
+  assert.match(html, /^<p>Created <strong>the<\/strong> \*overview\*\.<\/p><div class="attrow">/);
+  assert.doesNotMatch(html, /<em>/);
+  assert.match(html, /download="overview\.md"/);
+});
+
+test("assetBubbleBodyHTML: injected markdown receives clean tokens", () => {
+  assert.equal(typeof chatmod.assetBubbleBodyHTML, "function", "assetBubbleBodyHTML must be exported");
+  let input;
+  const html = chatmod.assetBubbleBodyHTML("See [<diagram>](scimux-asset:b).", "n1", inlineAssets, {
+    markdown: clean => { input = clean; return `<section>${clean}</section>`; },
+  });
+  assert.doesNotMatch(input, /<diagram>|scimux-asset/);
+  assert.match(html, /^<section>See &lt;diagram&gt;\.<\/section><div class="attrow">/);
+  assert.match(html, /class="attthumb"/);
+});
+
+for (const text of ["", null]) {
+  test(`assetBubbleBodyHTML: handles ${JSON.stringify(text)} text`, () => {
+    assert.equal(typeof chatmod.assetBubbleBodyHTML, "function", "assetBubbleBodyHTML must be exported");
+    assert.equal(chatmod.assetBubbleBodyHTML(text, "n1", {}), "");
+  });
+}
+
+test("assetBubbleBodyHTML: preview delegates its bubble body", () => {
+  const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+  const start = appSrc.indexOf("const rows = turns.map");
+  const preview = appSrc.slice(start, appSrc.indexOf('$("#previewbody").innerHTML', start));
+  assert.match(preview, /\$\{assetBubbleBodyHTML\(/, "preview bubble must call assetBubbleBodyHTML(");
+  assert.doesNotMatch(preview, /md\(s\.clean\)/);
+});
+
+
+const fencedAssetLine = '- want := "see [the report](scimux-asset:a)"';
+const fencedAssetText = `\`\`\`diff\n${fencedAssetLine}\n\`\`\``;
+
+function fencedCodeContents(html){
+  return [...html.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)].map(m => m[1]);
+}
+
+test("splitAssetRefs fenced: known id stays verbatim", () => {
+  const r = splitAssetRefs(fencedAssetText, "n1", inlineAssets);
+  assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(fencedAssetText, "n1", inlineAssets)), [esc(fencedAssetLine)]);
+  assert.equal(r.clean, fencedAssetText);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.labels, []);
+});
+
+test("splitAssetRefs fenced: unknown id makes no unavailable row", () => {
+  const text = fencedAssetText.replaceAll("scimux-asset:a", "scimux-asset:unknown");
+  const html = chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets);
+  assert.doesNotMatch(html, /unavailable|attrow/);
+  assert.deepEqual(fencedCodeContents(html), [esc(fencedAssetLine.replaceAll("scimux-asset:a", "scimux-asset:unknown"))]);
+  assert.equal(splitAssetRefs(text, "n1", inlineAssets).html, "");
+});
+
+test("splitAssetRefs fenced: standalone marker line is retained", () => {
+  const line = "[x](scimux-asset:a)";
+  const text = `\`\`\`\n${line}\n\`\`\``;
+  assert.equal(splitAssetRefs(text, "n1", inlineAssets).clean, text);
+  assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets)), [esc(line)]);
+});
+
+test("splitAssetRefs fenced: blank lines stay inside and collapse outside", () => {
+  const lines = `${fencedAssetLine}\n\n\n\nend`;
+  const fence = `\`\`\`diff\n${lines}\n\`\`\``;
+  const r = inlineAssetResult(`before\n\n\n\nSee [report](scimux-asset:a).\n${fence}\n\n\n\nafter`, inlineAssets);
+  assert.deepEqual(fencedCodeContents(r.body), [esc(lines)]);
+  assert.ok(r.clean.startsWith("before\n\nSee "));
+  assert.ok(r.clean.endsWith("```\n\nafter"));
+});
+
+test("splitAssetRefs fenced: only outside occurrences create tiles", () => {
+  const lines = `${fencedAssetLine}\n![diagram](scimux-asset:b)`;
+  const fence = `\`\`\`diff\n${lines}\n\`\`\``;
+  const r = inlineAssetResult(`${fence}\nSee [outside report](scimux-asset:a).`, inlineAssets);
+  assert.deepEqual(fencedCodeContents(r.body), [esc(lines)]);
+  assert.match(r.body, /<p>See outside report\.<\/p>/);
+  assert.equal((r.html.match(/<a /g) || []).length, 1);
+  assert.doesNotMatch(r.html, /chart\.png/);
+});
+
+test("splitAssetRefs fenced: unclosed fence includes appended attachment", () => {
+  const lines = `sample\n\n[report.pdf](scimux-asset:a)\n\n`;
+  const text = `\`\`\`text\n${lines}`;
+  const r = splitAssetRefs(text, "n1", inlineAssets);
+  assert.equal(r.clean, text);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.labels, []);
+  assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets)), [esc(lines)]);
+});
+
+test("splitAssetRefs fenced: indented info opener and opener marker are preserved", () => {
+  const text = "  ```go [opener](scimux-asset:a)\nvalue\n  ``` [closer](scimux-asset:b)";
+  const r = splitAssetRefs(text, "n1", inlineAssets);
+  assert.equal(r.clean, text);
+  assert.equal(r.html, "");
+  assert.deepEqual(r.labels, []);
+});
+
+for (const [name, newline] of [["CR", "\r"], ["CRLF", "\r\n"]]) {
+  test(`splitAssetRefs fenced: ${name} renders like LF`, () => {
+    const text = fencedAssetText.replaceAll("\n", newline);
+    assert.equal(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets), md(fencedAssetText));
+    assert.equal(splitAssetRefs(text, "n1", inlineAssets).clean, text);
+  });
+}
+
+test("splitAssetRefs fenced: verbatim property across synthetic fixtures", () => {
+  const marker = "[x](scimux-asset:a)";
+  const fixtures = [
+    [fencedAssetText, [fencedAssetLine]],
+    [`\`\`\`\n${marker}\n\`\`\``, [marker]],
+    [`  \`\`\`go\n${marker}\n  \`\`\``, [marker]],
+    [`\`\`\`text ${marker}\n<&>\n\`\`\``, ["<&>"]],
+    [`\`\`\`\n${marker}\n\n\n\nend\n\`\`\``, [`${marker}\n\n\n\nend`]],
+    [`\`\`\`\n${marker}\n\n`, [`${marker}\n\n`]],
+    [fencedAssetText.replaceAll("\n", "\r"), [fencedAssetLine]],
+    [fencedAssetText.replaceAll("\n", "\r\n"), [fencedAssetLine]],
+    [`${fencedAssetText}\nprose\n\`\`\`text\n${marker}\n\`\`\``, [fencedAssetLine, marker]],
+    [`${fencedAssetText}\n\`\`\`text\n${marker}\n\`\`\``, [fencedAssetLine, marker]],
+  ];
+  for (const [text, contents] of fixtures) {
+    assert.deepEqual(fencedCodeContents(chatmod.assetBubbleBodyHTML(text, "n1", inlineAssets)), contents.map(esc), text);
+  }
+});
+
+test("splitAssetRefs fenced: synthetic report reproduction has six quoted markers", () => {
+  const diff = Array.from({ length: 4 }, (_, i) => `- want := "here: [sketch ${i}](scimux-asset:quote_${i})"`).join("\n");
+  const plain = "[report](scimux-asset:quote_4)\n![diagram](scimux-asset:quote_5)";
+  const text = `The synthetic checks preserve the quoted fixtures.\n\n\`\`\`diff\n${diff}\n\`\`\`\n\nResults are recorded below.\n\n\`\`\`text\n${plain}\n\`\`\``;
+  const html = chatmod.assetBubbleBodyHTML(text, "n1", {});
+  assert.doesNotMatch(html, /<a |unavailable|attrow/);
+  assert.deepEqual(fencedCodeContents(html), [esc(diff), esc(plain)]);
+});
+
+test("splitAssetRefs fenced: live render has no media class or attachment row", async () => {
+  const ctx = makeFeature({ chatPayload: {
+    ...defaultChatPayload(),
+    turns: [{ role: "assistant", text: fencedAssetText }],
+    assets: inlineAssets,
+  } });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  const html = ctx.roots.msgs.innerHTML;
+  assert.doesNotMatch(html, /attrow|class="turn assistant media"/);
+  assert.match(html, /class="turn assistant"/);
+  assert.deepEqual(fencedCodeContents(html), [esc(fencedAssetLine)]);
+  ctx.feature.destroy();
 });

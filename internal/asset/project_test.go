@@ -133,7 +133,7 @@ func TestProjectAgentPaths_RewritesImageLink(t *testing.T) {
 		"results/sketch.png": {ID: "a_5", Name: "sketch.png"},
 	}
 	got := ProjectAgentPaths("here: ![a sketch](results/sketch.png)", byPath)
-	want := "here: ![sketch.png](scimux-asset:a_5)"
+	want := "here: ![a sketch](scimux-asset:a_5)"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -144,7 +144,7 @@ func TestProjectAgentPaths_RewritesFileLink(t *testing.T) {
 		"/tmp/gen/report.pdf": {ID: "a_6", Name: "report.pdf"},
 	}
 	got := ProjectAgentPaths("see [the report](/tmp/gen/report.pdf)", byPath)
-	want := "see [report.pdf](scimux-asset:a_6)"
+	want := "see [the report](scimux-asset:a_6)"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -245,7 +245,7 @@ func TestProjectBlockedAgentPathsLeavesFencedExample(t *testing.T) {
 }
 
 func TestProjectAgentPathBindingsUsesFallbackNameAndRejectsMismatchedBinding(t *testing.T) {
-	text := "![one](/tmp/one.png) [two](/tmp/two.txt)"
+	text := "![](/tmp/one.png) [two](/tmp/two.txt)"
 	bound := map[int]sessionlog.AssetEvent{
 		0: {ID: "a_one", SourcePath: "/tmp/one.png"},
 		1: {ID: "a_wrong", SourcePath: "/tmp/other.txt", Name: "other.txt"},
@@ -519,7 +519,7 @@ func TestProjectVisibleBlockedAbsenceDecisions(t *testing.T) {
 	bound := map[int]sessionlog.AssetEvent{
 		0: {ID: "a_keep", Name: "kept.png", SourcePath: "kept.png"},
 	}
-	if got := ProjectVisibleBlocked("![shot](kept.png)", bound, nil, dir, true, 8); got != "![kept.png](scimux-asset:a_keep)" {
+	if got := ProjectVisibleBlocked("![shot](kept.png)", bound, nil, dir, true, 8); got != "![shot](scimux-asset:a_keep)" {
 		t.Fatalf("empty import list = %q", got)
 	}
 }
@@ -659,5 +659,84 @@ func TestProjectVisibleBlockedRetrySizeEligibility(t *testing.T) {
 				t.Fatalf("projection = %q, stored reason = %q; want %q in view only", got, imports[0].Reason, want)
 			}
 		})
+	}
+}
+
+func TestProjectAgentPathsPreservesLabels(t *testing.T) {
+	for _, tc := range []struct{ text, want string }{
+		{"Created [research overview](docs/overview.md), using", "Created [research overview](scimux-asset:a_label), using"},
+		{"See ![the diagram](docs/overview.md).", "See ![the diagram](scimux-asset:a_label)."},
+	} {
+		t.Run(tc.text, func(t *testing.T) {
+			got := ProjectAgentPaths(tc.text, map[string]sessionlog.AssetEvent{
+				"docs/overview.md": {ID: "a_label", Name: "overview.md"},
+			})
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProjectAgentLabelFallbacks(t *testing.T) {
+	for _, projector := range []string{"paths", "bindings"} {
+		for _, label := range []string{"", " \t "} {
+			for _, name := range []string{"report.pdf", ""} {
+				t.Run(projector+"/label="+label+"/name="+name, func(t *testing.T) {
+					ev := sessionlog.AssetEvent{ID: "a_fallback", Name: name, SourcePath: "report.pdf"}
+					text := "See [" + label + "](report.pdf)"
+					wantLabel := name
+					if wantLabel == "" {
+						wantLabel = "asset"
+					}
+					want := "See [" + wantLabel + "](scimux-asset:a_fallback)"
+					var got string
+					if projector == "paths" {
+						got = ProjectAgentPaths(text, map[string]sessionlog.AssetEvent{"report.pdf": ev})
+					} else {
+						got = ProjectAgentPathBindings(text, map[int]sessionlog.AssetEvent{0: ev}, nil)
+					}
+					if got != want {
+						t.Fatalf("got %q, want %q", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestProjectAgentPathBindingsPreservesBoundLabel(t *testing.T) {
+	text := "[unbound](other.md) ![ chosen diagram ](chart.png)"
+	got := ProjectAgentPathBindings(text, map[int]sessionlog.AssetEvent{
+		1: {ID: "a_bound", Name: "chart.png", SourcePath: "chart.png"},
+	}, nil)
+	want := "[unbound](other.md) ![ chosen diagram ](scimux-asset:a_bound)"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestProjectVisibleBlockedEmptyImportsPreservesLabel(t *testing.T) {
+	got := ProjectVisibleBlocked("See [the report](report.pdf)", map[int]sessionlog.AssetEvent{
+		0: {ID: "a_visible", Name: "report.pdf", SourcePath: "report.pdf"},
+	}, nil, t.TempDir(), false, 8)
+	want := "See [the report](scimux-asset:a_visible)"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestProjectAgentPathBindingsNoProjection(t *testing.T) {
+	for _, tc := range []struct {
+		text  string
+		bound map[int]sessionlog.AssetEvent
+	}{
+		{"[report](report.pdf)", nil},
+		{"plain text", map[int]sessionlog.AssetEvent{0: {ID: "a_plain"}}},
+		{"", nil},
+	} {
+		if got := ProjectAgentPathBindings(tc.text, tc.bound, nil); got != tc.text {
+			t.Fatalf("got %q, want unchanged %q", got, tc.text)
+		}
 	}
 }

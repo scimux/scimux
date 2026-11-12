@@ -37,6 +37,7 @@
  *   - GET  /api/nodes/:id/chat?history=1
  *   - GET  /api/nodes/:id/peek[?mode=visible]
  *   - POST /api/nodes/:id/key
+ *   - POST /api/nodes/:id/claude-interaction
  *   - POST /api/nodes/:id/send/resolve
  *   - POST /api/nodes/:id/auto-approve
  *   - PATCH /api/nodes/:id  (description only, from details editor)
@@ -87,6 +88,12 @@ import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
 import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
+import {
+  interactionSignature,
+  interactionBlocksNativeKeys,
+  manualDecisionRowHTML,
+  createClaudeInteractionCard,
+} from "./claude-interaction.js";
 import {
   readPendingForwards,
   clearPendingForwards,
@@ -277,6 +284,7 @@ export function buildChatSignature(parts){
     p.expanded ? "1" : "0",
     p.compacting ? "1" : "0",
     p.elicitationKey || "",
+    p.interactionKey || "",
   ].join("|");
 }
 
@@ -292,23 +300,29 @@ function legacySourceMatches(turn, nodeId, value = {}){
     (!Object.prototype.hasOwnProperty.call(value, "text") || value.text === (turn.text || ""));
 }
 
+/* A note reference addresses the turn by itself. A source that already has a
+   uid never falls back to node and time when that address does not match. */
+function usageSourceMatches(turn, nodeId, usage){
+  const source = (usage && usage.source) || {};
+  const sourceKey = durableSourceKey(source);
+  if (sourceKey) return sourceKey === durableSourceKey(turn);
+  return source.node === nodeId && source.turnTime === (turn.time || "");
+}
+
 export function bookmarkMarkerModel(turn, nodeId, bookmarks = [], usages = []){
   const key = durableSourceKey(turn);
   const bookmark = bookmarks.find(b =>
     (key && durableSourceKey(b) === key) || legacySourceMatches(turn, nodeId, b));
-  if (!bookmark) return null;
-  const bookmarkKey = durableSourceKey(bookmark);
   const seen = new Set();
   const destinations = usages.filter(u => {
-    const source = (u && u.source) || {};
-    return (bookmarkKey && durableSourceKey(source) === bookmarkKey) ||
-      (!bookmarkKey && source.node === bookmark.node && source.turnTime === bookmark.turnTime);
+    return usageSourceMatches(turn, nodeId, u);
   }).filter(u => {
     const k = `${u.note_id || ""}\u0000${u.section_id || ""}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
+  if (!bookmark && !destinations.length) return null;
   return { bookmark, destinations };
 }
 
@@ -338,8 +352,9 @@ export function matchingForwardDestinationTurn(expected, turns = []){
 
 export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = "" } = {}){
   const buttons = [];
-  if (model.bookmark){
-    const n = (model.bookmarkDestinations || model.destinations || []).length;
+  const bookmarkDestinations = model.bookmarkDestinations || model.destinations || [];
+  if (model.bookmark || bookmarkDestinations.length){
+    const n = bookmarkDestinations.length;
     buttons.push(`<button type="button" class="bmarker" data-bmarker="bookmark" aria-label="${n ? "Open bookmark destination" : "Open bookmark"}"${n > 1 ? ` aria-haspopup="menu"` : ""}>${iconBookmark}${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
   }
   if (model.sentTo && model.sentTo.length){
@@ -645,6 +660,29 @@ export function retryFailureRetiresButton(reason){
   return reason === "not_found" || reason === "too_large";
 }
 
+/* Mirror md()'s line-based /^\s*```/ toggle while retaining raw source bytes.
+   The break after a closing line is outside; an unclosed fence reaches EOF. */
+function fencedReferenceSegments(text){
+  const segments = [];
+  const parts = text.split(/(\r\n|\r|\n)/);
+  let inFence = false;
+  let start = 0;
+  let offset = 0;
+  for (let i = 0; i < parts.length; i += 2) {
+    const line = parts[i];
+    if (/^\s*```/.test(line)) {
+      const end = inFence ? offset + line.length : offset;
+      segments.push({ fenced: inFence, text: text.slice(start, end) });
+      start = end;
+      inFence = !inFence;
+    }
+    offset += line.length;
+    if (i + 1 < parts.length) offset += parts[i + 1].length;
+  }
+  segments.push({ fenced: inFence, text: text.slice(start) });
+  return segments;
+}
+
 export function splitImportRefs(text, nodeId, deps = {}){
   IMPORT_REF_RE.lastIndex = 0;
   if (!IMPORT_REF_RE.test(text || "")) return { clean: text || "", html: "", missing: [] };
@@ -654,7 +692,11 @@ export function splitImportRefs(text, nodeId, deps = {}){
   let nextToken = 0;
   let priorMissingEnd = -1;
   const source = text || "";
-  const clean = source.replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason, offset) => {
+  const clean = fencedReferenceSegments(source).map((segment, index, segments) => {
+    if (segment.fenced) return segment.text;
+    // Replacement offsets and missing-file adjacency belong to this prose only.
+    priorMissingEnd = -1;
+    let outside = segment.text.replace(IMPORT_REF_RE, (_m, bang, alt, turn, occurrence, reason, offset) => {
     if (reason === "not_found") {
       let name = alt || "file";
       try { name = decodeURIComponent(name); } catch { /* Keep malformed legacy labels as text. */ }
@@ -668,7 +710,11 @@ export function splitImportRefs(text, nodeId, deps = {}){
     priorMissingEnd = -1;
     tiles.push(importTileHTML(nodeId, +turn, +occurrence, reason, alt, bang === "!", deps));
     return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
+    }).replace(/\n{3,}/g, "\n\n");
+    if (index === 0) outside = outside.trimStart();
+    if (index === segments.length - 1) outside = outside.trimEnd();
+    return outside;
+  }).join("");
   return { clean, html: tiles.length ? `<div class="attrow blockedrow">${tiles.join("")}</div>` : "", missing };
 }
 
@@ -680,13 +726,45 @@ export function renderMissingImportText(rendered, missing = []){
 export function splitAssetRefs(text, nodeId, assets, deps = {}){
   const re = deps.assetRefRe || ASSET_REF_RE;
   re.lastIndex = 0;
-  if (!re.test(text || "")) return { clean: text || "", html: "" };
+  if (!re.test(text || "")) return { clean: text || "", html: "", labels: [] };
   const tiles = [];
-  const clean = (text || "").replace(re, (_m, _bang, alt, id) => {
-    tiles.push(assetTileHTML(nodeId, id, alt, (assets || {})[id], deps));
-    return "";
-  }).replace(/\n{3,}/g, "\n\n").trim();
-  return { clean, html: `<div class="attrow">${tiles.join("")}</div>` };
+  const labels = [];
+  const seen = new Set();
+  const escape = deps.escape || esc;
+  const source = text;
+  let nextToken = 0;
+  const clean = fencedReferenceSegments(source).map((segment, index, segments) => {
+    if (segment.fenced) return segment.text;
+    let outside = segment.text.replace(/\r\n?/g, "\n").split("\n").map(line => {
+    const inline = !!line.replace(re, "").trim();
+    return line.replace(re, (_m, _bang, alt, id) => {
+      const rec = (assets || {})[id];
+      if (!seen.has(id)) {
+        seen.add(id);
+        tiles.push(assetTileHTML(nodeId, id, alt, rec, deps));
+      }
+      if (!inline) return "";
+      const label = alt.trim() ? alt : (rec?.name || "file");
+      let token;
+      // Reserve tokens against the whole source; splitImportRefs then reserves
+      // its own tokens against clean, which already contains these tokens.
+      do { token = `\uE000${nextToken++}\uE001`; } while (source.includes(token));
+      labels.push({ token, html: escape(label) });
+      return token;
+    });
+    }).join("\n").replace(/\n{3,}/g, "\n\n");
+    // Trim outer prose without altering indented openers or unclosed code tails.
+    if (index === 0) outside = outside.trimStart();
+    if (index === segments.length - 1) outside = outside.trimEnd();
+    return outside;
+  }).join("");
+  return { clean, html: tiles.length ? `<div class="attrow">${tiles.join("")}</div>` : "", labels };
+}
+
+export function assetBubbleBodyHTML(text, nodeId, assets, deps = {}){
+  const a = splitAssetRefs(text, nodeId, assets, deps);
+  const markdown = deps.markdown || md;
+  return renderMissingImportText(markdown(a.clean), a.labels) + a.html;
 }
 
 /* splitPermTitle: pure. Parse "Verb `payload`" from ACP ToolCall.Title; anything
@@ -1062,11 +1140,25 @@ export function decisionsHash(decisions){
   return (decisions || []).map(d => {
     const dec = (d && d.decision) || d || {};
     const sel = dec.selected || {};
+    const manual = dec.manual || {};
+    const outcome = dec.outcome || {};
+    const selections = Array.isArray(manual.selections) ? manual.selections : [];
     return [
       d && d.record != null ? d.record : "",
       dec.request_id || "",
       sel.key || "",
       dec.lease_id || "",
+      dec.source || "",
+      manual.action || "",
+      manual.mode || "",
+      manual.feedback || "",
+      selections.map(item => [
+        item && item.question_id || "",
+        Array.isArray(item && item.option_ids) ? item.option_ids.join(",") : "",
+        item && item.free_text || "",
+      ].join("=")).join(","),
+      outcome.delivery || "",
+      outcome.app_context || "",
     ].join(":");
   }).join("|");
 }
@@ -1114,6 +1206,9 @@ export function decisionRowHTML(surface, {
 } = {}){
   const s = surface || {};
   const d = s.decision || {};
+  if (d.source === "application" || d.source === "manual" || d.manual){
+    return manualDecisionRowHTML(s, { escape, fmtTime });
+  }
   const sel = d.selected || {};
   const title = d.title != null ? String(d.title) : "";
   const selName = sel.name != null ? String(sel.name) : (sel.key != null ? String(sel.key) : "");
@@ -1212,6 +1307,10 @@ export function createChatFeature(deps){
   const autoapprove = roots.autoapprove;
   const scrollend = roots.scrollend;
   const workpulse = roots.workpulse;
+  const interactionCard = createClaudeInteractionCard({
+    document: doc,
+    api: (path, opts) => api(path, opts),
+  });
 
   /* feature-owned state */
   let chatSig = "";
@@ -1448,7 +1547,7 @@ export function createChatFeature(deps){
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
     return `
       <div class="${cls}" ${dataAttrs}>
-		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${renderMissingImportText(markdown(blocked.clean), blocked.missing)}${a.html}${blocked.html}</div>
+		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${renderMissingImportText(renderMissingImportText(markdown(blocked.clean), blocked.missing), a.labels)}${a.html}${blocked.html}</div>
       </div>`;
   }
 
@@ -1582,6 +1681,7 @@ export function createChatFeature(deps){
   }
 
   function onSelectChange(){
+    interactionCard.retire();
     chatSig = "";
     syncMuseSchemaWarning(nodeById(g("sel", "")));
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
@@ -2067,6 +2167,7 @@ export function createChatFeature(deps){
       expanded,
       compacting: !!data.compacting,
       elicitationKey: elicitationKey(data),
+      interactionKey: interactionSignature(data.claude_interaction),
     });
     const label = unconfirmed
       ? "Send unconfirmed \u2014 check the terminal"
@@ -2196,6 +2297,13 @@ export function createChatFeature(deps){
       renderedCleanups.push(() => node.removeEventListener(event, handler));
     };
     if (keyrow){
+      const interactionView = data.claude_interaction || null;
+      if (interactionBlocksNativeKeys(interactionView)){
+        interactionCard.capture();
+        keyrow.innerHTML = "";
+        interactionCard.update(keyrow, interactionView, { nodeId: n.id });
+      } else {
+      interactionCard.unmount();
       /* Preserve .permask scrollTop across poll rebuilds (expanded path only).
          Same spirit as withCardEditsPreserved: snapshot before innerHTML write,
          restore after if still the same node and still expanded. Clamped mode
@@ -2236,6 +2344,7 @@ export function createChatFeature(deps){
          its clamp vertically. Runs here only — not on the skip path, not a
          second render. Same pattern as bookmarkClampState + applyRefClamps. */
       revealPermMoreIfNeeded();
+      }
     }
     endChatLoad();
   }
@@ -2732,6 +2841,7 @@ export function createChatFeature(deps){
   }
 
   function destroy(){
+    interactionCard.destroy();
     while (cleanups.length){
       try { cleanups.pop()(); } catch { /* ignore */ }
     }

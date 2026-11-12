@@ -138,7 +138,7 @@ test("the checkbox sends the explicit signal only while it is checked, then rese
 
   const calls = [];
   const box = { checked: false };
-  const button = { disabled: false, textContent: "Check for harness updates" };
+  const button = { disabled: false, textContent: "Check for updates" };
   const scimuxButton = { disabled: false };
   const applied = [];
   const api = async (path, opts) => {
@@ -160,7 +160,7 @@ test("the checkbox sends the explicit signal only while it is checked, then rese
   assert.equal(calls[0].method, undefined);
   assert.equal(box.checked, false);
   assert.equal(button.disabled, false);
-  assert.equal(button.textContent, "Check for harness updates");
+  assert.equal(button.textContent, "Check for updates");
   assert.deepEqual(applied[0].agents.vibe.models, []);
 
   box.checked = true;
@@ -172,7 +172,7 @@ test("the checkbox sends the explicit signal only while it is checked, then rese
   assert.equal(calls[1].method, "POST");
   assert.equal(calls[1].body, JSON.stringify({ inspect_vibe: true }));
   assert.equal(box.checked, false, "the choice resets after the action");
-  assert.equal(button.textContent, "Check for harness updates");
+  assert.equal(button.textContent, "Check for updates");
   const shown = {};
   const shownEfforts = {};
   applyAgentsProbe(shown, shownEfforts, applied[1].agents);
@@ -191,7 +191,7 @@ test("the checkbox sends the explicit signal only while it is checked, then rese
 test("a failed update resets the checkbox and does not present a catalog", async () => {
   const { runHarnessMenuCheck } = await loadHarnessUpdate();
   const box = { checked: true };
-  const button = { disabled: false, textContent: "Check for harness updates" };
+  const button = { disabled: false, textContent: "Check for updates" };
   let applied = 0;
   const checked = await runHarnessMenuCheck({
     button,
@@ -223,7 +223,7 @@ test("a missing checkbox and a missing catalog payload still finish the ordinary
     apply: (d) => { received = d; },
   });
   assert.deepEqual(calls, [undefined]);
-  assert.equal(button.textContent, "Check for harness updates");
+  assert.equal(button.textContent, "Check for updates");
   assert.deepEqual(received, { latest: {} });
 
   let bare;

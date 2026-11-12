@@ -442,8 +442,10 @@ terminal access. Model ids are the advertised option values in the agent's
 order; an accidental `currentValue` is not added and is not a scimux default.
 The initial thinking menu's value ids are shown for each advertised model;
 an explicit selection is validated again against the live session at launch.
-The probe's protocol budget is 12 seconds after process startup, with each
-call limited to 4 seconds and close limited to 2 seconds within that budget.
+The probe's protocol budget is 12 seconds after process startup.
+`initialize`, which also waits for the agent to start, may take up to
+8 seconds; each later call is limited to 4 seconds and close to 2 seconds
+within that budget.
 A failed, timed-out, or empty catalog keeps the
 empty `models` list: the chat still launches on Vibe's own default, and the
 response invents no model, thinking level, or success state. After a
@@ -744,6 +746,56 @@ Every accepted key is recorded in the store together with decision evidence
 (the pane's bottom lines, or the tool title on structured transports); on
 structured transports the decision is persisted *before* the agent learns
 the answer.
+
+### `POST /api/nodes/{id}/claude-interaction`
+
+Body: `{"request_id","action"}` plus the fields that action uses. `action`
+is `answer`, `discuss`, `approve`, `request_changes`, `cancel`, or
+`terminal`. `answer` carries `answers` of `{question_id, option_ids,
+free_text}`. `discuss` and `request_changes` carry non-empty `feedback`.
+`approve` may carry `mode` of exactly `restore`, `default`, or
+`acceptEdits`. The server looks up question text, option labels, and plan
+text from the hook request it already holds. The body cannot replace that
+request, supply hook JSON, a filesystem path, or any `updatedPermissions`
+document.
+
+`202` means the owning worker durably recorded the decision (`status:
+accepted`, `delivery: recorded`, `emitted: false`). It does not mean Claude
+consumed the reply. `emitted` means only a complete helper stdout write;
+this feature does not register a consumption-confirmation hook. Unconfirmed
+delivery is not replayed. A failed post-audit submission appends a correlated
+application outcome (`source: application`, correlated by `request_id`, with
+only delivery status and fixed context in `outcome`). It repeats no human
+content or raw errors: `not_delivered` means known rejection, `unconfirmed`
+means I/O uncertainty. Recording intent does not assert approval reached
+Claude. A known stale, replaced, canceled,
+handed-off, expired, or competing request is `409`. Malformed or incomplete
+input is `400`, including a body over 32 KiB. Feedback and each free-text
+answer are at most 4096 UTF-8 bytes, checked by both browser and server.
+`/send` stays `413` at 1 MiB. An unsupported
+node, a worker that does not advertise `claude-interaction-v1`, or a legacy hook
+bundle without interaction support is `404`. All new Claude hook bundles
+support structured questions and plans without a feature flag.
+While the interaction owns the request, `POST …/key` for that node is `409`
+and no native key is delivered, including when ownership appears after the
+key was prepared. `terminal` revokes that ownership first; the
+visible-dialog epoch on `…/key` is then authoritative again. Loss of the helper's
+waiter lock rejects answers and releases native controls before the deadline;
+recovery removes that dead request's active slot. An emitted
+cancellation settles on the first quiet pane tick while its accepted turn is
+still current or closing. A `202` proves the cancellation was recorded, not
+that it was emitted or that Claude consumed the reply. Settlement does not
+read the transcript, and it does not settle on an active tick. Settlement
+closes that accepted-turn token. A cancel for a turn never closes the next
+one. The cancel fence kept after payload retirement still settles, including
+across a worker restart. Quiet is a pane snapshot, not proof that Claude
+consumed the reply.
+`perm_dialog_id` stays that epoch and is not the hook request id. Questions
+and plans are never auto-approved, including while a lease is armed.
+
+The current chat snapshot may include `claude_interaction` (`request_id`,
+`phase`, `tool`, questions or plan text, mode choices, `native_keys`).
+`GET …/chat?history=1` does not.
 
 ### `POST /api/nodes/{id}/auto-approve`
 

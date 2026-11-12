@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,46 +107,82 @@ func TestS5R3_F1_InviteFileAndStdinBypassTTY(t *testing.T) {
 	})
 }
 
-func TestS5R3_F8_RevokedRemoteLeavesLocalhost(t *testing.T) {
-	data := t.TempDir()
-	writeEnrolledState(t, data)
-	cmd := &Command{
-		ExperimentalRemote: true,
-		Args:               []string{"scimux", "--remote", "-data", data, "-addr", "127.0.0.1:0"},
-		Stdout:             io.Discard,
-		Stderr:             new(bytes.Buffer),
-		Home:               t.TempDir(),
-		Config: remote.Config{
-			DataDir:       data,
-			RendezvousURL: "http://127.0.0.1:1",
-			HTTPClient:    constantStatusHTTP(http.StatusNotFound),
-			NewTerminal:   noTestTerminal,
-		},
+func TestS5R3_F8_RejectionAndPersistedRevocationLeaveLocalhost(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		state    remote.EnrollmentState
+		hosted   string
+		requests int64
+	}{
+		{"startup-rejection", remote.StateEnrolled, "unavailable", 1},
+		{"persisted-revoked", remote.StateRevoked, "revoked", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := t.TempDir()
+			writeEnrolledState(t, data)
+			if tc.state == remote.StateRevoked {
+				seedPersistedRemoteRevocation(t, data)
+			}
+			before := readRemoteIdentity(t, data)
+			hc, calls := countedRejectionHTTP()
+			cmd := remoteCmd(t, data, "http://127.0.0.1:1", hc)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := cmd.Run(ctx); err != nil {
+				t.Fatalf("remote failure killed localhost startup: %v", err)
+			}
+			t.Cleanup(func() {
+				if cmd.Client() != nil {
+					_ = cmd.Client().Close()
+				}
+			})
+			assertHostedStatus(t, cmd, tc.hosted) // Includes HTTP 200 from localhost.
+			st, err := cmd.Client().State()
+			if err != nil || st != tc.state {
+				t.Fatalf("remote state = %q, %v; want %q", st, err, tc.state)
+			}
+			if !bytes.Equal(before, readRemoteIdentity(t, data)) {
+				t.Fatal("startup rewrote durable enrollment")
+			}
+			if got := calls.Load(); got != tc.requests {
+				t.Fatalf("rendezvous requests = %d, want %d", got, tc.requests)
+			}
+		})
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := cmd.Run(ctx); err != nil {
-		t.Fatalf("F8: revoked remote killed localhost startup: %v", err)
-	}
-	h := cmd.Handler()
-	if h == nil {
-		t.Fatal("F8: handler missing after revoked remote")
-	}
-	rec := routeRequest(h, http.MethodGet, "/api/state", "", false)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("F8: GET /api/state = %d after revoked remote", rec.Code)
-	}
-	cli := cmd.Client()
-	if cli == nil {
-		t.Fatal("F8: remote client missing")
-	}
-	st, err := cli.State()
+}
+
+func readRemoteIdentity(t *testing.T, data string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(data, remote.PrivateDirName, remote.StateFileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != remote.StateRevoked {
-		t.Fatalf("F8: remote state = %q, want revoked", st)
+	return raw
+}
+
+func seedPersistedRemoteRevocation(t *testing.T, data string) {
+	t.Helper()
+	var st remote.PersistedState
+	if err := json.Unmarshal(readRemoteIdentity(t, data), &st); err != nil {
+		t.Fatal(err)
 	}
+	st.Status = remote.StateRevoked
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, remote.PrivateDirName, remote.StateFileName), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func countedRejectionHTTP() (*http.Client, *atomic.Int64) {
+	var calls atomic.Int64
+	base := constantStatusHTTP(http.StatusNotFound)
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return base.Transport.RoundTrip(r)
+	})}, &calls
 }
 
 func TestS5R3_F8_DisabledRemoteLeavesLocalhost(t *testing.T) {
