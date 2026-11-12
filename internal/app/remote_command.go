@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/scimux/scimux/internal/backend"
 	"github.com/scimux/scimux/internal/remote"
@@ -31,10 +32,10 @@ func experimentalRemoteEnabled(getenv func(string) string) bool {
 
 const experimentalTeamEnv = "SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM"
 
-// experimentalTeamEnabled reports whether the team routes are on. The stub
-// stays fail-closed for every value.
+// experimentalTeamEnabled reports whether the team routes are on. Only the
+// exact value 1 enables them. A nil reader is off.
 func experimentalTeamEnabled(getenv func(string) string) bool {
-	return false
+	return getenv != nil && getenv(experimentalTeamEnv) == "1"
 }
 
 // Command is the injectable startup seam for remote-aware scimux (S5).
@@ -239,6 +240,9 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	c.application = a
+	if c.ExperimentalTeam && c.muxerOnly {
+		c.application.teamHandler = newTeamHandler(c.Config.DataDir, time.Now, newTeamClient())
+	}
 	policy, err := newRequestPolicy(*addr, trustedHosts)
 	if err != nil {
 		return fmt.Errorf("host policy: %w", err)
