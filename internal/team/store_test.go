@@ -158,7 +158,8 @@ func TestAddRejectsADuplicateID(t *testing.T) {
 	again := e
 	again.Name = "Other"
 	again.Token = sampleEntry(9).Token
-	if err := Add(dir, again); !errors.Is(err, ErrAlreadyJoined) {
+	err = Add(dir, again)
+	if !errors.Is(err, ErrAlreadyJoined) {
 		t.Fatalf("error = %v", err)
 	}
 	if strings.Contains(err.Error(), again.Token) {
@@ -208,7 +209,8 @@ func TestAddRejectsASeventeenthServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	extra := sampleEntry(17)
-	if err := Add(dir, extra); !errors.Is(err, ErrTooMany) {
+	err = Add(dir, extra)
+	if !errors.Is(err, ErrTooMany) {
 		t.Fatalf("error = %v", err)
 	}
 	if strings.Contains(err.Error(), extra.Token) {
