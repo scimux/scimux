@@ -801,6 +801,55 @@ func hostOf(raw string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(raw, "https://"), "http://")
 }
 
+func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
+	root := repoRootFromTest(t)
+	api, err := os.ReadFile(filepath.Join(root, "docs", "http-api.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{
+		"SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM",
+		"GET /api/team/servers",
+		"POST /api/team/servers",
+		"DELETE /api/team/servers/{id}",
+		"bad_request",
+		"invalid_link",
+		"identity_unavailable",
+		"store_unavailable",
+		"unreachable",
+		"bad_server",
+		"already_joined",
+		"join_refused",
+		"already_registered",
+		"server_full",
+		"joined_but_not_saved",
+		"not_found",
+		"never leaves the server process",
+		"does not contact the team server",
+		"stays registered there until the operator revokes it",
+	} {
+		if !strings.Contains(string(api), needle) {
+			t.Errorf("docs/http-api.md missing %q", needle)
+		}
+	}
+	storage, err := os.ReadFile(filepath.Join(root, "docs", "invariants", "storage.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{
+		"team.json",
+		"credentials",
+		"only the muxer reads and writes it",
+		"explicit join or forget",
+		"damaged file is never overwritten",
+		"gate off it is neither read nor written",
+	} {
+		if !strings.Contains(string(storage), needle) {
+			t.Errorf("docs/invariants/storage.md missing %q", needle)
+		}
+	}
+}
+
 func TestTeamRoutesShareTheSettingsBoundary(t *testing.T) {
 	srv, _ := scriptedTeam(t, http.StatusOK, helloJSON(teamServerID, "Lab relay"), http.StatusCreated, registerJSON(teamToken, teamServerID, "Lab relay"))
 	orig := newTeamClient
