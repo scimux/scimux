@@ -16,8 +16,8 @@ import (
 
 const maxTeamJoinBody = 4 << 10
 
-// teamHandler serves the experimental team routes. One mutex covers the
-// whole surface, including the JSON not-found answers.
+// teamHandler serves the experimental team routes. mu is held only around
+// reads and writes of the server file.
 type teamHandler struct {
 	dataDir string
 	now     func() time.Time
@@ -41,8 +41,6 @@ type teamServerView struct {
 }
 
 func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/team/servers":
 		h.list(w)
@@ -61,7 +59,7 @@ func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *teamHandler) list(w http.ResponseWriter) {
-	entries, err := team.Load(h.dataDir)
+	entries, err := h.readServers()
 	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
@@ -72,7 +70,7 @@ func (h *teamHandler) list(w http.ResponseWriter) {
 }
 
 func (h *teamHandler) forget(w http.ResponseWriter, id string) {
-	err := team.Remove(h.dataDir, id)
+	err := h.deleteServer(id)
 	if err == nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -107,7 +105,7 @@ func (h *teamHandler) join(w http.ResponseWriter, r *http.Request) {
 		writeTeamError(w, http.StatusInternalServerError, "identity_unavailable")
 		return
 	}
-	entries, err := team.Load(h.dataDir)
+	entries, err := h.readServers()
 	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
@@ -144,13 +142,35 @@ func (h *teamHandler) join(w http.ResponseWriter, r *http.Request) {
 		Token:    token,
 		JoinedAt: h.now().UTC().Format(time.RFC3339),
 	}
-	if err := team.Add(h.dataDir, entry); err != nil {
+	if err := h.writeServer(entry); err != nil {
+		if errors.Is(err, team.ErrAlreadyJoined) {
+			writeTeamError(w, http.StatusConflict, "already_joined")
+			return
+		}
 		writeTeamError(w, http.StatusInternalServerError, "joined_but_not_saved")
 		return
 	}
 	writeJSONStatus(w, http.StatusCreated, teamServerView{
 		ID: entry.ID, Name: entry.Name, URL: entry.URL, SeatName: entry.SeatName, JoinedAt: entry.JoinedAt,
 	})
+}
+
+func (h *teamHandler) readServers() ([]team.Entry, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return team.Load(h.dataDir)
+}
+
+func (h *teamHandler) writeServer(e team.Entry) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return team.Add(h.dataDir, e)
+}
+
+func (h *teamHandler) deleteServer(id string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return team.Remove(h.dataDir, id)
 }
 
 func writeTeamRegisterError(w http.ResponseWriter, err error) {
