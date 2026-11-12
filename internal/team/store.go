@@ -1,13 +1,25 @@
 package team
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // File is the server list inside the data directory.
 const File = "team.json"
+
+const maxTeamFile = 64 * 1024
 
 // Entry is one joined team server. Token is a credential.
 type Entry struct {
@@ -53,18 +65,193 @@ var storeOps = storeIO{
 // marshalTeam encodes the server file. Tests replace it.
 var marshalTeam = json.Marshal
 
-// Load reads the server file. A missing file is an empty list and is not
-// created. The stub reports that it is not implemented.
+const maxServers = 16
+
+type teamDocument struct {
+	V       int      `json:"v"`
+	Servers *[]Entry `json:"servers"`
+}
+
+type teamFile struct {
+	V       int     `json:"v"`
+	Servers []Entry `json:"servers"`
+}
+
+// Load reads the server file. A missing file is an empty list and is not created.
 func Load(dataDir string) ([]Entry, error) {
-	return nil, errors.New("team: not implemented")
+	f, err := os.Open(filepath.Join(dataDir, File))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return []Entry{}, nil
+		}
+		return nil, fmt.Errorf("team: open server file: %w", err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxTeamFile+1))
+	if err != nil {
+		return nil, fmt.Errorf("team: read server file: %w", err)
+	}
+	if len(raw) > maxTeamFile {
+		return nil, ErrDamaged
+	}
+	return parseTeamFile(raw)
 }
 
-// Add inserts one server. The stub reports that it is not implemented.
+// Add inserts one server at the end of the list.
 func Add(dataDir string, e Entry) error {
-	return errors.New("team: not implemented")
+	if !validEntry(e) {
+		return ErrDamaged
+	}
+	entries, err := Load(dataDir)
+	if err != nil {
+		return err
+	}
+	for _, old := range entries {
+		if old.ID == e.ID {
+			return ErrAlreadyJoined
+		}
+	}
+	if len(entries) >= maxServers {
+		return ErrTooMany
+	}
+	return writeEntries(dataDir, append(entries, e))
 }
 
-// Remove drops one server. The stub reports that it is not implemented.
+// Remove drops the server with the given ID. The last server leaves an empty list.
 func Remove(dataDir, serverID string) error {
-	return errors.New("team: not implemented")
+	entries, err := Load(dataDir)
+	if err != nil {
+		return err
+	}
+	next := make([]Entry, 0, len(entries))
+	found := false
+	for _, e := range entries {
+		if e.ID == serverID {
+			found = true
+			continue
+		}
+		next = append(next, e)
+	}
+	if !found {
+		return ErrNotFound
+	}
+	return writeEntries(dataDir, next)
+}
+
+func parseTeamFile(raw []byte) ([]Entry, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var doc teamDocument
+	if err := dec.Decode(&doc); err != nil {
+		return nil, ErrDamaged
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, ErrDamaged
+	}
+	if doc.V != 1 || doc.Servers == nil {
+		return nil, ErrDamaged
+	}
+	seen := make(map[string]struct{}, len(*doc.Servers))
+	for _, e := range *doc.Servers {
+		if !validEntry(e) {
+			return nil, ErrDamaged
+		}
+		if _, ok := seen[e.ID]; ok {
+			return nil, ErrDamaged
+		}
+		seen[e.ID] = struct{}{}
+	}
+	return *doc.Servers, nil
+}
+
+func writeEntries(dir string, entries []Entry) error {
+	body, err := marshalTeam(teamFile{V: 1, Servers: entries})
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	return publish(dir, body)
+}
+
+func publish(dir string, body []byte) error {
+	f, err := storeOps.createTemp(dir)
+	if err != nil {
+		return fmt.Errorf("team: write server file: %w", err)
+	}
+	tmpName := f.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = storeOps.close(f)
+		}
+		if tmpName != "" {
+			_ = storeOps.remove(tmpName)
+		}
+	}()
+	if err := storeOps.chmod(f, 0o600); err != nil {
+		return fmt.Errorf("team: write server file: %w", err)
+	}
+	n, err := storeOps.write(f, body)
+	if err != nil {
+		return fmt.Errorf("team: write server file: %w", err)
+	}
+	if n != len(body) {
+		return fmt.Errorf("team: write server file: %w", io.ErrShortWrite)
+	}
+	if err := storeOps.syncFile(f); err != nil {
+		return fmt.Errorf("team: write server file: %w", err)
+	}
+	if err := storeOps.close(f); err != nil {
+		return fmt.Errorf("team: write server file: %w", err)
+	}
+	closed = true
+	if err := storeOps.rename(tmpName, filepath.Join(dir, File)); err != nil {
+		return fmt.Errorf("team: write server file: %w", err)
+	}
+	tmpName = ""
+	return nil
+}
+
+func validEntry(e Entry) bool {
+	return validHex(e.ID, 32) &&
+		validStoredName(e.Name, false) &&
+		validBaseURL(e.URL) &&
+		validStoredName(e.SeatName, true) &&
+		validHex(e.Token, 64) &&
+		validJoinedAt(e.JoinedAt)
+}
+
+func validStoredName(name string, trim bool) bool {
+	if name == "" || len(name) > 64 || !utf8.ValidString(name) {
+		return false
+	}
+	if trim && strings.TrimSpace(name) != name {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func validBaseURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil {
+		return false
+	}
+	if u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	return raw == u.Scheme+"://"+u.Host
+}
+
+func validJoinedAt(s string) bool {
+	parsed, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return false
+	}
+	return parsed.UTC().Format(time.RFC3339) == s
 }
