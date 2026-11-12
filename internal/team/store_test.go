@@ -400,7 +400,7 @@ func TestAddRejectsAnInvalidEntry(t *testing.T) {
 	}{
 		{"bad id", func(e *Entry) { e.ID = "0123456789abcdef0123456789abcdeg" }},
 		{"short id", func(e *Entry) { e.ID = "abcd" }},
-		{"uppercase id", func(e *Entry) { e.ID = strings.ToUpper(e.ID) }},
+		{"uppercase id", func(e *Entry) { e.ID = "0123456789ABCDEF0123456789ABCDEF" }},
 		{"empty name", func(e *Entry) { e.Name = "" }},
 		{"long name", func(e *Entry) { e.Name = long }},
 		{"control name", func(e *Entry) { e.Name = "Lab\nrelay" }},
@@ -422,7 +422,7 @@ func TestAddRejectsAnInvalidEntry(t *testing.T) {
 		{"padded seat", func(e *Entry) { e.SeatName = " Ada " }},
 		{"invalid seat utf-8", func(e *Entry) { e.SeatName = "A\xff" }},
 		{"short token", func(e *Entry) { e.Token = "abcd" }},
-		{"uppercase token", func(e *Entry) { e.Token = strings.ToUpper(e.Token) }},
+		{"uppercase token", func(e *Entry) { e.Token = strings.Repeat("AB", 32) }},
 		{"non hex token", func(e *Entry) { e.Token = strings.Repeat("g", 64) }},
 		{"bad time", func(e *Entry) { e.JoinedAt = "yesterday" }},
 		{"offset time", func(e *Entry) { e.JoinedAt = "2026-11-12T09:30:00+00:00" }},
