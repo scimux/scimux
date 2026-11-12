@@ -39,8 +39,8 @@ type Client struct {
 	timeout   time.Duration
 }
 
-// NewClient returns a client that dials directly, follows no redirect, and
-// gives each call 10 seconds.
+// NewClient returns a client that dials directly, follows no redirect,
+// keeps no connection after a call returns, and gives each call 10 seconds.
 func NewClient() *Client {
 	return &Client{timeout: 10 * time.Second}
 }
@@ -138,7 +138,8 @@ func (c *Client) exchange(ctx context.Context, method, baseURL, path string, bod
 func (c *Client) httpClient() *http.Client {
 	transport := c.Transport
 	if transport == nil {
-		transport = &http.Transport{Proxy: nil}
+		// A fresh transport would otherwise leave its idle connection open.
+		transport = &http.Transport{Proxy: nil, DisableKeepAlives: true}
 	}
 	return &http.Client{
 		Timeout:       c.timeout,
