@@ -19,7 +19,7 @@ jobs:
   offline-tests:
     runs-on: [self-hosted, linux, x64, go-builder]
     container:
-      image: golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c
+      image: golang:1.26.11-alpine@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb
       options: --init --cap-add=SYS_ADMIN --cap-add=NET_ADMIN
     steps:
       - name: Add missing tools
