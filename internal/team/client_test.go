@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -414,5 +415,82 @@ func TestClientReadErrorIsUnreachable(t *testing.T) {
 	_, err := c.Hello(context.Background(), "http://relay.example")
 	if !errors.Is(err, ErrUnreachable) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestClientLeavesNoConnectionOpen(t *testing.T) {
+	var mu sync.Mutex
+	open := 0
+	opened := 0
+	changed := make(chan struct{}, 1)
+	notify := func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, helloBody(helloID, helloName))
+		case "/v1/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, registerBody(regToken, helloID, helloName))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		mu.Lock()
+		switch state {
+		case http.StateNew:
+			open++
+			opened++
+		case http.StateClosed:
+			open--
+		}
+		mu.Unlock()
+		notify()
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	c := NewClient()
+	for i := 0; i < 4; i++ {
+		if _, err := c.Hello(context.Background(), srv.URL); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := c.Register(context.Background(), srv.URL, "ab-cd", seatID, "Ada"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	seen := opened
+	mu.Unlock()
+	if seen == 0 {
+		t.Fatal("the server accepted no connection")
+	}
+
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		mu.Lock()
+		n := open
+		mu.Unlock()
+		if n == 0 {
+			return
+		}
+		select {
+		case <-changed:
+		case <-deadline.C:
+			mu.Lock()
+			n = open
+			mu.Unlock()
+			if n == 0 {
+				return
+			}
+			t.Fatalf("open connections = %d, want 0", n)
+		}
 	}
 }
