@@ -1039,7 +1039,7 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 	for _, needle := range []string{
 		"team.json",
 		"credentials",
-		"only the muxer reads and writes it",
+		"Only the muxer reads and writes it",
 		"explicit join or forget",
 		"damaged file is never overwritten",
 		"gate off it is neither read nor written",
