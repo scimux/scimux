@@ -29,6 +29,14 @@ func experimentalRemoteEnabled(getenv func(string) string) bool {
 	return getenv != nil && getenv(experimentalRemoteEnv) == "1"
 }
 
+const experimentalTeamEnv = "SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM"
+
+// experimentalTeamEnabled reports whether the team routes are on. The stub
+// stays fail-closed for every value.
+func experimentalTeamEnabled(getenv func(string) string) bool {
+	return false
+}
+
 // Command is the injectable startup seam for remote-aware scimux (S5).
 // Tests call Run; they must not spawn the scimux binary or os.Exit.
 type Command struct {
@@ -43,6 +51,9 @@ type Command struct {
 	// command makes the default fail closed and keeps tests independent of the
 	// agent's own environment.
 	ExperimentalRemote bool
+	// ExperimentalTeam is set only by the public process entry point after
+	// reading experimentalTeamEnv. The default is off.
+	ExperimentalTeam bool
 
 	Config remote.Config
 
