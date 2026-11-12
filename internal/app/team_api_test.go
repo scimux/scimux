@@ -801,6 +801,206 @@ func hostOf(raw string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(raw, "https://"), "http://")
 }
 
+func blockingTeamServer(path string) (*httptest.Server, <-chan struct{}, func()) {
+	entered := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == path {
+			once.Do(func() { close(entered) })
+			<-release
+		}
+		if r.URL.Path == "/v1/register" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, registerJSON(teamToken, teamServerID, "Lab relay"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+	}))
+	return srv, entered, letGo
+}
+
+func recvTeam(t *testing.T, ch <-chan *httptest.ResponseRecorder, what string) *httptest.ResponseRecorder {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case rec := <-ch:
+		return rec
+	case <-timer.C:
+		t.Fatalf("%s did not finish", what)
+		return nil
+	}
+}
+
+func TestTeamListAndForgetFinishWhileTheServerIsBlocked(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"hello", "/v1/hello"},
+		{"register", "/v1/register"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, entered, letGo := blockingTeamServer(tc.path)
+			h, dir := testTeamSurface(t, clientFor(srv))
+			t.Cleanup(srv.Close)
+			t.Cleanup(letGo)
+			otherToken := strings.Repeat("ab", 32)
+			if err := team.Add(dir, team.Entry{
+				ID: teamOtherID, Name: "Other relay", URL: "http://other.example",
+				SeatName: "Ada", Token: otherToken, JoinedAt: "2026-11-12T09:30:00Z",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			joinDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				joinDone <- doTeam(h, http.MethodPost, "/api/team/servers", joinPayload(srv.URL+"/join#"+teamCode, "Ada"))
+			}()
+			timer := time.NewTimer(3 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-entered:
+			case <-timer.C:
+				t.Fatal("the join did not reach the team server")
+			}
+
+			listDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				listDone <- doTeam(h, http.MethodGet, "/api/team/servers", "")
+			}()
+			listed := recvTeam(t, listDone, "list")
+			if listed.Code != http.StatusOK {
+				t.Fatalf("list status = %d body %s", listed.Code, listed.Body.String())
+			}
+			if !strings.Contains(listed.Body.String(), teamOtherID) || strings.Contains(listed.Body.String(), teamServerID) {
+				t.Fatalf("list = %s", listed.Body.String())
+			}
+			assertNoSecrets(t, listed.Body.String(), teamCode, teamToken)
+			assertNoSecrets(t, listed.Body.String(), "", otherToken)
+
+			forgetDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				forgetDone <- doTeam(h, http.MethodDelete, "/api/team/servers/"+teamOtherID, "")
+			}()
+			forgotten := recvTeam(t, forgetDone, "forget")
+			if forgotten.Code != http.StatusNoContent || forgotten.Body.Len() != 0 {
+				t.Fatalf("forget = %d %q", forgotten.Code, forgotten.Body.String())
+			}
+			mid, err := team.Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(mid) != 0 {
+				t.Fatalf("stored while the join is in flight = %+v", mid)
+			}
+
+			letGo()
+			joined := recvTeam(t, joinDone, "join")
+			if joined.Code != http.StatusCreated {
+				t.Fatalf("join status = %d body %s", joined.Code, joined.Body.String())
+			}
+			assertNoSecrets(t, joined.Body.String(), teamCode, teamToken)
+			stored, err := team.Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(stored) != 1 || stored[0].ID != teamServerID || stored[0].Token != teamToken {
+				t.Fatalf("stored = %+v", stored)
+			}
+		})
+	}
+}
+
+func TestTeamConcurrentJoinsOfOneServer(t *testing.T) {
+	const codeA = "alpha-join"
+	const codeB = "beta-join"
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/register" {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				return
+			}
+			entered <- string(raw)
+			<-release
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, registerJSON(teamToken, teamServerID, "Lab relay"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+	}))
+	h, dir := testTeamSurface(t, clientFor(srv))
+	t.Cleanup(srv.Close)
+	t.Cleanup(letGo)
+
+	done := make(chan *httptest.ResponseRecorder, 2)
+	join := func(code string) {
+		done <- doTeam(h, http.MethodPost, "/api/team/servers", joinPayload(srv.URL+"/join#"+code, "Ada"))
+	}
+	go join(codeA)
+	go join(codeB)
+
+	var bodies []string
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for len(bodies) < 2 {
+		select {
+		case body := <-entered:
+			bodies = append(bodies, body)
+		case <-timer.C:
+			t.Fatalf("register calls in flight = %d, want 2", len(bodies))
+		}
+	}
+	if !strings.Contains(bodies[0]+bodies[1], codeA) || !strings.Contains(bodies[0]+bodies[1], codeB) {
+		t.Fatalf("register bodies = %q", bodies)
+	}
+
+	letGo()
+	var recs []*httptest.ResponseRecorder
+	doneTimer := time.NewTimer(3 * time.Second)
+	defer doneTimer.Stop()
+	for len(recs) < 2 {
+		select {
+		case rec := <-done:
+			recs = append(recs, rec)
+		case <-doneTimer.C:
+			t.Fatalf("finished joins = %d, want 2", len(recs))
+		}
+	}
+	var created, conflict int
+	for _, rec := range recs {
+		switch rec.Code {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			conflict++
+			assertAPIError(t, rec, http.StatusConflict, "already_joined")
+		default:
+			t.Errorf("status = %d body %s", rec.Code, rec.Body.String())
+		}
+		assertNoSecrets(t, rec.Body.String(), codeA, teamToken)
+		assertNoSecrets(t, rec.Body.String(), codeB, "")
+	}
+	if created != 1 || conflict != 1 {
+		t.Fatalf("created = %d conflict = %d", created, conflict)
+	}
+	stored, err := team.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].ID != teamServerID || stored[0].Token != teamToken {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
 func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 	root := repoRootFromTest(t)
 	api, err := os.ReadFile(filepath.Join(root, "docs", "http-api.md"))
