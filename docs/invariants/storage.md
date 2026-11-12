@@ -39,6 +39,7 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   The ID is not a credential and must never be accepted as proof of identity.
   A damaged file is never regenerated automatically. Deleting the file yields
   a new ID on the next start.
+- **Joined team servers are credentials.** `team.json` holds the token of each server this seat has joined. only the muxer reads and writes it, and a write happens only from an explicit join or forget. A damaged file is never overwritten. With the gate off it is neither read nor written.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth
   (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a
   default 64 MiB free-space reserve plus optional global/per-node byte budgets

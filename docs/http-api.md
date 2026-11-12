@@ -1320,3 +1320,56 @@ embedded filesystem the handlers serve, computed once per process. GET
 needs no CSRF header. It is always reachable during an active remote run —
 this is application content, not pairing state — and absent with the rest of
 the namespace when the experiment is inactive.
+
+## Team
+
+Experimental. These routes exist only when the process is the muxer and it
+was started with `SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM=1`. Any other
+value, including an unset variable, leaves every `/api/team` path on the
+ordinary not-found path. The gate is read once at startup. Installing it
+creates no file and contacts no team server.
+
+The token a team server returns is a credential. It is stored in
+`team.json` and never leaves the server process: no response, log line, or
+error text contains it.
+
+All bodies are JSON. An error is `{"error":"<code>"}`. The routes sit
+behind the same request boundary as `/api/settings`.
+
+### `GET /api/team/servers`
+
+`200` and `{"servers":[{"id","name","url","seat_name","joined_at"}]}`.
+An empty list is `{"servers":[]}`. The token is not a field. A server file
+that cannot be read, including a damaged one, is `500` `store_unavailable`.
+
+### `POST /api/team/servers`
+
+Body `{"link","name"}`, at most 4 KiB, with no unknown fields. `name` is
+1 to 64 bytes of UTF-8 without control characters and without leading or
+trailing space. `link` is `BASE/join#CODE`.
+
+Success is `201` with one server object in the same shape as the list.
+
+Checks run in this order:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `bad_request` | The body or the name is not usable, or the team server rejected the registration as `bad_request` |
+| 400 | `invalid_link` | The link is not a join link |
+| 500 | `identity_unavailable` | The installation ID cannot be read |
+| 500 | `store_unavailable` | The server file cannot be read |
+| 502 | `unreachable` | The team server could not be contacted |
+| 502 | `bad_server` | The team server did not speak protocol 1, or registration named a different server than hello |
+| 409 | `already_joined` | This seat already has that server. The join code is not sent |
+| 403 | `join_refused` | The team server refused the join code |
+| 409 | `already_registered` | The installation is already registered on that server |
+| 507 | `server_full` | The team server is at its seat limit |
+| 500 | `joined_but_not_saved` | The team server accepted the seat and this computer could not store the result. The join code is spent |
+
+### `DELETE /api/team/servers/{id}`
+
+`204` when the server was forgotten, and `404` `not_found` when it was not
+in the file. The call does not contact the team server. The seat stays registered there until the operator revokes it. A damaged server file is
+`500` `store_unavailable` and is left untouched.
+
+Any other method or path under `/api/team` is `404` `not_found`.
