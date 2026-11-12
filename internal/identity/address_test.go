@@ -2,6 +2,8 @@ package identity
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -249,6 +251,8 @@ func TestAddressZero(t *testing.T) {
 
 func TestParseAddressRejects(t *testing.T) {
 	id := validInstallationID
+	maxIndex := strconv.Itoa(math.MaxInt)
+	overflowIndex := strconv.FormatUint(uint64(math.MaxInt)+1, 10)
 	rejects := []string{
 		"",
 		"scimux2/" + id + "/lane/main",
@@ -272,6 +276,8 @@ func TestParseAddressRejects(t *testing.T) {
 		"scimux1/" + id + "/bubble/chat/1/-1",
 		"scimux1/" + id + "/bubble/chat/" + strings.Repeat("9", 40) + "/1",
 		"scimux1/" + id + "/bubble/chat/1a/1",
+		"scimux1/" + id + "/bubble/chat/" + overflowIndex + "/0",
+		"scimux1/" + id + "/bubble/chat/0/" + overflowIndex,
 		"scimux1/" + id + "/lane/a%2fb",
 		"scimux1/" + id + "/lane/a b",
 		"scimux1/" + id + "/lane/a?b",
@@ -302,6 +308,8 @@ func TestParseAddressRejects(t *testing.T) {
 		"scimux1/" + id + "/lane/a%2Fb",
 		"scimux1/" + id + "/lane/%E8%BD%A6%E9%81%93",
 		"scimux1/" + id + "/bubble/abcdef0123456789/0/0",
+		"scimux1/" + id + "/bubble/chat/" + maxIndex + "/0",
+		"scimux1/" + id + "/bubble/chat/0/" + maxIndex,
 	}
 	for _, s := range accepts {
 		got, err := ParseAddress(s)

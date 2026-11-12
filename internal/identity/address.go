@@ -257,7 +257,7 @@ func canonicalIndex(s string) (int, error) {
 	if len(s) > 1 && s[0] == '0' {
 		return 0, errInvalidAddress
 	}
-	n, err := strconv.ParseUint(s, 10, strconv.IntSize-1)
+	n, err := strconv.ParseInt(s, 10, strconv.IntSize)
 	if err != nil {
 		return 0, errInvalidAddress
 	}
