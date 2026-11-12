@@ -105,7 +105,7 @@ func TestParseJoinLinkRejects(t *testing.T) {
 }
 
 func TestParseJoinLinkErrorOmitsTheInput(t *testing.T) {
-	const marker = "UNIQUE-INPUT-MARKER"
+	const marker = "UNIQUE_INPUT_MARKER"
 	_, _, err := ParseJoinLink("http://relay.example/join#" + marker)
 	if err == nil {
 		t.Fatal("expected an error")
