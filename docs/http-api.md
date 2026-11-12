@@ -1336,15 +1336,17 @@ error text contains it.
 All bodies are JSON. An error is `{"error":"<code>"}`. The routes sit
 behind the same request boundary as `/api/settings`.
 
-### `GET /api/team/servers`
+### List
 
-`200` and `{"servers":[{"id","name","url","seat_name","joined_at"}]}`.
+`GET /api/team/servers` answers `200` and
+`{"servers":[{"id","name","url","seat_name","joined_at"}]}`.
 An empty list is `{"servers":[]}`. The token is not a field. A server file
 that cannot be read, including a damaged one, is `500` `store_unavailable`.
 
-### `POST /api/team/servers`
+### Join
 
-Body `{"link","name"}`, at most 4 KiB, with no unknown fields. `name` is
+`POST /api/team/servers` takes a body `{"link","name"}`, at most 4 KiB,
+with no unknown fields. `name` is
 1 to 64 bytes of UTF-8 without control characters and without leading or
 trailing space. `link` is `BASE/join#CODE`.
 
@@ -1366,10 +1368,11 @@ Checks run in this order:
 | 507 | `server_full` | The team server is at its seat limit |
 | 500 | `joined_but_not_saved` | The team server accepted the seat and this computer could not store the result. The join code is spent |
 
-### `DELETE /api/team/servers/{id}`
+### Forget
 
-`204` when the server was forgotten, and `404` `not_found` when it was not
-in the file. The call does not contact the team server. The seat stays registered there until the operator revokes it. A damaged server file is
+`DELETE /api/team/servers/{id}` answers `204` when the server was
+forgotten, and `404` `not_found` when it was not in the file. The call
+does not contact the team server. The seat stays registered there until the operator revokes it. A damaged server file is
 `500` `store_unavailable` and is left untouched.
 
 Any other method or path under `/api/team` is `404` `not_found`.
