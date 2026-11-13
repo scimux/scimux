@@ -118,6 +118,7 @@ import {
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
 import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl, homeScreenInstallable } from "./pairing-ui.js";
+import { createSharingSection } from "./team-ui.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { APP_SLOT, claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
@@ -1237,6 +1238,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     doc: document,
     onUnlinked: () => { deviceList.refresh(); pairControl.refresh(); },
   }));
+  const sharingSection = own(createSharingSection({ api, doc: document }));
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */
   /* the chevron must describe the tap: on desktop the button is a toggle, so it
@@ -1606,6 +1608,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   pairControl.bind();
   homeScreen.bind();
   unlinkControl.bind();
+  sharingSection.bind();
   const refocusTitleEditor = () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
   };
@@ -1829,6 +1832,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     deviceList.refresh();
     pairControl.refresh();
     unlinkControl.refresh();
+    sharingSection.refresh();
     loadHarnesses();
   });
   /* A dark Claude gauge that the user could switch on is the only badge worth

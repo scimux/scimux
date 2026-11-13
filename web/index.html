@@ -444,6 +444,21 @@
     <button class="cta" id="m_unlink" hidden>Unlink from the rendezvous</button>
     <div id="m_unlink_note" hidden></div>
   </details>
+  <details class="sect menu-section" id="m_sharing" hidden>
+    <summary>SHARING</summary>
+    <div id="m_team_servers"></div>
+    <button class="cta" id="m_team_add">Add server</button>
+    <div id="m_team_form" hidden>
+      <label for="m_team_link">Join link</label>
+      <input id="m_team_link" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="m_team_name">Your name on this server</label>
+      <input id="m_team_name" type="text" autocomplete="off" maxlength="64">
+      <button class="cta" id="m_team_join">Join</button>
+      <button class="cta" id="m_team_cancel">Cancel</button>
+    </div>
+    <div id="m_team_note" hidden></div>
+    <div class="sr-only" id="m_team_live" aria-live="polite"></div>
+  </details>
   <details class="sect menu-section" id="m_harness_section">
     <summary>HARNESSES</summary>
     <div class="hnote">Provider data use and retention depend on your plan and privacy settings. Review the links below; Grok CLI also offers <code>/privacy</code> controls.</div>

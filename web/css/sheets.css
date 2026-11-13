@@ -314,3 +314,18 @@ label:has(> #m_vibe_inspect) > input {
 .privacy-policy-body h2 { font-size: 16px; margin: 20px 0 8px; }
 .privacy-policy-body p { margin: 8px 0; }
 .privacy-policy-body ul { margin: 8px 0; padding-left: 24px; }
+
+/* Sharing rows. A display rule on a control that can also be hidden has to
+   put [hidden] back, or the attribute stops hiding it. */
+#m_sharing .teamrow {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  min-height: 44px; margin: 8px 0;
+}
+#m_sharing .teamname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+#m_sharing .teammeta, #m_sharing .teamstate { color: var(--dim); font-size: 13px; }
+#m_sharing .teamnote { flex-basis: 100%; margin: 0; color: var(--dim); font-size: 13px; }
+#m_sharing #m_team_form { display: flex; flex-direction: column; gap: 4px; }
+#m_sharing #m_team_form[hidden] { display: none; }
+#m_sharing #m_team_note { margin-top: 8px; color: var(--dim); font-size: 13px; }
+#m_sharing #m_team_note[hidden] { display: none; }
+#m_sharing button.danger { color: var(--bad); font-weight: 600; }
