@@ -137,7 +137,13 @@ func assertTeamPathsMatchUnknown(t *testing.T, h http.Handler) {
 	t.Helper()
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions} {
 		unknown := recordedText(h, method, "/api/not-a-route")
-		for _, path := range []string{"/api/team", "/api/team/", "/api/team/servers"} {
+		for _, path := range []string{
+			"/api/team",
+			"/api/team/",
+			"/api/team/servers",
+			"/api/team/servers/" + teamServerID + "/status",
+			"/api/team/servers/" + teamServerID + "/leave",
+		} {
 			got := recordedText(h, method, path)
 			if got != unknown {
 				t.Fatalf("%s %s\n%s\nwant the unknown-route response\n%s", method, path, got, unknown)
@@ -687,6 +693,15 @@ func TestTeamUnknownRoutesAreJSONNotFound(t *testing.T) {
 		{http.MethodDelete, "/api/team/servers/abc/def"},
 		{http.MethodOptions, "/api/team/servers"},
 		{http.MethodGet, "/api/team/nope"},
+		{http.MethodGet, "/api/team/servers/" + teamServerID},
+		{http.MethodPost, "/api/team/servers/" + teamServerID + "/status"},
+		{http.MethodPut, "/api/team/servers/" + teamServerID + "/status"},
+		{http.MethodDelete, "/api/team/servers/" + teamServerID + "/status"},
+		{http.MethodGet, "/api/team/servers/" + teamServerID + "/leave"},
+		{http.MethodPut, "/api/team/servers/" + teamServerID + "/leave"},
+		{http.MethodDelete, "/api/team/servers/" + teamServerID + "/leave"},
+		{http.MethodGet, "/api/team/servers/" + teamServerID + "/status/extra"},
+		{http.MethodPost, "/api/team/servers/" + teamServerID + "/leave/extra"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -1027,6 +1042,10 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 		"never leaves the server process",
 		"does not contact the team server",
 		"stays registered there until the operator revokes it",
+		"GET /api/team/servers/{id}/status",
+		"POST /api/team/servers/{id}/leave",
+		"left_but_not_removed",
+		"when leaving is not possible",
 	} {
 		if !strings.Contains(string(api), needle) {
 			t.Errorf("docs/http-api.md missing %q", needle)
@@ -1115,4 +1134,668 @@ func TestTeamCoreMuxLeavesOtherRoutesAlone(t *testing.T) {
 	if other.Body.String() != plain.Body.String() || other.Code != plain.Code {
 		t.Fatalf("/api/teams and /api/not-a-route differ\n%s\n%s", other.Body.String(), plain.Body.String())
 	}
+}
+
+func asTeamHandler(t *testing.T, h http.Handler) *teamHandler {
+	t.Helper()
+	th, ok := h.(*teamHandler)
+	if !ok {
+		t.Fatalf("handler = %T", h)
+	}
+	return th
+}
+
+func labEntry(id, rawURL, token string) team.Entry {
+	return team.Entry{
+		ID: id, Name: "Lab relay", URL: rawURL, SeatName: "Ada",
+		Token: token, JoinedAt: "2026-11-12T09:30:00Z",
+	}
+}
+
+func seedTeam(t *testing.T, dir string, e team.Entry) {
+	t.Helper()
+	if err := team.Add(dir, e); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func teamDirSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var b strings.Builder
+	for _, e := range entries {
+		fmt.Fprintf(&b, "%s dir=%t\n", e.Name(), e.IsDir())
+		if e.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(raw)
+	}
+	return b.String()
+}
+
+func assertStatus(t *testing.T, rec *httptest.ResponseRecorder, state string) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	dec := json.NewDecoder(bytes.NewReader(rec.Body.Bytes()))
+	dec.DisallowUnknownFields()
+	var got struct {
+		Status string `json:"status"`
+	}
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("body %s: %v", rec.Body.String(), err)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		t.Fatalf("trailing status document: %v", err)
+	}
+	if got.Status != state {
+		t.Fatalf("state = %q, want %q", got.Status, state)
+	}
+}
+
+type teamHit struct {
+	method string
+	path   string
+	auth   string
+	body   string
+}
+
+func scriptedClient(sc struct {
+	helloStatus int
+	helloBody   string
+	helloErr    bool
+	nextStatus  int
+	nextBody    string
+	nextErr     bool
+}) (*team.Client, *[]teamHit) {
+	var mu sync.Mutex
+	var got []teamHit
+	c := team.NewClient()
+	c.Transport = teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+		var raw []byte
+		if r.Body != nil {
+			raw, _ = io.ReadAll(r.Body)
+		}
+		mu.Lock()
+		got = append(got, teamHit{method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"), body: string(raw)})
+		mu.Unlock()
+		if r.URL.Path == "/v1/hello" {
+			if sc.helloErr {
+				return nil, errors.New("down")
+			}
+			return &http.Response{
+				StatusCode: sc.helloStatus,
+				Body:       io.NopCloser(strings.NewReader(sc.helloBody)),
+				Header:     make(http.Header),
+				Request:    r,
+			}, nil
+		}
+		if sc.nextErr {
+			return nil, errors.New("down")
+		}
+		return &http.Response{
+			StatusCode: sc.nextStatus,
+			Body:       io.NopCloser(strings.NewReader(sc.nextBody)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})
+	return c, &got
+}
+
+func assertNoTokenSent(t *testing.T, hits []teamHit, token string) {
+	t.Helper()
+	for _, hit := range hits {
+		if strings.Contains(hit.auth, token) || strings.Contains(hit.body, token) {
+			t.Fatalf("token left the seat: %+v", hits)
+		}
+	}
+}
+
+func TestTeamStatusBoundIsEightSeconds(t *testing.T) {
+	h, _ := testTeamSurface(t, team.NewClient())
+	if got := asTeamHandler(t, h).statusBound; got != 8*time.Second {
+		t.Fatalf("bound = %s, want 8s", got)
+	}
+}
+
+func TestTeamStatusReportsEachState(t *testing.T) {
+	seats := `{"seats":[{"id":"` + teamOtherID + `","name":"Ada"}]}`
+	cases := []struct {
+		name        string
+		helloStatus int
+		helloBody   string
+		checkStatus int
+		checkBody   string
+		want        string
+		check       bool
+	}{
+		{"connected", http.StatusOK, helloJSON(teamServerID, "Lab relay"), http.StatusOK, seats, "connected", true},
+		{"refused", http.StatusOK, helloJSON(teamServerID, "Other name"), http.StatusUnauthorized, `{"error":"unauthorized"}`, "refused", true},
+		{"changed id", http.StatusOK, helloJSON(teamOtherID, "Lab relay"), http.StatusOK, seats, "changed", false},
+		{"changed protocol", http.StatusOK, `{"protocol":0,"server":{"id":"` + teamServerID + `","name":"Lab relay"}}`, http.StatusOK, seats, "changed", false},
+		{"changed check", http.StatusOK, helloJSON(teamServerID, "Lab relay"), http.StatusInternalServerError, `{"error":"internal"}`, "changed", true},
+		{"changed seats", http.StatusOK, helloJSON(teamServerID, "Lab relay"), http.StatusOK, `{}`, "changed", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, got := scriptedClient(struct {
+				helloStatus int
+				helloBody   string
+				helloErr    bool
+				nextStatus  int
+				nextBody    string
+				nextErr     bool
+			}{helloStatus: tc.helloStatus, helloBody: tc.helloBody, nextStatus: tc.checkStatus, nextBody: tc.checkBody})
+			h, dir := testTeamSurface(t, client)
+			decoyToken := strings.Repeat("cd", 32)
+			seedTeam(t, dir, labEntry(teamOtherID, "http://other.example", decoyToken))
+			seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+			before := teamDirSnapshot(t, dir)
+			rec := doTeam(h, http.MethodGet, "/api/team/servers/"+teamServerID+"/status", "")
+			assertStatus(t, rec, tc.want)
+			assertNoSecrets(t, rec.Body.String(), "", teamToken)
+			assertNoSecrets(t, rec.Body.String(), "", decoyToken)
+			if strings.Contains(rec.Body.String(), `"token"`) {
+				t.Fatalf("response names a token: %s", rec.Body.String())
+			}
+			if teamDirSnapshot(t, dir) != before {
+				t.Fatal("status wrote the data directory")
+			}
+			hits := *got
+			if len(hits) == 0 || hits[0].method != http.MethodGet || hits[0].path != "/v1/hello" || hits[0].auth != "" || hits[0].body != "" {
+				t.Fatalf("hello = %+v", hits)
+			}
+			if strings.Contains(hits[0].path, teamToken) {
+				t.Fatalf("token in the hello path: %+v", hits[0])
+			}
+			if tc.check {
+				if len(hits) != 2 || hits[1].method != http.MethodGet || hits[1].path != "/v1/seats" || hits[1].body != "" || hits[1].auth != "Bearer "+teamToken {
+					t.Fatalf("check = %+v", hits)
+				}
+			} else {
+				if len(hits) != 1 {
+					t.Fatalf("check ran: %+v", hits)
+				}
+				assertNoTokenSent(t, hits, teamToken)
+			}
+		})
+	}
+}
+
+func TestTeamStatusOfflineWhenUnreachable(t *testing.T) {
+	for _, hello := range []bool{true, false} {
+		name := "check"
+		if hello {
+			name = "hello"
+		}
+		t.Run(name, func(t *testing.T) {
+			client, got := scriptedClient(struct {
+				helloStatus int
+				helloBody   string
+				helloErr    bool
+				nextStatus  int
+				nextBody    string
+				nextErr     bool
+			}{
+				helloStatus: http.StatusOK,
+				helloBody:   helloJSON(teamServerID, "Lab relay"),
+				helloErr:    hello,
+				nextStatus:  http.StatusOK,
+				nextBody:    `{"seats":[]}`,
+				nextErr:     !hello,
+			})
+			h, dir := testTeamSurface(t, client)
+			seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+			before := teamDirSnapshot(t, dir)
+			rec := doTeam(h, http.MethodGet, "/api/team/servers/"+teamServerID+"/status", "")
+			assertStatus(t, rec, "offline")
+			assertNoSecrets(t, rec.Body.String(), "", teamToken)
+			if teamDirSnapshot(t, dir) != before {
+				t.Fatal("status wrote the data directory")
+			}
+			hits := *got
+			if hello {
+				if len(hits) != 1 || hits[0].path != "/v1/hello" {
+					t.Fatalf("hits = %+v", hits)
+				}
+				assertNoTokenSent(t, hits, teamToken)
+			} else if len(hits) != 2 || hits[1].path != "/v1/seats" || hits[1].auth != "Bearer "+teamToken {
+				t.Fatalf("hits = %+v", hits)
+			}
+		})
+	}
+}
+
+func TestTeamStatusHonorsItsTimeBound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-time.After(time.Hour)
+	}))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	asTeamHandler(t, h).statusBound = 40 * time.Millisecond
+	seedTeam(t, dir, labEntry(teamServerID, srv.URL, teamToken))
+	before := teamDirSnapshot(t, dir)
+	start := time.Now()
+	rec := doTeam(h, http.MethodGet, "/api/team/servers/"+teamServerID+"/status", "")
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("status waited longer than its bound")
+	}
+	assertStatus(t, rec, "offline")
+	assertNoSecrets(t, rec.Body.String(), "", teamToken)
+	if teamDirSnapshot(t, dir) != before {
+		t.Fatal("status wrote the data directory")
+	}
+}
+
+func TestTeamStatusAndLeaveUnknownID(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	seedTeam(t, dir, labEntry(teamServerID, srv.URL, teamToken))
+	missing := strings.Repeat("ab", 16)
+	before := teamDirSnapshot(t, dir)
+	status := doTeam(h, http.MethodGet, "/api/team/servers/"+missing+"/status", "")
+	assertAPIError(t, status, http.StatusNotFound, "not_found")
+	leave := doTeam(h, http.MethodPost, "/api/team/servers/"+missing+"/leave", "")
+	assertAPIError(t, leave, http.StatusNotFound, "not_found")
+	assertNoSecrets(t, status.Body.String()+leave.Body.String(), "", teamToken)
+	if hits != 0 {
+		t.Fatalf("unknown id contacted the server %d times", hits)
+	}
+	if teamDirSnapshot(t, dir) != before {
+		t.Fatal("unknown id wrote the data directory")
+	}
+}
+
+func TestTeamStatusAndLeaveStoreUnavailable(t *testing.T) {
+	for _, dirShape := range []string{"damaged", "unreadable"} {
+		t.Run(dirShape, func(t *testing.T) {
+			h, dir := testTeamSurface(t, team.NewClient())
+			path := filepath.Join(dir, team.File)
+			if dirShape == "unreadable" {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := teamDirSnapshot(t, dir)
+			status := doTeam(h, http.MethodGet, "/api/team/servers/"+teamServerID+"/status", "")
+			assertAPIError(t, status, http.StatusInternalServerError, "store_unavailable")
+			leave := doTeam(h, http.MethodPost, "/api/team/servers/"+teamServerID+"/leave", "")
+			assertAPIError(t, leave, http.StatusInternalServerError, "store_unavailable")
+			assertNoSecrets(t, status.Body.String()+leave.Body.String(), "", teamToken)
+			if teamDirSnapshot(t, dir) != before {
+				t.Fatal("a failed read changed the data directory")
+			}
+		})
+	}
+}
+
+func TestTeamLeaveRemovesTheEntry(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusUnauthorized} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			client, got := scriptedClient(struct {
+				helloStatus int
+				helloBody   string
+				helloErr    bool
+				nextStatus  int
+				nextBody    string
+				nextErr     bool
+			}{
+				helloStatus: http.StatusOK,
+				helloBody:   helloJSON(teamServerID, "Lab relay"),
+				nextStatus:  status,
+				nextBody:    teamToken,
+			})
+			h, dir := testTeamSurface(t, client)
+			decoyToken := strings.Repeat("cd", 32)
+			seedTeam(t, dir, labEntry(teamOtherID, "http://other.example", decoyToken))
+			seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+			rec := doTeam(h, http.MethodPost, "/api/team/servers/"+teamServerID+"/leave", "")
+			if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+				t.Fatalf("leave = %d %q", rec.Code, rec.Body.String())
+			}
+			assertNoSecrets(t, rec.Body.String(), "", teamToken)
+			left, err := team.Load(dir)
+			if err != nil || len(left) != 1 || left[0].ID != teamOtherID || left[0].Token != decoyToken {
+				t.Fatalf("stored = %+v err %v", left, err)
+			}
+			hits := *got
+			if len(hits) != 2 || hits[0].path != "/v1/hello" || hits[0].method != http.MethodGet || hits[0].auth != "" || hits[0].body != "" {
+				t.Fatalf("hello = %+v", hits)
+			}
+			if hits[1].path != "/v1/seat" || hits[1].method != http.MethodDelete || hits[1].body != "" || hits[1].auth != "Bearer "+teamToken {
+				t.Fatalf("leave call = %+v", hits[1])
+			}
+		})
+	}
+}
+
+func TestTeamLeaveKeepsTheEntryOnFailure(t *testing.T) {
+	cases := []struct {
+		name        string
+		helloStatus int
+		helloBody   string
+		helloErr    bool
+		nextStatus  int
+		nextErr     bool
+		want        string
+		called      bool
+	}{
+		{"hello unreachable", http.StatusOK, helloJSON(teamServerID, "Lab relay"), true, http.StatusNoContent, false, "unreachable", false},
+		{"leave unreachable", http.StatusOK, helloJSON(teamServerID, "Lab relay"), false, http.StatusNoContent, true, "unreachable", true},
+		{"other server", http.StatusOK, helloJSON(teamOtherID, "Lab relay"), false, http.StatusNoContent, false, "bad_server", false},
+		{"bad hello", http.StatusOK, `not-json`, false, http.StatusNoContent, false, "bad_server", false},
+		{"leave not found", http.StatusOK, helloJSON(teamServerID, "Lab relay"), false, http.StatusNotFound, false, "bad_server", true},
+		{"leave server error", http.StatusOK, helloJSON(teamServerID, "Lab relay"), false, http.StatusInternalServerError, false, "bad_server", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, got := scriptedClient(struct {
+				helloStatus int
+				helloBody   string
+				helloErr    bool
+				nextStatus  int
+				nextBody    string
+				nextErr     bool
+			}{
+				helloStatus: tc.helloStatus,
+				helloBody:   tc.helloBody,
+				helloErr:    tc.helloErr,
+				nextStatus:  tc.nextStatus,
+				nextBody:    teamToken,
+				nextErr:     tc.nextErr,
+			})
+			h, dir := testTeamSurface(t, client)
+			seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+			before := teamDirSnapshot(t, dir)
+			rec := doTeam(h, http.MethodPost, "/api/team/servers/"+teamServerID+"/leave", "")
+			assertAPIError(t, rec, http.StatusBadGateway, tc.want)
+			assertNoSecrets(t, rec.Body.String(), "", teamToken)
+			if teamDirSnapshot(t, dir) != before {
+				t.Fatal("a failed leave changed the entry")
+			}
+			hits := *got
+			if tc.called {
+				if len(hits) != 2 || hits[1].path != "/v1/seat" || hits[1].auth != "Bearer "+teamToken || hits[1].body != "" {
+					t.Fatalf("leave call = %+v", hits)
+				}
+			} else if len(hits) != 1 || hits[0].path != "/v1/hello" {
+				t.Fatalf("leave ran: %+v", hits)
+			}
+			if !tc.called {
+				assertNoTokenSent(t, hits, teamToken)
+			}
+		})
+	}
+}
+
+func TestTeamLeaveReportsAnEntryItCouldNotRemove(t *testing.T) {
+	entered := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seat" {
+			if r.Header.Get("Authorization") != "Bearer "+teamToken {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			once.Do(func() { close(entered) })
+			<-release
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(letGo)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	seedTeam(t, dir, labEntry(teamServerID, srv.URL, teamToken))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- doTeam(h, http.MethodPost, "/api/team/servers/"+teamServerID+"/leave", "")
+	}()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-entered:
+	case <-timer.C:
+		t.Fatal("leave did not reach the team server")
+	}
+	path := filepath.Join(dir, team.File)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	letGo()
+	rec := recvTeam(t, done, "leave")
+	assertAPIError(t, rec, http.StatusInternalServerError, "left_but_not_removed")
+	assertNoSecrets(t, rec.Body.String(), "", teamToken)
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("entry path after the failed remove: dir=%v err=%v", info, err)
+	}
+}
+
+func TestTeamLeaveSucceedsWhenForgetWinsTheRace(t *testing.T) {
+	entered := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seat" {
+			once.Do(func() { close(entered) })
+			<-release
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(letGo)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	seedTeam(t, dir, labEntry(teamServerID, srv.URL, teamToken))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- doTeam(h, http.MethodPost, "/api/team/servers/"+teamServerID+"/leave", "")
+	}()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-entered:
+	case <-timer.C:
+		t.Fatal("leave did not reach the team server")
+	}
+	forgotten := doTeam(h, http.MethodDelete, "/api/team/servers/"+teamServerID, "")
+	if forgotten.Code != http.StatusNoContent {
+		t.Fatalf("forget = %d %s", forgotten.Code, forgotten.Body.String())
+	}
+	mid, err := team.Load(dir)
+	if err != nil || len(mid) != 0 {
+		t.Fatalf("stored while leave is in flight = %+v err %v", mid, err)
+	}
+	letGo()
+	rec := recvTeam(t, done, "leave")
+	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+		t.Fatalf("leave = %d %q", rec.Code, rec.Body.String())
+	}
+	assertNoSecrets(t, rec.Body.String(), "", teamToken)
+	left, err := team.Load(dir)
+	if err != nil || len(left) != 0 {
+		t.Fatalf("stored = %+v err %v", left, err)
+	}
+}
+
+func TestTeamStatusAndLeaveDoNotHoldTheFileLock(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		path   string
+		method string
+		route  string
+	}{
+		{"status hello", "/v1/hello", http.MethodGet, "/status"},
+		{"status check", "/v1/seats", http.MethodGet, "/status"},
+		{"leave hello", "/v1/hello", http.MethodPost, "/leave"},
+		{"leave call", "/v1/seat", http.MethodPost, "/leave"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entered := make(chan struct{})
+			var once sync.Once
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			letGo := func() { releaseOnce.Do(func() { close(release) }) }
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == tc.path {
+					once.Do(func() { close(entered) })
+					<-release
+				}
+				switch r.URL.Path {
+				case "/v1/hello":
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+				case "/v1/seats":
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, `{"seats":[]}`)
+				case "/v1/seat":
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			t.Cleanup(letGo)
+			h, dir := testTeamSurface(t, clientFor(srv))
+			otherToken := strings.Repeat("ab", 32)
+			seedTeam(t, dir, labEntry(teamServerID, srv.URL, teamToken))
+			seedTeam(t, dir, labEntry(teamOtherID, "http://other.example", otherToken))
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				done <- doTeam(h, tc.method, "/api/team/servers/"+teamServerID+tc.route, "")
+			}()
+			timer := time.NewTimer(3 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-entered:
+			case <-timer.C:
+				t.Fatal("the call did not reach the team server")
+			}
+			listed := doTeam(h, http.MethodGet, "/api/team/servers", "")
+			if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), teamServerID) || !strings.Contains(listed.Body.String(), teamOtherID) {
+				t.Fatalf("list = %d %s", listed.Code, listed.Body.String())
+			}
+			assertNoSecrets(t, listed.Body.String(), "", teamToken)
+			assertNoSecrets(t, listed.Body.String(), "", otherToken)
+			forgotten := doTeam(h, http.MethodDelete, "/api/team/servers/"+teamOtherID, "")
+			if forgotten.Code != http.StatusNoContent {
+				t.Fatalf("forget = %d %s", forgotten.Code, forgotten.Body.String())
+			}
+			letGo()
+			rec := recvTeam(t, done, tc.name)
+			if tc.route == "/status" {
+				assertStatus(t, rec, "connected")
+				assertNoSecrets(t, rec.Body.String(), "", teamToken)
+				left, err := team.Load(dir)
+				if err != nil || len(left) != 1 || left[0].ID != teamServerID || left[0].Token != teamToken {
+					t.Fatalf("stored = %+v err %v", left, err)
+				}
+			} else if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+				t.Fatalf("leave = %d %q", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestTeamStatusAndLeaveShareTheSettingsBoundary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+		case "/v1/seats":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"seats":[]}`)
+		case "/v1/seat":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	orig := newTeamClient
+	t.Cleanup(func() { newTeamClient = orig })
+	newTeamClient = func() *team.Client {
+		c := orig()
+		c.Transport = srv.Client().Transport
+		return c
+	}
+	cmd, data, _, _ := startTeamCommand(t, true, true)
+	if cmd.application == nil || cmd.application.teamHandler == nil {
+		t.Fatal("muxer did not install the team handler")
+	}
+	seedTeam(t, data, labEntry(teamServerID, srv.URL, teamToken))
+	core, err := newCoreMux(cmd.application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, err := newWebBackend(webBackendConfig{Web: webFS, Core: core, RequestPolicy: cmd.application.requestPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compare := func(method, teamPath, settingsPath string, header string) {
+		t.Helper()
+		teamReq := httptest.NewRequest(method, "http://127.0.0.1"+teamPath, nil)
+		settingsReq := httptest.NewRequest(method, "http://127.0.0.1"+settingsPath, nil)
+		for _, req := range []*http.Request{teamReq, settingsReq} {
+			req.Host = "127.0.0.1"
+			if header != "" {
+				req.Header.Set("Sec-Fetch-Site", header)
+			}
+		}
+		teamRec := httptest.NewRecorder()
+		settingsRec := httptest.NewRecorder()
+		web.local.ServeHTTP(teamRec, teamReq)
+		web.local.ServeHTTP(settingsRec, settingsReq)
+		if dumpRecorder(teamRec) != dumpRecorder(settingsRec) {
+			t.Fatalf("%s %s\n%s\nsettings\n%s", method, teamPath, dumpRecorder(teamRec), dumpRecorder(settingsRec))
+		}
+	}
+	compare(http.MethodPost, "/api/team/servers/"+teamServerID+"/leave", "/api/settings", "")
+	compare(http.MethodGet, "/api/team/servers/"+teamServerID+"/status", "/api/settings", "cross-site")
+
+	statusReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/api/team/servers/"+teamServerID+"/status", nil)
+	statusReq.Host = "127.0.0.1"
+	statusRec := httptest.NewRecorder()
+	web.local.ServeHTTP(statusRec, statusReq)
+	assertStatus(t, statusRec, "connected")
+	assertNoSecrets(t, statusRec.Body.String(), "", teamToken)
+
+	leaveReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/team/servers/"+teamServerID+"/leave", nil)
+	leaveReq.Host = "127.0.0.1"
+	leaveReq.Header.Set("X-Scimux-CSRF", csrfToken)
+	leaveRec := httptest.NewRecorder()
+	web.local.ServeHTTP(leaveRec, leaveReq)
+	if leaveRec.Code != http.StatusNoContent || leaveRec.Body.Len() != 0 {
+		t.Fatalf("leave behind the boundary = %d %q", leaveRec.Code, leaveRec.Body.String())
+	}
+	assertNoSecrets(t, leaveRec.Body.String(), "", teamToken)
 }

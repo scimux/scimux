@@ -23,6 +23,9 @@ type teamHandler struct {
 	now     func() time.Time
 	client  *team.Client
 	mu      sync.Mutex
+	// statusBound is the time limit for one status check. Tests set it.
+	// Production sets eight seconds.
+	statusBound time.Duration
 }
 
 func newTeamHandler(dataDir string, now func() time.Time, client *team.Client) http.Handler {
