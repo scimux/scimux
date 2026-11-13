@@ -1368,11 +1368,47 @@ Checks run in this order:
 | 507 | `server_full` | The team server is at its seat limit |
 | 500 | `joined_but_not_saved` | The team server accepted the seat and this computer could not store the result. The join code is spent |
 
+### Status
+
+`GET /api/team/servers/{id}/status` answers `200` and
+`{"status":"<state>"}`. The check writes nothing. It is bounded to 8
+seconds. The token is sent only after Hello on the stored URL names the
+stored server.
+
+| State | When |
+| --- | --- |
+| `connected` | Hello named the stored server and the token is still accepted |
+| `refused` | Hello named the stored server and the token was refused |
+| `offline` | Hello or the token check could not reach the server, or the time bound passed |
+| `changed` | Hello named another server, or the answer was not protocol 1, or the token check failed for another reason |
+
+An id that is not in the server file is `404` `not_found`. A server file
+that cannot be read, including a damaged one, is `500` `store_unavailable`.
+
+### Leave
+
+`POST /api/team/servers/{id}/leave` takes no body. Success is `204` when
+the seat left the server and the entry was removed. A token the server
+refuses counts as left: the seat is already gone there, the entry is
+removed, and the answer is `204`. An entry another request removed in the
+meantime is still `204`. The token is sent only after Hello on the stored
+URL names the stored server.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 404 | `not_found` | The id is not in the server file |
+| 500 | `store_unavailable` | The server file cannot be read |
+| 502 | `unreachable` | Hello or the leave call could not reach the server |
+| 502 | `bad_server` | Hello named another server, or Hello or the leave call failed for another reason |
+| 500 | `left_but_not_removed` | The seat left and the entry could not be removed |
+
+On `unreachable` and `bad_server` the entry stays.
+
 ### Forget
 
 `DELETE /api/team/servers/{id}` answers `204` when the server was
 forgotten, and `404` `not_found` when it was not in the file. The call
-does not contact the team server. The seat stays registered there until the operator revokes it. A damaged server file is
+does not contact the team server. The seat stays registered there until the operator revokes it. Use this when leaving is not possible. A damaged server file is
 `500` `store_unavailable` and is left untouched.
 
 Any other method or path under `/api/team` is `404` `not_found`.

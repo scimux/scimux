@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -29,7 +30,7 @@ type teamHandler struct {
 }
 
 func newTeamHandler(dataDir string, now func() time.Time, client *team.Client) http.Handler {
-	return &teamHandler{dataDir: dataDir, now: now, client: client}
+	return &teamHandler{dataDir: dataDir, now: now, client: client, statusBound: 8 * time.Second}
 }
 
 // newTeamClient builds the client Run installs. Tests replace it.
@@ -44,21 +45,46 @@ type teamServerView struct {
 }
 
 func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/api/team/servers":
-		h.list(w)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/team/servers":
-		h.join(w, r)
-	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/team/servers/"):
-		id := strings.TrimPrefix(r.URL.Path, "/api/team/servers/")
-		if id == "" || strings.Contains(id, "/") {
+	if r.URL.Path == "/api/team/servers" {
+		switch r.Method {
+		case http.MethodGet:
+			h.list(w)
+		case http.MethodPost:
+			h.join(w, r)
+		default:
 			writeTeamError(w, http.StatusNotFound, "not_found")
-			return
 		}
+		return
+	}
+	id, action, ok := splitTeamServerPath(r.URL.Path)
+	if !ok {
+		writeTeamError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	switch {
+	case action == "" && r.Method == http.MethodDelete:
 		h.forget(w, id)
+	case action == "status" && r.Method == http.MethodGet:
+		h.status(w, r, id)
+	case action == "leave" && r.Method == http.MethodPost:
+		h.leave(w, r, id)
 	default:
 		writeTeamError(w, http.StatusNotFound, "not_found")
 	}
+}
+
+// splitTeamServerPath accepts /api/team/servers/{id} and the status and
+// leave actions. Anything else, including a trailing slash, is refused.
+func splitTeamServerPath(path string) (id, action string, ok bool) {
+	rest, found := strings.CutPrefix(path, "/api/team/servers/")
+	if !found || rest == "" {
+		return "", "", false
+	}
+	id, action, hasAction := strings.Cut(rest, "/")
+	if strings.Contains(action, "/") || (hasAction && action != "status" && action != "leave") {
+		return "", "", false
+	}
+	return id, action, true
 }
 
 func (h *teamHandler) list(w http.ResponseWriter) {
@@ -174,6 +200,102 @@ func (h *teamHandler) deleteServer(id string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return team.Remove(h.dataDir, id)
+}
+
+func (h *teamHandler) serverByID(id string) (team.Entry, error) {
+	entries, err := h.readServers()
+	if err != nil {
+		return team.Entry{}, err
+	}
+	for _, e := range entries {
+		if e.ID == id {
+			return e, nil
+		}
+	}
+	return team.Entry{}, team.ErrNotFound
+}
+
+func (h *teamHandler) beginServer(w http.ResponseWriter, id string) (team.Entry, bool) {
+	entry, err := h.serverByID(id)
+	if err == nil {
+		return entry, true
+	}
+	if errors.Is(err, team.ErrNotFound) {
+		writeTeamError(w, http.StatusNotFound, "not_found")
+		return team.Entry{}, false
+	}
+	writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+	return team.Entry{}, false
+}
+
+func (h *teamHandler) status(w http.ResponseWriter, r *http.Request, id string) {
+	entry, ok := h.beginServer(w, id)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), h.statusBound)
+	defer cancel()
+	writeJSONStatus(w, http.StatusOK, struct {
+		Status string `json:"status"`
+	}{Status: h.serverState(ctx, entry)})
+}
+
+func (h *teamHandler) serverState(ctx context.Context, entry team.Entry) string {
+	hello, err := h.client.Hello(ctx, entry.URL)
+	if err != nil {
+		if errors.Is(err, team.ErrUnreachable) {
+			return "offline"
+		}
+		return "changed"
+	}
+	if hello.ID != entry.ID {
+		return "changed"
+	}
+	err = h.client.Check(ctx, entry.URL, entry.Token)
+	if err == nil {
+		return "connected"
+	}
+	if errors.Is(err, team.ErrUnauthorized) {
+		return "refused"
+	}
+	if errors.Is(err, team.ErrUnreachable) {
+		return "offline"
+	}
+	return "changed"
+}
+
+func (h *teamHandler) leave(w http.ResponseWriter, r *http.Request, id string) {
+	entry, ok := h.beginServer(w, id)
+	if !ok {
+		return
+	}
+	hello, err := h.client.Hello(r.Context(), entry.URL)
+	if err != nil {
+		if errors.Is(err, team.ErrUnreachable) {
+			writeTeamError(w, http.StatusBadGateway, "unreachable")
+			return
+		}
+		writeTeamError(w, http.StatusBadGateway, "bad_server")
+		return
+	}
+	if hello.ID != entry.ID {
+		writeTeamError(w, http.StatusBadGateway, "bad_server")
+		return
+	}
+	err = h.client.Leave(r.Context(), entry.URL, entry.Token)
+	if err != nil && !errors.Is(err, team.ErrUnauthorized) {
+		if errors.Is(err, team.ErrUnreachable) {
+			writeTeamError(w, http.StatusBadGateway, "unreachable")
+			return
+		}
+		writeTeamError(w, http.StatusBadGateway, "bad_server")
+		return
+	}
+	if err := h.deleteServer(id); err != nil && !errors.Is(err, team.ErrNotFound) {
+		writeTeamError(w, http.StatusInternalServerError, "left_but_not_removed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeTeamRegisterError(w http.ResponseWriter, err error) {
