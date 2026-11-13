@@ -1378,8 +1378,13 @@ func TestTeamStatusOfflineWhenUnreachable(t *testing.T) {
 }
 
 func TestTeamStatusHonorsItsTimeBound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		<-time.After(time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		timer := time.NewTimer(time.Hour)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-r.Context().Done():
+		}
 	}))
 	t.Cleanup(srv.Close)
 	h, dir := testTeamSurface(t, clientFor(srv))
