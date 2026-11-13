@@ -31,15 +31,17 @@ test('structural parsing skips comments without joining fragments into new eleme
   assert.equal(ids.get('visible').text, 'kept');
 });
 
-test('four native menu sections have exact order, defaults, unique IDs and content ownership', () => {
+test('five native menu sections have exact order, defaults, unique IDs and content ownership', () => {
   const { ids } = markup(), menu = ids.get('menu');
   const sections = menu.children.filter(e => e.tag === 'details');
-  assert.deepEqual(sections.map(e => e.children[0].text.trim()), ['ABOUT', 'REMOTE', 'HARNESSES', 'PREFERENCES']);
-  assert.deepEqual(sections.map(e => 'open' in e.attrs), [true, false, false, false]);
+  assert.deepEqual(sections.map(e => e.children[0].text.trim()), ['ABOUT', 'REMOTE', 'SHARING', 'HARNESSES', 'PREFERENCES']);
+  assert.deepEqual(sections.map(e => 'open' in e.attrs), [true, false, false, false, false]);
   assert.ok('hidden' in ids.get('m_remote').attrs);
+  assert.ok('hidden' in ids.get('m_sharing').attrs);
   assert.ok(sections.every(e => !('name' in e.attrs)), 'sections must expand independently');
   for (const id of ['m_version', 'm_check', 'm_result', 'm_reltext', 'm_relurl', 'm_apply', 'm_notes', 'm_affil', 'm_privacy', 'm_ai_engineering', 'm_lictext']) assert.equal(owner(ids.get(id)), 'm_about', id);
   for (const id of ['m_devices', 'm_pair', 'm_pair_note', 'm_unlink', 'm_unlink_note', 'm_homescreen']) assert.equal(owner(ids.get(id)), 'm_remote', id);
+  for (const id of ['m_team_servers', 'm_team_add', 'm_team_form', 'm_team_link', 'm_team_name', 'm_team_join', 'm_team_cancel', 'm_team_note', 'm_team_live']) assert.equal(owner(ids.get(id)), 'm_sharing', id);
   for (const id of ['m_harnesses', 'm_vibe_inspect_row', 'm_vibe_inspect', 'm_hnote', 'm_hcheck']) assert.equal(owner(ids.get(id)), 'm_harness_section', id);
   for (const id of ['m_external_attachments', 'm_external_attachments_note', 'm_accent_harness_logos']) assert.equal(owner(ids.get(id)), 'm_attachment_settings', id);
   const harness = ids.get('m_harness_section');
@@ -172,7 +174,7 @@ test('remote visibility, refusal/unlink controls, folding and menu reopen preser
   assert.equal(s.get('m_pair').hidden, true);
   assert.match(s.get('m_pair_note').innerHTML, /Synthetic refusal/);
   assert.equal(s.get('m_unlink').hidden, false);
-  for (const id of ['m_about', 'm_remote', 'm_harness_section', 'm_attachment_settings']) {
+  for (const id of ['m_about', 'm_remote', 'm_sharing', 'm_harness_section', 'm_attachment_settings']) {
     const el = s.get(id); assert.ok(el, id); el.open = false; el.open = true;
     el.dispatchEvent({ type: 'toggle' });
   }

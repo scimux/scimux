@@ -71,6 +71,7 @@ func TestMenuSectionOrderAndInitialStates(t *testing.T) {
 	}{
 		{"m_about", "ABOUT", true, false},
 		{"m_remote", "REMOTE", false, true},
+		{"m_sharing", "SHARING", false, true},
 		{"m_harness_section", "HARNESSES", false, false},
 		{"m_attachment_settings", "PREFERENCES", false, false},
 	}
@@ -113,6 +114,44 @@ func TestMenuSectionOrderAndInitialStates(t *testing.T) {
 		if i < remote || i > harnesses {
 			t.Errorf("%s must remain inside REMOTE", id)
 		}
+	}
+}
+
+// TestSharingSectionSlotsAndConstruction pins the Sharing section the
+// browser module writes into, and that the composition root constructs it.
+func TestSharingSectionSlotsAndConstruction(t *testing.T) {
+	html := readWebFile(t, "web/index.html")
+	start := strings.Index(html, `id="m_sharing"`)
+	endRel := -1
+	if start < 0 {
+		t.Error(`index.html has no id="m_sharing"`)
+	} else {
+		endRel = strings.Index(html[start:], `id="m_harness_section"`)
+		if endRel < 0 {
+			t.Error("SHARING is not before HARNESSES")
+		}
+	}
+	if start >= 0 && endRel >= 0 {
+		section := html[start : start+endRel]
+		for _, id := range []string{
+			"m_team_servers",
+			"m_team_add",
+			"m_team_form",
+			"m_team_link",
+			"m_team_name",
+			"m_team_join",
+			"m_team_cancel",
+			"m_team_note",
+			"m_team_live",
+		} {
+			if !strings.Contains(section, `id="`+id+`"`) {
+				t.Errorf("SHARING section has no id=%q", id)
+			}
+		}
+	}
+	app := readWebFile(t, "web/js/app.js")
+	if !strings.Contains(app, "createSharingSection") {
+		t.Error("web/js/app.js does not name createSharingSection")
 	}
 }
 
