@@ -215,13 +215,87 @@ func validHex(s string, n int) bool {
 }
 
 // Check asks the server whether the token is still accepted.
-func (c *Client) Check(context.Context, string, string) error {
-	return errors.New("team: unchecked")
+// GET /v1/seats. A 200 whose body is a JSON object with a seats array is
+// success. 401 is ErrUnauthorized.
+func (c *Client) Check(ctx context.Context, baseURL, token string) error {
+	status, raw, err := c.authed(ctx, http.MethodGet, baseURL, "/v1/seats", token)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusUnauthorized {
+		return ErrUnauthorized
+	}
+	if status != http.StatusOK || !seatsArray(raw) {
+		return ErrProtocol
+	}
+	return nil
 }
 
 // Leave removes this seat from the server.
-func (c *Client) Leave(context.Context, string, string) error {
-	return errors.New("team: not left")
+// DELETE /v1/seat with no body. 204 is success. 401 is ErrUnauthorized.
+func (c *Client) Leave(ctx context.Context, baseURL, token string) error {
+	status, _, err := c.authed(ctx, http.MethodDelete, baseURL, "/v1/seat", token)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusUnauthorized {
+		return ErrUnauthorized
+	}
+	if status != http.StatusNoContent {
+		return ErrProtocol
+	}
+	return nil
+}
+
+// authed performs one token call. The token is placed on the Authorization
+// header and nowhere else. A connection failure or a timeout is
+// ErrUnreachable. An oversized body is ErrProtocol. The status and the
+// bounded body are returned only when the call itself succeeded.
+func (c *Client) authed(ctx context.Context, method, baseURL, path, token string) (int, []byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	endpoint, err := endpointURL(baseURL, path)
+	if err != nil {
+		return 0, nil, err
+	}
+	// method and endpoint are built here, so the request constructor succeeds.
+	req, _ := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return 0, nil, ErrUnreachable
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	if err != nil {
+		return 0, nil, ErrUnreachable
+	}
+	if len(raw) > maxResponseBody {
+		return 0, nil, ErrProtocol
+	}
+	return resp.StatusCode, raw, nil
+}
+
+// seatsArray reports whether raw is one JSON object that has a seats array.
+func seatsArray(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var obj map[string]json.RawMessage
+	if err := dec.Decode(&obj); err != nil {
+		return false
+	}
+	var extra json.RawMessage
+	if dec.Decode(&extra) != io.EOF {
+		return false
+	}
+	seats, ok := obj["seats"]
+	if !ok {
+		return false
+	}
+	// A JSON value the object decoder accepted is one value. An array is
+	// the only one whose first byte is '['.
+	return bytes.HasPrefix(bytes.TrimSpace(seats), []byte("["))
 }
 
 func validName(name string) bool {
