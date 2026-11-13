@@ -418,6 +418,412 @@ func TestClientReadErrorIsUnreachable(t *testing.T) {
 	}
 }
 
+const teamCallToken = "SYNTHETIC-TEAM-TOKEN"
+
+func seatsBody() string {
+	return `{"seats":[{"id":"` + seatID + `","name":"Ada"}]}`
+}
+
+func assertTokenAbsent(t *testing.T, err error) {
+	t.Helper()
+	if err != nil && strings.Contains(err.Error(), teamCallToken) {
+		t.Fatalf("error quotes the token: %v", err)
+	}
+}
+
+func TestCheckAcceptsASeatsArray(t *testing.T) {
+	bodies := []string{
+		`{"seats":[]}`,
+		seatsBody(),
+		`{"seats":[ ],"extra":true}`,
+	}
+	for _, body := range bodies {
+		t.Run(body, func(t *testing.T) {
+			srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			})
+			err := clientOn(srv).Check(context.Background(), srv.URL, teamCallToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(*got) != 1 {
+				t.Fatalf("requests = %d", len(*got))
+			}
+			req := (*got)[0]
+			if req.method != http.MethodGet || req.path != "/v1/seats" || req.body != "" {
+				t.Fatalf("request = %+v", req)
+			}
+			if req.header.Get("Authorization") != "Bearer "+teamCallToken {
+				t.Fatalf("Authorization = %q", req.header.Get("Authorization"))
+			}
+			if req.header.Get("Content-Type") != "" {
+				t.Fatalf("Content-Type = %q", req.header.Get("Content-Type"))
+			}
+			if strings.Contains(req.body, teamCallToken) || strings.Contains(srv.URL, teamCallToken) {
+				t.Fatal("token left the Authorization header")
+			}
+		})
+	}
+}
+
+func TestCheckRejectsTheAnswer(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{"not json", http.StatusOK, "not-json", ErrProtocol},
+		{"array", http.StatusOK, `[]`, ErrProtocol},
+		{"missing seats", http.StatusOK, `{}`, ErrProtocol},
+		{"seats object", http.StatusOK, `{"seats":{}}`, ErrProtocol},
+		{"seats null", http.StatusOK, `{"seats":null}`, ErrProtocol},
+		{"seats string", http.StatusOK, `{"seats":"[]"}`, ErrProtocol},
+		{"seats number", http.StatusOK, `{"seats":0}`, ErrProtocol},
+		{"trailing value", http.StatusOK, `{"seats":[]}{}`, ErrProtocol},
+		{"unauthorized json", http.StatusUnauthorized, `{"error":"unauthorized"}`, ErrUnauthorized},
+		{"unauthorized text", http.StatusUnauthorized, teamCallToken, ErrUnauthorized},
+		{"not found", http.StatusNotFound, `{"error":"not_found"}`, ErrProtocol},
+		{"server error", http.StatusInternalServerError, teamCallToken, ErrProtocol},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			err := clientOn(srv).Check(context.Background(), srv.URL, teamCallToken)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+			assertTokenAbsent(t, err)
+			if len(*got) != 1 || (*got)[0].body != "" || (*got)[0].header.Get("Authorization") != "Bearer "+teamCallToken {
+				t.Fatalf("request = %+v", *got)
+			}
+		})
+	}
+}
+
+func TestLeaveAcceptsNoContentAndARefusedToken(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusUnauthorized} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+				w.WriteHeader(status)
+				if status == http.StatusUnauthorized {
+					_, _ = io.WriteString(w, teamCallToken)
+				}
+			})
+			err := clientOn(srv).Leave(context.Background(), srv.URL, teamCallToken)
+			if status == http.StatusNoContent {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("error = %v", err)
+			}
+			assertTokenAbsent(t, err)
+			if len(*got) != 1 {
+				t.Fatalf("requests = %d", len(*got))
+			}
+			req := (*got)[0]
+			if req.method != http.MethodDelete || req.path != "/v1/seat" || req.body != "" {
+				t.Fatalf("request = %+v", req)
+			}
+			if req.header.Get("Authorization") != "Bearer "+teamCallToken {
+				t.Fatalf("Authorization = %q", req.header.Get("Authorization"))
+			}
+			if req.header.Get("Content-Type") != "" {
+				t.Fatalf("Content-Type = %q", req.header.Get("Content-Type"))
+			}
+		})
+	}
+}
+
+func TestLeaveRejectsOtherAnswers(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"not found", http.StatusNotFound, `{"error":"not_found"}`},
+		{"server error", http.StatusInternalServerError, teamCallToken},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			})
+			err := clientOn(srv).Leave(context.Background(), srv.URL, teamCallToken)
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("error = %v", err)
+			}
+			assertTokenAbsent(t, err)
+		})
+	}
+}
+
+func TestCheckAndLeaveAreUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	c := NewClient()
+	c.timeout = time.Second
+	err := c.Check(context.Background(), url, teamCallToken)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("Check error = %v", err)
+	}
+	assertTokenAbsent(t, err)
+	err = c.Leave(context.Background(), url, teamCallToken)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("Leave error = %v", err)
+	}
+	assertTokenAbsent(t, err)
+}
+
+func TestCheckAndLeaveTimeOut(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	c := clientOn(srv)
+	c.timeout = 30 * time.Millisecond
+	if err := c.Check(context.Background(), srv.URL, teamCallToken); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("Check error = %v", err)
+	}
+	if err := c.Leave(context.Background(), srv.URL, teamCallToken); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("Leave error = %v", err)
+	}
+}
+
+func TestCheckAndLeaveDoNotFollowRedirects(t *testing.T) {
+	for _, path := range []string{"/v1/seats", "/v1/seat"} {
+		t.Run(path, func(t *testing.T) {
+			var paths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				http.Redirect(w, r, "/v1/landed", http.StatusFound)
+			}))
+			t.Cleanup(srv.Close)
+			c := clientOn(srv)
+			var err error
+			if path == "/v1/seats" {
+				err = c.Check(context.Background(), srv.URL, teamCallToken)
+			} else {
+				err = c.Leave(context.Background(), srv.URL, teamCallToken)
+			}
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("error = %v", err)
+			}
+			assertTokenAbsent(t, err)
+			if len(paths) != 1 || paths[0] != path {
+				t.Fatalf("paths = %v", paths)
+			}
+		})
+	}
+}
+
+func TestCheckRejectsAnOversizedAnswer(t *testing.T) {
+	body := teamCallToken + strings.Repeat("x", 64*1024)
+	srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	})
+	err := clientOn(srv).Check(context.Background(), srv.URL, teamCallToken)
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("error = %v", err)
+	}
+	assertTokenAbsent(t, err)
+}
+
+func TestCheckNilContextStillReachesTheServer(t *testing.T) {
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"seats":[]}`)
+	})
+	if err := clientOn(srv).Check(nil, srv.URL, teamCallToken); err != nil {
+		t.Fatal(err)
+	}
+	if len(*got) != 1 || (*got)[0].path != "/v1/seats" {
+		t.Fatalf("requests = %+v", *got)
+	}
+}
+
+func TestCheckCanceledContextIsUnreachable(t *testing.T) {
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"seats":[]}`)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := clientOn(srv).Check(ctx, srv.URL, teamCallToken)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("error = %v", err)
+	}
+	assertTokenAbsent(t, err)
+	if len(*got) != 0 {
+		t.Fatalf("canceled call sent %#v", *got)
+	}
+}
+
+func TestCheckAndLeaveRejectABadBaseURL(t *testing.T) {
+	c := NewClient()
+	c.timeout = time.Second
+	base := "http://" + teamCallToken + "@relay.example"
+	if err := c.Check(context.Background(), base, teamCallToken); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Check error = %v", err)
+	} else {
+		assertTokenAbsent(t, err)
+	}
+	if err := c.Leave(context.Background(), "http://[", teamCallToken); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("Leave error = %v", err)
+	} else {
+		assertTokenAbsent(t, err)
+	}
+}
+
+func TestCheckReadErrorIsUnreachable(t *testing.T) {
+	c := NewClient()
+	c.Transport = failTrip{}
+	c.timeout = time.Second
+	err := c.Check(context.Background(), "http://relay.example", teamCallToken)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("error = %v", err)
+	}
+	assertTokenAbsent(t, err)
+}
+
+func TestCheckUsesTheBaseAndTheHeader(t *testing.T) {
+	trip := &headerTrip{status: http.StatusOK, body: `{"seats":[]}`}
+	c := NewClient()
+	c.Transport = trip
+	c.timeout = time.Second
+	if err := c.Check(context.Background(), "https://relay.example", teamCallToken); err != nil {
+		t.Fatal(err)
+	}
+	if trip.method != http.MethodGet || trip.gotURL != "https://relay.example/v1/seats" {
+		t.Fatalf("request = %s %s", trip.method, trip.gotURL)
+	}
+	if trip.auth != "Bearer "+teamCallToken || trip.gotBody != "" {
+		t.Fatalf("auth = %q body = %q", trip.auth, trip.gotBody)
+	}
+}
+
+type headerTrip struct {
+	status  int
+	body    string
+	method  string
+	gotURL  string
+	auth    string
+	gotBody string
+}
+
+func (s *headerTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.method = r.Method
+	s.gotURL = r.URL.String()
+	s.auth = r.Header.Get("Authorization")
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		s.gotBody = string(raw)
+	}
+	return &http.Response{
+		StatusCode: s.status,
+		Body:       io.NopCloser(strings.NewReader(s.body)),
+		Header:     make(http.Header),
+		Request:    r,
+	}, nil
+}
+
+func TestCheckAndLeaveLeaveNoConnectionOpen(t *testing.T) {
+	var mu sync.Mutex
+	open := 0
+	opened := 0
+	var paths []string
+	changed := make(chan struct{}, 1)
+	notify := func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		auth := r.Header.Get("Authorization")
+		mu.Unlock()
+		if auth != "Bearer "+teamCallToken || r.ContentLength != 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/seats":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"seats":[]}`)
+		case "/v1/seat":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		mu.Lock()
+		switch state {
+		case http.StateNew:
+			open++
+			opened++
+		case http.StateClosed:
+			open--
+		}
+		mu.Unlock()
+		notify()
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	c := NewClient()
+	for i := 0; i < 3; i++ {
+		if err := c.Check(context.Background(), srv.URL, teamCallToken); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Leave(context.Background(), srv.URL, teamCallToken); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	seen := append([]string(nil), paths...)
+	nOpened := opened
+	mu.Unlock()
+	if nOpened == 0 {
+		t.Fatal("the server accepted no connection")
+	}
+	if len(seen) != 6 || seen[0] != "GET /v1/seats" || seen[1] != "DELETE /v1/seat" {
+		t.Fatalf("paths = %v", seen)
+	}
+
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		mu.Lock()
+		n := open
+		mu.Unlock()
+		if n == 0 {
+			return
+		}
+		select {
+		case <-changed:
+		case <-deadline.C:
+			mu.Lock()
+			n = open
+			mu.Unlock()
+			if n == 0 {
+				return
+			}
+			t.Fatalf("open connections = %d, want 0", n)
+		}
+	}
+}
+
 func TestClientLeavesNoConnectionOpen(t *testing.T) {
 	var mu sync.Mutex
 	open := 0

@@ -21,8 +21,8 @@ type Server struct {
 	Name string
 }
 
-// Sentinel errors from Hello and Register. None of them quote a join code,
-// a token, or a response body.
+// Sentinel errors from Hello, Register, Check and Leave. None of them quote
+// a join code, a token, or a response body.
 var (
 	ErrUnreachable       = errors.New("team: server unreachable")
 	ErrProtocol          = errors.New("team: protocol mismatch")
@@ -30,6 +30,7 @@ var (
 	ErrAlreadyRegistered = errors.New("team: already registered")
 	ErrServerFull        = errors.New("team: server full")
 	ErrRejected          = errors.New("team: registration rejected")
+	ErrUnauthorized      = errors.New("team: token refused")
 )
 
 // Client calls a team server. Transport, when set, replaces the direct
@@ -211,6 +212,16 @@ func validHex(s string, n int) bool {
 		}
 	}
 	return true
+}
+
+// Check asks the server whether the token is still accepted.
+func (c *Client) Check(context.Context, string, string) error {
+	return errors.New("team: unchecked")
+}
+
+// Leave removes this seat from the server.
+func (c *Client) Leave(context.Context, string, string) error {
+	return errors.New("team: not left")
 }
 
 func validName(name string) bool {
