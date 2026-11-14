@@ -28,6 +28,7 @@ var productionJSModules = []string{
 	"web/js/claude-interaction.js",
 	"web/js/composer.js",
 	"web/js/format.js",
+	"web/js/fold.js",
 	"web/js/harness.js",
 	"web/js/insets.js",
 	"web/js/lane-picker.js",
