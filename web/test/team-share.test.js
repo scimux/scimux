@@ -609,3 +609,256 @@ function roster(seats) {
   return { self: selfId, seats };
 }
 
+test("opening and choosing send no share request", async () => {
+  const { feature, calls, btn, body, opened, apply } = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north, south] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue, red]);
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  feature.select("node-1");
+  await feature.settled();
+  const before = calls.length;
+  btn.click();
+  await feature.settled();
+  assert.deepEqual(opened, ["sharesheet"]);
+  const chosen = calls.slice(before);
+  assert.deepEqual(chosen.map((call) => call.path), ["/api/team/servers/server-north/seats"]);
+  assert.equal(calls.some((call) => call.method === "PUT"), false);
+  assert.match(body.innerHTML, /<legend>Server<\/legend>/);
+  assert.match(body.innerHTML, /<legend>What to share<\/legend>/);
+  assert.match(body.innerHTML, /Prompts and answers only\./);
+  assert.match(body.innerHTML, /Tool details stay on this computer\./);
+  const servers = inputs(body, "sh_server");
+  assert.equal(servers[0].checked, true);
+  assert.equal(servers[1].checked, false);
+  const scopes = inputs(body, "sh_scope");
+  assert.equal(scopes[0].checked, true);
+  assert.equal(scopes[0].value, "from_now");
+  servers[0].checked = false;
+  servers[1].checked = true;
+  servers[1].emit("change");
+  await feature.settled();
+  scopes[0].checked = false;
+  scopes[1].checked = true;
+  scopes[1].emit("change");
+  const choice = selects(body)[0];
+  choice.value = "read";
+  choice.emit("change");
+  await feature.settled();
+  assert.equal(calls.some((call) => call.method === "PUT"), false);
+  assert.equal(apply.textContent, "Share chat");
+  assert.equal(apply.disabled, false);
+});
+
+test("the put body covers nobody, read, read and write, entire history, and the second server", async () => {
+  const cases = [
+    { choose: () => {}, members: [] },
+    { choose: (body) => { selects(body)[0].value = "read"; }, members: [{ seat: blue.id, access: "read" }] },
+    {
+      choose: (body) => {
+        selects(body)[0].value = "read";
+        selects(body)[1].value = "write";
+      },
+      members: [{ seat: blue.id, access: "read" }, { seat: red.id, access: "write" }],
+    },
+    {
+      scope: "all",
+      choose: () => {},
+      members: [],
+    },
+    {
+      server: south.id,
+      choose: () => {},
+      members: [],
+    },
+  ];
+  for (const item of cases) {
+    const seen = [];
+    const { feature, btn, body, apply, calls } = setup((call) => {
+      if (call.path === "/api/team/servers") return { servers: [north, south] };
+      if (call.path.endsWith("/seats")) return roster([selfSeat(), blue, red]);
+      if (call.method === "PUT") {
+        seen.push(call.body);
+        return viewOf({ server: call.body.server, scope: call.body.scope, members: call.body.members });
+      }
+      return rejected(404, JSON.stringify({ error: "not_found" }));
+    });
+    feature.select("node-1");
+    await feature.settled();
+    btn.click();
+    await feature.settled();
+    if (item.server) {
+      const radios = inputs(body, "sh_server");
+      radios[0].checked = false;
+      radios[1].checked = true;
+      radios[1].emit("change");
+      await feature.settled();
+    }
+    if (item.scope === "all") {
+      const radios = inputs(body, "sh_scope");
+      radios[0].checked = false;
+      radios[1].checked = true;
+    }
+    item.choose(body);
+    apply.click();
+    await feature.settled();
+    assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+    assert.deepEqual(seen[0], {
+      server: item.server || north.id,
+      scope: item.scope || "from_now",
+      members: item.members,
+    });
+  }
+});
+
+test("a share with nothing chosen uses the first server and from now on", async () => {
+  const { feature, btn, body, apply, calls } = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north, south] };
+    if (call.path.endsWith("/seats")) return roster([]);
+    if (call.method === "PUT") return viewOf({ members: [] });
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  feature.select("node-1");
+  await feature.settled();
+  btn.click();
+  await feature.settled();
+  for (const input of body.querySelectorAll("input")) input.checked = false;
+  apply.click();
+  await feature.settled();
+  const put = calls.find((call) => call.method === "PUT");
+  assert.equal(put.body.server, north.id);
+  assert.equal(put.body.scope, "from_now");
+  assert.deepEqual(put.body.members, []);
+});
+
+test("self is not a row, an empty roster says so, and a failed roster shows the error", async () => {
+  const emptyBodies = [roster([]), roster([selfSeat()]), null, { seats: "no" }, { seats: [blue] }];
+  for (const body of emptyBodies) {
+    const { feature, btn, body: sheet } = setup((call) => {
+      if (call.path === "/api/team/servers") return { servers: [north] };
+      if (call.path.endsWith("/seats")) return body;
+      return rejected(404, JSON.stringify({ error: "not_found" }));
+    });
+    feature.select("node-1");
+    await feature.settled();
+    btn.click();
+    await feature.settled();
+    const host = peopleOf(sheet);
+    if (body && Array.isArray(body.seats) && body.seats.some((seat) => seat.id === blue.id) && body.self == null) {
+      assert.equal(selects(sheet).length, 1);
+      assert.equal(selects(sheet)[0].dataset.seat, blue.id);
+    } else {
+      assert.equal(host.textContent, "Nobody else has joined this server yet.");
+      assert.equal(selects(sheet).length, 0);
+    }
+  }
+  const { feature, btn, body } = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue, marked]);
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  feature.select("node-1");
+  await feature.settled();
+  btn.click();
+  await feature.settled();
+  const rows = selects(body);
+  assert.deepEqual(rows.map((row) => row.dataset.seat), [blue.id, marked.id]);
+  assert.equal(rows.some((row) => row.dataset.seat === selfId), false);
+  assert.match(peopleOf(body).innerHTML, /A &lt;b&gt; &amp; &quot;q&quot;/);
+  assert.doesNotMatch(peopleOf(body).innerHTML, /A <b>/);
+  assert.match(peopleOf(body).innerHTML, /aria-label="A &lt;b&gt; &amp; &quot;q&quot;"/);
+  const failed = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return rejected(502, JSON.stringify({ error: "unreachable" }));
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  failed.feature.select("node-1");
+  await failed.feature.settled();
+  failed.btn.click();
+  await failed.feature.settled();
+  assert.equal(peopleOf(failed.body).textContent, "The server could not be reached.");
+  assert.equal(selects(failed.body).length, 0);
+});
+
+test("a late roster for the previous server is dropped", async () => {
+  const gates = [];
+  const { feature, btn, body, calls } = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north, south] };
+    if (call.path.endsWith("/seats")) {
+      const gate = deferred();
+      gates.push(gate);
+      return gate.promise;
+    }
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  feature.select("node-1");
+  await feature.settled();
+  btn.click();
+  await until(() => calls.some((call) => call.path.endsWith("/seats")));
+  const radios = inputs(body, "sh_server");
+  radios[0].checked = false;
+  radios[1].checked = true;
+  radios[1].emit("change");
+  await until(() => calls.filter((call) => call.path.endsWith("/seats")).length === 2);
+  gates[0].resolve(roster([selfSeat(), { id: "seat-late", name: "Late" }]));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(peopleOf(body).textContent.includes("Late"), false);
+  gates[1].resolve(roster([selfSeat(), red]));
+  await feature.settled();
+  assert.equal(selects(body)[0].dataset.seat, red.id);
+  assert.equal(peopleOf(body).textContent.includes("Late"), false);
+});
+
+test("every put error is shown and the sheet stays as it was", async () => {
+  const failures = [
+    ...ERRORS.map(([code, text]) => ({ message: JSON.stringify({ error: code }), text, status: 409 })),
+    { message: "nope", text: "That did not work. Try again.", status: 500 },
+    { message: "null", text: "That did not work. Try again.", status: 500 },
+    { message: JSON.stringify({ error: 1 }), text: "That did not work. Try again.", status: 500 },
+  ];
+  for (const item of failures) {
+    const { feature, btn, body, apply, note, status, calls } = setup((call) => {
+      if (call.path === "/api/team/servers") return { servers: [north] };
+      if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+      if (call.method === "PUT") return rejected(item.status, item.message);
+      return rejected(404, JSON.stringify({ error: "not_found" }));
+    });
+    feature.select("node-1");
+    await feature.settled();
+    btn.click();
+    await feature.settled();
+    const html = body.innerHTML;
+    apply.click();
+    await feature.settled();
+    assert.equal(note.hidden, false, item.message);
+    assert.equal(note.textContent, item.text);
+    assert.equal(body.innerHTML, html);
+    assert.equal(apply.textContent, "Share chat");
+    assert.equal(status.hidden, true);
+    assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+  }
+});
+
+test("a second click while sharing sends nothing", async () => {
+  const gate = deferred();
+  const { feature, btn, apply, stop, calls } = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([]);
+    if (call.method === "PUT") return gate.promise;
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  feature.select("node-1");
+  await feature.settled();
+  btn.click();
+  await feature.settled();
+  apply.click();
+  assert.equal(apply.disabled, true);
+  assert.equal(stop.disabled, true);
+  apply.click();
+  assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+  gate.resolve(viewOf({ members: [] }));
+  await feature.settled();
+  assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+});
+
