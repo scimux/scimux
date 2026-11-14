@@ -2546,6 +2546,7 @@ func TestOutboxAppendsWithTheTitleGeneration(t *testing.T) {
 	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:32:00Z", Text: "two"})
 	script.set(func(s *outboxScript) {
 		s.channel = channelJSON(inst, shareUID, "South", titleGen)
+		s.mirrorGen = titleGen
 	})
 	mustSaveShare(t, dir, team.Share{
 		UID: shareUID, Node: shareNode, Title: "North", Generation: titleGen, StartSent: true, Next: 2,
