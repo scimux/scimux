@@ -119,6 +119,7 @@ import {
 import { createSheetsFeature } from "./sheets.js";
 import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl, homeScreenInstallable } from "./pairing-ui.js";
 import { createSharingSection } from "./team-ui.js";
+import { createShareFeature } from "./team-share.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { APP_SLOT, claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
@@ -1239,6 +1240,13 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     onUnlinked: () => { deviceList.refresh(); pairControl.refresh(); },
   }));
   const sharingSection = own(createSharingSection({ api, doc: document }));
+  const shareFeature = own(createShareFeature({
+    api,
+    doc: document,
+    openSheet: (id) => sheetsFeature.openSheet(id),
+    closeSheets: () => sheetsFeature.closeSheets(),
+    now: () => Date.now(),
+  }));
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */
   /* the chevron must describe the tap: on desktop the button is a toggle, so it
@@ -1410,6 +1418,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     cardsSig = "";
     renderCards();
     renderChatHead();
+    shareFeature.select(id);
     renderMap();   /* full-screen wall map: move the selection marker + action bar */
     refreshChat();
   }
@@ -1609,6 +1618,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   homeScreen.bind();
   unlinkControl.bind();
   sharingSection.bind();
+  shareFeature.bind();
   const refocusTitleEditor = () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
   };
@@ -2041,7 +2051,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderMapTabs: () => renderMapTabs(),
     renderBookmarksPane: () => renderBookmarksPane(),
     renderChatHead: () => renderChatHead(),
-    refreshChat: () => refreshChat(),
+    refreshChat: () => { refreshChat(); shareFeature.tick(); },
     renderWsInbox: () => renderWsInbox(),
     invalidateCardsSig: () => { cardsSig = ""; },
     invalidateMap: () => mapFeature.invalidate(),

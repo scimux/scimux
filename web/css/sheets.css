@@ -329,3 +329,14 @@ label:has(> #m_vibe_inspect) > input {
 #m_sharing #m_team_note { margin-top: 8px; color: var(--dim); font-size: 13px; }
 #m_sharing #m_team_note[hidden] { display: none; }
 #m_sharing button.danger { color: var(--bad); font-weight: 600; }
+
+/* Share sheet. Radios opt out of the full-width field rule so the target
+   stays a 44px control. Apply and stop already hide through .sheet .cta[hidden]. */
+#sharesheet label { min-height: 44px; }
+#sharesheet input[type="radio"] {
+  width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+  margin: 0; padding: 0; flex: none;
+}
+#sharesheet select { min-height: 44px; }
+#sharesheet #sh_apply,
+#sharesheet #sh_stop { min-height: 44px; }

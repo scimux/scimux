@@ -531,7 +531,9 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     listen($("#sharesheet"), "change", onSheetChange);
   }
 
-  function destroy() {}
+  function destroy() {
+    while (cleanups.length) cleanups.pop()();
+  }
 
   async function settled() {
     let prev;
