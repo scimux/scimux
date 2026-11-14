@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -395,11 +396,212 @@ type MirrorPage struct {
 }
 
 // Channels is GET /v1/channels.
-func (c *Client) Channels(context.Context, string, string) ([]Channel, error) {
-	return nil, ErrProtocol
+func (c *Client) Channels(ctx context.Context, baseURL, token string) ([]Channel, error) {
+	status, raw, err := c.doAuthed(ctx, http.MethodGet, baseURL, "/v1/channels", token, nil, maxChannelsBody)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, mapChannelStatus(status)
+	}
+	list, err := parseChannels(raw)
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	return list, nil
 }
 
 // ReadMirror is GET /v1/channels/{owner}/{chat}/mirror?after=.
-func (c *Client) ReadMirror(context.Context, string, string, string, string, uint64) (MirrorPage, error) {
-	return MirrorPage{}, ErrProtocol
+func (c *Client) ReadMirror(ctx context.Context, baseURL, token, owner, chat string, after uint64) (MirrorPage, error) {
+	path, err := channelPath(owner, chat, "/mirror")
+	if err != nil {
+		return MirrorPage{}, err
+	}
+	status, raw, err := c.withAfter(after).doAuthed(ctx, http.MethodGet, baseURL, path, token, nil, maxMirrorRead)
+	if err != nil {
+		return MirrorPage{}, err
+	}
+	if status != http.StatusOK {
+		return MirrorPage{}, mapChannelStatus(status)
+	}
+	page, err := parseMirrorPage(raw, after)
+	if err != nil {
+		return MirrorPage{}, ErrProtocol
+	}
+	return page, nil
+}
+
+// queryTrip adds the mirror page query. The inner transport is the client's.
+type queryTrip struct {
+	inner http.RoundTripper
+	query string
+}
+
+func (q queryTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+	next := r.Clone(r.Context())
+	next.URL.RawQuery = q.query
+	return q.inner.RoundTrip(next)
+}
+
+// withAfter returns a client that sends after= on the next call.
+func (c *Client) withAfter(after uint64) *Client {
+	clone := *c
+	inner := c.Transport
+	if inner == nil {
+		inner = &http.Transport{Proxy: nil, DisableKeepAlives: true}
+	}
+	clone.Transport = queryTrip{inner: inner, query: "after=" + strconv.FormatUint(after, 10)}
+	return &clone
+}
+
+func parseChannels(raw []byte) ([]Channel, error) {
+	if !utf8.Valid(raw) {
+		return nil, ErrProtocol
+	}
+	var doc struct {
+		Channels *[]json.RawMessage `json:"channels"`
+	}
+	if err := decodeJSON(raw, &doc); err != nil || doc.Channels == nil {
+		return nil, ErrProtocol
+	}
+	out := make([]Channel, 0, len(*doc.Channels))
+	for _, one := range *doc.Channels {
+		ch, err := parseListedChannel(one)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ch)
+	}
+	return out, nil
+}
+
+func parseListedChannel(raw json.RawMessage) (Channel, error) {
+	var doc struct {
+		Owner        string          `json:"owner"`
+		Chat         string          `json:"chat"`
+		Title        string          `json:"title"`
+		Generation   string          `json:"generation"`
+		CreatedAt    string          `json:"created_at"`
+		Access       string          `json:"access"`
+		MirrorLast   uint64          `json:"mirror_last"`
+		CommentsLast uint64          `json:"comments_last"`
+		Members      json.RawMessage `json:"members"`
+	}
+	if err := decodeJSON(raw, &doc); err != nil {
+		return Channel{}, ErrProtocol
+	}
+	if !validHex(doc.Owner, 32) || !validChatID(doc.Chat) || !validChannelTitle(doc.Title) || !validHex(doc.Generation, 16) || !validProtocolTime(doc.CreatedAt) {
+		return Channel{}, ErrProtocol
+	}
+	if doc.Access != "owner" && doc.Access != "read" && doc.Access != "write" {
+		return Channel{}, ErrProtocol
+	}
+	members, err := listedMembers(doc.Access, doc.Members)
+	if err != nil {
+		return Channel{}, err
+	}
+	return Channel{
+		Owner: doc.Owner, Chat: doc.Chat, Title: doc.Title, Generation: doc.Generation,
+		CreatedAt: doc.CreatedAt, Access: doc.Access, MirrorLast: doc.MirrorLast,
+		CommentsLast: doc.CommentsLast, Members: members,
+	}, nil
+}
+
+func listedMembers(access string, raw json.RawMessage) ([]Member, error) {
+	if access != "owner" {
+		if len(raw) != 0 {
+			return nil, ErrProtocol
+		}
+		return nil, nil
+	}
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, ErrProtocol
+	}
+	var members []Member
+	if err := decodeJSON(raw, &members); err != nil {
+		return nil, ErrProtocol
+	}
+	if err := checkListedMembers(members); err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
+func checkListedMembers(members []Member) error {
+	seen := make(map[string]struct{}, len(members))
+	for _, m := range members {
+		if !validHex(m.Seat, 32) || (m.Access != "read" && m.Access != "write") {
+			return ErrProtocol
+		}
+		if _, ok := seen[m.Seat]; ok {
+			return ErrProtocol
+		}
+		seen[m.Seat] = struct{}{}
+	}
+	return nil
+}
+
+func parseMirrorPage(raw []byte, after uint64) (MirrorPage, error) {
+	if !utf8.Valid(raw) {
+		return MirrorPage{}, ErrProtocol
+	}
+	var doc struct {
+		Generation string             `json:"generation"`
+		Entries    *[]json.RawMessage `json:"entries"`
+		Last       *uint64            `json:"last"`
+		More       *bool              `json:"more"`
+	}
+	if err := decodeJSON(raw, &doc); err != nil || doc.Entries == nil || doc.Last == nil || doc.More == nil {
+		return MirrorPage{}, ErrProtocol
+	}
+	if !validHex(doc.Generation, 16) {
+		return MirrorPage{}, ErrProtocol
+	}
+	if len(*doc.Entries) > maxMirrorEntries {
+		return MirrorPage{}, ErrProtocol
+	}
+	entries := make([]MirrorRecord, 0, len(*doc.Entries))
+	var prev uint64
+	for i, one := range *doc.Entries {
+		rec, err := parseMirrorRecord(one)
+		if err != nil {
+			return MirrorPage{}, err
+		}
+		if rec.Seq <= after || (i > 0 && rec.Seq <= prev) {
+			return MirrorPage{}, ErrProtocol
+		}
+		prev = rec.Seq
+		entries = append(entries, rec)
+	}
+	if *doc.More {
+		if len(entries) == 0 || *doc.Last <= entries[len(entries)-1].Seq {
+			return MirrorPage{}, ErrProtocol
+		}
+	} else if len(entries) > 0 && *doc.Last != entries[len(entries)-1].Seq {
+		return MirrorPage{}, ErrProtocol
+	}
+	return MirrorPage{Generation: doc.Generation, Entries: entries, Last: *doc.Last, More: *doc.More}, nil
+}
+
+func parseMirrorRecord(raw json.RawMessage) (MirrorRecord, error) {
+	var doc struct {
+		Seq    *uint64         `json:"seq"`
+		Key    string          `json:"key"`
+		Author string          `json:"author"`
+		At     string          `json:"at"`
+		Body   json.RawMessage `json:"body"`
+	}
+	if err := decodeJSON(raw, &doc); err != nil || doc.Seq == nil {
+		return MirrorRecord{}, ErrProtocol
+	}
+	if !validEntryKey(doc.Key) || !validHex(doc.Author, 32) || !validProtocolTime(doc.At) {
+		return MirrorRecord{}, ErrProtocol
+	}
+	if len(doc.Body) == 0 || len(doc.Body) > maxMirrorBody {
+		return MirrorRecord{}, ErrProtocol
+	}
+	return MirrorRecord{
+		Seq: *doc.Seq, Key: doc.Key, Author: doc.Author, At: doc.At,
+		Body: append(json.RawMessage(nil), doc.Body...),
+	}, nil
 }
