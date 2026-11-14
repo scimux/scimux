@@ -588,6 +588,37 @@ test("tick waits, skips a load that is in flight, and skips a missing node", asy
   assert.equal(doc.activeElement, body);
 });
 
+test("tick updates the header and leaves the sheet, the note, and the focus", async () => {
+  let delivery = "ok";
+  const { feature, time, body, note, status, doc, btn, opened } = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return { self: selfId, seats: [selfSeat(), blue] };
+    return viewOf({ delivery });
+  });
+  feature.select("node-1");
+  await feature.settled();
+  btn.click();
+  await feature.settled();
+  const seat = selects(body)[0];
+  seat.focus();
+  const html = body.innerHTML;
+  const peopleHTML = peopleOf(body).innerHTML;
+  const focused = doc.activeElement;
+  note.textContent = "keep";
+  note.hidden = false;
+  delivery = "offline";
+  time.now = 10000;
+  feature.tick();
+  await feature.settled();
+  assert.equal(status.textContent, "Shared with 1 · North · offline, will retry");
+  assert.equal(body.innerHTML, html);
+  assert.equal(peopleOf(body).innerHTML, peopleHTML);
+  assert.equal(note.textContent, "keep");
+  assert.equal(note.hidden, false);
+  assert.equal(doc.activeElement, focused);
+  assert.deepEqual(opened, ["sharesheet"]);
+});
+
 test("a server name with markup is text on the status line", async () => {
   const named = { ...north, name: 'A <b> & "q"' };
   const { feature, status } = setup((call) => {
@@ -860,5 +891,314 @@ test("a second click while sharing sends nothing", async () => {
   gate.resolve(viewOf({ members: [] }));
   await feature.settled();
   assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
+});
+
+test("selects follow the view and a member who is not a seat is left out", async () => {
+  const { feature, btn, body, calls } = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north, south] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue, red]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    return viewOf({
+      members: [
+        { seat: blue.id, access: "read" },
+        { seat: "seat-missing", access: "write" },
+        { seat: red.id, access: "other" },
+      ],
+    });
+  });
+  feature.select("node-1");
+  await feature.settled();
+  btn.click();
+  await feature.settled();
+  assert.equal(body.querySelectorAll("input").length, 0);
+  assert.match(body.innerHTML, /North/);
+  assert.match(body.innerHTML, /From now on/);
+  assert.match(body.innerHTML, /To change the server or the scope, stop sharing and share again\./);
+  assert.match(body.innerHTML, /Members keep what they already received\./);
+  const rows = selects(body);
+  assert.deepEqual(rows.map((row) => row.dataset.seat), [blue.id, red.id]);
+  assert.equal(rows[0].value, "read");
+  assert.equal(rows[1].value, "");
+  rows[0].value = "write";
+  rows[0].emit("change");
+  body.ownerDoc.byId.get("sh_apply").click();
+  await feature.settled();
+  const put = calls.find((call) => call.method === "PUT");
+  assert.deepEqual(put.body, {
+    server: north.id,
+    scope: "from_now",
+    members: [{ seat: blue.id, access: "write" }],
+  });
+  assert.equal(calls.some((call) => String(call.body || "").includes("seat-missing")), false);
+});
+
+test("save people stays disabled until a choice differs and again when it is put back", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  const row = selects(ui.body)[0];
+  assert.equal(ui.apply.disabled, true);
+  ui.apply.click();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  row.value = "write";
+  row.emit("change");
+  assert.equal(ui.apply.disabled, false);
+  row.value = "read";
+  row.emit("change");
+  assert.equal(ui.apply.disabled, true);
+  ui.apply.click();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+});
+
+test("an active share whose scope is the whole history is shown as text", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf({ scope: "all", members: null });
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  assert.match(ui.body.innerHTML, /Entire history/);
+  assert.equal(selects(ui.body)[0].value, "");
+  assert.equal(ui.apply.disabled, true);
+});
+
+test("stop arms, a click elsewhere disarms, and the second click deletes", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "DELETE") return "";
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  ui.stop.click();
+  assert.equal(ui.stop.textContent, "Confirm stop");
+  assert.equal(ui.calls.some((call) => call.method === "DELETE"), false);
+  ui.body.click();
+  assert.equal(ui.stop.textContent, "Stop sharing");
+  ui.stop.click();
+  ui.body.click();
+  assert.equal(ui.calls.some((call) => call.method === "DELETE"), false);
+  ui.stop.click();
+  ui.stop.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.filter((call) => call.method === "DELETE").length, 1);
+  assert.equal(ui.calls.find((call) => call.method === "DELETE").path, "/api/team/shares/node-1");
+});
+
+test("delete answers 204 and 404 as stopped, 202 as stopping, and a failure as a note", async () => {
+  async function start(onDelete) {
+    const ui = setup((call) => {
+      if (call.path === "/api/team/servers") return { servers: [north] };
+      if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+      if (call.method === "DELETE") return onDelete();
+      return viewOf();
+    });
+    ui.feature.select("node-1");
+    await ui.feature.settled();
+    ui.btn.click();
+    await ui.feature.settled();
+    ui.stop.click();
+    ui.stop.click();
+    await ui.feature.settled();
+    return ui;
+  }
+  const gone = await start(() => "");
+  assert.equal(gone.live.textContent, "Sharing stopped.");
+  assert.deepEqual(gone.closed, ["closed"]);
+  assert.equal(gone.status.hidden, true);
+  assert.equal(gone.btn.hidden, false);
+  const missing = await start(() => rejected(404, JSON.stringify({ error: "not_found" })));
+  assert.equal(missing.live.textContent, "Sharing stopped.");
+  assert.deepEqual(missing.closed, ["closed"]);
+  assert.equal(missing.status.hidden, true);
+  const stopping = await start(() => viewOf({ state: "stopping", delivery: "offline" }));
+  assert.equal(stopping.closed.length, 0);
+  assert.match(stopping.body.textContent, /Stopping sharing…/);
+  assert.equal(stopping.apply.hidden, true);
+  assert.equal(stopping.stop.hidden, true);
+  assert.equal(stopping.status.textContent, "Stopping sharing…");
+  assert.notEqual(stopping.live.textContent, "Sharing stopped.");
+  const failed = await start(() => rejected(500, JSON.stringify({ error: "store_unavailable" })));
+  assert.equal(failed.closed.length, 0);
+  assert.equal(failed.note.hidden, false);
+  assert.equal(failed.note.textContent, "This computer could not save the change. Try again.");
+  assert.equal(failed.stop.textContent, "Confirm stop");
+  assert.equal(failed.status.textContent, "Shared with 1 · North");
+  assert.equal(failed.body.innerHTML.includes("North"), true);
+});
+
+test("a second click while stopping sends nothing", async () => {
+  const gate = deferred();
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([]);
+    if (call.method === "DELETE") return gate.promise;
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  ui.stop.click();
+  ui.stop.click();
+  assert.equal(ui.stop.disabled, true);
+  assert.equal(ui.apply.disabled, true);
+  ui.stop.click();
+  assert.equal(ui.calls.filter((call) => call.method === "DELETE").length, 1);
+  gate.resolve("");
+  await ui.feature.settled();
+});
+
+test("lost and full offer stop, and stopping offers nothing", async () => {
+  for (const state of ["lost", "full", "stopping"]) {
+    const ui = setup((call) => {
+      if (call.path === "/api/team/servers") return { servers: [north] };
+      if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+      return viewOf({ state, delivery: "ok", members: members(1) });
+    });
+    ui.feature.select("node-1");
+    await ui.feature.settled();
+    const before = ui.calls.length;
+    ui.btn.click();
+    await ui.feature.settled();
+    assert.equal(ui.calls.length, before, state);
+    assert.equal(ui.body.querySelectorAll("select").length, 0, state);
+    if (state === "stopping") {
+      assert.match(ui.body.textContent, /Stopping sharing…/);
+      assert.equal(ui.apply.hidden, true);
+      assert.equal(ui.stop.hidden, true);
+    } else {
+      assert.match(ui.body.textContent, new RegExp(shareStatusText(viewOf({ state }), "North").replace(/[.]/g, "\\.")));
+      assert.match(ui.body.innerHTML, /Members keep what they already received\./);
+      assert.equal(ui.apply.hidden, true);
+      assert.equal(ui.stop.hidden, false);
+      assert.equal(ui.stop.textContent, "Stop sharing");
+      ui.apply.click();
+      assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+    }
+  }
+});
+
+test("focus returns to share, to save, and to the armed stop control", async () => {
+  function watch(el) {
+    const orig = el.focus.bind(el);
+    let n = 0;
+    el.focus = () => {
+      n += 1;
+      orig();
+    };
+    return () => n;
+  }
+  const shared = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  shared.feature.select("node-1");
+  await shared.feature.settled();
+  shared.btn.click();
+  await shared.feature.settled();
+  const shareFocus = watch(shared.apply);
+  shared.apply.focus();
+  const shareBefore = shareFocus();
+  shared.apply.click();
+  await shared.feature.settled();
+  assert.equal(shared.live.textContent, "Sharing started.");
+  assert.equal(shared.apply.textContent, "Save people");
+  assert.equal(shared.doc.activeElement, shared.apply);
+  assert.equal(shareFocus() > shareBefore, true);
+
+  const saving = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    return viewOf();
+  });
+  saving.feature.select("node-1");
+  await saving.feature.settled();
+  saving.btn.click();
+  await saving.feature.settled();
+  const row = selects(saving.body)[0];
+  row.value = "write";
+  row.emit("change");
+  const saveFocus = watch(saving.apply);
+  saving.apply.focus();
+  const saveBefore = saveFocus();
+  saving.apply.click();
+  await saving.feature.settled();
+  assert.equal(saving.live.textContent, "People updated.");
+  assert.equal(saving.apply.textContent, "Save people");
+  assert.equal(saving.doc.activeElement, saving.apply);
+  assert.equal(saveFocus() > saveBefore, true);
+
+  const stopping = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  });
+  stopping.feature.select("node-1");
+  await stopping.feature.settled();
+  stopping.btn.click();
+  await stopping.feature.settled();
+  const stopFocus = watch(stopping.stop);
+  stopping.stop.focus();
+  const stopBefore = stopFocus();
+  stopping.stop.click();
+  assert.equal(stopping.stop.textContent, "Confirm stop");
+  assert.equal(stopping.doc.activeElement, stopping.stop);
+  assert.equal(stopFocus() > stopBefore, true);
+  assert.equal(stopping.calls.some((call) => call.method === "DELETE"), false);
+});
+
+test("selecting another node closes the sheet and selecting the same node leaves it", async () => {
+  const gates = [];
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) {
+      const gate = deferred();
+      gates.push(gate);
+      return gate.promise;
+    }
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await until(() => gates.length === 1);
+  ui.feature.select("node-1");
+  await Promise.resolve();
+  assert.equal(ui.closed.length, 0);
+  ui.feature.select("node-2");
+  assert.deepEqual(ui.closed, ["closed"]);
+  gates[0].resolve(roster([selfSeat(), { id: "seat-late", name: "Late" }]));
+  await ui.feature.settled();
+  assert.equal(ui.body.textContent.includes("Late"), false);
+});
+
+test("the status button opens the same sheet", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.status.click();
+  await ui.feature.settled();
+  assert.deepEqual(ui.opened, ["sharesheet"]);
+  assert.equal(ui.apply.textContent, "Save people");
 });
 
