@@ -1738,7 +1738,7 @@ func TestOutboxCountsSkippedLogLinesLikeAFullRead(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw := append(append([]byte{}, meta...), '\n')
-		raw = append(raw, bytes.Repeat([]byte("x"), 8<<20+1)...)
+		raw = append(raw, bytes.Repeat([]byte("x"), 8<<20+2*(64<<10)+1)...)
 		raw = append(raw, '\n')
 		raw = append(raw, user...)
 		raw = append(raw, '\n')
