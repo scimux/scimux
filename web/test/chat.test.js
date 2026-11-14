@@ -1782,6 +1782,7 @@ function el(tag, attrs = {}){
       if (sel.includes(".permmore") && this.classList.contains("permmore")) return this;
       if (sel.includes(".permask") && this.classList.contains("permask")) return this;
       if (sel.includes("[data-bact]") && this.dataset?.bact) return this;
+      if (sel.includes("[data-fold]") && this.dataset?.fold) return this;
       if (sel.includes("[data-bmarker]") && this.dataset?.bmarker) return this;
       if (sel.includes("[data-dismiss-attention]") && this.dataset?.dismissAttention) return this;
       if (sel.includes("[data-open-terminal]") && this.dataset?.openTerminal) return this;
@@ -1894,6 +1895,7 @@ function makeRoots(){
     chattitle: el("h2", { id: "chattitle" }),
     chatmission: el("div", { id: "chatmission" }),
     chatdetails: el("div", { id: "chatdetails", hidden: true }),
+    chatfoldall: el("button", { id: "chatfoldall", className: "foldall", hidden: true }),
     chatdesc: el("div", { id: "chatdesc" }),
     chatdescinput: el("textarea", { id: "chatdescinput" }),
     chatdot: el("span", { id: "chatdot" }),
@@ -7159,4 +7161,531 @@ test("a chat without a uid shows no fold control and does not touch storage", as
   assert.equal(page.includes("foldtoggle"), false);
   assert.equal(reads, 0);
   ctx.feature.destroy();
+});
+
+/* Fold actions, the chat-head control, and the reading position.
+ * Disclosure clicks are synthetic: the fake DOM does not parse innerHTML
+ * into buttons, and closest() only recognises [data-fold] when the target
+ * carries dataset.fold. Scroll positions are assigned, not laid out. */
+
+const FOLD_ACTION_HTML =
+  '<div class="bubwhen">TIME</div>' +
+  '<button data-bact="fork"><span>B</span>fork from here</button>' +
+  '<button data-bact="sendto"><span class="rot180">I</span>send to&#8230;</button>' +
+  '<button data-bact="desc"><span class="rot90l">I</span>use as description</button>' +
+  '<button data-bact="bookmark"><span>I</span>bookmark</button>' +
+  '<button data-bact="copy"><span>C</span>copy</button>';
+
+const FOLD_ICONS = {
+  ICON_TERM: "T", ICON_CHECK: "✓", ICON_CHEV_UP: "↑", ICON_CHEV_DOWN: "↓",
+  ICON_BRANCH: "B", ICON_INTO: "I", ICON_COPY: "C", ICON_DOWNALL: "↓↓",
+  ICON_FILE: "F", ICON_FOLD: "<svg fold>",
+};
+
+function foldSettle(){
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+function twoRangeTurns(){
+  return [
+    foldBubble("user", 1, "prompt-one"),
+    foldBubble("assistant", 2, "first"),
+    foldBubble("assistant", 3, "left-a"),
+    foldBubble("assistant", 4, "left-b"),
+    foldBubble("assistant", 5, "kept"),
+    foldBubble("assistant", 6, "right-c"),
+    foldBubble("assistant", 7, "right-d"),
+    foldBubble("assistant", 8, "last"),
+  ];
+}
+
+function twoRangeDeps(){
+  return {
+    bookmarks: () => [{ uid: "log-1", segment: 0, record: 5, text: "kept" }],
+    markerVersion: () => 1,
+    icons: FOLD_ICONS,
+  };
+}
+
+function readStoredFold(store, uid = "log-1"){
+  const text = store.getItem("scimux:fold:v1:" + uid);
+  return text ? JSON.parse(text) : null;
+}
+
+function armFoldScroll(msgs, top = 800){
+  let html = msgs.innerHTML;
+  Object.defineProperty(msgs, "innerHTML", {
+    configurable: true,
+    get(){ return html; },
+    set(v){
+      html = String(v);
+      msgs.children.length = 0;
+      const btnRe = /data-fold="(open|close)" data-foldkey="([^"]+)"/g;
+      let m;
+      while ((m = btnRe.exec(html))){
+        const btn = el("button", {
+          className: "foldtoggle",
+          dataset: { fold: m[1], foldkey: m[2] },
+        });
+        btn.offsetTop = top;
+        const row = el("div", { className: "foldrow" });
+        row.appendChild(btn);
+        msgs.appendChild(row);
+      }
+      const turnRe = /class="(turn [^"]*)"[^>]*data-bk="([^"]+)"/g;
+      let t;
+      while ((t = turnRe.exec(html))){
+        const turn = el("div", { className: t[1], dataset: { bk: t[2] } });
+        turn.offsetTop = top;
+        msgs.appendChild(turn);
+      }
+    },
+  });
+}
+
+function primeFoldScroll(ctx, scrollTop, replacementTop = 800){
+  const msgs = ctx.roots.msgs;
+  msgs.scrollHeight = 2000;
+  msgs.clientHeight = 400;
+  msgs.scrollTop = scrollTop;
+  armFoldScroll(msgs, replacementTop);
+}
+
+function clickFoldRow(ctx, kind, key, offsetTop){
+  const btn = el("button", { dataset: { fold: kind, foldkey: key } });
+  if (offsetTop != null) btn.offsetTop = offsetTop;
+  firstListener(ctx.roots.msgs, "click")({ target: btn });
+  return btn;
+}
+
+test("bubbleActionsHTML without a fold option is unchanged", () => {
+  const html = bubbleActionsHTML({ time: "2026-07-24T09:05:00" }, {
+    fmtTime: () => "TIME",
+    iconBranch: "B", iconInto: "I", iconCopy: "C",
+  });
+  assert.equal(html, FOLD_ACTION_HTML);
+});
+
+test("bubbleActionsHTML adds the fold action after copy when asked", () => {
+  const html = bubbleActionsHTML({ time: "2026-07-24T09:05:00" }, {
+    fmtTime: () => "TIME",
+    iconBranch: "B", iconInto: "I", iconCopy: "C",
+    fold: { icon: "<svg fold>" },
+  });
+  const bare = bubbleActionsHTML({ time: "2026-07-24T09:05:00" }, {
+    fmtTime: () => "TIME",
+    iconBranch: "B", iconInto: "I", iconCopy: "C",
+    fold: {},
+  });
+  const button = '<button data-bact="fold" aria-label="Fold intermediate agent bubbles" ' +
+    'title="Fold intermediate agent bubbles"><span><svg fold></span></button>';
+  assert.equal(html, FOLD_ACTION_HTML + button);
+  assert.ok(html.indexOf('data-bact="copy"') < html.indexOf('data-bact="fold"'));
+  assert.equal(bare, FOLD_ACTION_HTML + button.replace("<svg fold>", ""));
+});
+
+test("the fold action is last and only on the first agent bubble of a foldable turn", async () => {
+  const { ctx } = await renderFolded({
+    turns: foldAgents(4),
+    state: { all: false, turns: [], open: [] },
+    echo: false,
+    deps: { icons: FOLD_ICONS },
+  });
+  ctx.feature.bind();
+  tapBubbleTurn(ctx, "i:1");
+  const first = bubActionRows(ctx)[0].innerHTML;
+  assert.match(first, /data-bact="fold"/);
+  assert.ok(first.indexOf('data-bact="copy"') < first.indexOf('data-bact="fold"'));
+  assert.match(first, /<span><svg fold><\/span>/);
+  tapBubbleTurn(ctx, "i:1");
+  tapBubbleTurn(ctx, "i:2");
+  assert.doesNotMatch(bubActionRows(ctx)[0].innerHTML, /data-bact="fold"/);
+  tapBubbleTurn(ctx, "i:2");
+  tapBubbleTurn(ctx, "i:0");
+  assert.doesNotMatch(bubActionRows(ctx)[0].innerHTML, /data-bact="fold"/);
+  ctx.feature.destroy();
+});
+
+test("a short turn has no fold action and the head button stays hidden", async () => {
+  const { ctx } = await renderFolded({
+    turns: foldAgents(2),
+    state: { all: false, turns: [], open: [] },
+    echo: false,
+  });
+  ctx.feature.bind();
+  tapBubbleTurn(ctx, "i:1");
+  assert.doesNotMatch(bubActionRows(ctx)[0].innerHTML, /data-bact="fold"/);
+  assert.equal(ctx.roots.chatfoldall.hidden, true);
+  ctx.feature.destroy();
+});
+
+test("a fully folded turn has no fold action and the head button stays hidden", async () => {
+  const { ctx, html } = await renderFolded({
+    turns: foldAgents(4),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+  });
+  ctx.feature.bind();
+  tapBubbleTurn(ctx, "i:1");
+  assert.equal(html().includes(">a3<"), false);
+  assert.doesNotMatch(bubActionRows(ctx)[0].innerHTML, /data-bact="fold"/);
+  assert.equal(ctx.roots.chatfoldall.hidden, true);
+  ctx.feature.destroy();
+});
+
+test("a fold click on a bubble that cannot fold leaves the bar and the transcript", async () => {
+  const { ctx, store, html } = await renderFolded({
+    turns: foldAgents(4),
+    state: { all: false, turns: [], open: [] },
+    echo: false,
+  });
+  ctx.feature.bind();
+  tapBubbleTurn(ctx, "i:0");
+  clickBact(ctx, "fold");
+  await foldSettle();
+  assert.equal(bubActionRows(ctx).length, 1);
+  assert.ok(html().includes(">a3<"));
+  assert.equal(readStoredFold(store), null);
+  ctx.feature.destroy();
+});
+
+test("the fold action folds that turn, drops only its open keys, and keeps the bubble put", async () => {
+  const turns = [
+    foldBubble("user", 1, "prompt-one"),
+    foldBubble("assistant", 2, "a2"),
+    foldBubble("assistant", 3, "a3"),
+    foldBubble("assistant", 4, "a4"),
+    foldBubble("assistant", 5, "a5"),
+    foldBubble("user", 10, "prompt-two"),
+    foldBubble("assistant", 11, "b11"),
+    foldBubble("assistant", 12, "b12"),
+    foldBubble("assistant", 13, "b13"),
+    foldBubble("assistant", 14, "b14"),
+  ];
+  const { ctx, store, html } = await renderFolded({
+    turns,
+    state: { all: false, turns: [], open: ["0/3", "0/12"] },
+    echo: false,
+    deps: { icons: FOLD_ICONS },
+  });
+  ctx.feature.bind();
+  const turn = tapBubbleTurn(ctx, "i:1");
+  turn.offsetTop = 500;
+  primeFoldScroll(ctx, 40);
+  clickBact(ctx, "fold");
+  await foldSettle();
+  const page = html();
+  assert.equal(page.includes(">a3<"), false);
+  assert.equal(page.includes(">a4<"), false);
+  assert.ok(page.includes(">a2<"));
+  assert.ok(page.includes(">a5<"));
+  assert.ok(page.includes(">b12<"));
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  assert.equal(bubActionRows(ctx).length, 0);
+  assert.deepEqual(readStoredFold(store), {
+    all: false, turns: ["0/2"], open: ["0/12"],
+  });
+  assert.equal(ctx.roots.msgs.scrollTop, 340);
+  ctx.feature.destroy();
+});
+
+test("a Show click opens that range only and keeps the row at the same distance", async () => {
+  const { ctx, store, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.feature.bind();
+  assert.equal(ctx.roots.chatfoldall.hidden, true);
+  primeFoldScroll(ctx, 40);
+  clickFoldRow(ctx, "open", "0/3", 500);
+  await foldSettle();
+  const page = html();
+  assert.ok(page.includes(">left-a<"));
+  assert.ok(page.includes(">left-b<"));
+  assert.equal(page.includes(">right-c<"), false);
+  assert.equal(page.includes(">right-d<"), false);
+  assert.ok(page.includes(foldCloseHTML(2, "0/3")));
+  assert.ok(page.includes(foldShowHTML(2, "0/6")));
+  assert.deepEqual(readStoredFold(store).open, ["0/3", "0/4"]);
+  assert.deepEqual(readStoredFold(store).turns, ["0/2"]);
+  assert.equal(ctx.roots.msgs.scrollTop, 340);
+  assert.equal(ctx.roots.chatfoldall.hidden, false);
+  ctx.feature.destroy();
+});
+
+test("a Fold click hides that range and keeps the row at the same distance", async () => {
+  const { ctx, store, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: ["0/3", "0/4"] },
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.feature.bind();
+  primeFoldScroll(ctx, 0);
+  clickFoldRow(ctx, "close", "0/3", 500);
+  await foldSettle();
+  const page = html();
+  assert.equal(page.includes(">left-a<"), false);
+  assert.equal(page.includes(">left-b<"), false);
+  assert.equal(page.includes(">right-c<"), false);
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  assert.ok(page.includes(foldShowHTML(2, "0/6")));
+  assert.deepEqual(readStoredFold(store).open, []);
+  assert.equal(ctx.roots.msgs.scrollTop, 800);
+  ctx.feature.destroy();
+});
+
+test("a reader at the bottom stays there when a range opens", async () => {
+  const { ctx, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.feature.bind();
+  primeFoldScroll(ctx, 1550, 100);
+  clickFoldRow(ctx, "open", "0/3", 500);
+  await foldSettle();
+  assert.ok(html().includes(">left-a<"));
+  assert.equal(ctx.roots.msgs.scrollTop, 1600);
+  ctx.feature.destroy();
+});
+
+test("opening a range leaves the reader put when the new row has no position", async () => {
+  const { ctx, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.feature.bind();
+  ctx.roots.msgs.scrollHeight = 2000;
+  ctx.roots.msgs.clientHeight = 400;
+  ctx.roots.msgs.scrollTop = 40;
+  clickFoldRow(ctx, "open", "0/3", 500);
+  await foldSettle();
+  assert.ok(html().includes(">left-a<"));
+  assert.equal(ctx.roots.msgs.scrollTop, 40);
+  ctx.feature.destroy();
+});
+
+test("the head button shows when a foldable bubble is visible", async () => {
+  const { ctx } = await renderFolded({
+    turns: foldAgents(4),
+    state: { all: false, turns: [], open: [] },
+    echo: false,
+    deps: { icons: FOLD_ICONS },
+  });
+  assert.equal(ctx.roots.chatfoldall.hidden, false);
+  assert.equal(ctx.roots.chatfoldall.innerHTML, "<svg fold>Fold all intermediate agent bubbles");
+  ctx.feature.destroy();
+});
+
+test("the head button shows when only a loaded history surface can fold", async () => {
+  const store = foldMemory();
+  const ctx = makeFeature({
+    histSegs: [{
+      start: "2025-06-01T00:00:00Z",
+      seam: "2025-06-01T00:00:00Z",
+      reason: "clear",
+      turns: foldAgents(4, 0, "log-1", record => "hist-" + record),
+    }],
+    chatPayload: {
+      turns: foldAgents(2, 1, "log-1", record => "live-" + record),
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z",
+      prior_turns: 1, assets: {},
+    },
+    deps: {
+      fmtWhen: t => "T(" + t + ")",
+      bubbleTitle: (role, time) => role + "|" + time,
+      md: s => String(s ?? ""),
+      foldStorage: store,
+      icons: FOLD_ICONS,
+    },
+  });
+  await ctx.feature.loadHistory("n1", "");
+  assert.equal(ctx.roots.chatfoldall.hidden, false);
+  ctx.feature.destroy();
+});
+
+test("a chat without a uid keeps the head button hidden", async () => {
+  const turns = [1, 2, 3, 4].map(record => ({
+    role: record === 1 ? "user" : "assistant",
+    text: record === 1 ? "prompt-one" : "body-" + record,
+    segment: 0, record,
+    time: "2026-01-01T00:0" + record + ":00Z",
+  }));
+  const { ctx } = await renderFolded({ turns, echo: false });
+  assert.equal(ctx.roots.chatfoldall.hidden, true);
+  ctx.feature.destroy();
+});
+
+test("folding the whole chat hides opened ranges and does not offer to open everything", async () => {
+  const { ctx, store, html } = await renderFolded({
+    turns: foldAgents(4),
+    state: { all: false, turns: ["0/2"], open: ["0/3", "0/4"] },
+    echo: false,
+    deps: { icons: FOLD_ICONS },
+  });
+  ctx.feature.bind();
+  assert.equal(ctx.roots.chatfoldall.hidden, false);
+  const fn = firstListener(ctx.roots.chatfoldall, "click");
+  assert.equal(typeof fn, "function");
+  fn({ target: ctx.roots.chatfoldall });
+  await foldSettle();
+  const page = html();
+  assert.equal(page.includes(">a3<"), false);
+  assert.equal(page.includes(">a4<"), false);
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  assert.deepEqual(readStoredFold(store), { all: true, turns: [], open: [] });
+  assert.equal(ctx.roots.chatfoldall.hidden, true);
+  assert.doesNotMatch(ctx.roots.chatfoldall.innerHTML, /Unfold|Show all/);
+  assert.doesNotMatch(page, /Unfold all|Show all intermediate/);
+  ctx.feature.destroy();
+});
+
+test("the page has no control that opens every folded bubble", () => {
+  assert.doesNotMatch(indexHtmlChat, /Unfold all|Show all intermediate|data-fold="all"/);
+});
+
+test("the chat head markup offers one fold-all button after the detail meta", () => {
+  const details = indexHtmlChat.slice(
+    indexHtmlChat.indexOf('id="chatdetails"'),
+    indexHtmlChat.indexOf('id="chatdesc"'),
+  );
+  assert.match(details,
+    /<button type="button" class="foldall" id="chatfoldall" hidden>Fold all intermediate agent bubbles<\/button>/);
+});
+
+test("the fold-all control stays hidden when its rule sets display", () => {
+  assert.match(chatCssSrc, /\.foldall\[hidden\]\s*\{[^}]*display:\s*none/);
+});
+
+test("a jump to a hidden bubble opens its range and no other", async () => {
+  const { ctx, store, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.setPending({
+    node: "n1", uid: "log-1", segment: 0, record: 6, ts: 1_000_000,
+  });
+  await ctx.feature.render();
+  const page = html();
+  assert.ok(page.includes(">right-c<"));
+  assert.ok(page.includes(">right-d<"));
+  assert.equal(page.includes(">left-a<"), false);
+  assert.equal(page.includes(">left-b<"), false);
+  assert.deepEqual(readStoredFold(store), {
+    all: false, turns: ["0/2"], open: ["0/6", "0/7"],
+  });
+  assert.equal(ctx.getPending(), null);
+  ctx.feature.destroy();
+});
+
+test("a jump to a hidden history bubble opens that surface's range only", async () => {
+  const histTurns = foldAgents(4, 0, "log-1", record => "hist-" + record);
+  const liveTurns = foldAgents(4, 1, "log-1", record => "live-" + record);
+  const store = foldMemory(foldRecord("log-1", {
+    all: false, turns: ["0/2", "1/2"], open: [],
+  }));
+  const ctx = makeFeature({
+    histSegs: [
+      { start: "2025-01-01T00:00:00Z", seam: "2025-01-01T00:00:00Z", reason: "clear" },
+      {
+        start: "2025-06-01T00:00:00Z",
+        seam: "2025-06-01T00:00:00Z",
+        reason: "clear",
+        turns: histTurns,
+      },
+    ],
+    chatPayload: {
+      turns: liveTurns,
+      live: "quiet", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z",
+      prior_turns: 2, assets: {}, error: "channel down",
+    },
+    deps: {
+      fmtWhen: t => "T(" + t + ")",
+      bubbleTitle: (role, time) => role + "|" + time,
+      md: s => String(s ?? ""),
+      foldStorage: store,
+    },
+  });
+  await ctx.feature.loadHistory("n1", "");
+  ctx.setPending({
+    node: "n1", uid: "log-1", segment: 0, record: 3, ts: 1_000_000,
+  });
+  await ctx.feature.render();
+  const page = ctx.roots.msgs.innerHTML;
+  assert.ok(page.includes(">hist-3<"));
+  assert.ok(page.includes(">hist-4<"));
+  assert.equal(page.includes(">live-3<"), false);
+  assert.deepEqual(readStoredFold(store), {
+    all: false, turns: ["0/2", "1/2"], open: ["0/3", "0/4"],
+  });
+  ctx.feature.destroy();
+});
+
+test("a jump to a visible bubble changes no fold state", async () => {
+  const seed = { all: false, turns: ["0/2"], open: ["0/6", "0/7"] };
+  const { ctx, store, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: seed,
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.setPending({
+    node: "n1", uid: "log-1", segment: 0, record: 6, ts: 1_000_000,
+  });
+  await ctx.feature.render();
+  assert.ok(html().includes(">right-c<"));
+  assert.deepEqual(readStoredFold(store), seed);
+  ctx.feature.destroy();
+});
+
+test("a jump aimed at another chat does not change fold state", async () => {
+  const seed = { all: false, turns: ["0/2"], open: [] };
+  const { ctx, store, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: seed,
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.setPending({
+    node: "n2", uid: "log-1", segment: 0, record: 6, ts: 1_000_000,
+  });
+  await ctx.feature.render();
+  assert.equal(html().includes(">right-c<"), false);
+  assert.deepEqual(readStoredFold(store), seed);
+  ctx.feature.destroy();
+});
+
+test("an expired jump does not open a hidden range", async () => {
+  const seed = { all: false, turns: ["0/2"], open: [] };
+  const { ctx, store, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: seed,
+    echo: false,
+    deps: twoRangeDeps(),
+  });
+  ctx.setPending({
+    node: "n1", uid: "log-1", segment: 0, record: 6, ts: 1,
+  });
+  await ctx.feature.render();
+  assert.equal(html().includes(">right-c<"), false);
+  assert.deepEqual(readStoredFold(store), seed);
+  ctx.feature.destroy();
+});
+
+test("destroy removes the fold-all listener", () => {
+  const { feature, roots } = makeFeature();
+  feature.bind();
+  assert.equal(roots.chatfoldall.listenerCount("click"), 1);
+  feature.destroy();
+  assert.equal(roots.chatfoldall.listenerCount("click"), 0);
 });
