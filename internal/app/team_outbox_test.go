@@ -2120,6 +2120,241 @@ func seededLog() []byte {
 	return b.Bytes()
 }
 
+type logSpan struct {
+	offset int64
+	n      int
+}
+
+func countLogReads(box *shareOutbox) *[]logSpan {
+	spans := []logSpan{}
+	box.readLogAt = func(path string, offset int64) ([]byte, error) {
+		raw, err := readLogRange(path, offset)
+		spans = append(spans, logSpan{offset: offset, n: len(raw)})
+		return raw, err
+	}
+	return &spans
+}
+
+func TestOutboxUnchangedLogIsNotReadAgain(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	reads := countLogReads(box)
+	box.tick(context.Background())
+	if len(*reads) != 1 || (*reads)[0].offset != 0 || (*reads)[0].n != int(logBytes(t, dir)) {
+		t.Fatalf("first look = %+v size %d", *reads, logBytes(t, dir))
+	}
+	sent := len(snapshotCalls(calls))
+	if sent == 0 {
+		t.Fatal("first look sent nothing")
+	}
+	box.tick(context.Background())
+	box.tick(context.Background())
+	if len(*reads) != 1 || len(snapshotCalls(calls)) != sent {
+		t.Fatalf("reads %+v calls %d", *reads, len(snapshotCalls(calls)))
+	}
+}
+
+func TestOutboxGrownLogIsReadOnce(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, _, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	reads := countLogReads(box)
+	box.tick(context.Background())
+	if len(*reads) != 1 {
+		t.Fatalf("first look = %+v", *reads)
+	}
+	size := logBytes(t, dir)
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:40:00Z", Text: "more"})
+	box.tick(context.Background())
+	if len(*reads) != 2 {
+		t.Fatalf("reads = %+v", *reads)
+	}
+	got := (*reads)[1]
+	grew := int(logBytes(t, dir) - size)
+	if got.offset != size || got.n != grew {
+		t.Fatalf("grown read %+v want offset %d len %d", got, size, grew)
+	}
+}
+
+func TestOutboxGrownForeignUIDStopsTheShare(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, inst := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	reads := countLogReads(box)
+	box.tick(context.Background())
+	size := logBytes(t, dir)
+	n := len(*reads)
+	sent := len(snapshotCalls(calls))
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:40:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUIDB, Agent: "claude", Created: "2026-11-12T09:40:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:41:00Z", Text: "foreign"})
+	box.tick(context.Background())
+	if len(*reads) != n+1 {
+		t.Fatalf("reads = %+v", *reads)
+	}
+	got := (*reads)[n]
+	grew := int(logBytes(t, dir) - size)
+	if got.offset != size || got.n != grew {
+		t.Fatalf("grown read %+v want offset %d len %d", got, size, grew)
+	}
+	fresh := snapshotCalls(calls)[sent:]
+	if len(fresh) != 1 || fresh[0].method != http.MethodDelete || fresh[0].path != channelBase(inst, shareUID) {
+		t.Fatalf("calls = %+v", fresh)
+	}
+	for _, c := range snapshotCalls(calls) {
+		if strings.Contains(c.body, "foreign") {
+			t.Fatal("foreign text was sent")
+		}
+	}
+	assertNoStoredShare(t, dir, shareUID)
+}
+
+func TestOutboxReplacedLogWithAnotherUIDStopsTheShare(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, inst := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	reads := countLogReads(box)
+	box.tick(context.Background())
+	first, err := os.Stat(chatLogPath(dir, shareNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(chatLogPath(dir, shareNode)); err != nil {
+		t.Fatal(err)
+	}
+	writeChatLog(t, dir, shareNode, shareUIDB, 2)
+	second, err := os.Stat(chatLogPath(dir, shareNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(first, second) {
+		t.Fatal("replacement did not change the file")
+	}
+	n := len(*reads)
+	sent := len(snapshotCalls(calls))
+	box.tick(context.Background())
+	if len(*reads) != n+1 {
+		t.Fatalf("reads = %+v", *reads)
+	}
+	got := (*reads)[n]
+	if got.offset != 0 || got.n != int(second.Size()) {
+		t.Fatalf("replaced read %+v want 0,%d", got, second.Size())
+	}
+	fresh := snapshotCalls(calls)[sent:]
+	if len(fresh) != 1 || fresh[0].method != http.MethodDelete || fresh[0].path != channelBase(inst, shareUID) {
+		t.Fatalf("calls = %+v", fresh)
+	}
+	assertNoStoredShare(t, dir, shareUID)
+}
+
+func TestOutboxRestartReadsTheWholeLog(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	box.tick(context.Background())
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok {
+		t.Fatal("missing share")
+	}
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:40:00Z", Text: "more"})
+	box2 := &shareOutbox{dataDir: dir, now: box.now, client: box.client}
+	reads := countLogReads(box2)
+	mark := len(snapshotCalls(calls))
+	box2.tick(context.Background())
+	size := logBytes(t, dir)
+	if len(*reads) != 1 || (*reads)[0].offset != 0 || (*reads)[0].n != int(size) {
+		t.Fatalf("restart read %+v want 0,%d", *reads, size)
+	}
+	box2.tick(context.Background())
+	if len(*reads) != 1 {
+		t.Fatalf("second tick read %+v", *reads)
+	}
+	want, _, _ := mirrorBatch(stored, sessionlog.ReadEvents(chatLogPath(dir, shareNode)))
+	got := mirrorEntries(t, snapshotCalls(calls)[mark:])
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries = %s\nwant %s", entryKeys(got), entryKeys(want))
+	}
+}
+
+func TestOutboxLogIdentityMatchesAFullRead(t *testing.T) {
+	meta := func(uid string) sessionlog.Event {
+		return sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: uid, Agent: "claude", Created: "2026-11-12T09:30:00Z"}}
+	}
+	user := sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "kept"}
+	for _, tc := range []struct {
+		name string
+		live bool
+		raw  []byte
+	}{
+		{name: "no header", raw: mustLog(tLine(user))},
+		{name: "other uid", raw: mustLog(tLine(meta(shareUIDB)), tLine(user))},
+		{name: "two uids", raw: mustLog(tLine(meta(shareUID)), tLine(meta(shareUIDB)), tLine(user))},
+		{name: "same uid twice", live: true, raw: mustLog(tLine(meta(shareUID)), tLine(meta(shareUID)), tLine(user))},
+		{name: "blank uid then the chat", live: true, raw: mustLog([]byte("{\"t\":\"meta\"}\n"), []byte("{\"t\":\"meta\",\"meta\":{\"node\":\"chat\",\"uid\":\"\",\"agent\":\"claude\",\"created\":\"2026-11-12T09:30:00Z\"}}\n"), tLine(meta(shareUID)), tLine(user))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := &outboxScript{}
+			box, dir, calls, _ := newShareBox(t, script)
+			appendNode(t, dir, shareNode, "North")
+			if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(chatLogPath(dir, shareNode), tc.raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			id := sessionlog.ReadLogIdentity(chatLogPath(dir, shareNode))
+			wantLive := id.Status == sessionlog.IdentityOK && id.UID == shareUID
+			if wantLive != tc.live {
+				t.Fatalf("fixture live %v identity %+v", tc.live, id)
+			}
+			saveResumeShare(t, dir)
+			reads := countLogReads(box)
+			box.tick(context.Background())
+			if len(*reads) != 1 || (*reads)[0].offset != 0 || (*reads)[0].n != len(tc.raw) {
+				t.Fatalf("reads = %+v", *reads)
+			}
+			_, stored := storedShare(t, dir, shareUID)
+			if stored != tc.live {
+				t.Fatalf("stored %v want %v calls %+v", stored, tc.live, snapshotCalls(calls))
+			}
+			if tc.live && !strings.Contains(mirrorCall(t, snapshotCalls(calls)).body, "kept") {
+				t.Fatal("live chat was not copied")
+			}
+		})
+	}
+}
+
+func TestOutboxMissingLogRemovesTheShare(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, _, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	saveResumeShare(t, dir)
+	box.tick(context.Background())
+	assertNoStoredShare(t, dir, shareUID)
+}
+
+func tLine(ev sessionlog.Event) []byte {
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		panic(err)
+	}
+	return append(raw, '\n')
+}
+
+func mustLog(parts ...[]byte) []byte {
+	return bytes.Join(parts, nil)
+}
+
 func appendTool(t *testing.T, dir, id string) {
 	t.Helper()
 	appendOutbox(t, dir, sessionlog.Event{T: "tool", Time: "2026-11-12T09:32:00Z", Tool: &sessionlog.ToolEvent{ID: id, Title: "read", Status: "done"}})

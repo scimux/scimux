@@ -44,6 +44,9 @@ type shareOutbox struct {
 	// readFrom reads a session log from an offset. A test records the offsets.
 	// Nil reads the file from that offset.
 	readFrom func(path string, offset int64) ([]byte, error)
+	// readLogAt reads a session log from an offset through the end. A test
+	// counts every read. Nil reads the file. readFrom, when set, replaces it.
+	readLogAt func(path string, offset int64) ([]byte, error)
 	// statLog is the size and identity check for a session log. Nil uses os.Stat.
 	statLog func(path string) (os.FileInfo, error)
 	// files is the process lock for team-shares.json, shared with the routes.
