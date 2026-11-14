@@ -2119,3 +2119,94 @@ func seededLog() []byte {
 	write(sessionlog.Event{T: "user", Time: "2026-11-12T09:35:00Z", Text: "tail"})
 	return b.Bytes()
 }
+
+func appendTool(t *testing.T, dir, id string) {
+	t.Helper()
+	appendOutbox(t, dir, sessionlog.Event{T: "tool", Time: "2026-11-12T09:32:00Z", Tool: &sessionlog.ToolEvent{ID: id, Title: "read", Status: "done"}})
+}
+
+func shareFileBytes(t *testing.T, dir string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, team.SharesFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestOutboxToolGrowthReadsOnlyTheNewBytes(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	base := saveResumeShare(t, dir)
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	want := []int64{0, logBytes(t, dir)}
+	saved := shareFileBytes(t, dir)
+	for i := 0; i < 4; i++ {
+		appendTool(t, dir, fmt.Sprintf("tool-%d", i))
+		box.tick(context.Background())
+		if i < 3 {
+			want = append(want, logBytes(t, dir))
+		}
+	}
+	if !bytes.Equal(saved, shareFileBytes(t, dir)) {
+		t.Fatal("tool growth wrote team-shares.json")
+	}
+	if !reflect.DeepEqual(*offsets, want) {
+		t.Fatalf("offsets = %v want %v", *offsets, want)
+	}
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:40:00Z", Text: "later"})
+	box.tick(context.Background())
+	assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+}
+
+func TestOutboxDroppedSaveBetweenToolGrowth(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	base := saveResumeShare(t, dir)
+	rewound := shareFileBytes(t, dir)
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	want := []int64{0, logBytes(t, dir)}
+	appendTool(t, dir, "tool-1")
+	box.tick(context.Background())
+	want = append(want, logBytes(t, dir))
+	saved := shareFileBytes(t, dir)
+	appendTool(t, dir, "tool-2")
+	box.tick(context.Background())
+	if !bytes.Equal(saved, shareFileBytes(t, dir)) {
+		t.Fatal("tool growth wrote team-shares.json")
+	}
+	if err := os.WriteFile(filepath.Join(dir, team.SharesFile), rewound, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendTool(t, dir, "tool-3")
+	box.tick(context.Background())
+	want = append(want, 0)
+	after := logBytes(t, dir)
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:40:00Z", Text: "later"})
+	box.tick(context.Background())
+	want = append(want, after)
+	if !reflect.DeepEqual(*offsets, want) {
+		t.Fatalf("offsets = %v want %v", *offsets, want)
+	}
+	got := snapshotCalls(calls)
+	// The copy before the rewind is already on the server. The mirrors
+	// after it are what a full read of the rewound share sends.
+	start := len(got)
+	seen := 0
+	for i, c := range got {
+		if !strings.HasSuffix(c.path, "/mirror") {
+			continue
+		}
+		seen++
+		if seen == 2 {
+			start = i
+		}
+	}
+	assertMirrorsMatchFullRead(t, dir, base, got[start:])
+}
