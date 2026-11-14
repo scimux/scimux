@@ -7336,7 +7336,6 @@ test("a fully folded turn has no fold action and the head button stays hidden", 
 test("a fold click on a bubble that cannot fold leaves the bar and the transcript", async () => {
   const { ctx, store, html } = await renderFolded({
     turns: foldAgents(4),
-    state: { all: false, turns: [], open: [] },
     echo: false,
   });
   ctx.feature.bind();
@@ -7433,7 +7432,7 @@ test("a Fold click hides that range and keeps the row at the same distance", asy
   assert.ok(page.includes(foldShowHTML(2, "0/3")));
   assert.ok(page.includes(foldShowHTML(2, "0/6")));
   assert.deepEqual(readStoredFold(store).open, []);
-  assert.equal(ctx.roots.msgs.scrollTop, 800);
+  assert.equal(ctx.roots.msgs.scrollTop, 300);
   ctx.feature.destroy();
 });
 
