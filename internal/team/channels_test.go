@@ -294,7 +294,7 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		`not-json`,
 		`{"owner":"short","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}`,
 		`{"owner":"` + chOwner + `","chat":"bad chat","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}`,
-		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"bad` + "\n" + `","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}`,
+		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"bad\n","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}`,
 		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"bad` + "\xff" + `","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}`,
 		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"` + strings.Repeat("a", 201) + `","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}`,
 		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"short","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}`,
@@ -322,30 +322,42 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		appendObject() + `{"x":1}`,
 		`{"generation":"` + chGen + `","results":[{"key":"0/1","seq":1,"duplicate":false}],"last":1,"extra":1}`,
 	}
+	// net/http discards a 204 body, so only a RoundTripper can present one.
 	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
+		name string
+		body string
 	}{
-		{"body", http.StatusNoContent, secretEcho()},
-		{"blank", http.StatusNoContent, "\n"},
-		{"ok", http.StatusOK, ""},
+		{"body", secretEcho()},
+		{"blank", "\n"},
 	} {
 		t.Run("delete "+tc.name, func(t *testing.T) {
-			delSrv, delGot := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
-				w.WriteHeader(tc.status)
-				_, _ = io.WriteString(w, tc.body)
-			})
-			err := clientOn(delSrv).DeleteChannel(context.Background(), delSrv.URL, chToken, chOwner, chChat)
+			trip := &headerTrip{status: http.StatusNoContent, body: tc.body}
+			c := NewClient()
+			c.Transport = trip
+			c.timeout = time.Second
+			err := c.DeleteChannel(context.Background(), "http://relay.example", chToken, chOwner, chChat)
 			if !errors.Is(err, ErrProtocol) {
 				t.Fatalf("error = %v", err)
 			}
 			assertNoChannelSecrets(t, err)
-			if len(*delGot) != 1 {
-				t.Fatalf("requests = %d", len(*delGot))
+			if trip.method != http.MethodDelete || trip.gotBody != "" {
+				t.Fatalf("request = %s %q", trip.method, trip.gotBody)
 			}
 		})
 	}
+	t.Run("delete ok", func(t *testing.T) {
+		delSrv, delGot := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+			w.WriteHeader(http.StatusOK)
+		})
+		err := clientOn(delSrv).DeleteChannel(context.Background(), delSrv.URL, chToken, chOwner, chChat)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("error = %v", err)
+		}
+		assertNoChannelSecrets(t, err)
+		if len(*delGot) != 1 {
+			t.Fatalf("requests = %d", len(*delGot))
+		}
+	})
 
 	check := func(name string, bodies []string, status int, call func(*Client, string) error) {
 		t.Helper()
@@ -457,6 +469,8 @@ func TestChannelCallsDoNotFollowRedirects(t *testing.T) {
 
 func TestChannelCallsTimeOut(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The server cancels the request only once the body has been read.
+		_, _ = io.Copy(io.Discard, r.Body)
 		<-r.Context().Done()
 	}))
 	t.Cleanup(srv.Close)
