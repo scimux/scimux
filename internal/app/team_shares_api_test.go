@@ -1580,6 +1580,37 @@ func TestStopSharingAnswersStoppingWhenTheServerStays(t *testing.T) {
 			t.Fatalf("stored = %+v", got)
 		}
 	})
+	t.Run("server forgotten", func(t *testing.T) {
+		h, dir, calls, _ := readySurface(t, &shareScript{})
+		mustSaveShare(t, dir, shareNodeShare())
+		if err := team.Remove(dir, teamServerID); err != nil {
+			t.Fatal(err)
+		}
+		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+		if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
+			t.Fatalf("status = %d %q", rec.Code, rec.Body.String())
+		}
+		assertNoStoredShare(t, dir, shareUID)
+		if len(snapshotCalls(calls)) != 0 {
+			t.Fatalf("calls = %+v", snapshotCalls(calls))
+		}
+	})
+	t.Run("servers damaged", func(t *testing.T) {
+		h, dir, calls, _ := readySurface(t, &shareScript{})
+		mustSaveShare(t, dir, shareNodeShare())
+		if err := os.WriteFile(filepath.Join(dir, team.File), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+		got, ok := storedShare(t, dir, shareUID)
+		if !ok || got.State != "active" {
+			t.Fatalf("stored = %+v ok %v", got, ok)
+		}
+		if len(snapshotCalls(calls)) != 0 {
+			t.Fatal("called the server")
+		}
+	})
 }
 
 func shareNodeShare() team.Share {
