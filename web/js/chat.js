@@ -101,6 +101,7 @@ import {
   clearAwaitingForward,
   makeForwardLinkToTurn,
 } from "./storage.js";
+import { foldPlan, foldRowHTML, foldStateVersion, readFoldState } from "./fold.js";
 
 /* ---------- public constants ---------- */
 
@@ -285,6 +286,10 @@ export function buildChatSignature(parts){
     p.compacting ? "1" : "0",
     p.elicitationKey || "",
     p.interactionKey || "",
+    /* Folding lives in this tab. A change of it has to rebuild even when the
+       server payload is unchanged, and a poll that does not touch it still
+       skips. Omitted means the same empty value on both sides. */
+    p.foldVersion || "",
   ].join("|");
 }
 
@@ -1314,6 +1319,8 @@ export function createChatFeature(deps){
 
   /* feature-owned state */
   let chatSig = "";
+  /* What this tab hides. Read again on every refresh; nothing here is sent. */
+  let foldState = { all: false, turns: [], open: [] };
   /* Per-node chat poll validator (ETag). Keyed by node id so a tag from A is
      never sent for B; cleared on node switch (onSelectChange). */
   let chatETag = { node: "", etag: "" };
@@ -1568,16 +1575,49 @@ export function createChatFeature(deps){
       clearAwaitingForward(d.storage, nodeId);
   }
 
+  /* The log uid, from the live surface or a loaded history surface. A chat
+     with no uid is not folded and the store is not read. */
+  function chatLogUID(groups){
+    for (let gi = 0; gi < groups.length; gi++){
+      const list = groups[gi];
+      for (let i = 0; i < list.length; i++){
+        if (list[i].uid) return list[i].uid;
+      }
+    }
+    return "";
+  }
+
+  /* Protected means the chat already shows a bookmark marker or a sent-to
+     marker. A note usage is part of the bookmark marker. */
+  function agentBubbleProtected(turn, nodeId){
+    if (bookmarkMarkerModel(turn, nodeId, g("bookmarks", []), g("noteUsages", []))) return true;
+    return sentToMarkerModel(turn, nodeId, g("forwardLinks", [])).length > 0;
+  }
+
   function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets, externalAllowed = false } = {}){
-    return mergeTimelineItems(turns, decisions).map(item => {
+    const items = mergeTimelineItems(turns, decisions);
+    const view = foldPlan(items, {
+      state: foldState,
+      isProtected(turn){ return agentBubbleProtected(turn, nodeId); },
+    });
+    let html = "";
+    for (let i = 0; i < view.sequence.length; i++){
+      const step = view.sequence[i];
+      if (step.row){
+        html += foldRowHTML(step.row);
+        continue;
+      }
+      const item = items[step.index];
       if (item.kind === "decision"){
-        return decisionRowHTML(item.decision, {
+        html += decisionRowHTML(item.decision, {
           escape, fmtTime: whenFn, ordinal: item.ordinal,
         });
+        continue;
       }
       const bk = hist ? histBk(segIndex, item.index) : liveBk(item.index);
-      return renderTurnHTML(item.turn, { bk, hist, nodeId, assets, externalAllowed });
-    }).join("");
+      html += renderTurnHTML(item.turn, { bk, hist, nodeId, assets, externalAllowed });
+    }
+    return html;
   }
 
   function attentionSuppressed(id, node){
@@ -2140,6 +2180,11 @@ export function createChatFeature(deps){
       permExpanded = { node: "", open: false };
     }
     const expanded = permExpanded.node === n.id && permExpanded.open;
+    const foldGroups = [turns];
+    for (let i = 0; i < priorSegs.length; i++) foldGroups.push(priorSegs[i].turns || []);
+    const foldUID = chatLogUID(foldGroups);
+    if (foldUID && d.foldStorage) foldState = readFoldState(d.foldStorage, foldUID);
+    else foldState = { all: false, turns: [], open: [] };
     const sig = buildChatSignature({
       nodeId: n.id,
       attention: n.attention,
@@ -2168,6 +2213,7 @@ export function createChatFeature(deps){
       compacting: !!data.compacting,
       elicitationKey: elicitationKey(data),
       interactionKey: interactionSignature(data.claude_interaction),
+      foldVersion: foldStateVersion(foldState),
     });
     const label = unconfirmed
       ? "Send unconfirmed \u2014 check the terminal"

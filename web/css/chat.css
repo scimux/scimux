@@ -651,3 +651,11 @@ body.cards-open #msgs { overflow: hidden; }
 #keyrow .ci-card .ci-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 #keyrow .ci-card .ci-action { font: inherit; }
 #keyrow .ci-card textarea { font: inherit; width: 100%; }
+
+/* A run of intermediate agent bubbles, hidden or opened again in this tab. */
+.foldrow { display: flex; justify-content: center; padding: 6px 4px; }
+.foldtoggle {
+  font-size: 12px; font-weight: 600; color: var(--work);
+  border: 1px solid var(--hairline); border-radius: 14px; padding: 5px 12px;
+  background: var(--surface); white-space: nowrap;
+}
