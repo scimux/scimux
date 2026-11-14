@@ -63,6 +63,8 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   let pendingLoads = 0;
   let lastLoadAt = 0;
   let seatsGen = 0;
+  let drawnNode = "";
+  let drawnShare = "";
   let chain = Promise.resolve();
   const side = new Set();
   const cleanups = [];
@@ -306,6 +308,17 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     else if (view.state === "active") renderActive(body);
     else if (view.state === "lost" || view.state === "full") renderEnded(body);
     else renderStopping(body);
+    rememberDrawn();
+  }
+
+  function shareToken(v) {
+    if (!v) return "";
+    return String(v.uid) + "\n" + String(v.state);
+  }
+
+  function rememberDrawn() {
+    drawnNode = selected;
+    drawnShare = shareToken(view);
   }
 
   function wantsPeople() {
@@ -320,9 +333,14 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     return fallback;
   }
 
+  function firstServerId() {
+    for (const server of joined) return server.id;
+    return "";
+  }
+
   function seatServer() {
     if (view) return view.server;
-    return checkedValue("sh_server", joined[0].id);
+    return checkedValue("sh_server", firstServerId());
   }
 
   function chosenMembers() {
@@ -338,12 +356,39 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   function putBody() {
     if (!view) {
       return {
-        server: checkedValue("sh_server", joined[0].id),
+        server: checkedValue("sh_server", firstServerId()),
         scope: checkedValue("sh_scope", "from_now"),
         members: chosenMembers(),
       };
     }
     return { server: view.server, scope: view.scope, members: chosenMembers() };
+  }
+
+  function chosenServerJoined() {
+    const id = checkedValue("sh_server", firstServerId());
+    for (const server of joined) {
+      if (server.id === id) return true;
+    }
+    return false;
+  }
+
+  function sheetDrifted() {
+    if (drawnNode !== selected) return true;
+    if (shareToken(view) !== drawnShare) return true;
+    if (drawnShare === "" && !chosenServerJoined()) return true;
+    return false;
+  }
+
+  function abandonSheet() {
+    if (joined.length === 0) {
+      sheetNode = "";
+      closeSheets();
+      return;
+    }
+    showSheet();
+    const note = $("#sh_note");
+    note.textContent = "Sharing of this chat changed. Check and try again.";
+    note.hidden = false;
   }
 
   function sameAsView() {
@@ -449,6 +494,10 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       if (doc.activeElement === stop) stop.focus();
       return;
     }
+    if (sheetDrifted()) {
+      abandonSheet();
+      return;
+    }
     sheetBusy = true;
     $("#sh_apply").disabled = true;
     stop.disabled = true;
@@ -461,14 +510,19 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     const apply = $("#sh_apply");
     if (apply.hidden) return;
     if (apply.disabled) return;
+    if (sheetDrifted()) {
+      abandonSheet();
+      return;
+    }
     const restore = doc.activeElement === apply;
     const hadView = Boolean(view);
+    const body = JSON.stringify(putBody());
     sheetBusy = true;
     apply.disabled = true;
     $("#sh_stop").disabled = true;
     const pending = api("/api/team/shares/" + selected, {
       method: "PUT",
-      body: JSON.stringify(putBody()),
+      body,
     });
     enqueue(() => finishPut(pending, hadView, restore));
   }
