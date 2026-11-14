@@ -641,18 +641,21 @@ func parseLogTail(r io.Reader, base, segment int, agent string) (events []sessio
 
 // scanLogLines walks complete newline-terminated records. Blank lines and
 // records longer than maxLogRecord are skipped. A line with no newline yet
-// stays unread. The returned offset is the last byte consumed.
+// stays unread. The returned offset is the byte after the last complete
+// line, never inside an unfinished line.
 func scanLogLines(r io.Reader, fn func(rec []byte)) int64 {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var (
 		off     int64
+		pend    int64
 		carry   []byte
 		toolong bool
 	)
 	for {
 		chunk, err := br.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
-			off += int64(len(chunk))
+			// Count these bytes only when the line's newline arrives.
+			pend += int64(len(chunk))
 			if !toolong {
 				if len(carry)+len(chunk) > maxLogRecord {
 					toolong, carry = true, nil
@@ -664,10 +667,11 @@ func scanLogLines(r io.Reader, fn func(rec []byte)) int64 {
 		}
 		if err != nil {
 			// EOF, or a read error. ReadEvents drops the error too, and a
-			// partial line is not a record.
+			// partial line is not a record. pend is the unfinished line.
 			return off
 		}
-		off += int64(len(chunk))
+		off += pend + int64(len(chunk))
+		pend = 0
 		if !toolong {
 			rec := chunk[:len(chunk)-1]
 			if len(carry) > 0 {
