@@ -2,8 +2,31 @@
  *
  * api, doc, openSheet, closeSheets, and now are injected. This file does not
  * touch document, window, or fetch. Server and share reads run on one queue.
- * A newer select drops an older answer.
+ * A newer select drops an older answer. Seats reads are tracked beside the
+ * queue so a later choice can drop an earlier roster. settled() waits for both.
+ * A click that sends a request starts it before the handler returns.
  */
+import { esc } from "./format.js";
+
+const SERVERS = "/api/team/servers";
+const INTERVAL = 10000;
+const LEFT = "a server you left";
+
+const SHARE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2"></circle><circle cx="18" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle><path d="M8 11.2 15.2 7.2"></path><path d="M8 12.8 15.2 16.8"></path></svg>';
+
+const ERROR_TEXT = {
+  unreachable: "The server could not be reached.",
+  bad_server: "That address no longer answers as this server.",
+  refused: "The server ended this computer's access.",
+  unknown_member: "Someone in the list has left the server. Open the sheet again.",
+  server_full: "The server has no room for another shared chat.",
+  too_many: "This computer shares too many chats. Stop one first.",
+  no_history: "This chat has nothing to share yet.",
+  not_active: "Sharing of this chat has ended. Stop it, then share again.",
+  share_fixed: "Stop sharing first to change the server or the scope.",
+  store_unavailable: "This computer could not save the change. Try again.",
+};
+
 export function shareStatusText(view, serverName) {
   const count = (view.members || []).length;
   const name = serverName;
@@ -23,25 +46,8 @@ export function shareStatusText(view, serverName) {
 }
 
 export function shareErrorText(code) {
-  const ERROR_TEXT = {
-    unreachable: "The server could not be reached.",
-    bad_server: "That address no longer answers as this server.",
-    refused: "The server ended this computer's access.",
-    unknown_member: "Someone in the list has left the server. Open the sheet again.",
-    server_full: "The server has no room for another shared chat.",
-    too_many: "This computer shares too many chats. Stop one first.",
-    no_history: "This chat has nothing to share yet.",
-    not_active: "Sharing of this chat has ended. Stop it, then share again.",
-    share_fixed: "Stop sharing first to change the server or the scope.",
-    store_unavailable: "This computer could not save the change. Try again.",
-  };
   return ERROR_TEXT[code] || "That did not work. Try again.";
 }
-
-const SERVERS = "/api/team/servers";
-const INTERVAL = 10000;
-const LEFT = "a server you left";
-const SHARE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2"></circle><circle cx="18" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle><path d="M8 11.2 15.2 7.2"></path><path d="M8 12.8 15.2 16.8"></path></svg>';
 
 export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   const $ = (sel) => doc.querySelector(sel);
@@ -50,14 +56,26 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   let joined = [];
   let selected = "";
   let view = null;
+  let sheetNode = "";
+  let sheetBusy = false;
   let generation = 0;
   let pendingLoads = 0;
   let lastLoadAt = 0;
+  let seatsGen = 0;
   let chain = Promise.resolve();
+  const side = new Set();
+  const cleanups = [];
 
   function enqueue(fn) {
     chain = chain.then(fn);
     return chain;
+  }
+
+  function track(pending) {
+    side.add(pending);
+    pending.finally(() => {
+      side.delete(pending);
+    });
   }
 
   function stale(gen) {
@@ -160,8 +178,191 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     return beginLoad(selected);
   }
 
+  function clearNote() {
+    const note = $("#sh_note");
+    note.textContent = "";
+    note.hidden = true;
+  }
+
+  function showNote(code) {
+    const note = $("#sh_note");
+    note.textContent = shareErrorText(code);
+    note.hidden = false;
+  }
+
+  function codeOf(err) {
+    let body;
+    try {
+      body = JSON.parse(err.message);
+    } catch {
+      return "";
+    }
+    if (!body || typeof body.error !== "string") return "";
+    return body.error;
+  }
+
+  function setApply(text, hidden, disabled) {
+    const apply = $("#sh_apply");
+    apply.hidden = hidden;
+    apply.disabled = disabled;
+    apply.textContent = text;
+  }
+
+  function serverFields() {
+    let html = "<fieldset><legend>Server</legend>";
+    for (let i = 0; i < joined.length; i++) {
+      const server = joined[i];
+      const checked = i === 0 ? " checked" : "";
+      html += '<label><input type="radio" name="sh_server" value="' + esc(server.id) + '"' +
+        checked + ">" + esc(server.name) + "</label>";
+    }
+    html += "</fieldset>";
+    return html;
+  }
+
+  function scopeFields() {
+    return '<fieldset><legend>What to share</legend>' +
+      '<label><input type="radio" name="sh_scope" value="from_now" checked>From now on</label>' +
+      '<label><input type="radio" name="sh_scope" value="all">Entire history</label>' +
+      "</fieldset>" +
+      "<p>Prompts and answers only.</p>" +
+      "<p>Tool details stay on this computer.</p>";
+  }
+
+  function option(value, label, on) {
+    return '<option value="' + value + '"' + (on ? " selected" : "") + ">" + label + "</option>";
+  }
+
+  function personRow(seat) {
+    return "<label>" + esc(seat.name) +
+      '<select data-seat="' + esc(seat.id) + '" aria-label="' + esc(seat.name) + '">' +
+      option("", "No access", true) +
+      option("read", "Can view", false) +
+      option("write", "Can comment", false) +
+      "</select></label>";
+  }
+
+  function renderNew() {
+    $("#sh_body").innerHTML = serverFields() + scopeFields() + '<div id="sh_people">Loading people…</div>';
+    setApply("Share chat", false, false);
+    $("#sh_stop").hidden = true;
+  }
+
+  function checkedValue(name, fallback) {
+    for (const input of $("#sh_body").querySelectorAll("input")) {
+      if (input.name === name && input.checked) return input.value;
+    }
+    return fallback;
+  }
+
+  function chosenMembers() {
+    const members = [];
+    for (const sel of $("#sh_body").querySelectorAll("select")) {
+      if (sel.value === "read" || sel.value === "write") {
+        members.push({ seat: sel.dataset.seat, access: sel.value });
+      }
+    }
+    return members;
+  }
+
+  function putBody() {
+    return {
+      server: checkedValue("sh_server", joined[0].id),
+      scope: checkedValue("sh_scope", "from_now"),
+      members: chosenMembers(),
+    };
+  }
+
+  function loadSeats(serverId) {
+    const gen = ++seatsGen;
+    const node = selected;
+    $("#sh_people").textContent = "Loading people…";
+    const pending = api(SERVERS + "/" + serverId + "/seats").then(
+      (body) => applySeats(gen, node, body, null),
+      (err) => applySeats(gen, node, null, err),
+    );
+    track(pending);
+  }
+
+  function applySeats(gen, node, body, err) {
+    if (gen !== seatsGen) return;
+    if (node !== selected) return;
+    const host = $("#sh_people");
+    if (err) {
+      host.textContent = shareErrorText(codeOf(err));
+      return;
+    }
+    const seats = body && Array.isArray(body.seats) ? body.seats : [];
+    const selfId = body && typeof body.self === "string" ? body.self : "";
+    const others = [];
+    for (const seat of seats) {
+      if (seat.id !== selfId) others.push(seat);
+    }
+    if (others.length === 0) {
+      host.textContent = "Nobody else has joined this server yet.";
+      return;
+    }
+    host.innerHTML = others.map(personRow).join("");
+  }
+
+  function onOpen() {
+    if (view) return;
+    sheetNode = selected;
+    clearNote();
+    renderNew();
+    loadSeats(checkedValue("sh_server", joined[0].id));
+    openSheet("sharesheet");
+  }
+
+  function onSheetChange(ev) {
+    if (ev.target.name !== "sh_server") return;
+    loadSeats(ev.target.value);
+  }
+
+  function onApply() {
+    if (sheetBusy) return;
+    const apply = $("#sh_apply");
+    if (apply.hidden || apply.disabled) return;
+    sheetBusy = true;
+    apply.disabled = true;
+    $("#sh_stop").disabled = true;
+    const pending = api("/api/team/shares/" + selected, {
+      method: "PUT",
+      body: JSON.stringify(putBody()),
+    });
+    enqueue(() => finishPut(pending));
+  }
+
+  function onSheetClick(ev) {
+    if (ev.target === $("#sh_apply")) onApply();
+  }
+
+  async function finishPut(pending) {
+    try {
+      view = await pending;
+      paintHeader();
+      $("#sh_live").textContent = "Sharing started.";
+    } catch (err) {
+      showNote(codeOf(err));
+      $("#sh_apply").disabled = false;
+      $("#sh_stop").disabled = false;
+    } finally {
+      sheetBusy = false;
+    }
+  }
+
+  function listen(el, type, fn) {
+    el.addEventListener(type, fn);
+    cleanups.push(() => el.removeEventListener(type, fn));
+  }
+
   function bind() {
-    $("#sharebtn").innerHTML = SHARE_ICON;
+    const btn = $("#sharebtn");
+    btn.innerHTML = SHARE_ICON;
+    listen(btn, "click", onOpen);
+    listen($("#sharestatus"), "click", onOpen);
+    listen($("#sharesheet"), "click", onSheetClick);
+    listen($("#sharesheet"), "change", onSheetChange);
   }
 
   function destroy() {}
@@ -170,8 +371,10 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     let prev;
     do {
       prev = chain;
+      const pending = [...side];
       await prev;
-    } while (chain !== prev);
+      await Promise.all(pending);
+    } while (chain !== prev || side.size > 0);
   }
 
   return { select, tick, bind, destroy, settled };
