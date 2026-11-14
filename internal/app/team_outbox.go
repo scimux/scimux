@@ -257,7 +257,7 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 	}
 	gen, _, err := o.client.AppendMirror(ctx, entry.URL, entry.Token, owner, share.UID, share.Generation, batch)
 	if err != nil {
-		if errors.Is(err, team.ErrNoChannel) {
+		if errors.Is(err, team.ErrNoChannel) || errors.Is(err, team.ErrStaleGeneration) {
 			share.State = "lost"
 			_ = o.persist(share, born)
 			o.clearConfirmed(entry.ID)

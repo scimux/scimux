@@ -156,12 +156,16 @@ func (c *Client) AppendMirror(ctx context.Context, baseURL, token, owner, chat, 
 	if err != nil {
 		return "", 0, err
 	}
+	if !validHex(generation, 16) {
+		return "", 0, ErrProtocol
+	}
 	if err := validMirrorEntries(entries); err != nil {
 		return "", 0, err
 	}
 	body, err := marshalChannelBody(struct {
-		Entries []MirrorEntry `json:"entries"`
-	}{Entries: entries})
+		Generation string        `json:"generation"`
+		Entries    []MirrorEntry `json:"entries"`
+	}{Generation: generation, Entries: entries})
 	if err != nil {
 		return "", 0, ErrProtocol
 	}
@@ -235,6 +239,8 @@ func mapChannelStatus(status int) error {
 		return ErrUnknownMember
 	case http.StatusInsufficientStorage:
 		return ErrQuota
+	case http.StatusConflict:
+		return ErrStaleGeneration
 	default:
 		return ErrProtocol
 	}
