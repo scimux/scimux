@@ -511,7 +511,7 @@ func TestSeatsMapEveryError(t *testing.T) {
 		{"quota", &shareScript{seatsStatus: http.StatusInsufficientStorage}, http.StatusInsufficientStorage, "server_full", true},
 		{"no channel", &shareScript{seatsStatus: http.StatusNotFound}, http.StatusBadGateway, "bad_server", true},
 		{"protocol", &shareScript{seatsStatus: http.StatusInternalServerError}, http.StatusBadGateway, "bad_server", true},
-		{"seats down", &shareScript{failPath: "/v1/seats"}, http.StatusBadGateway, "unreachable", false},
+		{"seats down", &shareScript{failPath: "/v1/seats"}, http.StatusBadGateway, "unreachable", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, calls, _ := readySurface(t, tc.script)
