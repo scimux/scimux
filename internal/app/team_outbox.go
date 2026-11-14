@@ -183,9 +183,16 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 		return
 	}
 	if fresh != share.Title {
-		gen, _, err := o.client.PutChannel(ctx, entry.URL, entry.Token, owner, share.UID, fresh)
+		gen, created, err := o.client.PutChannel(ctx, entry.URL, entry.Token, owner, share.UID, fresh)
 		if err != nil {
 			o.noteFailure(entry.ID, err)
+			return
+		}
+		if created || gen != born {
+			_ = o.client.DeleteChannel(ctx, entry.URL, entry.Token, owner, share.UID)
+			share.State = "lost"
+			_ = o.persist(share, born)
+			o.clearConfirmed(entry.ID)
 			return
 		}
 		share.Title = fresh
