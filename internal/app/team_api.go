@@ -27,6 +27,12 @@ type teamHandler struct {
 	// statusBound is the time limit for one status check. Tests set it.
 	// Production sets eight seconds.
 	statusBound time.Duration
+	// shareDelivery is the outbox's last result for one server in this
+	// process. Nil means no attempt yet, which a view reports as ok.
+	shareDelivery func(serverID string) string
+	// removeShare replaces the share-file delete. Nil uses the real one.
+	// A test sets it when the second write of one request has to fail.
+	removeShare func(dataDir, uid string) error
 }
 
 func newTeamHandler(dataDir string, now func() time.Time, client *team.Client) http.Handler {
@@ -56,6 +62,10 @@ func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.URL.Path == "/api/team/shares" || strings.HasPrefix(r.URL.Path, "/api/team/shares/") {
+		h.serveShares(w, r)
+		return
+	}
 	id, action, ok := splitTeamServerPath(r.URL.Path)
 	if !ok {
 		writeTeamError(w, http.StatusNotFound, "not_found")
@@ -68,20 +78,22 @@ func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.status(w, r, id)
 	case action == "leave" && r.Method == http.MethodPost:
 		h.leave(w, r, id)
+	case action == "seats":
+		h.seats(w, r, id)
 	default:
 		writeTeamError(w, http.StatusNotFound, "not_found")
 	}
 }
 
-// splitTeamServerPath accepts /api/team/servers/{id} and the status and
-// leave actions. Anything else, including a trailing slash, is refused.
+// splitTeamServerPath accepts /api/team/servers/{id} and the status, leave,
+// and seats actions. Anything else, including a trailing slash, is refused.
 func splitTeamServerPath(path string) (id, action string, ok bool) {
 	rest, found := strings.CutPrefix(path, "/api/team/servers/")
 	if !found || rest == "" {
 		return "", "", false
 	}
 	id, action, hasAction := strings.Cut(rest, "/")
-	if strings.Contains(action, "/") || (hasAction && action != "status" && action != "leave") {
+	if strings.Contains(action, "/") || (hasAction && action != "status" && action != "leave" && action != "seats") {
 		return "", "", false
 	}
 	return id, action, true

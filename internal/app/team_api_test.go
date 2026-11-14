@@ -143,6 +143,10 @@ func assertTeamPathsMatchUnknown(t *testing.T, h http.Handler) {
 			"/api/team/servers",
 			"/api/team/servers/" + teamServerID + "/status",
 			"/api/team/servers/" + teamServerID + "/leave",
+			"/api/team/servers/" + teamServerID + "/seats",
+			"/api/team/shares",
+			"/api/team/shares/",
+			"/api/team/shares/chat",
 		} {
 			got := recordedText(h, method, path)
 			if got != unknown {
@@ -154,9 +158,11 @@ func assertTeamPathsMatchUnknown(t *testing.T, h http.Handler) {
 
 func assertNoTeamFile(t *testing.T, dir string) {
 	t.Helper()
-	_, err := os.Stat(filepath.Join(dir, team.File))
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("team file stat = %v", err)
+	for _, name := range []string{team.File, team.SharesFile} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s stat = %v", name, err)
+		}
 	}
 }
 
