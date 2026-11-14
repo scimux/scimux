@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,11 @@ type outboxScript struct {
 	failPath     string
 	owner        string
 	mu           sync.Mutex
+	// mirrorArrived is closed when a mirror call is inside the server.
+	// mirrorGate holds that call until it is closed.
+	mirrorArrived chan struct{}
+	mirrorGate    chan struct{}
+	mirrorOnce    sync.Once
 }
 
 func (s *outboxScript) set(fn func(*outboxScript)) {
@@ -86,7 +92,9 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 	case r.Method == http.MethodPut:
 		status := putStatus
-		if status == 0 {
+		if strings.HasSuffix(r.URL.Path, "/members") && (status == 0 || status == http.StatusCreated) {
+			status = http.StatusOK
+		} else if status == 0 {
 			status = http.StatusOK
 		}
 		w.WriteHeader(status)
@@ -99,6 +107,7 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusOK
 		}
 		raw, _ := io.ReadAll(r.Body)
+		s.holdMirror()
 		var req struct {
 			Entries []struct {
 				Key string `json:"key"`
@@ -1105,6 +1114,9 @@ func TestCopySharedChatsIsWired(t *testing.T) {
 	if h.shareDelivery(teamServerID) != "ok" {
 		t.Fatalf("delivery = %s", h.shareDelivery(teamServerID))
 	}
+	if on.application.shareOutbox.files != &h.mu {
+		t.Fatal("routes and the outbox do not share the share-file lock")
+	}
 }
 
 func TestCopySharedChatsStaysNilOutsideTheMuxer(t *testing.T) {
@@ -1123,4 +1135,226 @@ func TestCopySharedChatsStaysNilOutsideTheMuxer(t *testing.T) {
 func TestCopySharedChatsWithNoOutboxDoesNothing(t *testing.T) {
 	a := &app{}
 	a.copySharedChats()
+}
+
+func (s *outboxScript) holdMirror() {
+	s.mu.Lock()
+	arrived := s.mirrorArrived
+	gate := s.mirrorGate
+	s.mu.Unlock()
+	if gate == nil {
+		return
+	}
+	if arrived != nil {
+		s.mirrorOnce.Do(func() { close(arrived) })
+	}
+	<-gate
+}
+
+func newRaceBox(t *testing.T, script *outboxScript) (*shareOutbox, http.Handler, string, string) {
+	t.Helper()
+	box, dir, _, inst := newShareBox(t, script)
+	h := newTeamHandler(dir, box.now, box.client)
+	box.files = &asTeamHandler(t, h).mu
+	return box, h, dir, inst
+}
+
+func armActiveShare(t *testing.T, dir string, members []team.Member) {
+	t.Helper()
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	mustSaveShare(t, dir, team.Share{
+		UID: shareUID, Node: shareNode, Scope: "all", Title: "North", Members: members,
+	})
+}
+
+// overlapShare runs a tick and lets during finish while that tick is inside
+// the mirror call, after the outbox has loaded the share and before it saves.
+func overlapShare(t *testing.T, box *shareOutbox, script *outboxScript, during func()) {
+	t.Helper()
+	arrived := make(chan struct{})
+	gate := make(chan struct{})
+	script.set(func(s *outboxScript) {
+		s.mirrorArrived = arrived
+		s.mirrorGate = gate
+		s.mirrorOnce = sync.Once{}
+	})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate) }) }
+	defer func() {
+		release()
+		script.set(func(s *outboxScript) {
+			s.mirrorGate = nil
+			s.mirrorArrived = nil
+		})
+	}()
+	done := make(chan struct{})
+	go func() {
+		box.tick(context.Background())
+		close(done)
+	}()
+	wait := time.NewTimer(3 * time.Second)
+	defer wait.Stop()
+	select {
+	case <-arrived:
+	case <-done:
+		t.Fatal("tick finished before the mirror")
+	case <-wait.C:
+		t.Fatal("tick did not reach the mirror")
+	}
+	during()
+	release()
+	finish := time.NewTimer(3 * time.Second)
+	defer finish.Stop()
+	select {
+	case <-done:
+	case <-finish.C:
+		t.Fatal("tick did not finish")
+	}
+}
+
+func TestOutboxLeavesAStoppedShareGone(t *testing.T) {
+	script := &outboxScript{}
+	box, h, dir, _ := newRaceBox(t, script)
+	armActiveShare(t, dir, nil)
+	overlapShare(t, box, script, func() {
+		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	assertNoStoredShare(t, dir, shareUID)
+	box.tick(context.Background())
+	assertNoStoredShare(t, dir, shareUID)
+}
+
+func TestOutboxLeavesAStoppingShare(t *testing.T) {
+	script := &outboxScript{}
+	box, h, dir, inst := newRaceBox(t, script)
+	armActiveShare(t, dir, []team.Member{{Seat: shareSeat, Access: "read"}})
+	overlapShare(t, box, script, func() {
+		script.set(func(s *outboxScript) { s.failPath = channelBase(inst, shareUID) })
+		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+		}
+		view := decodeShareView(t, rec)
+		if view.State != "stopping" {
+			t.Fatalf("view = %+v", view)
+		}
+	})
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.State != "stopping" {
+		t.Fatalf("stored = %+v ok %v", stored, ok)
+	}
+	script.set(func(s *outboxScript) { s.failPath = "" })
+	box.tick(context.Background())
+	assertNoStoredShare(t, dir, shareUID)
+}
+
+func TestOutboxKeepsMemberEdits(t *testing.T) {
+	script := &outboxScript{}
+	box, h, dir, _ := newRaceBox(t, script)
+	old := []team.Member{{Seat: shareSeat, Access: "read"}}
+	armActiveShare(t, dir, old)
+	next := []team.Member{{Seat: shareSeatB, Access: "write"}}
+	overlapShare(t, box, script, func() {
+		rec := putShare(h, shareNode, sharePutBody(teamServerID, "all", next))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.State != "active" || !stored.StartSent || stored.Next != 2 || stored.Generation != shareGen {
+		t.Fatalf("stored = %+v", stored)
+	}
+	assertMembersEqual(t, stored.Members, next)
+}
+
+func TestOutboxKeepsANewShareOfTheSameChat(t *testing.T) {
+	script := &outboxScript{}
+	box, h, dir, inst := newRaceBox(t, script)
+	armActiveShare(t, dir, []team.Member{{Seat: shareSeat, Access: "read"}})
+	const freshGen = "1111222233334444"
+	members := []team.Member{{Seat: shareSeatB, Access: "write"}}
+	overlapShare(t, box, script, func() {
+		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("stop = %d %s", rec.Code, rec.Body.String())
+		}
+		script.set(func(s *outboxScript) {
+			s.putStatus = http.StatusCreated
+			s.channel = channelJSON(inst, shareUID, "North", freshGen)
+		})
+		rec = putShare(h, shareNode, sharePutBody(teamServerID, "all", members))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.State != "active" || stored.Generation != freshGen || stored.StartSent || stored.Next != 0 || stored.Scope != "all" || stored.Title != "North" {
+		t.Fatalf("stored = %+v", stored)
+	}
+	assertMembersEqual(t, stored.Members, members)
+}
+
+func TestShareRoutesAndTicksRace(t *testing.T) {
+	for i := 0; i < 4; i++ {
+		script := &outboxScript{}
+		box, h, dir, _ := newRaceBox(t, script)
+		armActiveShare(t, dir, []team.Member{{Seat: shareSeat, Access: "read"}})
+		overlapShare(t, box, script, func() {
+			rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d %s", rec.Code, rec.Body.String())
+			}
+		})
+		assertNoStoredShare(t, dir, shareUID)
+	}
+}
+
+func TestKeepShareFieldsWritesOnlyRouteFields(t *testing.T) {
+	dir := t.TempDir()
+	h := asTeamHandler(t, newTeamHandler(dir, fixedTeamClock(), team.NewClient()))
+	old := []team.Member{{Seat: shareSeat, Access: "read"}}
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Next: 7, StartSent: true, Members: old})
+	mustSaveShare(t, dir, team.Share{UID: shareUIDB, Node: "other", Next: 3})
+	next := []team.Member{{Seat: shareSeatB, Access: "write"}}
+	got, err := h.keepShareFields(shareUID, func(cur *team.Share) {
+		cur.Members = next
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Next != 7 || !got.StartSent || got.State != "active" || got.Title != "North" || got.Generation != shareGen {
+		t.Fatalf("got = %+v", got)
+	}
+	assertMembersEqual(t, got.Members, next)
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.Next != 7 || !stored.StartSent {
+		t.Fatalf("stored = %+v", stored)
+	}
+	assertMembersEqual(t, stored.Members, next)
+	other, ok := storedShare(t, dir, shareUIDB)
+	if !ok || other.Next != 3 || len(other.Members) != 0 {
+		t.Fatalf("other = %+v", other)
+	}
+	if _, err := h.keepShareFields(shareUIDC, func(*team.Share) {}); !errors.Is(err, team.ErrNotFound) {
+		t.Fatalf("missing = %v", err)
+	}
+	shares, err := team.LoadShares(dir)
+	if err != nil || len(shares) != 2 {
+		t.Fatalf("shares = %+v err %v", shares, err)
+	}
+	damaged := []byte("{")
+	if err := os.WriteFile(filepath.Join(dir, team.SharesFile), damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.keepShareFields(shareUID, func(cur *team.Share) { cur.State = "stopping" }); !errors.Is(err, team.ErrSharesDamaged) {
+		t.Fatalf("damaged = %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, team.SharesFile))
+	if err != nil || !bytes.Equal(raw, damaged) {
+		t.Fatalf("file = %q", raw)
+	}
 }

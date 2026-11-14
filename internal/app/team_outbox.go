@@ -34,6 +34,9 @@ type shareOutbox struct {
 	save    func(dir string, s team.Share) error
 	readLog func(path string) []sessionlog.Event
 	logSize func(path string) (int64, error)
+	// files is the process lock for team-shares.json, shared with the routes.
+	// A test that builds an outbox alone leaves it nil.
+	files *sync.Mutex
 
 	mu      sync.Mutex
 	running bool

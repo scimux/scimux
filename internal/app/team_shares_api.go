@@ -425,6 +425,12 @@ func (h *teamHandler) writeShare(s team.Share) error {
 	return team.SaveShare(h.dataDir, s)
 }
 
+// keepShareFields changes the stored share. The stub answers not found
+// until the route writes only its own fields.
+func (h *teamHandler) keepShareFields(uid string, apply func(*team.Share)) (team.Share, error) {
+	return team.Share{}, team.ErrNotFound
+}
+
 func (h *teamHandler) deleteShareFile(uid string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
