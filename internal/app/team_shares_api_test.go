@@ -1595,6 +1595,22 @@ func TestStopSharingAnswersStoppingWhenTheServerStays(t *testing.T) {
 			t.Fatalf("calls = %+v", snapshotCalls(calls))
 		}
 	})
+	t.Run("identity", func(t *testing.T) {
+		h, dir, calls, _ := readySurface(t, &shareScript{})
+		mustSaveShare(t, dir, shareNodeShare())
+		if err := os.Remove(filepath.Join(dir, identity.InstallationFile)); err != nil {
+			t.Fatal(err)
+		}
+		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+		assertAPIError(t, rec, http.StatusInternalServerError, "identity_unavailable")
+		got, ok := storedShare(t, dir, shareUID)
+		if !ok || got.State != "active" {
+			t.Fatalf("stored = %+v ok %v", got, ok)
+		}
+		if len(snapshotCalls(calls)) != 0 {
+			t.Fatal("called the server")
+		}
+	})
 	t.Run("servers damaged", func(t *testing.T) {
 		h, dir, calls, _ := readySurface(t, &shareScript{})
 		mustSaveShare(t, dir, shareNodeShare())
