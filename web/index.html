@@ -91,11 +91,13 @@
         <span class="dot" id="chatdot"></span>
         <h2 id="chattitle">scimux</h2>
         <button class="headtoggle" id="infobtn" aria-label="show details"></button>
+        <button class="headtoggle" id="sharebtn" aria-label="share chat" title="Share chat" hidden></button>
         <button class="headtoggle" id="bookmarksbtn" aria-label="open bookmarks"></button>
         <!-- dock only: closes the wall map's chat pop-out. Trailing, so it sits
              top-right where the bookmarks chevron does outside the dock. -->
         <button class="headtoggle" id="dockclose" aria-label="close chat">&#10005;</button>
       </div>
+      <button id="sharestatus" hidden></button>
       <div class="mission" id="chatmission"></div>
       <div id="chatdetails" aria-hidden="true">
         <div class="detailmeta">
@@ -349,6 +351,16 @@
   <div class="sect" id="sendto_list"></div>
 </div>
 
+<div class="sheet" id="sharesheet">
+  <div class="grab"></div>
+  <h3>Share chat</h3>
+  <div class="sect" id="sh_body"></div>
+  <div id="sh_note" hidden></div>
+  <button class="cta" id="sh_apply"></button>
+  <button class="cta" id="sh_stop" hidden></button>
+  <div class="sr-only" id="sh_live" aria-live="polite"></div>
+</div>
+
 <!-- fare ticket (tap a fare capsule on the wall map). The body is rendered by
      the map feature; the sheet itself is a plain static shell like every other
      one. No <h3>: the ticket prints its own head. -->
@@ -530,4 +542,3 @@
 
 </body>
 </html>
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
