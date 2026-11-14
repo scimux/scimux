@@ -244,3 +244,41 @@ func TestPairingFeatureIsGivenTheClipboard(t *testing.T) {
 		t.Error("web/js/app.js does not give the pairing feature copyText: the Copy link action would ship permanently failing, because the adapter treats a missing copy as a refused clipboard")
 	}
 }
+
+// TestShareSheetSlotsAndConstruction pins the share button, the status line
+// and the share sheet, and that the composition root constructs the feature.
+func TestShareSheetSlotsAndConstruction(t *testing.T) {
+	html := readWebFile(t, "web/index.html")
+	info := strings.Index(html, `id="infobtn"`)
+	share := strings.Index(html, `id="sharebtn"`)
+	if info < 0 || share < info {
+		t.Error("share button must follow the info button in the chat header")
+	}
+	if !strings.Contains(html, `<button class="headtoggle" id="sharebtn" aria-label="share chat" title="Share chat" hidden></button>`) {
+		t.Error("share button markup drifted")
+	}
+	toprow := strings.Index(html, `class="toprow"`)
+	status := strings.Index(html, `id="sharestatus"`)
+	mission := strings.Index(html, `id="chatmission"`)
+	if toprow < 0 || status < toprow || mission < 0 || status > mission {
+		t.Error("share status must sit between the header row and the mission")
+	}
+	if !strings.Contains(html, `<button id="sharestatus" hidden></button>`) {
+		t.Error("share status markup drifted")
+	}
+	sendto := strings.Index(html, `id="sendto"`)
+	sheet := strings.Index(html, `id="sharesheet"`)
+	fare := strings.Index(html, `id="faresheet"`)
+	if sendto < 0 || sheet < sendto || fare < 0 || fare < sheet {
+		t.Error("share sheet must follow send-to and precede the fare sheet")
+	}
+	for _, id := range []string{"sh_body", "sh_note", "sh_apply", "sh_stop", "sh_live"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("share sheet has no id=%q", id)
+		}
+	}
+	app := readWebFile(t, "web/js/app.js")
+	if !strings.Contains(app, "createShareFeature") {
+		t.Error("web/js/app.js does not name createShareFeature")
+	}
+}
