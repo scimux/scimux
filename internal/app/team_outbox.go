@@ -573,9 +573,11 @@ func (o *shareOutbox) grownLog(share team.Share, path string) (events []sessionl
 	if can && size == prev.size && prev.done && prev.next == share.Next && prev.startSent == share.StartSent {
 		return nil, size, nil, 0, 0, ""
 	}
-	// A dropped save leaves the stored share behind the parse. Read the
-	// whole log again so the record numbers stay the ones ReadEvents uses.
-	if can && share.StartSent == prev.startSent && share.Next >= prev.records {
+	// A dropped save leaves the stored share behind the next this look
+	// saved. Read the whole log again so the record numbers stay the ones
+	// ReadEvents uses. A record that sends nothing, such as a tool record,
+	// does not move that next, and the following tick still reads the tail.
+	if can && share.StartSent == prev.startSent && share.Next == prev.next {
 		start = prev.offset
 		base = prev.records
 		segment = prev.segment
