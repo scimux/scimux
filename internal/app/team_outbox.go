@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,9 @@ const (
 	maxOutboxText    = 1 << 20
 	outboxBackoff    = 4 * time.Second
 	outboxBackoffCap = 5 * time.Minute
+	// maxLogRecord is the largest record ReadEvents keeps. sessionlog does
+	// not export that cap. A resumed read uses the same one.
+	maxLogRecord = 8 << 20
 )
 
 // shareOutbox copies shared chats to their team servers. The poll loop
@@ -49,6 +54,7 @@ type shareOutbox struct {
 	running bool
 	hold    map[string]serverHold
 	looks   map[string]logLook
+	scanned map[string]logScan
 }
 
 // serverHold is one server's backoff and the last delivery word.
@@ -60,11 +66,28 @@ type serverHold struct {
 }
 
 // logLook is the cursor of the last look whose size check succeeded.
+// The byte fields are the last look that finished its batch. A partial
+// batch keeps them so the next tick reads the same tail again.
 type logLook struct {
 	size      int64
 	next      int
 	startSent bool
 	done      bool
+	offset    int64
+	records   int
+	segment   int
+	agent     string
+	info      os.FileInfo
+	haveInfo  bool
+}
+
+// logScan is one parse of a session log, kept until remember stores it.
+type logScan struct {
+	offset  int64
+	records int
+	segment int
+	agent   string
+	info    os.FileInfo
 }
 
 type mirrorStart struct {
@@ -170,13 +193,24 @@ func (o *shareOutbox) stop(ctx context.Context, entry team.Entry, owner string, 
 func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, share team.Share, title string) {
 	born := share.Generation
 	path := shareLogPath(o.dataDir, share.Node)
-	size, sizeErr := o.fileSize(path)
-	var events []sessionlog.Event
-	if sizeErr != nil || !o.sameLook(share, size) {
-		events = o.events(path)
+	o.dropScan(share.UID)
+	var (
+		events        []sessionlog.Event
+		size          int64
+		sizeErr       error
+		base, segment int
+		agent         string
+	)
+	if o.readLog != nil {
+		size, sizeErr = o.fileSize(path)
+		if sizeErr != nil || !o.sameLook(share, size) {
+			events = o.readLog(path)
+		}
+	} else {
+		events, size, sizeErr, base, segment, agent = o.grownLog(share, path)
 	}
 	fresh := channelTitle(title)
-	batch, next, done := mirrorBatch(share, events)
+	batch, next, done := mirrorFrom(share, events, base, segment, agent)
 	remember := func() {
 		if sizeErr != nil {
 			return
@@ -355,13 +389,6 @@ func defaultLogSize(path string) (int64, error) {
 	return st.Size(), nil
 }
 
-func (o *shareOutbox) events(path string) []sessionlog.Event {
-	if o.readLog != nil {
-		return o.readLog(path)
-	}
-	return sessionlog.ReadEvents(path)
-}
-
 // withFiles runs a read-change-write of team-shares.json under the lock
 // shared with the routes. No lock is held while the caller talks to a server.
 func (o *shareOutbox) withFiles(fn func() error) error {
@@ -413,6 +440,10 @@ func (o *shareOutbox) persist(share team.Share, born string) error {
 }
 
 func mirrorBatch(share team.Share, events []sessionlog.Event) ([]team.MirrorEntry, int, bool) {
+	return mirrorFrom(share, events, 0, 0, "")
+}
+
+func mirrorFrom(share team.Share, events []sessionlog.Event, base, segment int, agent string) ([]team.MirrorEntry, int, bool) {
 	batch := make([]team.MirrorEntry, 0)
 	sum := 0
 	if !share.StartSent {
@@ -420,23 +451,22 @@ func mirrorBatch(share team.Share, events []sessionlog.Event) ([]team.MirrorEntr
 		batch = append(batch, team.MirrorEntry{Key: "start", Body: raw})
 		sum += len(raw)
 	}
-	segment := 0
-	agent := ""
 	next := share.Next
 	for i, ev := range events {
+		idx := base + i
 		if ev.T == "meta" && ev.Meta != nil && ev.Meta.Agent != "" {
 			agent = ev.Meta.Agent
 		}
-		if i >= share.Start && i >= share.Next {
+		if idx >= share.Start && idx >= share.Next {
 			body, ok := mirrorBody(ev, agent)
 			if ok {
 				if len(batch) > 0 && (len(batch) >= maxOutboxEntries || sum+len(body) > maxOutboxBytes) {
-					return batch, i, false
+					return batch, idx, false
 				}
-				batch = append(batch, team.MirrorEntry{Key: fmt.Sprintf("%d/%d", segment, i), Body: body})
+				batch = append(batch, team.MirrorEntry{Key: fmt.Sprintf("%d/%d", segment, idx), Body: body})
 				sum += len(body)
 			}
-			next = i + 1
+			next = idx + 1
 		}
 		if ev.T == "source" {
 			segment++
@@ -491,7 +521,167 @@ func (o *shareOutbox) remember(share team.Share, size int64, done bool) {
 	if o.looks == nil {
 		o.looks = map[string]logLook{}
 	}
-	o.looks[share.UID] = logLook{size: size, next: share.Next, startSent: share.StartSent, done: done}
+	prev := o.looks[share.UID]
+	look := logLook{size: size, next: share.Next, startSent: share.StartSent, done: done}
+	if scan, ok := o.scanned[share.UID]; ok && done {
+		look.offset = scan.offset
+		look.records = scan.records
+		look.segment = scan.segment
+		look.agent = scan.agent
+		look.info = scan.info
+		look.haveInfo = true
+	} else {
+		look.offset = prev.offset
+		look.records = prev.records
+		look.segment = prev.segment
+		look.agent = prev.agent
+		look.info = prev.info
+		look.haveInfo = prev.haveInfo
+	}
+	o.looks[share.UID] = look
+}
+
+func (o *shareOutbox) dropScan(uid string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.scanned, uid)
+}
+
+func (o *shareOutbox) stash(uid string, scan logScan) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.scanned == nil {
+		o.scanned = map[string]logScan{}
+	}
+	o.scanned[uid] = scan
+}
+
+// grownLog reads the new tail when the log only grew. A first look, a
+// shorter file, and a replaced file are read from the start. The entries
+// are numbered as ReadEvents numbers a full read.
+func (o *shareOutbox) grownLog(share team.Share, path string) (events []sessionlog.Event, size int64, sizeErr error, base, segment int, agent string) {
+	info, err := o.statPath(path)
+	if err != nil {
+		return sessionlog.ReadEvents(path), 0, err, 0, 0, ""
+	}
+	size = info.Size()
+	o.mu.Lock()
+	prev, ok := o.looks[share.UID]
+	o.mu.Unlock()
+	start := int64(0)
+	can := ok && prev.haveInfo && os.SameFile(prev.info, info) && size >= prev.size
+	if can && size == prev.size && prev.done && prev.next == share.Next && prev.startSent == share.StartSent {
+		return nil, size, nil, 0, 0, ""
+	}
+	// A dropped save leaves the stored share behind the parse. Read the
+	// whole log again so the record numbers stay the ones ReadEvents uses.
+	if can && share.StartSent == prev.startSent && share.Next >= prev.records {
+		start = prev.offset
+		base = prev.records
+		segment = prev.segment
+		agent = prev.agent
+	}
+	raw, err := o.readRange(path, start, size)
+	if err != nil {
+		return nil, size, nil, 0, 0, ""
+	}
+	parsed, watermark, records, seg, ag := parseLogTail(bytes.NewReader(raw), base, segment, agent)
+	o.stash(share.UID, logScan{
+		offset:  start + watermark,
+		records: records,
+		segment: seg,
+		agent:   ag,
+		info:    info,
+	})
+	return parsed, size, nil, base, segment, agent
+}
+
+func (o *shareOutbox) statPath(path string) (os.FileInfo, error) {
+	if o.statLog != nil {
+		return o.statLog(path)
+	}
+	return os.Stat(path)
+}
+
+func (o *shareOutbox) readRange(path string, offset, size int64) ([]byte, error) {
+	if o.readFrom != nil {
+		return o.readFrom(path, offset)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.NewSectionReader(f, offset, size-offset))
+}
+
+// parseLogTail parses one slice of a session log. base, segment, and agent
+// are the cursor from the bytes already consumed. records counts the same
+// lines ReadEvents counts.
+func parseLogTail(r io.Reader, base, segment int, agent string) (events []sessionlog.Event, watermark int64, records, seg int, ag string) {
+	records = base
+	seg = segment
+	ag = agent
+	watermark = scanLogLines(r, func(rec []byte) {
+		var ev sessionlog.Event
+		if json.Unmarshal(rec, &ev) != nil {
+			return
+		}
+		events = append(events, ev)
+		if ev.T == "meta" && ev.Meta != nil && ev.Meta.Agent != "" {
+			ag = ev.Meta.Agent
+		}
+		if ev.T == "source" {
+			seg++
+		}
+		records++
+	})
+	return events, watermark, records, seg, ag
+}
+
+// scanLogLines walks complete newline-terminated records. Blank lines and
+// records longer than maxLogRecord are skipped. A line with no newline yet
+// stays unread. The returned offset is the last byte consumed.
+func scanLogLines(r io.Reader, fn func(rec []byte)) int64 {
+	br := bufio.NewReaderSize(r, 64*1024)
+	var (
+		off     int64
+		carry   []byte
+		toolong bool
+	)
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if err == bufio.ErrBufferFull {
+			off += int64(len(chunk))
+			if !toolong {
+				if len(carry)+len(chunk) > maxLogRecord {
+					toolong, carry = true, nil
+				} else {
+					carry = append(carry, chunk...)
+				}
+			}
+			continue
+		}
+		if err != nil {
+			// EOF, or a read error. ReadEvents drops the error too, and a
+			// partial line is not a record.
+			return off
+		}
+		off += int64(len(chunk))
+		if !toolong {
+			rec := chunk[:len(chunk)-1]
+			if len(carry) > 0 {
+				rec = append(carry, rec...)
+			}
+			if len(rec) > 0 && rec[len(rec)-1] == '\r' {
+				rec = rec[:len(rec)-1]
+			}
+			if len(bytes.TrimSpace(rec)) > 0 {
+				fn(rec)
+			}
+		}
+		carry, toolong = carry[:0], false
+	}
 }
 
 func (o *shareOutbox) waiting(id string) bool {
