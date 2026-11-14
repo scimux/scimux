@@ -30,10 +30,27 @@ type outboxScript struct {
 	channel      string
 	failPath     string
 	owner        string
+	mu           sync.Mutex
+}
+
+func (s *outboxScript) set(fn func(*outboxScript)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(s)
 }
 
 func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.failPath != "" && r.URL.Path == s.failPath {
+	s.mu.Lock()
+	failPath := s.failPath
+	helloStatus := s.helloStatus
+	helloID := s.helloID
+	putStatus := s.putStatus
+	deleteStatus := s.deleteStatus
+	mirrorStatus := s.mirrorStatus
+	mirrorGen := s.mirrorGen
+	channel := s.channel
+	s.mu.Unlock()
+	if failPath != "" && r.URL.Path == failPath {
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			panic("outbox script: no hijack")
@@ -47,13 +64,13 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == "/v1/hello":
-		status := s.helloStatus
+		status := helloStatus
 		if status == 0 {
 			status = http.StatusOK
 		}
 		w.WriteHeader(status)
 		if status == http.StatusOK {
-			id := s.helloID
+			id := helloID
 			if id == "" {
 				id = teamServerID
 			}
@@ -62,22 +79,22 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `{"error":"nope"}`)
 		}
 	case r.Method == http.MethodDelete:
-		status := s.deleteStatus
+		status := deleteStatus
 		if status == 0 {
 			status = http.StatusNoContent
 		}
 		w.WriteHeader(status)
 	case r.Method == http.MethodPut:
-		status := s.putStatus
+		status := putStatus
 		if status == 0 {
 			status = http.StatusOK
 		}
 		w.WriteHeader(status)
-		if (status == http.StatusOK || status == http.StatusCreated) && s.channel != "" {
-			_, _ = io.WriteString(w, s.channel)
+		if (status == http.StatusOK || status == http.StatusCreated) && channel != "" {
+			_, _ = io.WriteString(w, channel)
 		}
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/mirror"):
-		status := s.mirrorStatus
+		status := mirrorStatus
 		if status == 0 {
 			status = http.StatusOK
 		}
@@ -92,7 +109,7 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status != http.StatusOK {
 			return
 		}
-		gen := s.mirrorGen
+		gen := mirrorGen
 		if gen == "" {
 			gen = shareGen
 		}
@@ -438,7 +455,7 @@ func TestOutboxFailedAppendSavesNothing(t *testing.T) {
 	}
 	when := time.Date(2026, 11, 12, 9, 30, 4, 0, time.UTC)
 	box.now = func() time.Time { return when }
-	script.mirrorStatus = http.StatusOK
+	script.set(func(s *outboxScript) { s.mirrorStatus = http.StatusOK })
 	box.tick(context.Background())
 	got := snapshotCalls(calls)
 	if len(got) < 4 || got[2].path != "/v1/hello" {
@@ -507,7 +524,7 @@ func TestOutboxSendsANewTitle(t *testing.T) {
 	appendDelete(t, dir, shareNode)
 	appendNode(t, dir, shareNode, "South")
 	seedOneUser(t, dir)
-	script.channel = channelJSON(inst, shareUID, "South", shareGen)
+	script.set(func(s *outboxScript) { s.channel = channelJSON(inst, shareUID, "South", shareGen) })
 	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Title: "North", StartSent: true, Next: 2})
 	box.tick(context.Background())
 	got := snapshotCalls(calls)
@@ -807,7 +824,7 @@ func TestOutboxBackoffIsPerServer(t *testing.T) {
 		t.Fatal("cap opened early")
 	}
 	when = when.Add(time.Second)
-	script.failPath = ""
+	script.set(func(s *outboxScript) { s.failPath = "" })
 	box.tick(context.Background())
 	if box.delivery(teamServerID) != "ok" {
 		t.Fatalf("delivery = %s", box.delivery(teamServerID))
@@ -816,7 +833,7 @@ func TestOutboxBackoffIsPerServer(t *testing.T) {
 	// failed mirror is a new failure, so the wait returns to 4s.
 	sent := len(snapshotCalls(calls))
 	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "more"})
-	script.mirrorStatus = http.StatusInternalServerError
+	script.set(func(s *outboxScript) { s.mirrorStatus = http.StatusInternalServerError })
 	box.tick(context.Background())
 	if len(snapshotCalls(calls)) == sent {
 		t.Fatal("reset failure did not reach the server")
