@@ -272,12 +272,14 @@ func (h *teamHandler) updateShare(w http.ResponseWriter, r *http.Request, entry 
 		writeShareCallError(w, err)
 		return
 	}
-	share.Members = members
-	if err := h.writeShare(share); err != nil {
+	updated, err := h.keepShareFields(share.UID, func(cur *team.Share) {
+		cur.Members = members
+	})
+	if err != nil {
 		writeShareSaveError(w, err)
 		return
 	}
-	writeJSONStatus(w, http.StatusOK, h.shareAPI(share))
+	writeJSONStatus(w, http.StatusOK, h.shareAPI(updated))
 }
 
 // createShare sends Hello, then the channel, then the members. A channel
@@ -368,11 +370,14 @@ func (h *teamHandler) stopShare(w http.ResponseWriter, r *http.Request, node str
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
-	share.State = "stopping"
-	if err := h.writeShare(share); err != nil {
+	stopped, err := h.keepShareFields(share.UID, func(cur *team.Share) {
+		cur.State = "stopping"
+	})
+	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
+	share = stopped
 	if err := h.confirmed(r.Context(), entry); err != nil {
 		if errors.Is(err, team.ErrUnreachable) || errors.Is(err, errHelloMismatch) {
 			writeJSONStatus(w, http.StatusAccepted, h.shareAPI(share))
@@ -425,9 +430,25 @@ func (h *teamHandler) writeShare(s team.Share) error {
 	return team.SaveShare(h.dataDir, s)
 }
 
-// keepShareFields changes the stored share. The stub answers not found
-// until the route writes only its own fields.
+// keepShareFields applies a route change to the share that is stored now.
+// It does not create a share. The lock is the one the outbox uses too.
 func (h *teamHandler) keepShareFields(uid string, apply func(*team.Share)) (team.Share, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	shares, err := team.LoadShares(h.dataDir)
+	if err != nil {
+		return team.Share{}, err
+	}
+	for i := range shares {
+		if shares[i].UID != uid {
+			continue
+		}
+		apply(&shares[i])
+		if err := team.SaveShare(h.dataDir, shares[i]); err != nil {
+			return team.Share{}, err
+		}
+		return shares[i], nil
+	}
 	return team.Share{}, team.ErrNotFound
 }
 

@@ -129,7 +129,7 @@ func (o *shareOutbox) tick(ctx context.Context) {
 func (o *shareOutbox) one(ctx context.Context, entries []team.Entry, owner string, share team.Share) {
 	entry, ok := serverFor(entries, share.Server)
 	if !ok {
-		_ = team.RemoveShare(o.dataDir, share.UID)
+		o.deleteStored(share.UID)
 		return
 	}
 	if o.waiting(entry.ID) {
@@ -152,7 +152,7 @@ func (o *shareOutbox) stop(ctx context.Context, entry team.Entry, owner string, 
 	}
 	err := o.client.DeleteChannel(ctx, entry.URL, entry.Token, owner, share.UID)
 	if err == nil || errors.Is(err, team.ErrNoChannel) || errors.Is(err, team.ErrUnauthorized) {
-		_ = team.RemoveShare(o.dataDir, share.UID)
+		o.deleteStored(share.UID)
 		o.noteSuccess(entry.ID)
 		return
 	}
@@ -160,6 +160,7 @@ func (o *shareOutbox) stop(ctx context.Context, entry team.Entry, owner string, 
 }
 
 func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, share team.Share, title string) {
+	born := share.Generation
 	path := shareLogPath(o.dataDir, share.Node)
 	size, sizeErr := o.fileSize(path)
 	var events []sessionlog.Event
@@ -189,7 +190,7 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 		}
 		share.Title = fresh
 		share.Generation = gen
-		_ = o.persist(share)
+		_ = o.persist(share, born)
 	}
 	if len(batch) == 0 {
 		remember()
@@ -200,13 +201,13 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 	if err != nil {
 		if errors.Is(err, team.ErrNoChannel) {
 			share.State = "lost"
-			_ = o.persist(share)
+			_ = o.persist(share, born)
 			o.clearConfirmed(entry.ID)
 			return
 		}
 		if errors.Is(err, team.ErrQuota) {
 			share.State = "full"
-			_ = o.persist(share)
+			_ = o.persist(share, born)
 			o.clearConfirmed(entry.ID)
 			return
 		}
@@ -215,13 +216,13 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 	}
 	if gen != share.Generation {
 		share.State = "lost"
-		_ = o.persist(share)
+		_ = o.persist(share, born)
 		return
 	}
 	share.Next = next
 	share.StartSent = true
 	share.Generation = gen
-	_ = o.persist(share)
+	_ = o.persist(share, born)
 	remember()
 	o.noteSuccess(entry.ID)
 }
@@ -329,11 +330,54 @@ func (o *shareOutbox) events(path string) []sessionlog.Event {
 	return sessionlog.ReadEvents(path)
 }
 
-func (o *shareOutbox) persist(share team.Share) error {
-	if o.save != nil {
-		return o.save(o.dataDir, share)
+// withFiles runs a read-change-write of team-shares.json under the lock
+// shared with the routes. No lock is held while the caller talks to a server.
+func (o *shareOutbox) withFiles(fn func() error) error {
+	if o.files != nil {
+		o.files.Lock()
+		defer o.files.Unlock()
 	}
-	return team.SaveShare(o.dataDir, share)
+	return fn()
+}
+
+func (o *shareOutbox) deleteStored(uid string) {
+	_ = o.withFiles(func() error {
+		return team.RemoveShare(o.dataDir, uid)
+	})
+}
+
+// persist writes the outbox fields onto the share stored now. born is the
+// generation the tick loaded. A missing share, a share that is no longer
+// active, or a different generation is left untouched. The outbox does not
+// create a share.
+func (o *shareOutbox) persist(share team.Share, born string) error {
+	return o.withFiles(func() error {
+		shares, err := team.LoadShares(o.dataDir)
+		if err != nil {
+			return err
+		}
+		for i := range shares {
+			if shares[i].UID != share.UID {
+				continue
+			}
+			stored := shares[i]
+			if stored.State != "active" || stored.Generation != born {
+				return nil
+			}
+			stored.Next = share.Next
+			stored.StartSent = share.StartSent
+			stored.Title = share.Title
+			stored.Generation = share.Generation
+			if share.State == "lost" || share.State == "full" {
+				stored.State = share.State
+			}
+			if o.save != nil {
+				return o.save(o.dataDir, stored)
+			}
+			return team.SaveShare(o.dataDir, stored)
+		}
+		return nil
+	})
 }
 
 func mirrorBatch(share team.Share, events []sessionlog.Event) ([]team.MirrorEntry, int, bool) {
@@ -508,8 +552,9 @@ func (a *app) copySharedChats() {
 func installShareOutbox(a *app, dataDir string, now func() time.Time) {
 	client := newTeamClient()
 	h := newTeamHandler(dataDir, now, client)
-	box := &shareOutbox{dataDir: dataDir, now: now, client: client}
-	h.(*teamHandler).shareDelivery = box.delivery
+	th := h.(*teamHandler)
+	box := &shareOutbox{dataDir: dataDir, now: now, client: client, files: &th.mu}
+	th.shareDelivery = box.delivery
 	a.teamHandler = h
 	a.shareOutbox = box
 }
