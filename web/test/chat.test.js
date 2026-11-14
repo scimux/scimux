@@ -6650,3 +6650,513 @@ test("splitAssetRefs fenced: live render has no media class or attachment row", 
   assert.deepEqual(fencedCodeContents(html), [esc(fencedAssetLine)]);
   ctx.feature.destroy();
 });
+
+/* Folding intermediate agent bubbles. The chat feature renders one surface
+ * at a time; these tests seed the session-storage record and read the HTML.
+ * Formatters are injected so the byte comparison does not depend on locale. */
+
+function foldMemory(seed = {}){
+  const map = new Map(Object.entries(seed));
+  return {
+    getItem(key){ return map.has(key) ? map.get(key) : null; },
+    setItem(key, value){ map.set(key, String(value)); },
+    map,
+  };
+}
+
+function foldRecord(uid, state){
+  return { ["scimux:fold:v1:" + uid]: JSON.stringify(state) };
+}
+
+function foldBubble(role, record, text, segment = 0, uid = "log-1"){
+  return {
+    role, text, uid, segment, record,
+    time: "2026-01-01T00:" + String(record).padStart(2, "0") + ":00Z",
+  };
+}
+
+function foldTurnHTML(i, role, time, text){
+  return '\n      <div class="turn ' + role + '" data-i="' + i + '" data-bk="i:' + i + '">'
+    + '\n\t\t<div class="bubble" title="' + role + "|" + time + '">' + text + "</div>"
+    + "\n      </div>";
+}
+
+const FOLD_BASE_HTML =
+  '<div class="chatseam curseam"><span>chat started T(2026-01-01T00:00:00Z)</span></div>'
+  + foldTurnHTML(0, "user", "2026-01-01T00:01:00Z", "prompt-one")
+  + foldTurnHTML(1, "assistant", "2026-01-01T00:02:00Z", "alpha")
+  + foldTurnHTML(2, "assistant", "2026-01-01T00:03:00Z", "beta")
+  + foldTurnHTML(3, "assistant", "2026-01-01T00:04:00Z", "gamma")
+  + foldTurnHTML(4, "assistant", "2026-01-01T00:05:00Z", "delta")
+  + '<div class="pending chaterr" role="status">channel down</div>'
+  + '\n      <div class="turn user echo">\n        <div class="bubble" title="you — delivering">in flight</div>\n      </div>';
+
+function foldShowHTML(count, key){
+  const noun = count === 1 ? "bubble" : "bubbles";
+  return '<div class="foldrow"><button type="button" class="foldtoggle" data-fold="open" data-foldkey="'
+    + key + '" aria-expanded="false">Show ' + count + " intermediate " + noun + "</button></div>";
+}
+
+function foldCloseHTML(count, key){
+  const noun = count === 1 ? "bubble" : "bubbles";
+  return '<div class="foldrow"><button type="button" class="foldtoggle" data-fold="close" data-foldkey="'
+    + key + '" aria-expanded="true">Fold ' + count + " intermediate " + noun + "</button></div>";
+}
+
+function foldAgents(n, segment = 0, uid = "log-1", textAt = null){
+  const turns = [foldBubble("user", 1, "prompt-one", segment, uid)];
+  for (let i = 0; i < n; i++){
+    const record = i + 2;
+    const text = textAt ? textAt(record) : "a" + record;
+    turns.push(foldBubble("assistant", record, text, segment, uid));
+  }
+  return turns;
+}
+
+async function renderFolded({
+  turns, decisions, uid = "log-1", state = null, deps = {}, histSegs,
+  prior = 0, echo = true,
+} = {}){
+  const store = foldMemory(state ? foldRecord(uid, state) : {});
+  const chatPayload = {
+    turns,
+    live: "quiet",
+    delivery: "ok",
+    source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z",
+    prior_turns: prior,
+    assets: {},
+    error: "channel down",
+  };
+  if (decisions) chatPayload.decisions = decisions;
+  const ctx = makeFeature({
+    histSegs,
+    chatPayload,
+    deps: {
+      fmtWhen: t => "T(" + t + ")",
+      bubbleTitle: (role, time) => role + "|" + time,
+      md: s => String(s ?? ""),
+      foldStorage: store,
+      ...deps,
+    },
+  });
+  if (echo){
+    ctx.feature.setSentEcho({ node: "n1", text: "in flight", atts: [], at: 1_000_000, seen: null });
+  }
+  await ctx.feature.render();
+  return { ctx, store, html: () => ctx.roots.msgs.innerHTML };
+}
+
+function assertFoldChrome(html, userText = "prompt-one"){
+  assert.ok(html.includes("chat started T(2026-01-01T00:00:00Z)"), "seam");
+  assert.ok(html.includes(userText), "user bubble");
+  assert.ok(html.includes(">channel down<"), "pending error");
+  assert.ok(html.includes(">in flight<"), "echo");
+}
+
+test("nothing folded is the base transcript, byte for byte", async () => {
+  const { ctx, html } = await renderFolded({
+    turns: foldAgents(4, 0, "log-1", record => ["alpha", "beta", "gamma", "delta"][record - 2]),
+    state: { all: false, turns: [], open: [] },
+  });
+  assert.equal(html(), FOLD_BASE_HTML);
+  ctx.feature.destroy();
+});
+
+test("a folded turn shows the first and latest bubbles and one row for the middle", async () => {
+  const { ctx, html } = await renderFolded({
+    turns: foldAgents(4, 0, "log-1", record => ["alpha", "beta", "gamma", "delta"][record - 2]),
+    state: { all: false, turns: ["0/2"], open: [] },
+  });
+  const page = html();
+  assertFoldChrome(page);
+  assert.ok(page.includes(">alpha<"));
+  assert.ok(page.includes(">delta<"));
+  assert.equal(page.includes(">beta<"), false);
+  assert.equal(page.includes(">gamma<"), false);
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  assert.equal(page.includes("foldtoggle"), true);
+  ctx.feature.destroy();
+});
+
+test("one of two ranges can be open, and folding it again hides it", async () => {
+  const turns = [
+    foldBubble("user", 1, "prompt-one"),
+    foldBubble("assistant", 2, "first"),
+    foldBubble("assistant", 3, "left-a"),
+    foldBubble("assistant", 4, "left-b"),
+    foldBubble("assistant", 5, "kept"),
+    foldBubble("assistant", 6, "right-c"),
+    foldBubble("assistant", 7, "right-d"),
+    foldBubble("assistant", 8, "last"),
+  ];
+  const { ctx, store, html } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: ["0/6", "0/7"] },
+    deps: {
+      bookmarks: () => [{ uid: "log-1", segment: 0, record: 5, text: "kept" }],
+      markerVersion: () => 1,
+    },
+  });
+  let page = html();
+  assertFoldChrome(page);
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  assert.equal(page.includes(">left-a<"), false);
+  assert.equal(page.includes(">left-b<"), false);
+  assert.ok(page.includes(">kept<"));
+  assert.ok(page.includes(foldCloseHTML(2, "0/6")));
+  assert.ok(page.includes(">right-c<"));
+  assert.ok(page.includes(">right-d<"));
+  assert.ok(page.includes(">last<"));
+  assert.equal(page.split('data-fold="close"').length - 1, 1);
+
+  store.setItem("scimux:fold:v1:log-1", JSON.stringify({
+    all: false, turns: ["0/2"], open: [],
+  }));
+  await ctx.feature.render();
+  page = html();
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  assert.ok(page.includes(foldShowHTML(2, "0/6")));
+  assert.equal(page.includes(">right-c<"), false);
+  assert.equal(page.includes(">right-d<"), false);
+  assert.ok(page.includes(">kept<"));
+  assert.ok(page.includes(">first<"));
+  assert.ok(page.includes(">last<"));
+  ctx.feature.destroy();
+});
+
+test("eight open bubbles repeat the Fold control under the range", async () => {
+  const open = [];
+  for (let record = 3; record <= 10; record++) open.push("0/" + record);
+  const { ctx, html } = await renderFolded({
+    turns: foldAgents(10),
+    state: { all: false, turns: ["0/2"], open },
+  });
+  const page = html();
+  assertFoldChrome(page);
+  assert.equal(page.split(foldCloseHTML(8, "0/3")).length - 1, 2);
+  assert.ok(page.includes(">a3<"));
+  assert.ok(page.includes(">a10<"));
+  assert.ok(page.includes(">a11<"));
+  ctx.feature.destroy();
+});
+
+test("a bookmark keeps its bubble visible and splits the range", async () => {
+  const turns = foldAgents(6);
+  turns[3].text = "marked";
+  const { ctx, html } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: [] },
+    deps: {
+      bookmarks: () => [{ uid: "log-1", segment: 0, record: 4, text: "marked" }],
+      markerVersion: () => 1,
+    },
+  });
+  const page = html();
+  assertFoldChrome(page);
+  assert.equal(page.includes(">a3<"), false);
+  assert.ok(page.includes(">marked<"));
+  assert.equal(page.includes(">a5<"), false);
+  assert.ok(page.includes(foldShowHTML(1, "0/3")));
+  assert.ok(page.includes(foldShowHTML(2, "0/5")));
+  assert.ok(page.includes(">a2<"));
+  assert.ok(page.includes(">a7<"));
+  ctx.feature.destroy();
+});
+
+test("a note usage keeps its bubble visible and splits the range", async () => {
+  const turns = foldAgents(6);
+  turns[3].text = "noted";
+  const { ctx, html } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: [] },
+    deps: {
+      noteUsages: () => [{
+        note_id: "note-1", section_id: "sec-1",
+        source: { uid: "log-1", segment: 0, record: 4 },
+      }],
+      markerVersion: () => 1,
+    },
+  });
+  const page = html();
+  assertFoldChrome(page);
+  assert.equal(page.includes(">a3<"), false);
+  assert.ok(page.includes(">noted<"));
+  assert.equal(page.includes(">a5<"), false);
+  assert.ok(page.includes(foldShowHTML(1, "0/3")));
+  assert.ok(page.includes(foldShowHTML(2, "0/5")));
+  ctx.feature.destroy();
+});
+
+test("a sent-to link keeps its bubble visible and splits the range", async () => {
+  const turns = foldAgents(6);
+  turns[3].text = "sent";
+  const { ctx, html } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: [] },
+    deps: {
+      forwardLinks: () => [{
+        source: { uid: "log-1", segment: 0, record: 4 },
+        destination: { node: "other", text: "there" },
+      }],
+      markerVersion: () => 1,
+    },
+  });
+  const page = html();
+  assertFoldChrome(page);
+  assert.equal(page.includes(">a3<"), false);
+  assert.ok(page.includes(">sent<"));
+  assert.equal(page.includes(">a5<"), false);
+  assert.ok(page.includes(foldShowHTML(1, "0/3")));
+  assert.ok(page.includes(foldShowHTML(2, "0/5")));
+  ctx.feature.destroy();
+});
+
+test("adding a bookmark to a hidden bubble shows it on the next render", async () => {
+  const turns = foldAgents(5);
+  turns[2].text = "left";
+  turns[3].text = "hidden-middle";
+  turns[4].text = "right";
+  let bookmarks = [];
+  let markerVersion = 1;
+  const { ctx, html } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: [] },
+    deps: {
+      bookmarks: () => bookmarks,
+      markerVersion: () => markerVersion,
+    },
+  });
+  assert.equal(html().includes(">hidden-middle<"), false);
+  assert.ok(html().includes(foldShowHTML(3, "0/3")));
+  bookmarks = [{ uid: "log-1", segment: 0, record: 4, text: "hidden-middle" }];
+  markerVersion = 2;
+  await ctx.feature.render();
+  const page = html();
+  assert.ok(page.includes(">hidden-middle<"));
+  assert.equal(page.includes(">left<"), false);
+  assert.equal(page.includes(">right<"), false);
+  assert.ok(page.includes(foldShowHTML(1, "0/3")));
+  assert.ok(page.includes(foldShowHTML(1, "0/5")));
+  assertFoldChrome(page);
+  ctx.feature.destroy();
+});
+
+test("a decision inside a folded range is hidden and a decision at the edge stays", async () => {
+  const turns = [
+    foldBubble("user", 1, "prompt-one"),
+    foldBubble("assistant", 2, "first"),
+    foldBubble("assistant", 4, "mid-a"),
+    foldBubble("assistant", 6, "mid-b"),
+    foldBubble("assistant", 8, "last"),
+  ];
+  const decision = token => ({
+    record: token === "edge-keep" ? 3 : token === "inside-hide" ? 5 : 7,
+    time: "2026-01-01T00:00:30Z",
+    decision: {
+      title: token,
+      request_id: token,
+      selected: { key: "1", name: "Allow", kind: "allow" },
+    },
+  });
+  const { ctx, html } = await renderFolded({
+    turns,
+    decisions: [decision("edge-keep"), decision("inside-hide"), decision("edge-after")],
+    state: { all: false, turns: ["0/2"], open: [] },
+  });
+  const page = html();
+  assertFoldChrome(page);
+  assert.ok(page.includes("edge-keep"));
+  assert.ok(page.includes("edge-after"));
+  assert.equal(page.includes("inside-hide"), false);
+  assert.equal(page.includes(">mid-a<"), false);
+  assert.equal(page.includes(">mid-b<"), false);
+  assert.ok(page.includes(foldShowHTML(2, "0/4")));
+  assert.ok(page.includes(">first<"));
+  assert.ok(page.includes(">last<"));
+  ctx.feature.destroy();
+});
+
+test("a poll that adds a bubble to a folded turn hides the bubble that was latest", async () => {
+  const payload = {
+    turns: foldAgents(3, 0, "log-1", record => ["alpha", "beta", "gamma"][record - 2]),
+    live: "quiet",
+    delivery: "ok",
+    source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z",
+    prior_turns: 0,
+    assets: {},
+    error: "channel down",
+  };
+  const store = foldMemory(foldRecord("log-1", { all: false, turns: ["0/2"], open: [] }));
+  const ctx = makeFeature({
+    chatPayload: payload,
+    deps: {
+      fmtWhen: t => "T(" + t + ")",
+      bubbleTitle: (role, time) => role + "|" + time,
+      md: s => String(s ?? ""),
+      foldStorage: store,
+    },
+  });
+  ctx.feature.setSentEcho({ node: "n1", text: "in flight", atts: [], at: 1_000_000, seen: null });
+  await ctx.feature.render();
+  assert.ok(ctx.roots.msgs.innerHTML.includes(">alpha<"));
+  assert.equal(ctx.roots.msgs.innerHTML.includes(">beta<"), false);
+  assert.ok(ctx.roots.msgs.innerHTML.includes(">gamma<"));
+  assert.ok(ctx.roots.msgs.innerHTML.includes(foldShowHTML(1, "0/3")));
+  payload.turns = payload.turns.concat([
+    foldBubble("assistant", 5, "delta"),
+  ]);
+  await ctx.feature.render();
+  const page = ctx.roots.msgs.innerHTML;
+  assertFoldChrome(page);
+  assert.ok(page.includes(">alpha<"));
+  assert.ok(page.includes(">delta<"));
+  assert.equal(page.includes(">beta<"), false);
+  assert.equal(page.includes(">gamma<"), false);
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  ctx.feature.destroy();
+});
+
+test("a poll without changes does not rebuild a folded transcript", async () => {
+  const { ctx, html } = await renderFolded({
+    turns: foldAgents(4, 0, "log-1", record => ["alpha", "beta", "gamma", "delta"][record - 2]),
+    state: { all: false, turns: ["0/2"], open: [] },
+  });
+  const page = html();
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  ctx.roots.msgs.innerHTML = page + "<!--hold-->";
+  await ctx.feature.render();
+  assert.ok(html().includes("<!--hold-->"));
+  assert.ok(html().includes(foldShowHTML(2, "0/3")));
+  ctx.feature.destroy();
+});
+
+test("a change of the fold state rebuilds the transcript", async () => {
+  const { ctx, store, html } = await renderFolded({
+    turns: foldAgents(4, 0, "log-1", record => ["alpha", "beta", "gamma", "delta"][record - 2]),
+    state: { all: false, turns: [], open: [] },
+  });
+  assert.equal(html().includes("foldtoggle"), false);
+  assert.ok(html().includes(">beta<"));
+  ctx.roots.msgs.innerHTML = html() + "<!--hold-->";
+  store.setItem("scimux:fold:v1:log-1", JSON.stringify({
+    all: false, turns: ["0/2"], open: [],
+  }));
+  await ctx.feature.render();
+  const page = html();
+  assert.equal(page.includes("<!--hold-->"), false);
+  assert.ok(page.includes(foldShowHTML(2, "0/3")));
+  assert.equal(page.includes(">beta<"), false);
+  assertFoldChrome(page);
+  ctx.feature.destroy();
+});
+
+test("a loaded history surface folds on its own", async () => {
+  const { ctx, html } = await renderFolded({
+    turns: foldAgents(3, 1, "log-1", record => "live-" + record),
+    histSegs: [
+      { start: "2025-01-01T00:00:00Z", seam: "2025-01-01T00:00:00Z", reason: "clear" },
+      {
+        start: "2025-06-01T00:00:00Z",
+        seam: "2025-06-01T00:00:00Z",
+        reason: "clear",
+        turns: foldAgents(3, 0, "log-1", record => "hist-" + record),
+      },
+    ],
+    prior: 1,
+    state: { all: false, turns: ["0/2"], open: [] },
+  });
+  await ctx.feature.loadHistory("n1", "");
+  const page = html();
+  assertFoldChrome(page);
+  assert.equal(page.includes(">hist-3<"), false);
+  assert.ok(page.includes(">hist-2<"));
+  assert.ok(page.includes(">hist-4<"));
+  assert.ok(page.includes(">live-3<"));
+  assert.ok(page.includes(foldShowHTML(1, "0/3")));
+  assert.equal(page.includes(foldShowHTML(1, "1/3")), false);
+  ctx.feature.destroy();
+});
+
+test("the fold state survives a new chat feature on the same storage", async () => {
+  const store = foldMemory(foldRecord("log-1", { all: false, turns: ["0/2"], open: [] }));
+  const turns = foldAgents(4, 0, "log-1", record => ["alpha", "beta", "gamma", "delta"][record - 2]);
+  const deps = {
+    fmtWhen: t => "T(" + t + ")",
+    bubbleTitle: (role, time) => role + "|" + time,
+    md: s => String(s ?? ""),
+    foldStorage: store,
+  };
+  const payload = {
+    turns,
+    live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    error: "channel down",
+  };
+  const first = makeFeature({ chatPayload: payload, deps });
+  first.feature.setSentEcho({ node: "n1", text: "in flight", atts: [], at: 1_000_000, seen: null });
+  await first.feature.render();
+  assert.ok(first.roots.msgs.innerHTML.includes(foldShowHTML(2, "0/3")));
+  first.feature.destroy();
+  const second = makeFeature({ chatPayload: payload, deps });
+  second.feature.setSentEcho({ node: "n1", text: "in flight", atts: [], at: 1_000_000, seen: null });
+  await second.feature.render();
+  assert.ok(second.roots.msgs.innerHTML.includes(foldShowHTML(2, "0/3")));
+  assert.equal(second.roots.msgs.innerHTML.includes(">beta<"), false);
+  second.feature.destroy();
+});
+
+test("fold state is separate per chat uid", async () => {
+  const store = foldMemory(foldRecord("log-a", { all: false, turns: ["0/2"], open: [] }));
+  const deps = {
+    fmtWhen: t => "T(" + t + ")",
+    bubbleTitle: (role, time) => role + "|" + time,
+    md: s => String(s ?? ""),
+    foldStorage: store,
+  };
+  const payloadFor = uid => ({
+    turns: foldAgents(4, 0, uid, record => uid + "-" + record),
+    live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    error: "channel down",
+  });
+  const folded = makeFeature({ chatPayload: payloadFor("log-a"), deps });
+  await folded.feature.render();
+  assert.equal(folded.roots.msgs.innerHTML.includes(">log-a-3<"), false);
+  assert.ok(folded.roots.msgs.innerHTML.includes(foldShowHTML(2, "0/3")));
+  folded.feature.destroy();
+  const other = makeFeature({ chatPayload: payloadFor("log-b"), deps });
+  await other.feature.render();
+  const page = other.roots.msgs.innerHTML;
+  assert.ok(page.includes(">log-b-3<"));
+  assert.ok(page.includes(">log-b-4<"));
+  assert.equal(page.includes("foldtoggle"), false);
+  other.feature.destroy();
+});
+
+test("a chat without a uid shows no fold control and does not touch storage", async () => {
+  let reads = 0;
+  const store = {
+    getItem(){ reads += 1; return '{"all":true,"turns":[],"open":[]}'; },
+    setItem(){ reads += 1; },
+  };
+  const turns = [1, 2, 3, 4, 5].map(record => {
+    const role = record === 1 ? "user" : "assistant";
+    const text = record === 1 ? "prompt-one" : "body-" + record;
+    return {
+      role, text, segment: 0, record,
+      time: "2026-01-01T00:0" + record + ":00Z",
+    };
+  });
+  const { ctx, html } = await renderFolded({
+    turns,
+    deps: { foldStorage: store },
+  });
+  const page = html();
+  assertFoldChrome(page);
+  assert.ok(page.includes(">body-3<"));
+  assert.equal(page.includes("foldtoggle"), false);
+  assert.equal(reads, 0);
+  ctx.feature.destroy();
+});
