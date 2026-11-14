@@ -812,8 +812,14 @@ func TestOutboxBackoffIsPerServer(t *testing.T) {
 	if box.delivery(teamServerID) != "ok" {
 		t.Fatalf("delivery = %s", box.delivery(teamServerID))
 	}
+	// The success sent every record. The reset is proved by the next record.
+	sent := len(snapshotCalls(calls))
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "more"})
 	script.failPath = "/v1/hello"
 	box.tick(context.Background())
+	if len(snapshotCalls(calls)) == sent {
+		t.Fatal("reset failure did not reach the server")
+	}
 	mark = len(snapshotCalls(calls))
 	when = when.Add(3 * time.Second)
 	box.tick(context.Background())
