@@ -247,11 +247,18 @@ func (c *Client) Leave(ctx context.Context, baseURL, token string) error {
 	return nil
 }
 
-// authed performs one token call. The token is placed on the Authorization
-// header and nowhere else. A connection failure or a timeout is
-// ErrUnreachable. An oversized body is ErrProtocol. The status and the
+// authed performs one token call with no body. The token is placed on the
+// Authorization header and nowhere else. A connection failure or a timeout
+// is ErrUnreachable. An oversized body is ErrProtocol. The status and the
 // bounded body are returned only when the call itself succeeded.
 func (c *Client) authed(ctx context.Context, method, baseURL, path, token string) (int, []byte, error) {
+	return c.doAuthed(ctx, method, baseURL, path, token, nil, maxResponseBody)
+}
+
+// doAuthed performs one token call. body nil sends no body and no
+// Content-Type. limit is the largest response that is still a protocol
+// answer; a larger one is ErrProtocol.
+func (c *Client) doAuthed(ctx context.Context, method, baseURL, path, token string, body []byte, limit int) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -259,20 +266,27 @@ func (c *Client) authed(ctx context.Context, method, baseURL, path, token string
 	if err != nil {
 		return 0, nil, err
 	}
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
 	// method and endpoint are built here, so the request constructor succeeds.
-	req, _ := http.NewRequestWithContext(ctx, method, endpoint, nil)
+	req, _ := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return 0, nil, ErrUnreachable
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return 0, nil, ErrUnreachable
 	}
-	if len(raw) > maxResponseBody {
+	if len(raw) > limit {
 		return 0, nil, ErrProtocol
 	}
 	return resp.StatusCode, raw, nil

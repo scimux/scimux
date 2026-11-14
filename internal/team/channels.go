@@ -1,9 +1,15 @@
 package team
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/url"
+	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Seat is one registered seat on a team server.
@@ -20,8 +26,8 @@ type Member struct {
 
 // MirrorEntry is one record appended to a channel mirror.
 type MirrorEntry struct {
-	Key  string
-	Body json.RawMessage
+	Key  string          `json:"key"`
+	Body json.RawMessage `json:"body"`
 }
 
 // Sentinel errors from the channel calls. None of them quote a token, a
@@ -33,36 +39,313 @@ var (
 	ErrTooLarge      = errors.New("team: too large")
 )
 
-// errChannelStub is the red-state answer. The implementation replaces it.
-var errChannelStub = errors.New("team: channel stub")
+const maxSeatsBody = 1 << 20
+
+const (
+	maxMirrorEntries = 256
+	protocolTime     = "2006-01-02T15:04:05.000Z"
+)
 
 // marshalChannelBody encodes a JSON request body. Tests replace it.
-var marshalChannelBody = func(v any) ([]byte, error) {
-	return nil, errChannelStub
+var marshalChannelBody = encodeChannelBody
+
+func encodeChannelBody(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	// Structs of strings, slices, and raw JSON encode. The error cannot occur.
+	_ = enc.Encode(v)
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-// Seats is GET /v1/seats.
-func (c *Client) Seats(context.Context, string, string) ([]Seat, error) {
-	return nil, errChannelStub
+// Seats is GET /v1/seats. The answer may be up to 1 MiB.
+func (c *Client) Seats(ctx context.Context, baseURL, token string) ([]Seat, error) {
+	status, raw, err := c.doAuthed(ctx, http.MethodGet, baseURL, "/v1/seats", token, nil, maxSeatsBody)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, mapChannelStatus(status)
+	}
+	seats, err := parseSeats(raw)
+	if err != nil {
+		return nil, ErrProtocol
+	}
+	return seats, nil
 }
 
 // PutChannel is PUT /v1/channels/{owner}/{chat}.
 // created is true for 201 and false for 200.
-func (c *Client) PutChannel(context.Context, string, string, string, string, string) (string, bool, error) {
-	return "", false, errChannelStub
+func (c *Client) PutChannel(ctx context.Context, baseURL, token, owner, chat, title string) (string, bool, error) {
+	path, err := channelPath(owner, chat, "")
+	if err != nil {
+		return "", false, err
+	}
+	body, err := marshalChannelBody(struct {
+		Title string `json:"title"`
+	}{Title: title})
+	if err != nil {
+		return "", false, ErrProtocol
+	}
+	status, raw, err := c.doAuthed(ctx, http.MethodPut, baseURL, path, token, body, maxResponseBody)
+	if err != nil {
+		return "", false, err
+	}
+	if status != http.StatusOK && status != http.StatusCreated {
+		return "", false, mapChannelStatus(status)
+	}
+	ch, err := parseChannel(raw)
+	if err != nil {
+		return "", false, ErrProtocol
+	}
+	return ch.Generation, status == http.StatusCreated, nil
 }
 
 // DeleteChannel is DELETE /v1/channels/{owner}/{chat}.
-func (c *Client) DeleteChannel(context.Context, string, string, string, string) error {
-	return errChannelStub
+func (c *Client) DeleteChannel(ctx context.Context, baseURL, token, owner, chat string) error {
+	path, err := channelPath(owner, chat, "")
+	if err != nil {
+		return err
+	}
+	status, raw, err := c.doAuthed(ctx, http.MethodDelete, baseURL, path, token, nil, maxResponseBody)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return mapChannelStatus(status)
+	}
+	if len(raw) != 0 {
+		return ErrProtocol
+	}
+	return nil
 }
 
 // SetMembers is PUT /v1/channels/{owner}/{chat}/members.
-func (c *Client) SetMembers(context.Context, string, string, string, string, []Member) error {
-	return errChannelStub
+func (c *Client) SetMembers(ctx context.Context, baseURL, token, owner, chat string, members []Member) error {
+	path, err := channelPath(owner, chat, "/members")
+	if err != nil {
+		return err
+	}
+	if members == nil {
+		members = []Member{}
+	}
+	body, err := marshalChannelBody(struct {
+		Members []Member `json:"members"`
+	}{Members: members})
+	if err != nil {
+		return ErrProtocol
+	}
+	status, raw, err := c.doAuthed(ctx, http.MethodPut, baseURL, path, token, body, maxResponseBody)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return mapChannelStatus(status)
+	}
+	if _, err := parseChannel(raw); err != nil {
+		return ErrProtocol
+	}
+	return nil
 }
 
 // AppendMirror is POST /v1/channels/{owner}/{chat}/mirror.
-func (c *Client) AppendMirror(context.Context, string, string, string, string, []MirrorEntry) (string, int64, error) {
-	return "", 0, errChannelStub
+func (c *Client) AppendMirror(ctx context.Context, baseURL, token, owner, chat string, entries []MirrorEntry) (string, int64, error) {
+	path, err := channelPath(owner, chat, "/mirror")
+	if err != nil {
+		return "", 0, err
+	}
+	if err := validMirrorEntries(entries); err != nil {
+		return "", 0, err
+	}
+	body, err := marshalChannelBody(struct {
+		Entries []MirrorEntry `json:"entries"`
+	}{Entries: entries})
+	if err != nil {
+		return "", 0, ErrProtocol
+	}
+	status, raw, err := c.doAuthed(ctx, http.MethodPost, baseURL, path, token, body, maxResponseBody)
+	if err != nil {
+		return "", 0, err
+	}
+	if status != http.StatusOK {
+		return "", 0, mapChannelStatus(status)
+	}
+	return parseAppend(raw, entries)
+}
+
+func channelPath(owner, chat, rest string) (string, error) {
+	if !validHex(owner, 32) || !validChatID(chat) {
+		return "", ErrProtocol
+	}
+	return "/v1/channels/" + url.PathEscape(owner) + "/" + url.PathEscape(chat) + rest, nil
+}
+
+func validChatID(s string) bool {
+	if len(s) < 1 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validEntryKey(s string) bool {
+	if len(s) < 1 || len(s) > 200 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == ':' || c == '/' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validMirrorEntries(entries []MirrorEntry) error {
+	if len(entries) < 1 || len(entries) > maxMirrorEntries {
+		return ErrProtocol
+	}
+	for _, e := range entries {
+		if !validEntryKey(e.Key) || !json.Valid(e.Body) {
+			return ErrProtocol
+		}
+	}
+	return nil
+}
+
+func mapChannelStatus(status int) error {
+	switch status {
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	case http.StatusNotFound:
+		return ErrNoChannel
+	case http.StatusRequestEntityTooLarge:
+		return ErrTooLarge
+	case http.StatusUnprocessableEntity:
+		return ErrUnknownMember
+	case http.StatusInsufficientStorage:
+		return ErrQuota
+	default:
+		return ErrProtocol
+	}
+}
+
+type seatWire struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func parseSeats(raw []byte) ([]Seat, error) {
+	var doc struct {
+		Seats *[]seatWire `json:"seats"`
+	}
+	if err := decodeJSON(raw, &doc); err != nil || doc.Seats == nil {
+		return nil, ErrProtocol
+	}
+	out := make([]Seat, 0, len(*doc.Seats))
+	for _, s := range *doc.Seats {
+		if !validHex(s.ID, 32) || !validStoredName(s.Name, true) {
+			return nil, ErrProtocol
+		}
+		out = append(out, Seat{ID: s.ID, Name: s.Name})
+	}
+	return out, nil
+}
+
+type channelWire struct {
+	Owner        string    `json:"owner"`
+	Chat         string    `json:"chat"`
+	Title        string    `json:"title"`
+	Generation   string    `json:"generation"`
+	CreatedAt    string    `json:"created_at"`
+	Access       string    `json:"access"`
+	MirrorLast   uint64    `json:"mirror_last"`
+	CommentsLast uint64    `json:"comments_last"`
+	Members      *[]Member `json:"members"`
+}
+
+func parseChannel(raw []byte) (channelWire, error) {
+	// encoding/json replaces an invalid byte inside a string, so the
+	// raw body is checked before it is decoded.
+	if !utf8.Valid(raw) {
+		return channelWire{}, ErrProtocol
+	}
+	var doc channelWire
+	if err := decodeJSON(raw, &doc); err != nil {
+		return channelWire{}, ErrProtocol
+	}
+	if !validHex(doc.Owner, 32) || !validChatID(doc.Chat) || !validChannelTitle(doc.Title) || !validHex(doc.Generation, 16) || !validProtocolTime(doc.CreatedAt) {
+		return channelWire{}, ErrProtocol
+	}
+	if doc.Access != "owner" && doc.Access != "read" && doc.Access != "write" {
+		return channelWire{}, ErrProtocol
+	}
+	if doc.Members == nil {
+		return channelWire{}, ErrProtocol
+	}
+	seen := make(map[string]struct{}, len(*doc.Members))
+	for _, m := range *doc.Members {
+		if !validHex(m.Seat, 32) || (m.Access != "read" && m.Access != "write") {
+			return channelWire{}, ErrProtocol
+		}
+		if _, ok := seen[m.Seat]; ok {
+			return channelWire{}, ErrProtocol
+		}
+		seen[m.Seat] = struct{}{}
+	}
+	return doc, nil
+}
+
+func validChannelTitle(s string) bool {
+	if len(s) > 200 || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func validProtocolTime(s string) bool {
+	parsed, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return false
+	}
+	return parsed.UTC().Format(protocolTime) == s
+}
+
+type appendResult struct {
+	Key       string `json:"key"`
+	Seq       uint64 `json:"seq"`
+	Duplicate bool   `json:"duplicate"`
+}
+
+func parseAppend(raw []byte, entries []MirrorEntry) (string, int64, error) {
+	var doc struct {
+		Generation string          `json:"generation"`
+		Results    *[]appendResult `json:"results"`
+		Last       *int64          `json:"last"`
+	}
+	if err := decodeJSON(raw, &doc); err != nil {
+		return "", 0, ErrProtocol
+	}
+	if !validHex(doc.Generation, 16) || doc.Results == nil || doc.Last == nil || *doc.Last < 0 || len(*doc.Results) != len(entries) {
+		return "", 0, ErrProtocol
+	}
+	for i, res := range *doc.Results {
+		if !validEntryKey(res.Key) || res.Key != entries[i].Key {
+			return "", 0, ErrProtocol
+		}
+	}
+	return doc.Generation, *doc.Last, nil
 }
