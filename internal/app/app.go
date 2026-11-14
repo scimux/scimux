@@ -694,6 +694,9 @@ type app struct {
 	// teamHandler serves /api/team while the experimental team gate is on.
 	// It stays nil for every other process, and for a muxer with the gate off.
 	teamHandler http.Handler
+	// shareOutbox copies shared chats while the experimental team gate is on
+	// in the muxer. It stays nil for every other process.
+	shareOutbox *shareOutbox
 	// prepareWebUpdate validates a replacement web child from the verified
 	// temporary executable while the current generation is still serving.
 	// The returned transaction is committed only after atomic installation,
