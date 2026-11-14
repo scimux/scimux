@@ -659,3 +659,11 @@ body.cards-open #msgs { overflow: hidden; }
   border: 1px solid var(--hairline); border-radius: 14px; padding: 5px 12px;
   background: var(--surface); white-space: nowrap;
 }
+/* Fold every intermediate bubble in this tab. display beats the hidden attribute. */
+.foldall {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: var(--work);
+  border: 1px solid var(--hairline); border-radius: 14px; padding: 5px 12px;
+  background: var(--surface);
+}
+.foldall[hidden] { display: none; }

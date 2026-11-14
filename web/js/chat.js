@@ -4,8 +4,8 @@
  * -----------------------------
  * Owned roots / controls:
  *   - #chathead (details open, title display, mission, agent meta, desc)
- *   - #chatdetails / #chatdesc / #chatdescinput / #infobtn / #chatdot /
- *     #chattitle / #chatmission / #chatagentlogo / #chatmeta
+ *   - #chatdetails / #chatfoldall / #chatdesc / #chatdescinput / #infobtn /
+ *     #chatdot / #chattitle / #chatmission / #chatagentlogo / #chatmeta
  *   - #msgwrap / #msgs / #chatloading
  *   - #gauge / #gaugefill (context gauge)
  *   - #keyrow (dialog answer buttons — presentation + key send)
@@ -44,6 +44,7 @@
  *
  * Events owned after one idempotent bind():
  *   - #infobtn click (details toggle / save description)
+ *   - #chatfoldall click (fold every intermediate bubble in this tab)
  *   - #chathead click (header-row details toggle)
  *   - #msgs scroll (compact header)
  *   - #msgs load capture (thumbnail box + re-pin near bottom)
@@ -101,7 +102,10 @@ import {
   clearAwaitingForward,
   makeForwardLinkToTurn,
 } from "./storage.js";
-import { foldPlan, foldRowHTML, foldStateVersion, readFoldState } from "./fold.js";
+import {
+  closeRange, foldAll, foldKey, foldPlan, foldRowHTML, foldStateVersion,
+  foldTurn, openRange, readFoldState, writeFoldState,
+} from "./fold.js";
 
 /* ---------- public constants ---------- */
 
@@ -785,8 +789,9 @@ export function splitPermTitle(title){
 export function bubbleActionsHTML(turn, {
   escape = esc, fmtTime = fmtBubbleTime,
   iconBranch = "", iconInto = "", iconCopy = "",
+  fold = null,
 } = {}){
-  return `<div class="bubwhen">${escape(fmtTime(turn && turn.time))}</div>` +
+  const html = `<div class="bubwhen">${escape(fmtTime(turn && turn.time))}</div>` +
     `<button data-bact="fork"><span>${iconBranch}</span>fork from here</button>` +
     /* send-to sits beside fork — both take this text elsewhere, fork into a new
        chat, send-to into an existing one. The ellipsis is the HIG signal that a
@@ -795,6 +800,9 @@ export function bubbleActionsHTML(turn, {
     `<button data-bact="desc"><span class="rot90l">${iconInto}</span>use as description</button>` +
     `<button data-bact="bookmark"><span>${iconInto}</span>bookmark</button>` +
     `<button data-bact="copy"><span>${iconCopy}</span>copy</button>`;
+  if (!fold) return html;
+  return html +
+    `<button data-bact="fold" aria-label="Fold intermediate agent bubbles" title="Fold intermediate agent bubbles"><span>${fold.icon || ""}</span></button>`;
 }
 
 /* Kind → CSS class. Underscores become hyphens; empty → "unknown". */
@@ -1295,6 +1303,7 @@ export function createChatFeature(deps){
   const chattitle = roots.chattitle;
   const chatmission = roots.chatmission;
   const chatdetails = roots.chatdetails;
+  const chatfoldall = roots.chatfoldall;
   const chatdesc = roots.chatdesc;
   const chatdescinput = roots.chatdescinput;
   const chatdot = roots.chatdot;
@@ -1321,6 +1330,12 @@ export function createChatFeature(deps){
   let chatSig = "";
   /* What this tab hides. Read again on every refresh; nothing here is sent. */
   let foldState = { all: false, turns: [], open: [] };
+  let foldUID = "";
+  let foldByBK = {};
+  let foldTurnEntries = [];
+  let foldRows = [];
+  let foldCanAny = false;
+  let foldAnchor = null;
   /* Per-node chat poll validator (ETag). Keyed by node id so a tag from A is
      never sent for B; cleared on node switch (onSelectChange). */
   let chatETag = { node: "", etag: "" };
@@ -1600,6 +1615,16 @@ export function createChatFeature(deps){
       state: foldState,
       isProtected(turn){ return agentBubbleProtected(turn, nodeId); },
     });
+    for (let i = 0; i < view.rows.length; i++) foldRows.push(view.rows[i]);
+    for (let i = 0; i < view.turns.length; i++){
+      const entry = view.turns[i];
+      foldTurnEntries.push(entry);
+      if (!entry.canFold) continue;
+      const item = items[entry.firstIndex];
+      const bk = hist ? histBk(segIndex, item.index) : liveBk(item.index);
+      foldByBK[bk] = entry;
+    }
+    if (view.canFoldAny) foldCanAny = true;
     let html = "";
     for (let i = 0; i < view.sequence.length; i++){
       const step = view.sequence[i];
@@ -1618,6 +1643,120 @@ export function createChatFeature(deps){
       html += renderTurnHTML(item.turn, { bk, hist, nodeId, assets, externalAllowed });
     }
     return html;
+  }
+
+  /* The head control is shown only while some loaded surface still has a
+     foldable bubble on screen. A chat with no uid never qualifies. */
+  function syncFoldAll(){
+    if (!chatfoldall) return;
+    const show = !!(foldUID && foldCanAny);
+    chatfoldall.hidden = !show;
+    if (show)
+      chatfoldall.innerHTML = (icons.ICON_FOLD || "") + "Fold all intermediate agent bubbles";
+  }
+
+  function commitFold(){
+    if (foldUID && d.foldStorage) writeFoldState(d.foldStorage, foldUID, foldState);
+    chatSig = "";
+    refreshChat();
+  }
+
+  /* Distance from the top of the scroll area, so the clicked control can be
+     put back there after the transcript is rebuilt. */
+  function rememberFoldAnchor(node, anchor){
+    if (!node || node.offsetTop == null || !msgs) return;
+    foldAnchor = {
+      kind: anchor.kind,
+      key: anchor.key || "",
+      bk: anchor.bk || "",
+      distance: node.offsetTop - (msgs.scrollTop || 0),
+    };
+  }
+
+  function findFoldControl(root, kind, key){
+    const walk = n => {
+      const kids = n.children;
+      for (let i = 0; i < kids.length; i++){
+        const child = kids[i];
+        if (child.dataset && child.dataset.fold === kind && child.dataset.foldkey === key)
+          return child;
+        const found = walk(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    return walk(root);
+  }
+
+  function findFoldAnchor(el, anchor){
+    if (anchor.kind === "bubble") return q(el, `.turn[data-bk="${anchor.bk}"]`);
+    const kind = anchor.kind === "open" ? "close" : "open";
+    return findFoldControl(el, kind, anchor.key);
+  }
+
+  function restoreFoldAnchor(el){
+    const anchor = foldAnchor;
+    foldAnchor = null;
+    const node = findFoldAnchor(el, anchor);
+    if (!node || node.offsetTop == null) return;
+    el.scrollTop = node.offsetTop - anchor.distance;
+  }
+
+  /* A jump to a hidden bubble opens that bubble's range before the transcript
+     is written, and no other range. A visible target changes nothing. */
+  function revealPendingFold(turns, priorSegs){
+    const pending = getPendingJump();
+    if (!pending || pending.node !== g("sel", "")) return;
+    const now = d.now();
+    if (now - pending.ts > PENDING_JUMP_TTL_MS) return;
+    const groups = [turns];
+    for (let i = 0; i < priorSegs.length; i++) groups.push(priorSegs[i].turns || []);
+    for (let gi = 0; gi < groups.length; gi++){
+      const list = groups[gi];
+      const idx = matchPendingJumpInTurns(pending, list);
+      if (idx < 0) continue;
+      const key = foldKey(list[idx]);
+      let keys = null;
+      if (key){
+        const items = mergeTimelineItems(list, []);
+        const view = foldPlan(items, {
+          state: foldState,
+          isProtected(turn){ return agentBubbleProtected(turn, g("sel", "")); },
+        });
+        for (let r = 0; r < view.ranges.length; r++){
+          const range = view.ranges[r];
+          const at = range.keys.indexOf(key);
+          if (at < 0) continue;
+          if (!view.shown[range.indexes[at]]) keys = range.keys;
+          break;
+        }
+      }
+      if (!keys) return;
+      foldState = openRange(foldState, keys);
+      if (foldUID && d.foldStorage) writeFoldState(d.foldStorage, foldUID, foldState);
+      return;
+    }
+  }
+
+  function onFoldToggle(btn){
+    const kind = btn.dataset.fold;
+    const key = btn.dataset.foldkey;
+    let keys = null;
+    for (let i = 0; i < foldRows.length; i++){
+      const row = foldRows[i];
+      if (row.kind === kind && row.key === key){ keys = row.keys; break; }
+    }
+    if (!keys) return;
+    rememberFoldAnchor(btn, { kind, key });
+    if (kind === "open") foldState = openRange(foldState, keys);
+    else foldState = closeRange(foldState, keys);
+    commitFold();
+  }
+
+  function onFoldAllClick(){
+    foldState = foldAll(foldState);
+    foldAnchor = null;
+    commitFold();
   }
 
   function attentionSuppressed(id, node){
@@ -1940,11 +2079,13 @@ export function createChatFeature(deps){
     const row = (doc && doc.createElement) ? doc.createElement("div") : null;
     if (!row) return;
     row.className = "bubactions";
+    const foldEntry = foldByBK[tappedTurn];
     row.innerHTML = bubbleActionsHTML(turn, {
       escape, fmtTime: bubTimeFn,
       iconBranch: icons.ICON_BRANCH || "",
       iconInto: icons.ICON_INTO || "",
       iconCopy: icons.ICON_COPY || "",
+      fold: foldEntry ? { icon: icons.ICON_FOLD || "" } : null,
     });
     if (typeof turnEl.after === "function") turnEl.after(row);
     else if (turnEl.parentNode) turnEl.parentNode.insertBefore(row, turnEl.nextSibling);
@@ -2026,6 +2167,9 @@ export function createChatFeature(deps){
   async function refreshChat(){
     const n = nodeById(g("sel", ""));
     if (!n){
+      foldUID = "";
+      foldCanAny = false;
+      syncFoldAll();
       if (typeof d.setComposerBusy === "function") d.setComposerBusy(false);
       clearChatLoad();
       return;
@@ -2182,9 +2326,12 @@ export function createChatFeature(deps){
     const expanded = permExpanded.node === n.id && permExpanded.open;
     const foldGroups = [turns];
     for (let i = 0; i < priorSegs.length; i++) foldGroups.push(priorSegs[i].turns || []);
-    const foldUID = chatLogUID(foldGroups);
+    const nextUID = chatLogUID(foldGroups);
+    if (nextUID !== foldUID) foldAnchor = null;
+    foldUID = nextUID;
     if (foldUID && d.foldStorage) foldState = readFoldState(d.foldStorage, foldUID);
     else foldState = { all: false, turns: [], open: [] };
+    revealPendingFold(turns, priorSegs);
     const sig = buildChatSignature({
       nodeId: n.id,
       attention: n.attention,
@@ -2244,6 +2391,10 @@ export function createChatFeature(deps){
     chatSig = sig;
     lastTurns = turns;
     bubbleTurns = {};
+    foldByBK = {};
+    foldTurnEntries = [];
+    foldRows = [];
+    foldCanAny = false;
 
     const el = msgs;
     if (!el){ endChatLoad(); return; }
@@ -2304,6 +2455,8 @@ export function createChatFeature(deps){
     renderPeekHost(n, paneState);
 
     renderBubbleActions();
+    if (foldAnchor) restoreFoldAnchor(el);
+    syncFoldAll();
 
     let histScrolled = false;
     if (hist && chatHist.scrollTo){
@@ -2657,9 +2810,24 @@ export function createChatFeature(deps){
       }
       return;
     }
+    const foldBtn = e.target.closest && e.target.closest("[data-fold]");
+    if (foldBtn){
+      onFoldToggle(foldBtn);
+      return;
+    }
     const ba = e.target.closest && e.target.closest("[data-bact]");
     if (ba){
       const turn = bubbleTurns[tappedTurn];
+      if (ba.dataset.bact === "fold"){
+        const entry = foldByBK[tappedTurn];
+        if (entry){
+          rememberFoldAnchor(q(msgs, `.turn[data-bk="${tappedTurn}"]`), { kind: "bubble", bk: tappedTurn });
+          foldState = foldTurn(foldState, { turns: foldTurnEntries }, entry.firstKey);
+          tappedTurn = "";
+          commitFold();
+        }
+        return;
+      }
       if (ba.dataset.bact === "copy"){
         if (turn && typeof d.copyText === "function") d.copyText(turn.text || "");
         ba.innerHTML = "&#10003; copied";
@@ -2865,6 +3033,7 @@ export function createChatFeature(deps){
       cleanups.push(() => el.removeEventListener(event, handler, options));
     };
     on(infobtn, "click", onInfoClick);
+    on(chatfoldall, "click", onFoldAllClick);
     on(chathead, "click", onHeadClick);
     on(msgs, "scroll", onMsgsScroll);
     on(msgs, "load", onMsgsLoad, true);

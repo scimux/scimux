@@ -212,6 +212,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
      refusal is a blank page. storage.js keeps the promise, in memory when it
      has to, and says which it managed. */
   const store = createStorage(window.localStorage);
+  const foldStore = createStorage(window.sessionStorage);
 
   let nodes = [];              // last /api/state nodes
   let sel = store.getItem("scimux-sel") || "";
@@ -274,6 +275,12 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
     <rect x="2" y="8" width="14" height="14" rx="3"/>
     <path d="M8 4.5A2.5 2.5 0 0 1 10.5 2h9A2.5 2.5 0 0 1 22 4.5v9a2.5 2.5 0 0 1-2.5 2.5H19"/>
+  </svg>`;
+  /* Two chevrons on one axis, the upper pointing down and the lower up. */
+  const ICON_FOLD = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M7 7l5 4 5-4"/>
+    <path d="M7 17l5-4 5 4"/>
   </svg>`;
   /* trash glyph: fa-regular fa-trash (lidded can), inlined like the copy icon */
   const ICON_TRASH = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none"
@@ -812,6 +819,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
       chattitle: $("#chattitle"),
       chatmission: $("#chatmission"),
       chatdetails: $("#chatdetails"),
+      chatfoldall: $("#chatfoldall"),
       chatdesc: $("#chatdesc"),
       chatdescinput: $("#chatdescinput"),
       chatdot: $("#chatdot"),
@@ -858,7 +866,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     agentLogo,
     icons: {
       ICON_TERM, ICON_CHECK, ICON_CHEV_UP, ICON_CHEV_DOWN,
-      ICON_BRANCH, ICON_INTO, ICON_BUBBLE_BOOKMARK, ICON_COPY, ICON_DOWNALL, ICON_FILE,
+      ICON_BRANCH, ICON_INTO, ICON_BUBBLE_BOOKMARK, ICON_COPY, ICON_FOLD, ICON_DOWNALL, ICON_FILE,
       ICON_TOGGLE_OFF, ICON_TOGGLE_ON, ICON_WARN,
     },
     bookmarks: () => getUI().bookmarks,
@@ -880,6 +888,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     setComposerClosed: v => composerFeature.setComposerClosed(v),
     setAttachAvail: v => composerFeature.setAttachAvail(v),
     storage: store,
+    foldStorage: foldStore,
     composerText: () => (composerFeature && typeof composerFeature.promptText === "function")
       ? (composerFeature.promptText() || "") : "",
     restoreDraft: (id, text) => {
