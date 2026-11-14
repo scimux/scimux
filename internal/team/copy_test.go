@@ -558,6 +558,19 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 	})
 }
 
+func TestCopyMkdirFailureStoresNothing(t *testing.T) {
+	snapshotCopy(t)
+	dir := t.TempDir()
+	boom := errors.New("mkdir failed")
+	copyOps.mkdir = func(string, os.FileMode) error { return boom }
+	if err := AppendCopy(dir, sampleCopyID(), []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat = %v", err)
+	}
+}
+
 func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	snapshotCopy(t)
 	dir := t.TempDir()

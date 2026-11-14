@@ -35,6 +35,7 @@ type copyIO struct {
 	write   func(*os.File, []byte) (int, error)
 	chmod   func(string, os.FileMode) error
 	open    func(string, int, os.FileMode) (*os.File, error)
+	mkdir   func(string, os.FileMode) error
 	marshal func(any) ([]byte, error)
 }
 
@@ -43,6 +44,7 @@ var copyOps = copyIO{
 	write:   func(f *os.File, p []byte) (int, error) { return f.Write(p) },
 	chmod:   os.Chmod,
 	open:    os.OpenFile,
+	mkdir:   os.MkdirAll,
 	marshal: json.Marshal,
 }
 
