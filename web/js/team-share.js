@@ -303,6 +303,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   }
 
   function renderSheet() {
+    seatsGen += 1;
     armed = false;
     const body = $("#sh_body");
     if (!view) renderNew(body);
