@@ -549,6 +549,53 @@ func TestOutboxSendsANewTitle(t *testing.T) {
 	}
 }
 
+func TestOutboxDropsATitleThatOpensAChannel(t *testing.T) {
+	const foreign = "1111222233334444"
+	t.Run("created", func(t *testing.T) {
+		assertTitleDoesNotResurrect(t, http.StatusCreated, shareGen, 0)
+	})
+	t.Run("other generation", func(t *testing.T) {
+		assertTitleDoesNotResurrect(t, http.StatusOK, foreign, http.StatusInternalServerError)
+	})
+}
+
+func assertTitleDoesNotResurrect(t *testing.T, putStatus int, gen string, deleteStatus int) {
+	t.Helper()
+	script := &outboxScript{}
+	box, dir, calls, inst := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "South")
+	seedOneUser(t, dir)
+	script.set(func(s *outboxScript) {
+		s.putStatus = putStatus
+		s.deleteStatus = deleteStatus
+		s.channel = channelJSON(inst, shareUID, "South", gen)
+	})
+	mustSaveShare(t, dir, team.Share{
+		UID: shareUID, Node: shareNode, Title: "North", StartSent: true, Next: 2,
+	})
+	box.tick(context.Background())
+	got := snapshotCalls(calls)
+	if len(got) != 3 || got[0].path != "/v1/hello" || got[1].method != http.MethodPut || got[2].method != http.MethodDelete {
+		t.Fatalf("calls = %+v", got)
+	}
+	if !strings.Contains(got[1].body, `"title":"South"`) || got[2].path != channelBase(inst, shareUID) {
+		t.Fatalf("calls = %+v", got)
+	}
+	for _, c := range got {
+		if strings.HasSuffix(c.path, "/mirror") {
+			t.Fatalf("mirror = %+v", got)
+		}
+	}
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.State != "lost" || stored.Title != "North" || stored.Generation != shareGen || stored.Next != 2 || !stored.StartSent {
+		t.Fatalf("stored = %+v", stored)
+	}
+	box.tick(context.Background())
+	if len(snapshotCalls(calls)) != len(got) {
+		t.Fatalf("second = %+v", snapshotCalls(calls))
+	}
+}
+
 func TestOutboxDeletesWhenTheChatIsGone(t *testing.T) {
 	t.Run("node deleted", func(t *testing.T) {
 		script := &outboxScript{}
