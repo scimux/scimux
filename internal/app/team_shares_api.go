@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -508,31 +507,11 @@ func (h *teamHandler) nodeTitle(id string) (string, bool, error) {
 		}
 		return "", false, err
 	}
-	title := ""
-	found := false
-	for _, line := range bytes.Split(raw, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-		var rec storeRecord
-		if json.Unmarshal(line, &rec) != nil {
-			continue
-		}
-		if rec.Type == "node" {
-			if rec.Node == nil || rec.Node.ID != id {
-				continue
-			}
-			title = rec.Node.Title
-			found = true
-			continue
-		}
-		if rec.Type == "delete" && rec.ID == id {
-			title = ""
-			found = false
-		}
+	snap, ok := parseNodeLog(raw)[id]
+	if !ok || !snap.live {
+		return "", false, nil
 	}
-	return title, found, nil
+	return snap.title, true, nil
 }
 
 func (h *teamHandler) chatCursor(node string) (string, int, bool) {

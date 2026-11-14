@@ -123,12 +123,13 @@ func (o *shareOutbox) tick(ctx context.Context) {
 		return
 	}
 	owner := string(inst)
+	nodes := o.nodeLog()
 	for _, share := range shares {
-		o.one(ctx, entries, owner, share)
+		o.one(ctx, entries, owner, share, nodes)
 	}
 }
 
-func (o *shareOutbox) one(ctx context.Context, entries []team.Entry, owner string, share team.Share) {
+func (o *shareOutbox) one(ctx context.Context, entries []team.Entry, owner string, share team.Share, nodes map[string]nodeSnap) {
 	entry, ok := serverFor(entries, share.Server)
 	if !ok {
 		o.deleteStored(share.UID)
@@ -140,7 +141,7 @@ func (o *shareOutbox) one(ctx context.Context, entries []team.Entry, owner strin
 	if share.State == "lost" || share.State == "full" {
 		return
 	}
-	title, live := o.hasChat(share)
+	title, live := o.hasChat(share, nodes)
 	if share.State == "stopping" || !live {
 		o.stop(ctx, entry, owner, share)
 		return
@@ -259,25 +260,44 @@ func (o *shareOutbox) confirm(ctx context.Context, entry team.Entry) error {
 	return nil
 }
 
-func (o *shareOutbox) hasChat(share team.Share) (string, bool) {
-	title, found := readNodeTitle(o.dataDir, share.Node)
-	if !found {
+func (o *shareOutbox) hasChat(share team.Share, nodes map[string]nodeSnap) (string, bool) {
+	snap, ok := nodes[share.Node]
+	if !ok || !snap.live {
 		return "", false
 	}
 	id := sessionlog.ReadLogIdentity(shareLogPath(o.dataDir, share.Node))
 	if id.Status != sessionlog.IdentityOK || id.UID != share.UID {
 		return "", false
 	}
-	return title, true
+	return snap.title, true
 }
 
-func readNodeTitle(dir, id string) (string, bool) {
-	raw, err := os.ReadFile(filepath.Join(dir, "nodes.jsonl"))
+func (o *shareOutbox) nodeLog() map[string]nodeSnap {
+	raw, err := o.readNodeBytes()
 	if err != nil {
-		return "", false
+		return map[string]nodeSnap{}
 	}
-	title := ""
-	found := false
+	return parseNodeLog(raw)
+}
+
+func (o *shareOutbox) readNodeBytes() ([]byte, error) {
+	if o.readNodes != nil {
+		return o.readNodes(o.dataDir)
+	}
+	return os.ReadFile(filepath.Join(o.dataDir, "nodes.jsonl"))
+}
+
+// nodeSnap is the latest node record in nodes.jsonl.
+type nodeSnap struct {
+	title string
+	live  bool
+}
+
+// parseNodeLog is the one parser for nodes.jsonl. A blank line, a line that
+// is not JSON, and a node record with no node are skipped. A later node
+// record restores a chat that a delete removed.
+func parseNodeLog(raw []byte) map[string]nodeSnap {
+	nodes := map[string]nodeSnap{}
 	for _, line := range bytes.Split(raw, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -288,19 +308,17 @@ func readNodeTitle(dir, id string) (string, bool) {
 			continue
 		}
 		if rec.Type == "node" {
-			if rec.Node == nil || rec.Node.ID != id {
+			if rec.Node == nil {
 				continue
 			}
-			title = rec.Node.Title
-			found = true
+			nodes[rec.Node.ID] = nodeSnap{title: rec.Node.Title, live: true}
 			continue
 		}
-		if rec.Type == "delete" && rec.ID == id {
-			title = ""
-			found = false
+		if rec.Type == "delete" {
+			nodes[rec.ID] = nodeSnap{live: false}
 		}
 	}
-	return title, found
+	return nodes
 }
 
 func shareLogPath(dir, node string) string {
