@@ -1473,3 +1473,123 @@ test("a click on a sheet drawn for another node sends no put", async () => {
   assert.equal(ui.note.textContent, CHANGED);
   assert.equal(ui.apply.textContent, "Share chat");
 });
+
+test("a put answer for the previous chat is not painted on the next one", async () => {
+  const gate = deferred();
+  let reads = 0;
+  const real = viewOf({ delivery: "offline", members: members(3) });
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return gate.promise;
+    if (call.path === "/api/team/shares/node-2") return rejected(500, JSON.stringify({ error: "store_unavailable" }));
+    if (call.path === "/api/team/shares/node-1") {
+      reads += 1;
+      if (reads === 1) return rejected(404, JSON.stringify({ error: "not_found" }));
+      return real;
+    }
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  ui.apply.click();
+  ui.feature.select("node-2");
+  const seats = ui.calls.filter((call) => call.path.endsWith("/seats")).length;
+  const html = ui.body.innerHTML;
+  gate.resolve(viewOf());
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.path === "/api/team/shares/node-2"), true);
+  assert.equal(ui.status.hidden, true);
+  assert.equal(ui.btn.hidden, true);
+  assert.equal(ui.status.textContent, "");
+  assert.equal(ui.live.textContent, "");
+  assert.equal(ui.body.innerHTML, html);
+  assert.equal(ui.calls.filter((call) => call.path.endsWith("/seats")).length, seats);
+  assert.equal(ui.calls.filter((call) => call.method === "PUT").length, 1);
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  assert.equal(ui.btn.hidden, false);
+  assert.equal(ui.status.textContent, shareStatusText(real, "North"));
+});
+
+test("a delete answer of 204 for the previous chat closes nothing on the next one", async () => {
+  const gate = deferred();
+  let reads = 0;
+  const real = viewOf({ delivery: "refused" });
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "DELETE") return gate.promise;
+    if (call.path === "/api/team/shares/node-2") return rejected(500, JSON.stringify({ error: "store_unavailable" }));
+    if (call.path === "/api/team/shares/node-1") {
+      reads += 1;
+      if (reads === 1) return viewOf();
+      return real;
+    }
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  ui.stop.click();
+  ui.stop.click();
+  ui.feature.select("node-2");
+  const closed = ui.closed.length;
+  const html = ui.body.innerHTML;
+  gate.resolve("");
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.path === "/api/team/shares/node-2"), true);
+  assert.equal(ui.closed.length, closed);
+  assert.equal(ui.live.textContent, "");
+  assert.equal(ui.status.hidden, true);
+  assert.equal(ui.btn.hidden, true);
+  assert.equal(ui.body.innerHTML, html);
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  assert.equal(ui.btn.hidden, false);
+  assert.equal(ui.status.textContent, shareStatusText(real, "North"));
+});
+
+test("a delete answer of 202 for the previous chat is not painted on the next one", async () => {
+  const gate = deferred();
+  let reads = 0;
+  const real = viewOf({ state: "lost" });
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "DELETE") return gate.promise;
+    if (call.path === "/api/team/shares/node-2") return rejected(500, JSON.stringify({ error: "store_unavailable" }));
+    if (call.path === "/api/team/shares/node-1") {
+      reads += 1;
+      if (reads === 1) return viewOf();
+      return real;
+    }
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  ui.stop.click();
+  ui.stop.click();
+  ui.feature.select("node-2");
+  const closed = ui.closed.length;
+  const seats = ui.calls.filter((call) => call.path.endsWith("/seats")).length;
+  const html = ui.body.innerHTML;
+  gate.resolve(viewOf({ state: "stopping" }));
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.path === "/api/team/shares/node-2"), true);
+  assert.equal(ui.closed.length, closed);
+  assert.equal(ui.status.hidden, true);
+  assert.equal(ui.btn.hidden, true);
+  assert.notEqual(ui.status.textContent, shareStatusText(viewOf({ state: "stopping" }), "North"));
+  assert.equal(ui.body.innerHTML, html);
+  assert.equal(ui.calls.filter((call) => call.path.endsWith("/seats")).length, seats);
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  assert.equal(ui.btn.hidden, false);
+  assert.equal(ui.status.textContent, shareStatusText(real, "North"));
+});
