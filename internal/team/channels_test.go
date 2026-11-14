@@ -880,6 +880,527 @@ func TestAppendMirrorRejectsABadGeneration(t *testing.T) {
 	}
 }
 
+func guestChannel(owner, chat, access string, mirror, comments int) string {
+	return `{"owner":"` + owner + `","chat":"` + chat + `","title":"Synthetic title","generation":"` + chGen +
+		`","created_at":"2026-11-14T09:30:00.000Z","access":"` + access + `","mirror_last":` + fmt.Sprintf("%d", mirror) +
+		`,"comments_last":` + fmt.Sprintf("%d", comments) + `}`
+}
+
+func mirrorLine(seq int, key, body string) string {
+	return `{"seq":` + fmt.Sprintf("%d", seq) + `,"key":"` + key + `","author":"` + chOther +
+		`","at":"2026-11-14T09:30:00.000Z","body":` + body + `}`
+}
+
+func mirrorPage(entries string, last int, more bool) string {
+	flag := "false"
+	if more {
+		flag = "true"
+	}
+	return `{"generation":"` + chGen + `","entries":[` + entries + `],"last":` + fmt.Sprintf("%d", last) + `,"more":` + flag + `}`
+}
+
+func TestChannelsListsTheThreeAccessValues(t *testing.T) {
+	body := `{"channels":[` + channelObject() + `,` + guestChannel(chOther, chChat, "read", 2, 0) + `,` + guestChannel(chThird, "fedcba9876543210", "write", 0, 4) + `]}`
+	var query string
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, cap *capturedRequest) {
+		query = r.URL.RawQuery
+		if strings.Contains(r.URL.String(), chToken) || strings.Contains(cap.body, chToken) {
+			t.Errorf("token left the header: %s", r.URL.String())
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, body)
+	})
+	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*got) != 1 || (*got)[0].method != http.MethodGet || (*got)[0].path != "/v1/channels" || (*got)[0].body != "" || query != "" {
+		t.Fatalf("request = %+v query %q", *got, query)
+	}
+	req := (*got)[0]
+	if req.header.Get("Authorization") != "Bearer "+chToken || req.header.Get("Content-Type") != "" {
+		t.Fatalf("headers = %v", req.header)
+	}
+	if len(list) != 3 {
+		t.Fatalf("channels = %+v", list)
+	}
+	if list[0].Owner != chOwner || list[0].Chat != chChat || list[0].Access != "owner" || list[0].MirrorLast != 1 || list[0].CommentsLast != 0 || list[0].Generation != chGen || list[0].Title != "Synthetic title" {
+		t.Fatalf("owner = %+v", list[0])
+	}
+	if len(list[0].Members) != 1 || list[0].Members[0].Seat != chOther || list[0].Members[0].Access != "read" {
+		t.Fatalf("members = %+v", list[0].Members)
+	}
+	if list[1].Owner != chOther || list[1].Access != "read" || list[1].MirrorLast != 2 || list[1].Members != nil {
+		t.Fatalf("read = %+v", list[1])
+	}
+	if list[2].Owner != chThird || list[2].Chat != "fedcba9876543210" || list[2].Access != "write" || list[2].CommentsLast != 4 || list[2].Members != nil {
+		t.Fatalf("write = %+v", list[2])
+	}
+}
+
+func TestChannelsListsNothing(t *testing.T) {
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"channels":[]}`)
+	})
+	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+	if err != nil || list == nil || len(list) != 0 {
+		t.Fatalf("list = %#v err = %v", list, err)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("requests = %d", len(*got))
+	}
+}
+
+func TestReadMirrorReadsAPage(t *testing.T) {
+	kept := `{"v":1, "t":"user"}`
+	page := mirrorPage(mirrorLine(1, "0/1", kept)+","+mirrorLine(2, "a.b_c:d/e-f", `{"v":1,"t":"source","reason":"clear"}`), 2, false)
+	var query string
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, cap *capturedRequest) {
+		query = r.URL.RawQuery
+		if strings.Contains(r.URL.String(), chToken) || strings.Contains(cap.body, chToken) {
+			t.Errorf("token left the header: %s", r.URL.String())
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, page)
+	})
+	gotPage, err := clientOn(srv).ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*got) != 1 || (*got)[0].method != http.MethodGet || (*got)[0].path != "/v1/channels/"+chOwner+"/"+chChat+"/mirror" || (*got)[0].body != "" || query != "after=0" {
+		t.Fatalf("request = %+v query %q", *got, query)
+	}
+	if (*got)[0].header.Get("Authorization") != "Bearer "+chToken || (*got)[0].header.Get("Content-Type") != "" {
+		t.Fatalf("headers = %v", (*got)[0].header)
+	}
+	if gotPage.Generation != chGen || gotPage.More || gotPage.Last != 2 || len(gotPage.Entries) != 2 {
+		t.Fatalf("page = %+v", gotPage)
+	}
+	if string(gotPage.Entries[0].Body) != kept || gotPage.Entries[0].Seq != 1 || gotPage.Entries[0].Key != "0/1" || gotPage.Entries[0].Author != chOther {
+		t.Fatalf("first = %+v", gotPage.Entries[0])
+	}
+	if gotPage.Entries[1].Seq != 2 || gotPage.Entries[1].Key != "a.b_c:d/e-f" {
+		t.Fatalf("second = %+v", gotPage.Entries[1])
+	}
+	moreBody := mirrorPage(mirrorLine(8, "0/8", `{"v":1}`), 40, true)
+	moreSrv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		if r.URL.RawQuery != "after=7" {
+			t.Errorf("query = %q", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, moreBody)
+	})
+	more, err := clientOn(moreSrv).ReadMirror(context.Background(), moreSrv.URL, chToken, chOwner, chChat, 7)
+	if err != nil || !more.More || more.Last != 40 || len(more.Entries) != 1 || more.Entries[0].Seq != 8 {
+		t.Fatalf("more = %+v err = %v", more, err)
+	}
+	emptyBody := mirrorPage("", 5, false)
+	emptySrv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, emptyBody)
+	})
+	empty, err := clientOn(emptySrv).ReadMirror(context.Background(), emptySrv.URL, chToken, chOwner, chChat, 5)
+	if err != nil || empty.More || empty.Last != 5 || empty.Entries == nil || len(empty.Entries) != 0 {
+		t.Fatalf("empty = %+v err = %v", empty, err)
+	}
+}
+
+func TestGuestCallsMapEveryStatus(t *testing.T) {
+	cases := []struct {
+		status int
+		want   error
+	}{
+		{http.StatusUnauthorized, ErrUnauthorized},
+		{http.StatusNotFound, ErrNoChannel},
+		{http.StatusRequestEntityTooLarge, ErrTooLarge},
+		{http.StatusUnprocessableEntity, ErrUnknownMember},
+		{http.StatusInsufficientStorage, ErrQuota},
+		{http.StatusConflict, ErrStaleGeneration},
+		{http.StatusBadRequest, ErrProtocol},
+		{http.StatusForbidden, ErrProtocol},
+		{http.StatusInternalServerError, ErrProtocol},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%d", tc.status), func(t *testing.T) {
+			srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, secretEcho())
+			})
+			c := clientOn(srv)
+			_, err := c.Channels(context.Background(), srv.URL, chToken)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("channels error = %v, want %v", err, tc.want)
+			}
+			assertNoChannelSecrets(t, err)
+			_, err = c.ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 1)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("mirror error = %v, want %v", err, tc.want)
+			}
+			assertNoChannelSecrets(t, err)
+			if len(*got) != 2 {
+				t.Fatalf("requests = %d", len(*got))
+			}
+		})
+	}
+}
+
+func TestGuestCallsRejectWhatIsNotTheProtocol(t *testing.T) {
+	ownerWithWrite := `{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"write"}]}`
+	ownerNullMembers := `{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":null}`
+	lists := []string{
+		`not-json ` + chToken,
+		`{"channels":null}`,
+		`{"channels":`,
+		`{}`,
+		`{"channels":[]}` + `{"x":1}`,
+		`{"channels":[],"extra":1}`,
+		`{"channels":["no"]}`,
+		`{"channels":[` + guestChannel(chOwner, "bad chat", "read", 0, 0) + `]}`,
+		`{"channels":[` + guestChannel("short", chChat, "read", 0, 0) + `]}`,
+		`{"channels":[` + guestChannel(strings.ToUpper(chOwner), chChat, "read", 0, 0) + `]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"bad` + "\n" + `","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"read","mirror_last":0,"comments_last":0}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"bad` + "\xff" + `","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"read","mirror_last":0,"comments_last":0}]}`,
+		`{"channels":[` + strings.Replace(guestChannel(chOwner, chChat, "read", 0, 0), chGen, "short", 1) + `]}`,
+		`{"channels":[` + strings.Replace(guestChannel(chOwner, chChat, "read", 0, 0), chGen, strings.ToUpper(chGen), 1) + `]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"yesterday","access":"read","mirror_last":0,"comments_last":0}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"admin","mirror_last":0,"comments_last":0}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"read","mirror_last":"1","comments_last":0}]}`,
+		`{"channels":[` + guestChannel(chOwner, chChat, "read", 0, 0) + `,"extra"]}`,
+		`{"channels":[` + ownerNullMembers + `]}`,
+		`{"channels":[` + guestChannel(chOwner, chChat, "owner", 0, 0) + `]}`,
+		`{"channels":[` + guestChannel(chOther, chChat, "read", 0, 0)[:len(guestChannel(chOther, chChat, "read", 0, 0))-1] + `,"members":[]}]}`,
+		`{"channels":[` + guestChannel(chOther, chChat, "write", 0, 0)[:len(guestChannel(chOther, chChat, "write", 0, 0))-1] + `,"members":null}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"short","access":"read"}]}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"owner"}]}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"read"},{"seat":"` + chOther + `","access":"write"}]}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"read","extra":1}]}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + strings.Repeat("a", 65) + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"read","mirror_last":0,"comments_last":0}]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"` + strings.Repeat("a", 201) + `","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"read","mirror_last":0,"comments_last":0}]}`,
+	}
+	for i, body := range lists {
+		srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body)
+		})
+		_, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("list %d error = %v body %s", i, err, body)
+		}
+		assertNoChannelSecrets(t, err)
+		if len(*got) != 1 {
+			t.Fatalf("list %d requests = %d", i, len(*got))
+		}
+	}
+	// A write member on an owned channel is accepted, and so is an empty member list.
+	okBodies := []string{
+		`{"channels":[` + ownerWithWrite + `]}`,
+		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[]}]}`,
+	}
+	for i, body := range okBodies {
+		srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body)
+		})
+		list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+		if err != nil || len(list) != 1 || list[0].Access != "owner" {
+			t.Fatalf("ok %d list = %+v err = %v", i, list, err)
+		}
+		if i == 0 && (len(list[0].Members) != 1 || list[0].Members[0].Access != "write" || list[0].Members[0].Seat != chOther) {
+			t.Fatalf("write member = %+v", list[0].Members)
+		}
+		if i == 1 && (list[0].Members == nil || len(list[0].Members) != 0 || list[0].Title != "") {
+			t.Fatalf("empty members = %+v", list[0])
+		}
+	}
+
+	lines := []string{
+		`not-json ` + chToken,
+		`{"generation":"` + chGen + `","entries":null,"last":0,"more":false}`,
+		`{"generation":"` + chGen + `","last":0,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[],"more":false}`,
+		`{"generation":"` + chGen + `","entries":[],"last":0}`,
+		`{"generation":"short","entries":[],"last":0,"more":false}`,
+		`{"generation":"` + strings.ToUpper(chGen) + `","entries":[],"last":0,"more":false}`,
+		mirrorPage("", 1, true),
+		mirrorPage(mirrorLine(1, "0/1", `{"v":1}`), 1, true),
+		mirrorPage(mirrorLine(1, "0/1", `{"v":1}`), 0, false),
+		mirrorPage(mirrorLine(1, "0/1", `{"v":1}`)+","+mirrorLine(1, "0/2", `{"v":1}`), 1, false),
+		mirrorPage(mirrorLine(1, "0/1", `{"v":1}`)+","+mirrorLine(3, "0/3", `{"v":1}`)+","+mirrorLine(2, "0/2", `{"v":1}`), 2, false),
+		mirrorPage(mirrorLine(5, "0/5", `{"v":1}`), 4, true),
+		`{"generation":"` + chGen + `","entries":[` + mirrorLine(1, "0/1", `{"v":1}`) + `],"last":1,"more":false,"extra":1}`,
+		`{"generation":"` + chGen + `","entries":[{"seq":"1","key":"0/1","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"bad key","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"0/1","author":"short","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"0/1","author":"` + strings.ToUpper(chOther) + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"0/1","author":"` + chOther + `","at":"yesterday","body":{"v":1}}],"last":1,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"0/1","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z"}],"last":1,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[{"key":"0/1","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,
+		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"0/1","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1}` + "\xff" + `}],"last":1,"more":false}`,
+		mirrorPage("", 0, false) + `{"x":1}`,
+		`{"generation":"` + chGen + `","entries":[],"last":"0","more":false}`,
+		`{"generation":"` + chGen + `","entries":[],"last":0,"more":"false"}`,
+	}
+	for i, body := range lines {
+		srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body)
+		})
+		_, err := clientOn(srv).ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 0)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("page %d error = %v body %s", i, err, body)
+		}
+		assertNoChannelSecrets(t, err)
+		if len(*got) != 1 {
+			t.Fatalf("page %d requests = %d", i, len(*got))
+		}
+	}
+	// A sequence that is not above after is refused. 257 entries are refused.
+	// 256 increasing entries are kept.
+	stale, staleGot := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		if r.URL.RawQuery != "after=4" {
+			t.Errorf("query = %q", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, mirrorPage(mirrorLine(4, "0/4", `{"v":1}`), 4, false))
+	})
+	_, err := clientOn(stale).ReadMirror(context.Background(), stale.URL, chToken, chOwner, chChat, 4)
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("not above after: %v", err)
+	}
+	assertNoChannelSecrets(t, err)
+	if len(*staleGot) != 1 {
+		t.Fatalf("not above after requests = %d", len(*staleGot))
+	}
+	var many strings.Builder
+	for i := 1; i <= 257; i++ {
+		if i > 1 {
+			many.WriteByte(',')
+		}
+		many.WriteString(mirrorLine(i, fmt.Sprintf("k%d", i), `{"v":1}`))
+	}
+	wide := mirrorPage(many.String(), 257, false)
+	wideSrv, wideGot := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, wide)
+	})
+	_, err = clientOn(wideSrv).ReadMirror(context.Background(), wideSrv.URL, chToken, chOwner, chChat, 0)
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("257 error = %v", err)
+	}
+	assertNoChannelSecrets(t, err)
+	if len(*wideGot) != 1 {
+		t.Fatalf("257 requests = %d", len(*wideGot))
+	}
+	var full strings.Builder
+	for i := 1; i <= 256; i++ {
+		if i > 1 {
+			full.WriteByte(',')
+		}
+		full.WriteString(mirrorLine(i, fmt.Sprintf("k%d", i), `null`))
+	}
+	fullBody := mirrorPage(full.String(), 256, false)
+	fullSrv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, fullBody)
+	})
+	gotPage, err := clientOn(fullSrv).ReadMirror(context.Background(), fullSrv.URL, chToken, chOwner, chChat, 0)
+	if err != nil || len(gotPage.Entries) != 256 || string(gotPage.Entries[255].Body) != "null" || gotPage.Entries[255].Seq != 256 {
+		t.Fatalf("256 len = %d err = %v", len(gotPage.Entries), err)
+	}
+	over := mirrorPage(mirrorLine(1, "0/1", `"`+strings.Repeat("a", maxMirrorBody)+`"`), 1, false)
+	overSrv, overGot := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, over)
+	})
+	_, err = clientOn(overSrv).ReadMirror(context.Background(), overSrv.URL, chToken, chOwner, chChat, 0)
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("oversize body error = %v", err)
+	}
+	assertNoChannelSecrets(t, err)
+	if len(*overGot) != 1 {
+		t.Fatalf("oversize requests = %d", len(*overGot))
+	}
+}
+
+func TestGuestCallsKeepTheTokenInTheHeader(t *testing.T) {
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, cap *capturedRequest) {
+		if strings.Contains(r.URL.String(), chToken) || strings.Contains(cap.body, chToken) {
+			t.Errorf("token left the header: %s %s", r.URL.String(), cap.body)
+		}
+		if r.Header.Get("Authorization") != "Bearer "+chToken {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/v1/channels":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"channels":[]}`)
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, mirrorPage("", 0, false))
+		}
+	})
+	c := clientOn(srv)
+	if _, err := c.Channels(context.Background(), srv.URL, chToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 11); err != nil {
+		t.Fatal(err)
+	}
+	if len(*got) != 2 || (*got)[1].path != "/v1/channels/"+chOwner+"/"+chChat+"/mirror" {
+		t.Fatalf("requests = %+v", *got)
+	}
+}
+
+func TestGuestCallsReportUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	base := srv.URL
+	srv.Close()
+	c := NewClient()
+	c.timeout = time.Second
+	_, err := c.Channels(context.Background(), base, chToken)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("channels error = %v", err)
+	}
+	assertNoChannelSecrets(t, err)
+	_, err = c.ReadMirror(context.Background(), base, chToken, chOwner, chChat, 0)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("mirror error = %v", err)
+	}
+	assertNoChannelSecrets(t, err)
+	c.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("dial failed")
+	})
+	_, err = c.ReadMirror(context.Background(), "http://relay.example", chToken, chOwner, chChat, 2)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("dial error = %v", err)
+	}
+	assertNoChannelSecrets(t, err)
+	c.Transport = failTrip{}
+	_, err = c.Channels(context.Background(), "http://relay.example", chToken)
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("read error = %v", err)
+	}
+	assertNoChannelSecrets(t, err)
+}
+
+func TestReadMirrorRejectsABadPath(t *testing.T) {
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		t.Errorf("request sent: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	c := clientOn(srv)
+	owners := []string{"", "0123", strings.Repeat("a", 31), strings.Repeat("a", 33), strings.ToUpper(chOwner), chOwner[:31] + "g"}
+	chats := []string{"", strings.Repeat("a", 65), "bad chat", "bad/chat"}
+	for _, owner := range owners {
+		_, err := c.ReadMirror(context.Background(), srv.URL, chToken, owner, chChat, 0)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("owner %q error = %v", owner, err)
+		}
+		assertNoChannelSecrets(t, err)
+	}
+	for _, chat := range chats {
+		_, err := c.ReadMirror(context.Background(), srv.URL, chToken, chOwner, chat, 0)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("chat %q error = %v", chat, err)
+		}
+		assertNoChannelSecrets(t, err)
+	}
+	if len(*got) != 0 {
+		t.Fatalf("requests = %d", len(*got))
+	}
+}
+
+func TestGuestCallsRejectABadBase(t *testing.T) {
+	c := NewClient()
+	c.timeout = time.Second
+	for _, base := range []string{"http://[", "/relative", "ftp://relay.example/join", "http://ada:secret@relay.example"} {
+		_, err := c.Channels(context.Background(), base, chToken)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("channels %s error = %v", base, err)
+		}
+		assertNoChannelSecrets(t, err)
+		if strings.Contains(err.Error(), "secret") {
+			t.Fatalf("%s quotes the input: %v", base, err)
+		}
+		_, err = c.ReadMirror(context.Background(), base, chToken, chOwner, chChat, 0)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("mirror %s error = %v", base, err)
+		}
+		assertNoChannelSecrets(t, err)
+	}
+}
+
+func TestGuestCallsLeaveNoConnectionOpen(t *testing.T) {
+	var mu sync.Mutex
+	open := 0
+	opened := 0
+	changed := make(chan struct{}, 1)
+	notify := func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/channels" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"channels":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, mirrorPage("", 0, false))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		mu.Lock()
+		switch state {
+		case http.StateNew:
+			open++
+			opened++
+		case http.StateClosed:
+			open--
+		}
+		mu.Unlock()
+		notify()
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	c := NewClient()
+	if _, err := c.Channels(context.Background(), srv.URL, chToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 0); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	nOpened := opened
+	mu.Unlock()
+	if nOpened == 0 {
+		t.Fatal("the server accepted no connection")
+	}
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		mu.Lock()
+		n := open
+		mu.Unlock()
+		if n == 0 {
+			return
+		}
+		select {
+		case <-changed:
+		case <-deadline.C:
+			mu.Lock()
+			n = open
+			mu.Unlock()
+			if n != 0 {
+				t.Fatalf("open connections = %d, want 0", n)
+			}
+			return
+		}
+	}
+}
+
 func TestChannelCallsMapAStaleGeneration(t *testing.T) {
 	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
 		w.WriteHeader(http.StatusConflict)

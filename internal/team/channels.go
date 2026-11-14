@@ -45,6 +45,12 @@ const maxSeatsBody = 1 << 20
 const (
 	maxMirrorEntries = 256
 	protocolTime     = "2006-01-02T15:04:05.000Z"
+	// maxChannelsBody is the largest channel list that is still a protocol
+	// answer. maxMirrorRead is the largest mirror page: 16 MiB of bodies
+	// plus the line around them. maxMirrorBody is one entry body.
+	maxChannelsBody = 1 << 20
+	maxMirrorRead   = (16 << 20) + (64 << 10)
+	maxMirrorBody   = 4 << 20
 )
 
 // marshalChannelBody encodes a JSON request body. Tests replace it.
@@ -356,4 +362,44 @@ func parseAppend(raw []byte, entries []MirrorEntry) (string, int64, error) {
 		}
 	}
 	return doc.Generation, *doc.Last, nil
+}
+
+// Channel is one channel the caller can see.
+type Channel struct {
+	Owner        string
+	Chat         string
+	Title        string
+	Generation   string
+	CreatedAt    string
+	Access       string
+	MirrorLast   uint64
+	CommentsLast uint64
+	Members      []Member
+}
+
+// MirrorRecord is one mirror entry. Body is the JSON value the server sent.
+type MirrorRecord struct {
+	Seq    uint64
+	Key    string
+	Author string
+	At     string
+	Body   json.RawMessage
+}
+
+// MirrorPage is one page of a mirror log.
+type MirrorPage struct {
+	Generation string
+	Entries    []MirrorRecord
+	Last       uint64
+	More       bool
+}
+
+// Channels is GET /v1/channels.
+func (c *Client) Channels(context.Context, string, string) ([]Channel, error) {
+	return nil, ErrProtocol
+}
+
+// ReadMirror is GET /v1/channels/{owner}/{chat}/mirror?after=.
+func (c *Client) ReadMirror(context.Context, string, string, string, string, uint64) (MirrorPage, error) {
+	return MirrorPage{}, ErrProtocol
 }
