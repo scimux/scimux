@@ -290,6 +290,7 @@ func Run() {
 			// cache no-ops outside the prompt-driven window, so this cannot
 			// probe providers overnight (usage.go).
 			a.maybeRefreshUsageAsync()
+			a.copySharedChats()
 			time.Sleep(2 * time.Second)
 		}
 	}()

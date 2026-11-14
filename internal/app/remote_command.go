@@ -241,7 +241,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	}
 	c.application = a
 	if c.ExperimentalTeam && c.muxerOnly {
-		c.application.teamHandler = newTeamHandler(c.Config.DataDir, time.Now, newTeamClient())
+		installShareOutbox(c.application, c.Config.DataDir, time.Now)
 	}
 	policy, err := newRequestPolicy(*addr, trustedHosts)
 	if err != nil {
