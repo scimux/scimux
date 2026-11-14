@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1931,4 +1933,189 @@ func entryKeys(es []team.MirrorEntry) string {
 		keys[i] = e.Key + ":" + string(e.Body)
 	}
 	return strings.Join(keys, "\n")
+}
+
+// userRecordN is one user line of n bytes, not counting the newline.
+func userRecordN(n int) []byte {
+	const pre = `{"t":"user","time":"2026-11-12T09:32:00Z","text":"`
+	const suf = `"}`
+	body := make([]byte, n+1)
+	copy(body, pre)
+	for i := len(pre); i < n-len(suf); i++ {
+		body[i] = 'q'
+	}
+	copy(body[n-len(suf):n], suf)
+	body[n] = '\n'
+	return body
+}
+
+func TestOutboxKeepsARecordThatArrivesInTwoParts(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	base := saveResumeShare(t, dir)
+	prefix := logBytes(t, dir)
+	line := userRecordN(100_000)
+	if len(line) != 100_001 || bytes.Contains(line[:80_000], []byte("\n")) {
+		t.Fatalf("line = %d bytes", len(line))
+	}
+	offsets := watchLogReads(box)
+	if _, err := appendRawLog(t, dir, line[:80_000]); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	if _, err := appendRawLog(t, dir, line[80_000:]); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	last, err := json.Marshal(sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "last"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last = append(last, '\n')
+	if _, err := appendRawLog(t, dir, last); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	end := prefix + int64(len(line))
+	if !reflect.DeepEqual(*offsets, []int64{0, prefix, end}) {
+		t.Fatalf("offsets = %v want 0,%d,%d", *offsets, prefix, end)
+	}
+	assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+}
+
+func TestOutboxSkipsASplitRecordOverTheCap(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	base := saveResumeShare(t, dir)
+	prefix := logBytes(t, dir)
+	head := bytes.Repeat([]byte("x"), maxLogRecord)
+	tail := append(bytes.Repeat([]byte("x"), 64<<10), '\n')
+	after, err := json.Marshal(sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "after"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after = append(after, '\n')
+	offsets := watchLogReads(box)
+	if _, err := appendRawLog(t, dir, head); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	if _, err := appendRawLog(t, dir, append(tail, after...)); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	if !reflect.DeepEqual(*offsets, []int64{0, prefix}) {
+		t.Fatalf("offsets = %v want 0,%d", *offsets, prefix)
+	}
+	assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+}
+
+func TestOutboxSeededPartialWritesMatchAFullRead(t *testing.T) {
+	raw := seededLog()
+	nl := bytes.IndexByte(raw, '\n')
+	if nl < 0 {
+		t.Fatal("seed log has no meta line")
+	}
+	for _, seed := range []int64{1, 2, 3} {
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
+			script := &outboxScript{}
+			box, dir, calls, _ := newShareBox(t, script)
+			appendNode(t, dir, shareNode, "North")
+			if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(chatLogPath(dir, shareNode), raw[:nl+1], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			base := saveResumeShare(t, dir)
+			box.tick(context.Background())
+			rng := rand.New(rand.NewSource(seed))
+			rest := raw[nl+1:]
+			for len(rest) > 0 {
+				n := 1 + rng.Intn(3000)
+				if n > len(rest) {
+					n = len(rest)
+				}
+				if _, err := appendRawLog(t, dir, rest[:n]); err != nil {
+					t.Fatal(err)
+				}
+				rest = rest[n:]
+				box.tick(context.Background())
+			}
+			assertMirrorKeysMatchFullRead(t, dir, base, snapshotCalls(calls))
+		})
+	}
+}
+
+func assertMirrorKeysMatchFullRead(t *testing.T, dir string, base team.Share, calls []shareCall) {
+	t.Helper()
+	got := mirrorEntries(t, calls)
+	events := sessionlog.ReadEvents(chatLogPath(dir, base.Node))
+	var want []team.MirrorEntry
+	share := base
+	for guard := 0; guard < 8; guard++ {
+		batch, next, done := mirrorBatch(share, events)
+		want = append(want, batch...)
+		if !done {
+			if len(batch) == 0 {
+				t.Fatal("oracle made no progress")
+			}
+			share.Next = next
+			share.StartSent = true
+			continue
+		}
+		if len(got) != len(want) {
+			t.Fatalf("keys got %v want %v", mirrorKeyList(got), mirrorKeyList(want))
+		}
+		for i := range got {
+			if got[i].Key != want[i].Key || !bytes.Equal(got[i].Body, want[i].Body) {
+				t.Fatalf("entry %d got %s (%d bytes) want %s (%d bytes)", i, got[i].Key, len(got[i].Body), want[i].Key, len(want[i].Body))
+			}
+		}
+		return
+	}
+	t.Fatal("oracle did not finish")
+}
+
+func mirrorKeyList(es []team.MirrorEntry) []string {
+	keys := make([]string, len(es))
+	for i, e := range es {
+		keys[i] = e.Key
+	}
+	return keys
+}
+
+func seededLog() []byte {
+	var b bytes.Buffer
+	write := func(ev sessionlog.Event) {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			panic(err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	write(sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	b.WriteString("\n")
+	b.WriteString(" \n")
+	b.WriteString("{\n")
+	crlf, err := json.Marshal(sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "crlf"})
+	if err != nil {
+		panic(err)
+	}
+	b.Write(crlf)
+	b.WriteString("\r\n")
+	write(sessionlog.Event{T: "source", Time: "2026-11-12T09:32:00Z", Source: &sessionlog.SourceEvent{Reason: "cut"}})
+	write(sessionlog.Event{T: "assistant", Time: "2026-11-12T09:33:00Z", Text: "kept"})
+	write(sessionlog.Event{T: "tool", Time: "2026-11-12T09:34:00Z", Tool: &sessionlog.ToolEvent{ID: "t1", Title: "read", Status: "done"}})
+	b.Write(userRecordN(70 << 10))
+	b.Write(userRecordN(80 << 10))
+	write(sessionlog.Event{T: "user", Time: "2026-11-12T09:35:00Z", Text: "tail"})
+	return b.Bytes()
 }
