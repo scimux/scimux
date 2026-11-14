@@ -39,6 +39,8 @@ type outboxScript struct {
 	mirrorArrived chan struct{}
 	mirrorGate    chan struct{}
 	mirrorOnce    sync.Once
+	// kept is every mirror body this server stored.
+	kept []string
 }
 
 func (s *outboxScript) set(fn func(*outboxScript)) {
@@ -111,12 +113,21 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		s.holdMirror()
 		var req struct {
-			Entries []struct {
+			Generation string `json:"generation"`
+			Entries    []struct {
 				Key string `json:"key"`
 			} `json:"entries"`
 		}
 		_ = json.Unmarshal(raw, &req)
+		if req.Generation != channelGeneration(channel) {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"stale_generation"}`)
+			return
+		}
 		w.WriteHeader(status)
+		if status == http.StatusOK {
+			s.noteKept(string(raw))
+		}
 		if status != http.StatusOK {
 			return
 		}
@@ -137,6 +148,30 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func channelGeneration(raw string) string {
+	var doc struct {
+		Generation string `json:"generation"`
+	}
+	if json.Unmarshal([]byte(raw), &doc) != nil || doc.Generation == "" {
+		return shareGen
+	}
+	return doc.Generation
+}
+
+func (s *outboxScript) noteKept(raw string) {
+	s.mu.Lock()
+	s.kept = append(s.kept, raw)
+	s.mu.Unlock()
+}
+
+func (s *outboxScript) keptMirrors() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.kept))
+	copy(out, s.kept)
+	return out
 }
 
 func recordOutbox(t *testing.T, script *outboxScript) (*httptest.Server, *[]shareCall) {
@@ -1080,6 +1115,15 @@ func TestOutboxTwoTicksAtOnce(t *testing.T) {
 	letGo := func() { releaseOnce.Do(func() { close(release) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/mirror") {
+			raw, _ := io.ReadAll(r.Body)
+			var req struct {
+				Generation string `json:"generation"`
+			}
+			if json.Unmarshal(raw, &req) != nil || req.Generation != shareGen {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, `{"error":"stale_generation"}`)
+				return
+			}
 			once.Do(func() { close(entered) })
 			<-release
 			w.WriteHeader(http.StatusInternalServerError)
@@ -2444,4 +2488,118 @@ func TestOutboxDroppedSaveBetweenToolGrowth(t *testing.T) {
 		}
 	}
 	assertMirrorsMatchFullRead(t, dir, base, got[start:])
+}
+
+func TestOutboxDropsAReplacedChannel(t *testing.T) {
+	const fresh = "1111222233334444"
+	script := &outboxScript{}
+	box, dir, calls, inst := newShareBox(t, script)
+	h := newTeamHandler(dir, box.now, box.client)
+	box.files = &asTeamHandler(t, h).mu
+	script.set(func(s *outboxScript) {
+		s.channel = channelJSON(inst, shareUID, "North", fresh)
+	})
+	old := []team.Member{{Seat: shareSeat, Access: "read"}}
+	armActiveShare(t, dir, old)
+	next := []team.Member{{Seat: shareSeatB, Access: "write"}}
+	overlapShare(t, box, script, func() {
+		rec := putShare(h, shareNode, sharePutBody(teamServerID, "all", next))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("members = %d %s", rec.Code, rec.Body.String())
+		}
+	})
+	var sent struct {
+		Generation string `json:"generation"`
+	}
+	if err := json.Unmarshal([]byte(mirrorCall(t, snapshotCalls(calls)).body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Generation != shareGen {
+		t.Fatalf("generation = %q", sent.Generation)
+	}
+	if len(script.keptMirrors()) != 0 {
+		t.Fatalf("stored mirrors = %d", len(script.keptMirrors()))
+	}
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.State != "lost" || stored.Next != 0 || stored.StartSent || stored.Generation != shareGen || stored.Title != "North" {
+		t.Fatalf("stored = %+v", stored)
+	}
+	assertMembersEqual(t, stored.Members, next)
+	if box.confirmed(teamServerID) || box.waiting(teamServerID) || box.delivery(teamServerID) != "ok" {
+		t.Fatalf("confirmed %v waiting %v delivery %s", box.confirmed(teamServerID), box.waiting(teamServerID), box.delivery(teamServerID))
+	}
+	mark := len(snapshotCalls(calls))
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:45:00Z", Text: "later"})
+	box.now = func() time.Time { return time.Date(2026, 11, 12, 9, 40, 0, 0, time.UTC) }
+	box.tick(context.Background())
+	if len(snapshotCalls(calls)) != mark {
+		t.Fatalf("second = %+v", snapshotCalls(calls)[mark:])
+	}
+}
+
+func TestOutboxAppendsWithTheTitleGeneration(t *testing.T) {
+	const titleGen = "fedcba9876543210"
+	script := &outboxScript{}
+	box, dir, calls, inst := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "South")
+	seedOneUser(t, dir)
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:32:00Z", Text: "two"})
+	script.set(func(s *outboxScript) {
+		s.channel = channelJSON(inst, shareUID, "South", titleGen)
+	})
+	mustSaveShare(t, dir, team.Share{
+		UID: shareUID, Node: shareNode, Title: "North", Generation: titleGen, StartSent: true, Next: 2,
+	})
+	box.tick(context.Background())
+	got := snapshotCalls(calls)
+	if len(got) != 3 || got[0].path != "/v1/hello" || got[1].method != http.MethodPut || !strings.HasSuffix(got[2].path, "/mirror") {
+		t.Fatalf("calls = %+v", got)
+	}
+	if !strings.Contains(got[1].body, `"title":"South"`) {
+		t.Fatalf("put = %s", got[1].body)
+	}
+	var sent struct {
+		Generation string `json:"generation"`
+		Entries    []struct {
+			Key string `json:"key"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(got[2].body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Generation != titleGen || len(sent.Entries) != 1 || sent.Entries[0].Key != "0/2" {
+		t.Fatalf("mirror = %s", got[2].body)
+	}
+	if len(script.keptMirrors()) != 1 {
+		t.Fatalf("stored mirrors = %d", len(script.keptMirrors()))
+	}
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.State != "active" || stored.Title != "South" || stored.Generation != titleGen || stored.Next != 3 || !stored.StartSent {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+func TestOutboxLeavesAStoppedShareThatChanged(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, _, _ := newShareBox(t, script)
+	armActiveShare(t, dir, []team.Member{{Seat: shareSeat, Access: "read"}})
+	wantMembers := []team.Member{{Seat: shareSeatB, Access: "write"}}
+	overlapShare(t, box, script, func() {
+		stored, ok := storedShare(t, dir, shareUID)
+		if !ok {
+			t.Fatal("missing share")
+		}
+		stored.State = "stopping"
+		stored.Title = "Halted"
+		stored.Next = 9
+		stored.Members = wantMembers
+		if err := team.SaveShare(dir, stored); err != nil {
+			t.Fatal(err)
+		}
+	})
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.State != "stopping" || stored.Title != "Halted" || stored.Next != 9 || stored.StartSent || stored.Generation != shareGen {
+		t.Fatalf("stored = %+v", stored)
+	}
+	assertMembersEqual(t, stored.Members, wantMembers)
 }

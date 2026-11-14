@@ -255,7 +255,7 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 		o.noteSuccess(entry.ID)
 		return
 	}
-	gen, _, err := o.client.AppendMirror(ctx, entry.URL, entry.Token, owner, share.UID, batch)
+	gen, _, err := o.client.AppendMirror(ctx, entry.URL, entry.Token, owner, share.UID, share.Generation, batch)
 	if err != nil {
 		if errors.Is(err, team.ErrNoChannel) {
 			share.State = "lost"

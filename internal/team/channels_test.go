@@ -50,7 +50,7 @@ func runChannel(c *Client, ctx context.Context, base, name string) error {
 			{Seat: chThird, Access: "write"},
 		})
 	case "append":
-		_, _, err := c.AppendMirror(ctx, base, chToken, chOwner, chChat, []MirrorEntry{
+		_, _, err := c.AppendMirror(ctx, base, chToken, chOwner, chChat, chGen, []MirrorEntry{
 			{Key: "0/1", Body: chEntry()},
 		})
 		return err
@@ -173,7 +173,7 @@ func TestChannelCallsSendTheRequest(t *testing.T) {
 					t.Fatalf("request = %s %s %s", req.method, req.path, req.body)
 				}
 			case "append":
-				want := `{"entries":[{"key":"0/1","body":{"v":1,"t":"user","text":"synthetic prompt"}}]}`
+				want := `{"generation":"` + chGen + `","entries":[{"key":"0/1","body":{"v":1,"t":"user","text":"synthetic prompt"}}]}`
 				if req.method != http.MethodPost || req.path != "/v1/channels/"+chOwner+"/"+chChat+"/mirror" || req.body != want {
 					t.Fatalf("request = %s %s %s", req.method, req.path, req.body)
 				}
@@ -235,7 +235,7 @@ func TestChannelCallsReportCreatedOrderAndLast(t *testing.T) {
 	if err := c.SetMembers(context.Background(), srv.URL, chToken, chOwner, chChat, nil); err != nil {
 		t.Fatal(err)
 	}
-	gen, last, err := c.AppendMirror(context.Background(), srv.URL, chToken, chOwner, chChat, []MirrorEntry{{Key: "0/1", Body: chEntry()}})
+	gen, last, err := c.AppendMirror(context.Background(), srv.URL, chToken, chOwner, chChat, chGen, []MirrorEntry{{Key: "0/1", Body: chEntry()}})
 	if err != nil || gen != chGen || last != 43 {
 		t.Fatalf("append gen = %q last = %d err = %v", gen, last, err)
 	}
@@ -385,7 +385,7 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		return c.SetMembers(context.Background(), base, chToken, chOwner, chChat, nil)
 	})
 	check("append", appends, http.StatusOK, func(c *Client, base string) error {
-		_, _, err := c.AppendMirror(context.Background(), base, chToken, chOwner, chChat, []MirrorEntry{{Key: "0/1", Body: chEntry()}})
+		_, _, err := c.AppendMirror(context.Background(), base, chToken, chOwner, chChat, chGen, []MirrorEntry{{Key: "0/1", Body: chEntry()}})
 		return err
 	})
 }
@@ -693,7 +693,7 @@ func TestChannelCallsRejectInvalidOwnerAndChat(t *testing.T) {
 			return c.SetMembers(context.Background(), srv.URL, chToken, owner, chat, nil)
 		},
 		func(owner, chat string) error {
-			_, _, err := c.AppendMirror(context.Background(), srv.URL, chToken, owner, chat, []MirrorEntry{{Key: "0/1", Body: chEntry()}})
+			_, _, err := c.AppendMirror(context.Background(), srv.URL, chToken, owner, chat, chGen, []MirrorEntry{{Key: "0/1", Body: chEntry()}})
 			return err
 		},
 	}
@@ -757,20 +757,20 @@ func TestAppendMirrorRejectsEntriesBeforeARequest(t *testing.T) {
 		fullResults[i] = `{"key":"` + key + `","seq":1,"duplicate":false}`
 	}
 	for i, entries := range cases {
-		_, _, err := c.AppendMirror(context.Background(), srv.URL, chToken, chOwner, chChat, entries)
+		_, _, err := c.AppendMirror(context.Background(), srv.URL, chToken, chOwner, chChat, chGen, entries)
 		if !errors.Is(err, ErrProtocol) {
 			t.Fatalf("case %d error = %v", i, err)
 		}
 		assertNoChannelSecrets(t, err)
 	}
 	ok, one := serveTeam(t, func(w http.ResponseWriter, r *http.Request, cap *capturedRequest) {
-		if cap.body != `{"entries":[{"key":"a.b_c:d/e-f","body":{"ok":true}}]}` {
+		if cap.body != `{"generation":"`+chGen+`","entries":[{"key":"a.b_c:d/e-f","body":{"ok":true}}]}` {
 			t.Errorf("body = %s", cap.body)
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"generation":"`+chGen+`","results":[{"key":"a.b_c:d/e-f","seq":1,"duplicate":true}],"last":0}`)
 	})
-	gen, last, err := clientOn(ok).AppendMirror(context.Background(), ok.URL, chToken, chOwner, chChat, dotted)
+	gen, last, err := clientOn(ok).AppendMirror(context.Background(), ok.URL, chToken, chOwner, chChat, chGen, dotted)
 	if err != nil || gen != chGen || last != 0 {
 		t.Fatalf("dotted gen = %q last = %d err = %v", gen, last, err)
 	}
@@ -778,7 +778,7 @@ func TestAppendMirrorRejectsEntriesBeforeARequest(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"generation":"`+chGen+`","results":[`+strings.Join(fullResults, ",")+`],"last":256}`)
 	})
-	gen, last, err = clientOn(wide).AppendMirror(context.Background(), wide.URL, chToken, chOwner, chChat, full)
+	gen, last, err = clientOn(wide).AppendMirror(context.Background(), wide.URL, chToken, chOwner, chChat, chGen, full)
 	if err != nil || gen != chGen || last != 256 {
 		t.Fatalf("full gen = %q last = %d err = %v", gen, last, err)
 	}
@@ -834,5 +834,66 @@ func TestChannelCallsAcceptAnHTTPSBase(t *testing.T) {
 	}
 	if trip.method != http.MethodGet || trip.gotURL != "https://relay.example/v1/seats" || trip.auth != "Bearer "+chToken {
 		t.Fatalf("request = %s %s auth %q", trip.method, trip.gotURL, trip.auth)
+	}
+}
+
+func TestAppendMirrorSendsTheGeneration(t *testing.T) {
+	const gen = "fedcba9876543210"
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, cap *capturedRequest) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, appendObject())
+		if cap.body != `{"generation":"`+gen+`","entries":[{"key":"0/1","body":{"v":1,"t":"user","text":"synthetic prompt"}}]}` {
+			t.Errorf("body = %s", cap.body)
+		}
+	})
+	gotGen, last, err := clientOn(srv).AppendMirror(context.Background(), srv.URL, chToken, chOwner, chChat, gen, []MirrorEntry{{Key: "0/1", Body: chEntry()}})
+	if err != nil || gotGen != chGen || last != 43 {
+		t.Fatalf("append gen = %q last = %d err = %v", gotGen, last, err)
+	}
+	if len(*got) != 1 {
+		t.Fatalf("requests = %d", len(*got))
+	}
+}
+
+func TestAppendMirrorRejectsABadGeneration(t *testing.T) {
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		t.Errorf("request sent: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	c := clientOn(srv)
+	entries := []MirrorEntry{{Key: "0/1", Body: chEntry()}}
+	for _, gen := range []string{
+		"",
+		"0123456789abcde",
+		"0123456789abcdef0",
+		strings.ToUpper(chGen),
+		"0123456789abcdeg",
+	} {
+		_, _, err := c.AppendMirror(context.Background(), srv.URL, chToken, chOwner, chChat, gen, entries)
+		if !errors.Is(err, ErrProtocol) {
+			t.Fatalf("generation %q error = %v", gen, err)
+		}
+		assertNoChannelSecrets(t, err)
+	}
+	if len(*got) != 0 {
+		t.Fatalf("requests = %d", len(*got))
+	}
+}
+
+func TestChannelCallsMapAStaleGeneration(t *testing.T) {
+	srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, secretEcho())
+	})
+	c := clientOn(srv)
+	for _, name := range channelNames() {
+		err := runChannel(c, context.Background(), srv.URL, name)
+		if !errors.Is(err, ErrStaleGeneration) {
+			t.Fatalf("%s error = %v", name, err)
+		}
+		assertNoChannelSecrets(t, err)
+	}
+	if len(*got) != len(channelNames()) {
+		t.Fatalf("requests = %d", len(*got))
 	}
 }

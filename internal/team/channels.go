@@ -33,10 +33,11 @@ type MirrorEntry struct {
 // Sentinel errors from the channel calls. None of them quote a token, a
 // title, an entry body, or a response body.
 var (
-	ErrNoChannel     = errors.New("team: no such channel")
-	ErrUnknownMember = errors.New("team: unknown member")
-	ErrQuota         = errors.New("team: quota reached")
-	ErrTooLarge      = errors.New("team: too large")
+	ErrNoChannel       = errors.New("team: no such channel")
+	ErrUnknownMember   = errors.New("team: unknown member")
+	ErrQuota           = errors.New("team: quota reached")
+	ErrTooLarge        = errors.New("team: too large")
+	ErrStaleGeneration = errors.New("team: stale generation")
 )
 
 const maxSeatsBody = 1 << 20
@@ -149,7 +150,8 @@ func (c *Client) SetMembers(ctx context.Context, baseURL, token, owner, chat str
 }
 
 // AppendMirror is POST /v1/channels/{owner}/{chat}/mirror.
-func (c *Client) AppendMirror(ctx context.Context, baseURL, token, owner, chat string, entries []MirrorEntry) (string, int64, error) {
+// generation is the channel the entries were prepared for.
+func (c *Client) AppendMirror(ctx context.Context, baseURL, token, owner, chat, generation string, entries []MirrorEntry) (string, int64, error) {
 	path, err := channelPath(owner, chat, "/mirror")
 	if err != nil {
 		return "", 0, err
