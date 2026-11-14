@@ -972,6 +972,18 @@ func TestStartSharingReplacesALeftoverChannel(t *testing.T) {
 			t.Fatalf("calls = %+v", got)
 		}
 	})
+	t.Run("second create fails", func(t *testing.T) {
+		script := &shareScript{putStatuses: []int{http.StatusOK, http.StatusInternalServerError}}
+		h, dir, calls, inst := readySurface(t, script)
+		script.channel = channelJSON(inst, shareUID, "North", shareGen)
+		seedChat(t, dir, shareNode, "North", shareUID, 0)
+		rec := putShare(h, shareNode, sharePutBody(teamServerID, "all", []team.Member{}))
+		assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
+		assertNoStoredShare(t, dir, shareUID)
+		if countDeletes(snapshotCalls(calls)) != 2 {
+			t.Fatalf("calls = %+v", snapshotCalls(calls))
+		}
+	})
 }
 
 func TestStartSharingFailureStoresNothing(t *testing.T) {
@@ -1332,6 +1344,25 @@ func TestShareUpdateReplacesMembersOnly(t *testing.T) {
 		if countDeletes(snapshotCalls(calls)) != 0 {
 			t.Fatalf("calls = %+v", snapshotCalls(calls))
 		}
+	})
+	t.Run("hello names another server", func(t *testing.T) {
+		script := &shareScript{helloID: teamOtherID}
+		h, dir, calls, inst := readySurface(t, script)
+		script.channel = channelJSON(inst, shareUID, "North", shareGen)
+		seedChat(t, dir, shareNode, "North", shareUID, 0)
+		mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Members: old})
+		rec := putShare(h, shareNode, sharePutBody(teamServerID, "from_now", next))
+		assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
+		stored, ok := storedShare(t, dir, shareUID)
+		if !ok || stored.State != "active" {
+			t.Fatalf("stored = %+v", stored)
+		}
+		assertMembersEqual(t, stored.Members, old)
+		got := snapshotCalls(calls)
+		if len(got) != 1 || got[0].path != "/v1/hello" {
+			t.Fatalf("calls = %+v", got)
+		}
+		assertBearer(t, got[0], false)
 	})
 	t.Run("save fails", func(t *testing.T) {
 		script := &shareScript{}
