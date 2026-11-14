@@ -1298,6 +1298,30 @@ func TestOutboxKeepsANewShareOfTheSameChat(t *testing.T) {
 	assertMembersEqual(t, stored.Members, members)
 }
 
+func TestOutboxLeavesABrokenShareFile(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, _, _ := newShareBox(t, script)
+	armActiveShare(t, dir, nil)
+	saves := 0
+	box.save = func(dir string, s team.Share) error {
+		saves++
+		return team.SaveShare(dir, s)
+	}
+	broken := []byte("{")
+	overlapShare(t, box, script, func() {
+		if err := os.WriteFile(filepath.Join(dir, team.SharesFile), broken, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if saves != 0 {
+		t.Fatalf("saves = %d", saves)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, team.SharesFile))
+	if err != nil || !bytes.Equal(raw, broken) {
+		t.Fatalf("file = %q err %v", raw, err)
+	}
+}
+
 func TestShareRoutesAndTicksRace(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		script := &outboxScript{}
