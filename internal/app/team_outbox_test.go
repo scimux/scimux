@@ -812,10 +812,11 @@ func TestOutboxBackoffIsPerServer(t *testing.T) {
 	if box.delivery(teamServerID) != "ok" {
 		t.Fatalf("delivery = %s", box.delivery(teamServerID))
 	}
-	// The success sent every record. The reset is proved by the next record.
+	// The success sent every record and kept the hello. The next record's
+	// failed mirror is a new failure, so the wait returns to 4s.
 	sent := len(snapshotCalls(calls))
 	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "more"})
-	script.failPath = "/v1/hello"
+	script.mirrorStatus = http.StatusInternalServerError
 	box.tick(context.Background())
 	if len(snapshotCalls(calls)) == sent {
 		t.Fatal("reset failure did not reach the server")
