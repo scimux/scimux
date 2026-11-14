@@ -168,6 +168,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
 
   function select(node) {
     const shown = sheetNode;
+    if (node !== selected) view = null;
     selected = node;
     hideControls();
     if (shown && shown !== node) {
@@ -501,8 +502,9 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     sheetBusy = true;
     $("#sh_apply").disabled = true;
     stop.disabled = true;
-    const pending = api("/api/team/shares/" + selected, { method: "DELETE" });
-    enqueue(() => finishDelete(pending));
+    const node = selected;
+    const pending = api("/api/team/shares/" + node, { method: "DELETE" });
+    enqueue(() => finishDelete(pending, node));
   }
 
   function onApply() {
@@ -520,27 +522,35 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     sheetBusy = true;
     apply.disabled = true;
     $("#sh_stop").disabled = true;
-    const pending = api("/api/team/shares/" + selected, {
+    const node = selected;
+    const pending = api("/api/team/shares/" + node, {
       method: "PUT",
       body,
     });
-    enqueue(() => finishPut(pending, hadView, restore));
+    enqueue(() => finishPut(pending, hadView, restore, node));
   }
 
-  async function finishPut(pending, hadView, restore) {
+  async function finishPut(pending, hadView, restore, node) {
+    let body = null;
+    let err = null;
     try {
-      view = await pending;
-      paintHeader();
-      showSheet();
-      $("#sh_live").textContent = hadView ? "People updated." : "Sharing started.";
-      if (restore) $("#sh_apply").focus();
-    } catch (err) {
+      body = await pending;
+    } catch (e) {
+      err = e;
+    }
+    sheetBusy = false;
+    if (node !== selected) return;
+    if (err) {
       showNote(codeOf(err));
       $("#sh_stop").disabled = false;
       $("#sh_apply").disabled = applyShouldDisable();
-    } finally {
-      sheetBusy = false;
+      return;
     }
+    view = body;
+    paintHeader();
+    showSheet();
+    $("#sh_live").textContent = hadView ? "People updated." : "Sharing started.";
+    if (restore) $("#sh_apply").focus();
   }
 
   function markStopped() {
@@ -551,24 +561,28 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     $("#sh_live").textContent = "Sharing stopped.";
   }
 
-  async function finishDelete(pending) {
+  async function finishDelete(pending, node) {
+    let body = null;
+    let err = null;
     try {
-      const body = await pending;
-      if (typeof body === "object") {
-        view = body;
-        paintHeader();
-        showSheet();
-      } else {
-        markStopped();
-      }
-    } catch (err) {
+      body = await pending;
+    } catch (e) {
+      err = e;
+    }
+    sheetBusy = false;
+    if (node !== selected) return;
+    if (err) {
       if (err.status === 404) markStopped();
       else showNote(codeOf(err));
-    } finally {
-      sheetBusy = false;
-      $("#sh_stop").disabled = false;
-      $("#sh_apply").disabled = applyShouldDisable();
+    } else if (typeof body === "object") {
+      view = body;
+      paintHeader();
+      showSheet();
+    } else {
+      markStopped();
     }
+    $("#sh_stop").disabled = false;
+    $("#sh_apply").disabled = applyShouldDisable();
   }
 
   function listen(el, type, fn) {
