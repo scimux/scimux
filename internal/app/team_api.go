@@ -66,6 +66,10 @@ func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveShares(w, r)
 		return
 	}
+	if r.URL.Path == "/api/team/subscriptions" || strings.HasPrefix(r.URL.Path, "/api/team/subscriptions/") {
+		h.serveSubscriptions(w, r)
+		return
+	}
 	id, action, ok := splitTeamServerPath(r.URL.Path)
 	if !ok {
 		writeTeamError(w, http.StatusNotFound, "not_found")
