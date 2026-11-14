@@ -1202,3 +1202,52 @@ test("the status button opens the same sheet", async () => {
   assert.equal(ui.apply.textContent, "Save people");
 });
 
+test("destroy removes every listener", async () => {
+  const ui = mount();
+  let added = 0;
+  let removed = 0;
+  for (const el of [ui.btn, ui.status, ui.sheet]) {
+    const add = el.addEventListener.bind(el);
+    const rem = el.removeEventListener.bind(el);
+    el.addEventListener = (type, fn) => {
+      added += 1;
+      add(type, fn);
+    };
+    el.removeEventListener = (type, fn) => {
+      removed += 1;
+      rem(type, fn);
+    };
+  }
+  const opened = [];
+  const feature = createShareFeature({
+    api: async () => ({ servers: [] }),
+    doc: ui.doc,
+    openSheet: (id) => opened.push(id),
+    closeSheets: () => {},
+    now: () => 0,
+  });
+  feature.bind();
+  assert.equal(added, 4);
+  feature.destroy();
+  assert.equal(removed, added);
+  ui.btn.click();
+  ui.status.click();
+  ui.sheet.click();
+  assert.deepEqual(opened, []);
+});
+
+test("share controls keep a 44px target and hidden still hides them", () => {
+  const chat = fs.readFileSync(new URL("../css/chat.css", import.meta.url), "utf8");
+  const sheets = fs.readFileSync(new URL("../css/sheets.css", import.meta.url), "utf8");
+  const chatShare = chat.slice(chat.indexOf("#sharebtn"));
+  const sheetShare = sheets.slice(sheets.indexOf("#sharesheet"));
+  assert.match(chatShare, /#sharebtn\.headtoggle\s*\{[^}]*min-height:\s*44px/);
+  assert.match(chatShare, /#sharestatus\s*\{[^}]*min-height:\s*44px/);
+  assert.match(chatShare, /#sharestatus\[hidden\]\s*\{[^}]*display:\s*none/);
+  assert.match(sheetShare, /#sharesheet label\s*\{[^}]*min-height:\s*44px/);
+  assert.match(sheetShare, /#sharesheet input\[type="radio"\]\s*\{[^}]*height:\s*44px/);
+  assert.match(sheetShare, /#sharesheet select\s*\{[^}]*min-height:\s*44px/);
+  assert.match(sheetShare, /#sharesheet #sh_apply,\s*#sharesheet #sh_stop\s*\{[^}]*min-height:\s*44px/);
+  assert.doesNotMatch(chatShare, /@import|url\(/);
+  assert.doesNotMatch(sheetShare, /@import|url\(/);
+});
