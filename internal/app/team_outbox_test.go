@@ -549,6 +549,83 @@ func TestOutboxSendsANewTitle(t *testing.T) {
 	}
 }
 
+func TestOutboxReadsTheNodeFileOnce(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		script := &outboxScript{}
+		box, _, _, _ := newShareBox(t, script)
+		if reads := countNodeReads(box); reads != 0 {
+			t.Fatalf("reads = %d", reads)
+		}
+	})
+	t.Run("one", func(t *testing.T) {
+		assertNodeReads(t, 1)
+	})
+	t.Run("three", func(t *testing.T) {
+		assertNodeReads(t, 3)
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		script := &outboxScript{}
+		box, dir, _, _ := newShareBox(t, script)
+		armCountedShares(t, dir, 1)
+		reads := 0
+		box.readNodes = func(string) ([]byte, error) {
+			reads++
+			return nil, errors.New("nodes unreadable")
+		}
+		box.tick(context.Background())
+		if reads != 1 {
+			t.Fatalf("reads = %d", reads)
+		}
+		assertNoStoredShare(t, dir, shareUID)
+	})
+}
+
+func assertNodeReads(t *testing.T, n int) {
+	t.Helper()
+	script := &outboxScript{}
+	box, dir, _, _ := newShareBox(t, script)
+	armCountedShares(t, dir, n)
+	if reads := countNodeReads(box); reads != 1 {
+		t.Fatalf("reads = %d", reads)
+	}
+	ids := []string{shareUID, shareUIDB, shareUIDC}
+	for i := 0; i < n; i++ {
+		stored, ok := storedShare(t, dir, ids[i])
+		if !ok || stored.State != "active" {
+			t.Fatalf("stored %s = %+v", ids[i], stored)
+		}
+	}
+}
+
+func countNodeReads(box *shareOutbox) int {
+	reads := 0
+	box.readNodes = func(dir string) ([]byte, error) {
+		reads++
+		return os.ReadFile(filepath.Join(dir, "nodes.jsonl"))
+	}
+	box.tick(context.Background())
+	return reads
+}
+
+func armCountedShares(t *testing.T, dir string, n int) {
+	t.Helper()
+	appendStoreLine(t, dir, []byte("{"))
+	appendStoreLine(t, dir, []byte(`{"type":"node"}`))
+	appendStoreLine(t, dir, []byte(`{"type":"transcript"}`))
+	appendNode(t, dir, "gone", "Gone")
+	appendDelete(t, dir, "gone")
+	nodes := []struct{ id, uid string }{
+		{shareNode, shareUID},
+		{"keep", shareUIDB},
+		{"plain", shareUIDC},
+	}
+	for i := 0; i < n; i++ {
+		appendNode(t, dir, nodes[i].id, "North")
+		writeChatLog(t, dir, nodes[i].id, nodes[i].uid, 1)
+		mustSaveShare(t, dir, team.Share{UID: nodes[i].uid, Node: nodes[i].id, Title: "North"})
+	}
+}
+
 func TestOutboxDropsATitleThatOpensAChannel(t *testing.T) {
 	const foreign = "1111222233334444"
 	t.Run("created", func(t *testing.T) {
