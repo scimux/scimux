@@ -203,6 +203,7 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 		sizeErr       error
 		base, segment int
 		agent         string
+		conflict      bool
 	)
 	if o.readLog != nil {
 		size, sizeErr = o.fileSize(path)
@@ -210,7 +211,12 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 			events = o.readLog(path)
 		}
 	} else {
-		events, size, sizeErr, base, segment, agent = o.grownLog(share, path)
+		events, size, sizeErr, base, segment, agent, conflict = o.grownLog(share, path)
+		if conflict {
+			// The log belongs to another chat. Stop the share and send nothing.
+			o.stop(ctx, entry, owner, share)
+			return
+		}
 	}
 	fresh := channelTitle(title)
 	batch, next, done := mirrorFrom(share, events, base, segment, agent)
@@ -302,13 +308,11 @@ func (o *shareOutbox) confirm(ctx context.Context, entry team.Entry) error {
 	return nil
 }
 
+// hasChat reports whether the node is still live. It does not read the
+// session log. grownLog checks the uid on the bytes it already reads.
 func (o *shareOutbox) hasChat(share team.Share, nodes map[string]nodeSnap) (string, bool) {
 	snap, ok := nodes[share.Node]
 	if !ok || !snap.live {
-		return "", false
-	}
-	id := sessionlog.ReadLogIdentity(shareLogPath(o.dataDir, share.Node))
-	if id.Status != sessionlog.IdentityOK || id.UID != share.UID {
 		return "", false
 	}
 	return snap.title, true
@@ -561,11 +565,17 @@ func (o *shareOutbox) stash(uid string, scan logScan) {
 
 // grownLog reads the new tail when the log only grew. A first look, a
 // shorter file, and a replaced file are read from the start. The entries
-// are numbered as ReadEvents numbers a full read.
-func (o *shareOutbox) grownLog(share team.Share, path string) (events []sessionlog.Event, size int64, sizeErr error, base, segment int, agent string) {
+// are numbered as ReadEvents numbers a full read. conflict means the log
+// is not this share's chat: the caller stops the share and sends nothing.
+func (o *shareOutbox) grownLog(share team.Share, path string) (events []sessionlog.Event, size int64, sizeErr error, base, segment int, agent string, conflict bool) {
 	info, err := o.statPath(path)
 	if err != nil {
-		return sessionlog.ReadEvents(path), 0, err, 0, 0, ""
+		// Stat can fail while the file is still readable. A missing file
+		// has no identity, so the share stops. A matching file is copied.
+		if !readIdentityMatches(path, share.UID) {
+			return nil, 0, err, 0, 0, "", true
+		}
+		return sessionlog.ReadEvents(path), 0, err, 0, 0, "", false
 	}
 	size = info.Size()
 	o.mu.Lock()
@@ -574,7 +584,7 @@ func (o *shareOutbox) grownLog(share team.Share, path string) (events []sessionl
 	start := int64(0)
 	can := ok && prev.haveInfo && os.SameFile(prev.info, info) && size >= prev.size
 	if can && size == prev.size && prev.done && prev.next == share.Next && prev.startSent == share.StartSent {
-		return nil, size, nil, 0, 0, ""
+		return nil, size, nil, 0, 0, "", false
 	}
 	// A dropped save leaves the stored share behind the next this look
 	// saved. Read the whole log again so the record numbers stay the ones
@@ -588,9 +598,16 @@ func (o *shareOutbox) grownLog(share team.Share, path string) (events []sessionl
 	}
 	raw, err := o.readRange(path, start, size)
 	if err != nil {
-		return nil, size, nil, 0, 0, ""
+		return nil, size, nil, 0, 0, "", false
 	}
 	parsed, watermark, records, seg, ag := parseLogTail(bytes.NewReader(raw), base, segment, agent)
+	if start == 0 {
+		if !logIdentityOK(parsed, share.UID) {
+			return nil, size, nil, 0, 0, "", true
+		}
+	} else if tailHasOtherUID(parsed, share.UID) {
+		return nil, size, nil, 0, 0, "", true
+	}
 	o.stash(share.UID, logScan{
 		offset:  start + watermark,
 		records: records,
@@ -598,7 +615,7 @@ func (o *shareOutbox) grownLog(share team.Share, path string) (events []sessionl
 		agent:   ag,
 		info:    info,
 	})
-	return parsed, size, nil, base, segment, agent
+	return parsed, size, nil, base, segment, agent, false
 }
 
 func (o *shareOutbox) statPath(path string) (os.FileInfo, error) {
@@ -612,12 +629,74 @@ func (o *shareOutbox) readRange(path string, offset, size int64) ([]byte, error)
 	if o.readFrom != nil {
 		return o.readFrom(path, offset)
 	}
+	if o.readLogAt != nil {
+		return o.readLogAt(path, offset)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 	return io.ReadAll(io.NewSectionReader(f, offset, size-offset))
+}
+
+// readIdentityMatches is ReadLogIdentity for a stat that failed. The file
+// may still be readable, and a missing file is not this share's chat.
+func readIdentityMatches(path, uid string) bool {
+	id := sessionlog.ReadLogIdentity(path)
+	if id.Status != sessionlog.IdentityOK {
+		return false
+	}
+	return id.UID == uid
+}
+
+// metaUID is a meta record's non-empty uid. Anything else is not a header,
+// which is the rule ReadLogIdentity uses.
+func metaUID(ev sessionlog.Event) (string, bool) {
+	if ev.T != "meta" || ev.Meta == nil || ev.Meta.UID == "" {
+		return "", false
+	}
+	return ev.Meta.UID, true
+}
+
+// logIdentityOK reports whether a whole log of parsed records is this
+// share's chat. The first non-empty meta uid wins. A later different uid
+// is a conflict. A log with no header is not the chat.
+func logIdentityOK(events []sessionlog.Event, uid string) bool {
+	seen := ""
+	have := false
+	for _, ev := range events {
+		id, ok := metaUID(ev)
+		if !ok {
+			continue
+		}
+		if !have {
+			seen, have = id, true
+			continue
+		}
+		if id != seen {
+			return false
+		}
+	}
+	if !have || seen != uid {
+		return false
+	}
+	return true
+}
+
+// tailHasOtherUID reports a header in the grown part whose uid is not the
+// share's. The bytes before that part were already accepted.
+func tailHasOtherUID(events []sessionlog.Event, uid string) bool {
+	for _, ev := range events {
+		id, ok := metaUID(ev)
+		if !ok {
+			continue
+		}
+		if id != uid {
+			return true
+		}
+	}
+	return false
 }
 
 // parseLogTail parses one slice of a session log. base, segment, and agent
