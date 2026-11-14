@@ -36,6 +36,11 @@ type shareOutbox struct {
 	logSize func(path string) (int64, error)
 	// readNodes reads nodes.jsonl. A test counts the calls. Nil reads the file.
 	readNodes func(dir string) ([]byte, error)
+	// readFrom reads a session log from an offset. A test records the offsets.
+	// Nil reads the file from that offset.
+	readFrom func(path string, offset int64) ([]byte, error)
+	// statLog is the size and identity check for a session log. Nil uses os.Stat.
+	statLog func(path string) (os.FileInfo, error)
 	// files is the process lock for team-shares.json, shared with the routes.
 	// A test that builds an outbox alone leaves it nil.
 	files *sync.Mutex

@@ -1506,3 +1506,429 @@ func TestKeepShareFieldsWritesOnlyRouteFields(t *testing.T) {
 		t.Fatalf("file = %q", raw)
 	}
 }
+
+func TestOutboxResumesAGrownLog(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	base := saveResumeShare(t, dir)
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	size1 := logBytes(t, dir)
+	appendOutbox(t, dir, sessionlog.Event{T: "source", Time: "2026-11-12T09:32:00Z", Source: &sessionlog.SourceEvent{Reason: "cut"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "two"})
+	box.tick(context.Background())
+	size2 := logBytes(t, dir)
+	appendOutbox(t, dir, sessionlog.Event{T: "assistant", Time: "2026-11-12T09:34:00Z", Text: "kept"})
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:35:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "muse", Created: "2026-11-12T09:35:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "assistant", Time: "2026-11-12T09:36:00Z", Text: "next"})
+	box.tick(context.Background())
+	if !reflect.DeepEqual(*offsets, []int64{0, size1, size2}) {
+		t.Fatalf("offsets = %v want 0,%d,%d", *offsets, size1, size2)
+	}
+	assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+}
+
+func TestOutboxRereadsATornLine(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	base := saveResumeShare(t, dir)
+	prefix := logBytes(t, dir)
+	torn := []byte(`{"t":"user","time":"2026-11-12T09:32:00Z","text":"torn-pending"`)
+	if _, err := appendRawLog(t, dir, torn); err != nil {
+		t.Fatal(err)
+	}
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	if strings.Contains(mirrorCall(t, snapshotCalls(calls)).body, "torn-pending") {
+		t.Fatal("torn line was sent")
+	}
+	if _, err := appendRawLog(t, dir, []byte("}\n")); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	if !reflect.DeepEqual(*offsets, []int64{0, prefix}) {
+		t.Fatalf("offsets = %v want 0,%d", *offsets, prefix)
+	}
+	assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+}
+
+func TestOutboxRereadsAShorterLog(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: strings.Repeat("q", 4000)})
+	saveResumeShare(t, dir)
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	before := logBytes(t, dir)
+	if err := os.WriteFile(chatLogPath(dir, shareNode), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "a"})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:32:00Z", Text: "b"})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "c"})
+	if logBytes(t, dir) >= before {
+		t.Fatal("replacement is not shorter")
+	}
+	mark := len(snapshotCalls(calls))
+	box.tick(context.Background())
+	if !reflect.DeepEqual(*offsets, []int64{0, 0}) {
+		t.Fatalf("offsets = %v", *offsets)
+	}
+	want, _, _ := mirrorBatch(storedBeforeNext(t, dir, 2), sessionlog.ReadEvents(chatLogPath(dir, shareNode)))
+	got := mirrorEntries(t, snapshotCalls(calls)[mark:])
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries = %s\nwant %s", entryKeys(got), entryKeys(want))
+	}
+}
+
+func TestOutboxRereadsAReplacedLog(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	saveResumeShare(t, dir)
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	first, err := os.Stat(chatLogPath(dir, shareNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(chatLogPath(dir, shareNode)); err != nil {
+		t.Fatal(err)
+	}
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:32:00Z", Text: "extra"})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:33:00Z", Text: "more"})
+	second, err := os.Stat(chatLogPath(dir, shareNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(first, second) || second.Size() <= first.Size() {
+		t.Fatal("replacement did not change identity and grow")
+	}
+	mark := len(snapshotCalls(calls))
+	box.tick(context.Background())
+	if !reflect.DeepEqual(*offsets, []int64{0, 0}) {
+		t.Fatalf("offsets = %v", *offsets)
+	}
+	want, _, _ := mirrorBatch(storedBeforeNext(t, dir, 2), sessionlog.ReadEvents(chatLogPath(dir, shareNode)))
+	got := mirrorEntries(t, snapshotCalls(calls)[mark:])
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries = %s\nwant %s", entryKeys(got), entryKeys(want))
+	}
+}
+
+func TestOutboxRereadsAfterARestart(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	saveResumeShare(t, dir)
+	first := watchLogReads(box)
+	box.tick(context.Background())
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:32:00Z", Text: "more"})
+	box2 := &shareOutbox{dataDir: dir, now: box.now, client: box.client}
+	second := watchLogReads(box2)
+	mark := len(snapshotCalls(calls))
+	box2.tick(context.Background())
+	if !reflect.DeepEqual(*first, []int64{0}) || !reflect.DeepEqual(*second, []int64{0}) {
+		t.Fatalf("first %v second %v", *first, *second)
+	}
+	want, _, _ := mirrorBatch(storedBeforeNext(t, dir, 2), sessionlog.ReadEvents(chatLogPath(dir, shareNode)))
+	got := mirrorEntries(t, snapshotCalls(calls)[mark:])
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries = %s\nwant %s", entryKeys(got), entryKeys(want))
+	}
+}
+
+func TestOutboxSendsNoRecordsWhenTheLogReadFails(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	offsets := []int64{}
+	box.readFrom = func(string, int64) ([]byte, error) {
+		offsets = append(offsets, 0)
+		return nil, errors.New("log unreadable")
+	}
+	box.tick(context.Background())
+	if !reflect.DeepEqual(offsets, []int64{0}) {
+		t.Fatalf("offsets = %v", offsets)
+	}
+	for _, c := range snapshotCalls(calls) {
+		if strings.Contains(c.body, "one") {
+			t.Fatalf("sent the log: %+v", snapshotCalls(calls))
+		}
+	}
+}
+
+func TestOutboxKeepsAPartialBatchAtTheSameOffset(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+	appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: "one"})
+	base := saveResumeShare(t, dir)
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	size1 := logBytes(t, dir)
+	for i := 0; i < 80; i++ {
+		appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:32:00Z", Text: "m" + strings.Repeat("x", 2) + string(rune('a'+i%26))})
+	}
+	box.tick(context.Background())
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.Next >= 82 {
+		t.Fatalf("growth tick finished the log: %+v", stored)
+	}
+	box.tick(context.Background())
+	if !reflect.DeepEqual(*offsets, []int64{0, size1, size1}) {
+		t.Fatalf("offsets = %v want 0,%d,%d", *offsets, size1, size1)
+	}
+	assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+}
+
+func TestOutboxCountsSkippedLogLinesLikeAFullRead(t *testing.T) {
+	t.Run("blank crlf and garbage", func(t *testing.T) {
+		meta, err := json.Marshal(sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := append(append([]byte{}, meta...), '\n')
+		raw = append(raw, '\n')
+		raw = append(raw, " \n"...)
+		raw = append(raw, "{\n"...)
+		raw = append(raw, "{\"t\":\"user\",\"time\":\"2026-11-12T09:31:00Z\",\"text\":\"crlf\"}\r\n"...)
+		raw = append(raw, "{\"t\":\"user\",\"time\":\"2026-11-12T09:32:00Z\",\"text\":\"plain\"}\n"...)
+		assertOneLogRead(t, raw)
+	})
+	t.Run("line across the buffer", func(t *testing.T) {
+		script := &outboxScript{}
+		box, dir, calls, _ := newShareBox(t, script)
+		appendNode(t, dir, shareNode, "North")
+		appendOutbox(t, dir, sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+		appendOutbox(t, dir, sessionlog.Event{T: "user", Time: "2026-11-12T09:31:00Z", Text: strings.Repeat("q", 70<<10)})
+		base := saveResumeShare(t, dir)
+		offsets := watchLogReads(box)
+		box.tick(context.Background())
+		if !reflect.DeepEqual(*offsets, []int64{0}) {
+			t.Fatalf("offsets = %v", *offsets)
+		}
+		assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+	})
+	t.Run("line over the record cap", func(t *testing.T) {
+		meta, err := json.Marshal(sessionlog.Event{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "claude", Created: "2026-11-12T09:30:00Z"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		user, err := json.Marshal(sessionlog.Event{T: "user", Time: "2026-11-12T09:32:00Z", Text: "after"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := append(append([]byte{}, meta...), '\n')
+		raw = append(raw, bytes.Repeat([]byte("x"), 8<<20+1)...)
+		raw = append(raw, '\n')
+		raw = append(raw, user...)
+		raw = append(raw, '\n')
+		assertOneLogRead(t, raw)
+	})
+}
+
+func TestOutboxReadsTheLogWhenTheSizeCheckFails(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	stats := 0
+	box.statLog = func(string) (os.FileInfo, error) {
+		stats++
+		return nil, errors.New("stat failed")
+	}
+	reads := 0
+	box.readFrom = func(string, int64) ([]byte, error) {
+		reads++
+		return nil, errors.New("read")
+	}
+	box.tick(context.Background())
+	if stats != 1 || reads != 0 {
+		t.Fatalf("stats %d reads %d", stats, reads)
+	}
+	if !strings.Contains(mirrorCall(t, snapshotCalls(calls)).body, "one") {
+		t.Fatal("size-check failure dropped the log")
+	}
+}
+
+func TestOutboxSendsNothingWhenTheLogVanishes(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	saveResumeShare(t, dir)
+	box.statLog = func(path string) (os.FileInfo, error) {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+		return info, nil
+	}
+	box.tick(context.Background())
+	for _, c := range snapshotCalls(calls) {
+		if strings.Contains(c.body, "one") {
+			t.Fatalf("sent a vanished log: %+v", snapshotCalls(calls))
+		}
+	}
+}
+
+func saveResumeShare(t *testing.T, dir string) team.Share {
+	t.Helper()
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Scope: "all", Title: "North"})
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok {
+		t.Fatal("missing share")
+	}
+	return stored
+}
+
+func storedBeforeNext(t *testing.T, dir string, next int) team.Share {
+	t.Helper()
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok {
+		t.Fatal("missing share")
+	}
+	stored.Next = next
+	stored.StartSent = true
+	return stored
+}
+
+func watchLogReads(box *shareOutbox) *[]int64 {
+	offsets := []int64{}
+	box.readFrom = func(path string, offset int64) ([]byte, error) {
+		offsets = append(offsets, offset)
+		return readLogRange(path, offset)
+	}
+	return &offsets
+}
+
+func readLogRange(path string, offset int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if offset > st.Size() {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return io.ReadAll(io.NewSectionReader(f, offset, st.Size()-offset))
+}
+
+func logBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	st, err := os.Stat(chatLogPath(dir, shareNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Size()
+}
+
+func appendRawLog(t *testing.T, dir string, raw []byte) (int, error) {
+	t.Helper()
+	f, err := os.OpenFile(chatLogPath(dir, shareNode), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	n, err := f.Write(raw)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	return n, err
+}
+
+func assertOneLogRead(t *testing.T, raw []byte) {
+	t.Helper()
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chatLogPath(dir, shareNode), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := saveResumeShare(t, dir)
+	offsets := watchLogReads(box)
+	box.tick(context.Background())
+	if !reflect.DeepEqual(*offsets, []int64{0}) {
+		t.Fatalf("offsets = %v", *offsets)
+	}
+	assertMirrorsMatchFullRead(t, dir, base, snapshotCalls(calls))
+}
+
+func assertMirrorsMatchFullRead(t *testing.T, dir string, base team.Share, calls []shareCall) {
+	t.Helper()
+	got := mirrorEntries(t, calls)
+	events := sessionlog.ReadEvents(chatLogPath(dir, base.Node))
+	var want []team.MirrorEntry
+	share := base
+	for guard := 0; guard < 8; guard++ {
+		batch, next, done := mirrorBatch(share, events)
+		want = append(want, batch...)
+		if done {
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("entries = %s\nwant %s", entryKeys(got), entryKeys(want))
+			}
+			return
+		}
+		if len(batch) == 0 {
+			t.Fatal("oracle made no progress")
+		}
+		share.Next = next
+		share.StartSent = true
+	}
+	t.Fatal("oracle did not finish")
+}
+
+func mirrorEntries(t *testing.T, calls []shareCall) []team.MirrorEntry {
+	t.Helper()
+	var out []team.MirrorEntry
+	for _, c := range calls {
+		if !strings.HasSuffix(c.path, "/mirror") {
+			continue
+		}
+		var body struct {
+			Entries []team.MirrorEntry `json:"entries"`
+		}
+		if err := json.Unmarshal([]byte(c.body), &body); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, body.Entries...)
+	}
+	return out
+}
+
+func entryKeys(es []team.MirrorEntry) string {
+	keys := make([]string, len(es))
+	for i, e := range es {
+		keys[i] = e.Key + ":" + string(e.Body)
+	}
+	return strings.Join(keys, "\n")
+}
