@@ -165,10 +165,16 @@ func (s *shareScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// shareCallMus guards a recorded call list. A hijacked request can still be
+// appending when the client returns, so the test must take the same lock.
+var shareCallMus sync.Map
+
 func recordShareServer(t *testing.T, script *shareScript) (*httptest.Server, *[]shareCall) {
 	t.Helper()
-	var mu sync.Mutex
+	mu := &sync.Mutex{}
 	var calls []shareCall
+	shareCallMus.Store(&calls, mu)
+	t.Cleanup(func() { shareCallMus.Delete(&calls) })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewReader(raw))
@@ -182,6 +188,10 @@ func recordShareServer(t *testing.T, script *shareScript) (*httptest.Server, *[]
 }
 
 func snapshotCalls(calls *[]shareCall) []shareCall {
+	if mu, ok := shareCallMus.Load(calls); ok {
+		mu.(*sync.Mutex).Lock()
+		defer mu.(*sync.Mutex).Unlock()
+	}
 	out := make([]shareCall, len(*calls))
 	copy(out, *calls)
 	return out
