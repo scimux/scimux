@@ -7688,3 +7688,418 @@ test("destroy removes the fold-all listener", () => {
   feature.destroy();
   assert.equal(roots.chatfoldall.listenerCount("click"), 0);
 });
+
+/* Keyboard focus after a fold. The rebuild destroys the control that was
+ * activated. When that control held the focus, the focus returns to what
+ * replaced it, and focus() is called with preventScroll so the page is not
+ * scrolled a second time. The fake DOM does not focus a button on click, so
+ * each test sets activeElement itself. A control that did not hold the focus
+ * is left alone, and a later poll does not move the focus. */
+
+function foldFocusDoc(){
+  const log = [];
+  const doc = {
+    activeElement: null,
+    createElement(tag){ return el(tag); },
+    querySelector(){ return null; },
+  };
+  function watch(node, mark){
+    node.focus = opts => {
+      log.push({ ...mark, opts, node });
+      doc.activeElement = node;
+    };
+    return node;
+  }
+  const elsewhere = watch(el("button"), { role: "elsewhere" });
+  doc.activeElement = elsewhere;
+  return { log, doc, watch, elsewhere };
+}
+
+function installFoldFocus(msgs, doc, log, top){
+  let html = msgs.innerHTML;
+  Object.defineProperty(msgs, "innerHTML", {
+    configurable: true,
+    get(){ return html; },
+    set(v){
+      html = String(v);
+      msgs.children.length = 0;
+      const btnRe = /data-fold="(open|close)" data-foldkey="([^"]+)"/g;
+      let m;
+      while ((m = btnRe.exec(html))){
+        const kind = m[1];
+        const key = m[2];
+        const btn = el("button", {
+          className: "foldtoggle",
+          dataset: { fold: kind, foldkey: key },
+        });
+        btn.offsetTop = top;
+        btn.focus = opts => {
+          log.push({ role: "fold", kind, key, opts, node: btn });
+          doc.activeElement = btn;
+        };
+        const row = el("div", { className: "foldrow" });
+        row.appendChild(btn);
+        msgs.appendChild(row);
+      }
+      const turnRe = /class="(turn [^"]*)"[^>]*data-bk="([^"]+)"/g;
+      let t;
+      while ((t = turnRe.exec(html))){
+        const turn = el("div", { className: t[1], dataset: { bk: t[2] } });
+        turn.offsetTop = top;
+        msgs.appendChild(turn);
+      }
+    },
+  });
+}
+
+function revealFoldControls(msgs, doc, log, top){
+  installFoldFocus(msgs, doc, log, top);
+  msgs.innerHTML = msgs.innerHTML;
+}
+
+function foldToggleButtons(msgs){
+  const out = [];
+  const walk = n => {
+    if (n.dataset && n.dataset.fold) out.push(n);
+    for (const c of n.children || []) walk(c);
+  };
+  walk(msgs);
+  return out;
+}
+
+function holdFoldScroll(msgs, scrollTop){
+  msgs.scrollHeight = 2000;
+  msgs.clientHeight = 400;
+  msgs.scrollTop = scrollTop;
+}
+
+function wideFoldTurns(){
+  const text = {
+    2: "first", 3: "hid-a", 4: "hid-b", 5: "kept",
+    6: "o6", 7: "o7", 8: "o8", 9: "o9", 10: "o10", 11: "o11", 12: "o12", 13: "o13",
+    14: "last",
+  };
+  const turns = [foldBubble("user", 1, "prompt-one")];
+  for (let record = 2; record <= 14; record++){
+    turns.push(foldBubble("assistant", record, text[record]));
+  }
+  return turns;
+}
+
+function wideFoldState(){
+  const open = [];
+  for (let record = 6; record <= 13; record++) open.push("0/" + record);
+  return { all: false, turns: ["0/2"], open };
+}
+
+function wideFoldDeps(doc){
+  return {
+    document: doc,
+    icons: FOLD_ICONS,
+    bookmarks: () => [{ uid: "log-1", segment: 0, record: 5, text: "kept" }],
+    markerVersion: () => 1,
+  };
+}
+
+function focusSplitTurns(){
+  return [
+    foldBubble("user", 1, "prompt-one"),
+    foldBubble("assistant", 2, "a-first"),
+    foldBubble("assistant", 3, "a-hid"),
+    foldBubble("assistant", 4, "a-hid2"),
+    foldBubble("assistant", 5, "a-keep"),
+    foldBubble("assistant", 6, "a-open"),
+    foldBubble("assistant", 7, "a-open2"),
+    foldBubble("assistant", 8, "a-last"),
+    foldBubble("user", 10, "prompt-two"),
+    foldBubble("assistant", 11, "b-first"),
+    foldBubble("assistant", 12, "b-left"),
+    foldBubble("assistant", 13, "b-left2"),
+    foldBubble("assistant", 14, "b-keep"),
+    foldBubble("assistant", 15, "b-right"),
+    foldBubble("assistant", 16, "b-right2"),
+    foldBubble("assistant", 17, "b-last"),
+  ];
+}
+
+function focusSplitDeps(doc){
+  return {
+    document: doc,
+    icons: FOLD_ICONS,
+    bookmarks: () => [
+      { uid: "log-1", segment: 0, record: 5, text: "a-keep" },
+      { uid: "log-1", segment: 0, record: 14, text: "b-keep" },
+    ],
+    markerVersion: () => 1,
+  };
+}
+
+test("focused Show control returns focus to the Fold control of the same range", async () => {
+  const focus = foldFocusDoc();
+  const { ctx, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    deps: { ...twoRangeDeps(), document: focus.doc },
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 40);
+  revealFoldControls(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const show = foldToggleButtons(ctx.roots.msgs).find(btn =>
+    btn.dataset.fold === "open" && btn.dataset.foldkey === "0/6");
+  show.offsetTop = 500;
+  focus.doc.activeElement = show;
+  firstListener(ctx.roots.msgs, "click")({ target: show });
+  await foldSettle();
+  assert.ok(html().includes(">right-c<"));
+  assert.equal(html().includes(">left-a<"), false);
+  assert.equal(focus.log.length, 1);
+  assert.equal(focus.log[0].role, "fold");
+  assert.equal(focus.log[0].kind, "close");
+  assert.equal(focus.log[0].key, "0/6");
+  assert.deepEqual(focus.log[0].opts, { preventScroll: true });
+  assert.equal(focus.doc.activeElement, focus.log[0].node);
+  assert.equal(focus.doc.activeElement.dataset.foldkey, "0/6");
+  assert.equal(ctx.roots.msgs.scrollTop, 340);
+  ctx.feature.destroy();
+});
+
+test("Show control without focus does not move focus", async () => {
+  const focus = foldFocusDoc();
+  const { ctx, html } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    deps: { ...twoRangeDeps(), document: focus.doc },
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 40);
+  revealFoldControls(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const show = foldToggleButtons(ctx.roots.msgs).find(btn =>
+    btn.dataset.fold === "open" && btn.dataset.foldkey === "0/6");
+  show.offsetTop = 500;
+  firstListener(ctx.roots.msgs, "click")({ target: show });
+  await foldSettle();
+  assert.ok(html().includes(">right-c<"));
+  assert.equal(focus.log.length, 0);
+  assert.equal(focus.doc.activeElement, focus.elsewhere);
+  assert.equal(ctx.roots.msgs.scrollTop, 340);
+  ctx.feature.destroy();
+});
+
+test("focused upper Fold control returns focus to the Show row of that range", async () => {
+  const focus = foldFocusDoc();
+  const { ctx, html } = await renderFolded({
+    turns: wideFoldTurns(),
+    state: wideFoldState(),
+    echo: false,
+    deps: wideFoldDeps(focus.doc),
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 100);
+  revealFoldControls(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const closes = foldToggleButtons(ctx.roots.msgs).filter(btn =>
+    btn.dataset.fold === "close" && btn.dataset.foldkey === "0/6");
+  assert.equal(closes.length, 2);
+  closes[0].offsetTop = 200;
+  focus.doc.activeElement = closes[0];
+  firstListener(ctx.roots.msgs, "click")({ target: closes[0] });
+  await foldSettle();
+  assert.ok(html().includes(foldShowHTML(8, "0/6")));
+  assert.ok(html().includes(foldShowHTML(2, "0/3")));
+  assert.equal(focus.log.length, 1);
+  assert.equal(focus.log[0].kind, "open");
+  assert.equal(focus.log[0].key, "0/6");
+  assert.deepEqual(focus.log[0].opts, { preventScroll: true });
+  assert.equal(focus.doc.activeElement.dataset.fold, "open");
+  assert.equal(focus.doc.activeElement.dataset.foldkey, "0/6");
+  assert.equal(ctx.roots.msgs.scrollTop, 700);
+  ctx.feature.destroy();
+});
+
+test("focused lower Fold control returns focus to the Show row of that range", async () => {
+  const focus = foldFocusDoc();
+  const { ctx, html } = await renderFolded({
+    turns: wideFoldTurns(),
+    state: wideFoldState(),
+    echo: false,
+    deps: wideFoldDeps(focus.doc),
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 100);
+  revealFoldControls(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const closes = foldToggleButtons(ctx.roots.msgs).filter(btn =>
+    btn.dataset.fold === "close" && btn.dataset.foldkey === "0/6");
+  assert.equal(closes.length, 2);
+  closes[1].offsetTop = 500;
+  focus.doc.activeElement = closes[1];
+  firstListener(ctx.roots.msgs, "click")({ target: closes[1] });
+  await foldSettle();
+  assert.ok(html().includes(foldShowHTML(8, "0/6")));
+  assert.ok(html().includes(foldShowHTML(2, "0/3")));
+  assert.equal(focus.log.length, 1);
+  assert.equal(focus.log[0].kind, "open");
+  assert.equal(focus.log[0].key, "0/6");
+  assert.deepEqual(focus.log[0].opts, { preventScroll: true });
+  assert.equal(focus.doc.activeElement.dataset.fold, "open");
+  assert.equal(focus.doc.activeElement.dataset.foldkey, "0/6");
+  assert.equal(ctx.roots.msgs.scrollTop, 400);
+  ctx.feature.destroy();
+});
+
+test("Fold control without focus does not move focus", async () => {
+  const focus = foldFocusDoc();
+  const { ctx, html } = await renderFolded({
+    turns: wideFoldTurns(),
+    state: wideFoldState(),
+    echo: false,
+    deps: wideFoldDeps(focus.doc),
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 100);
+  revealFoldControls(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const closes = foldToggleButtons(ctx.roots.msgs).filter(btn =>
+    btn.dataset.fold === "close" && btn.dataset.foldkey === "0/6");
+  closes[1].offsetTop = 500;
+  firstListener(ctx.roots.msgs, "click")({ target: closes[1] });
+  await foldSettle();
+  assert.ok(html().includes(foldShowHTML(8, "0/6")));
+  assert.equal(focus.log.length, 0);
+  assert.equal(focus.doc.activeElement, focus.elsewhere);
+  assert.equal(ctx.roots.msgs.scrollTop, 400);
+  ctx.feature.destroy();
+});
+
+test("focused fold action returns focus to the first Show row of that turn", async () => {
+  const focus = foldFocusDoc();
+  const { ctx, store, html } = await renderFolded({
+    turns: focusSplitTurns(),
+    state: { all: false, turns: ["0/2"], open: ["0/6", "0/7"] },
+    echo: false,
+    deps: focusSplitDeps(focus.doc),
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 40);
+  installFoldFocus(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const anchor = el("div", { className: "turn assistant", dataset: { bk: "i:9" } });
+  anchor.offsetTop = 500;
+  ctx.roots.msgs.appendChild(anchor);
+  firstListener(ctx.roots.msgs, "click")({ target: anchor });
+  const btn = el("button", { dataset: { bact: "fold" } });
+  focus.doc.activeElement = btn;
+  firstListener(ctx.roots.msgs, "click")({ target: btn });
+  await foldSettle();
+  assert.deepEqual(readStoredFold(store), {
+    all: false, turns: ["0/2", "0/11"], open: ["0/6", "0/7"],
+  });
+  assert.ok(html().includes(foldShowHTML(2, "0/12")));
+  assert.ok(html().includes(foldShowHTML(2, "0/3")));
+  assert.equal(focus.log.length, 1);
+  assert.equal(focus.log[0].kind, "open");
+  assert.equal(focus.log[0].key, "0/12");
+  assert.deepEqual(focus.log[0].opts, { preventScroll: true });
+  assert.equal(focus.doc.activeElement.dataset.foldkey, "0/12");
+  assert.equal(ctx.roots.msgs.scrollTop, 340);
+  ctx.feature.destroy();
+});
+
+test("fold action without focus does not move focus", async () => {
+  const focus = foldFocusDoc();
+  const { ctx, store } = await renderFolded({
+    turns: focusSplitTurns(),
+    state: { all: false, turns: ["0/2"], open: ["0/6", "0/7"] },
+    echo: false,
+    deps: focusSplitDeps(focus.doc),
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 40);
+  installFoldFocus(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const anchor = el("div", { className: "turn assistant", dataset: { bk: "i:9" } });
+  anchor.offsetTop = 500;
+  ctx.roots.msgs.appendChild(anchor);
+  firstListener(ctx.roots.msgs, "click")({ target: anchor });
+  const btn = el("button", { dataset: { bact: "fold" } });
+  firstListener(ctx.roots.msgs, "click")({ target: btn });
+  await foldSettle();
+  assert.deepEqual(readStoredFold(store), {
+    all: false, turns: ["0/2", "0/11"], open: ["0/6", "0/7"],
+  });
+  assert.equal(focus.log.length, 0);
+  assert.equal(focus.doc.activeElement, focus.elsewhere);
+  assert.equal(ctx.roots.msgs.scrollTop, 340);
+  ctx.feature.destroy();
+});
+
+test("focused Fold all control returns focus to the info button", async () => {
+  const focus = foldFocusDoc();
+  const { ctx } = await renderFolded({
+    turns: foldAgents(4),
+    state: { all: false, turns: [], open: [] },
+    echo: false,
+    deps: { icons: FOLD_ICONS, document: focus.doc },
+  });
+  ctx.feature.bind();
+  focus.watch(ctx.roots.infobtn, { role: "infobtn" });
+  holdFoldScroll(ctx.roots.msgs, 120);
+  installFoldFocus(ctx.roots.msgs, focus.doc, focus.log, 800);
+  focus.doc.activeElement = ctx.roots.chatfoldall;
+  firstListener(ctx.roots.chatfoldall, "click")({ target: ctx.roots.chatfoldall });
+  await foldSettle();
+  assert.equal(ctx.roots.chatfoldall.hidden, true);
+  assert.equal(focus.log.length, 1);
+  assert.equal(focus.log[0].role, "infobtn");
+  assert.deepEqual(focus.log[0].opts, { preventScroll: true });
+  assert.equal(focus.doc.activeElement, ctx.roots.infobtn);
+  assert.equal(ctx.roots.msgs.scrollTop, 120);
+  ctx.feature.destroy();
+});
+
+test("Fold all control without focus does not move focus", async () => {
+  const focus = foldFocusDoc();
+  const { ctx } = await renderFolded({
+    turns: foldAgents(4),
+    state: { all: false, turns: [], open: [] },
+    echo: false,
+    deps: { icons: FOLD_ICONS, document: focus.doc },
+  });
+  ctx.feature.bind();
+  focus.watch(ctx.roots.infobtn, { role: "infobtn" });
+  holdFoldScroll(ctx.roots.msgs, 120);
+  installFoldFocus(ctx.roots.msgs, focus.doc, focus.log, 800);
+  firstListener(ctx.roots.chatfoldall, "click")({ target: ctx.roots.chatfoldall });
+  await foldSettle();
+  assert.equal(ctx.roots.chatfoldall.hidden, true);
+  assert.equal(focus.log.length, 0);
+  assert.equal(focus.doc.activeElement, focus.elsewhere);
+  assert.equal(ctx.roots.msgs.scrollTop, 120);
+  ctx.feature.destroy();
+});
+
+test("a poll after a fold action does not move focus", async () => {
+  const focus = foldFocusDoc();
+  const turns = twoRangeTurns();
+  const { ctx, html } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    deps: { ...twoRangeDeps(), document: focus.doc },
+  });
+  ctx.feature.bind();
+  holdFoldScroll(ctx.roots.msgs, 40);
+  revealFoldControls(ctx.roots.msgs, focus.doc, focus.log, 800);
+  const show = foldToggleButtons(ctx.roots.msgs).find(btn =>
+    btn.dataset.fold === "open" && btn.dataset.foldkey === "0/6");
+  show.offsetTop = 500;
+  focus.doc.activeElement = show;
+  firstListener(ctx.roots.msgs, "click")({ target: show });
+  await foldSettle();
+  assert.ok(html().includes(">right-c<"));
+  const held = focus.doc.activeElement;
+  const calls = focus.log.length;
+  turns.push(foldBubble("assistant", 9, "arrived"));
+  await ctx.feature.render();
+  assert.ok(html().includes(">arrived<"));
+  assert.equal(focus.doc.activeElement, held);
+  assert.equal(focus.log.length, calls);
+  ctx.feature.destroy();
+});
