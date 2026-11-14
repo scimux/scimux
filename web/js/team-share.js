@@ -57,6 +57,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   let selected = "";
   let view = null;
   let sheetNode = "";
+  let armed = false;
   let sheetBusy = false;
   let generation = 0;
   let pendingLoads = 0;
@@ -164,8 +165,13 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   }
 
   function select(node) {
+    const shown = sheetNode;
     selected = node;
     hideControls();
+    if (shown && shown !== node) {
+      sheetNode = "";
+      closeSheets();
+    }
     if (off) return;
     return beginLoad(node);
   }
@@ -208,6 +214,13 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     apply.textContent = text;
   }
 
+  function setStop(hidden) {
+    const stop = $("#sh_stop");
+    stop.hidden = hidden;
+    stop.disabled = false;
+    stop.textContent = "Stop sharing";
+  }
+
   function serverFields() {
     let html = "<fieldset><legend>Server</legend>";
     for (let i = 0; i < joined.length; i++) {
@@ -229,23 +242,75 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       "<p>Tool details stay on this computer.</p>";
   }
 
+  function accessOf(seatId) {
+    if (!view || !Array.isArray(view.members)) return "";
+    for (const member of view.members) {
+      if (member.seat !== seatId) continue;
+      if (member.access === "write") return "write";
+      if (member.access === "read") return "read";
+      return "";
+    }
+    return "";
+  }
+
   function option(value, label, on) {
     return '<option value="' + value + '"' + (on ? " selected" : "") + ">" + label + "</option>";
   }
 
   function personRow(seat) {
+    const access = accessOf(seat.id);
     return "<label>" + esc(seat.name) +
       '<select data-seat="' + esc(seat.id) + '" aria-label="' + esc(seat.name) + '">' +
-      option("", "No access", true) +
-      option("read", "Can view", false) +
-      option("write", "Can comment", false) +
+      option("", "No access", access === "") +
+      option("read", "Can view", access === "read") +
+      option("write", "Can comment", access === "write") +
       "</select></label>";
   }
 
-  function renderNew() {
-    $("#sh_body").innerHTML = serverFields() + scopeFields() + '<div id="sh_people">Loading people…</div>';
+  function renderNew(body) {
+    body.innerHTML = serverFields() + scopeFields() + '<div id="sh_people">Loading people…</div>';
     setApply("Share chat", false, false);
-    $("#sh_stop").hidden = true;
+    setStop(true);
+  }
+
+  function renderActive(body) {
+    const scope = view.scope === "all" ? "Entire history" : "From now on";
+    body.innerHTML =
+      "<p>" + esc(nameOf(view.server)) + "</p>" +
+      "<p>" + scope + "</p>" +
+      "<p>To change the server or the scope, stop sharing and share again.</p>" +
+      '<div id="sh_people">Loading people…</div>' +
+      "<p>Members keep what they already received.</p>";
+    setApply("Save people", false, true);
+    setStop(false);
+  }
+
+  function renderEnded(body) {
+    body.innerHTML =
+      "<p>" + esc(shareStatusText(view, nameOf(view.server))) + "</p>" +
+      "<p>Members keep what they already received.</p>";
+    setApply("", true, true);
+    setStop(false);
+  }
+
+  function renderStopping(body) {
+    body.innerHTML = "<p>" + esc(shareStatusText(view, nameOf(view.server))) + "</p>";
+    setApply("", true, true);
+    setStop(true);
+  }
+
+  function renderSheet() {
+    armed = false;
+    const body = $("#sh_body");
+    if (!view) renderNew(body);
+    else if (view.state === "active") renderActive(body);
+    else if (view.state === "lost" || view.state === "full") renderEnded(body);
+    else renderStopping(body);
+  }
+
+  function wantsPeople() {
+    if (!view) return true;
+    return view.state === "active";
   }
 
   function checkedValue(name, fallback) {
@@ -253,6 +318,11 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       if (input.name === name && input.checked) return input.value;
     }
     return fallback;
+  }
+
+  function seatServer() {
+    if (view) return view.server;
+    return checkedValue("sh_server", joined[0].id);
   }
 
   function chosenMembers() {
@@ -266,11 +336,36 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   }
 
   function putBody() {
-    return {
-      server: checkedValue("sh_server", joined[0].id),
-      scope: checkedValue("sh_scope", "from_now"),
-      members: chosenMembers(),
-    };
+    if (!view) {
+      return {
+        server: checkedValue("sh_server", joined[0].id),
+        scope: checkedValue("sh_scope", "from_now"),
+        members: chosenMembers(),
+      };
+    }
+    return { server: view.server, scope: view.scope, members: chosenMembers() };
+  }
+
+  function sameAsView() {
+    for (const sel of $("#sh_body").querySelectorAll("select")) {
+      if (sel.value !== accessOf(sel.dataset.seat)) return false;
+    }
+    return true;
+  }
+
+  function syncApply() {
+    const apply = $("#sh_apply");
+    if (!view) {
+      apply.disabled = false;
+      return;
+    }
+    apply.disabled = sameAsView();
+  }
+
+  function applyShouldDisable() {
+    if ($("#sh_apply").hidden) return true;
+    if (!view) return false;
+    return sameAsView();
   }
 
   function loadSeats(serverId) {
@@ -290,6 +385,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     const host = $("#sh_people");
     if (err) {
       host.textContent = shareErrorText(codeOf(err));
+      syncApply();
       return;
     }
     const seats = body && Array.isArray(body.seats) ? body.seats : [];
@@ -300,29 +396,73 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     }
     if (others.length === 0) {
       host.textContent = "Nobody else has joined this server yet.";
+      syncApply();
       return;
     }
     host.innerHTML = others.map(personRow).join("");
+    syncApply();
+  }
+
+  function showSheet() {
+    clearNote();
+    renderSheet();
+    if (wantsPeople()) loadSeats(seatServer());
   }
 
   function onOpen() {
-    if (view) return;
     sheetNode = selected;
-    clearNote();
-    renderNew();
-    loadSeats(checkedValue("sh_server", joined[0].id));
+    showSheet();
     openSheet("sharesheet");
   }
 
   function onSheetChange(ev) {
-    if (ev.target.name !== "sh_server") return;
-    loadSeats(ev.target.value);
+    const target = ev.target;
+    if (target.name === "sh_server") {
+      disarmStop();
+      loadSeats(target.value);
+      return;
+    }
+    if (target.tagName === "SELECT") syncApply();
+  }
+
+  function onSheetClick(ev) {
+    if (ev.target === $("#sh_stop")) {
+      onStop();
+      return;
+    }
+    disarmStop();
+    if (ev.target === $("#sh_apply")) onApply();
+  }
+
+  function disarmStop() {
+    if (!armed) return;
+    armed = false;
+    $("#sh_stop").textContent = "Stop sharing";
+  }
+
+  function onStop() {
+    if (sheetBusy) return;
+    const stop = $("#sh_stop");
+    if (!armed) {
+      armed = true;
+      stop.textContent = "Confirm stop";
+      if (doc.activeElement === stop) stop.focus();
+      return;
+    }
+    sheetBusy = true;
+    $("#sh_apply").disabled = true;
+    stop.disabled = true;
+    const pending = api("/api/team/shares/" + selected, { method: "DELETE" });
+    enqueue(() => finishDelete(pending));
   }
 
   function onApply() {
     if (sheetBusy) return;
     const apply = $("#sh_apply");
-    if (apply.hidden || apply.disabled) return;
+    if (apply.hidden) return;
+    if (apply.disabled) return;
+    const restore = doc.activeElement === apply;
+    const hadView = Boolean(view);
     sheetBusy = true;
     apply.disabled = true;
     $("#sh_stop").disabled = true;
@@ -330,24 +470,50 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       method: "PUT",
       body: JSON.stringify(putBody()),
     });
-    enqueue(() => finishPut(pending));
+    enqueue(() => finishPut(pending, hadView, restore));
   }
 
-  function onSheetClick(ev) {
-    if (ev.target === $("#sh_apply")) onApply();
-  }
-
-  async function finishPut(pending) {
+  async function finishPut(pending, hadView, restore) {
     try {
       view = await pending;
       paintHeader();
-      $("#sh_live").textContent = "Sharing started.";
+      showSheet();
+      $("#sh_live").textContent = hadView ? "People updated." : "Sharing started.";
+      if (restore) $("#sh_apply").focus();
     } catch (err) {
       showNote(codeOf(err));
-      $("#sh_apply").disabled = false;
       $("#sh_stop").disabled = false;
+      $("#sh_apply").disabled = applyShouldDisable();
     } finally {
       sheetBusy = false;
+    }
+  }
+
+  function markStopped() {
+    view = null;
+    paintHeader();
+    sheetNode = "";
+    closeSheets();
+    $("#sh_live").textContent = "Sharing stopped.";
+  }
+
+  async function finishDelete(pending) {
+    try {
+      const body = await pending;
+      if (typeof body === "object") {
+        view = body;
+        paintHeader();
+        showSheet();
+      } else {
+        markStopped();
+      }
+    } catch (err) {
+      if (err.status === 404) markStopped();
+      else showNote(codeOf(err));
+    } finally {
+      sheetBusy = false;
+      $("#sh_stop").disabled = false;
+      $("#sh_apply").disabled = applyShouldDisable();
     }
   }
 
