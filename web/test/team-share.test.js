@@ -1593,3 +1593,25 @@ test("a delete answer of 202 for the previous chat is not painted on the next on
   assert.equal(ui.btn.hidden, false);
   assert.equal(ui.status.textContent, shareStatusText(real, "North"));
 });
+
+test("a late roster after stopping changes nothing and settled resolves", async () => {
+  const seatsGate = deferred();
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return seatsGate.promise;
+    if (call.method === "DELETE") return viewOf({ state: "stopping" });
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await until(() => ui.calls.some((call) => call.path.endsWith("/seats")));
+  ui.stop.click();
+  ui.stop.click();
+  await until(() => ui.body.textContent.includes("Stopping sharing"));
+  assert.equal(ui.body.querySelector("#sh_people"), null);
+  seatsGate.resolve(roster([selfSeat(), blue]));
+  await assert.doesNotReject(() => ui.feature.settled());
+  assert.match(ui.body.textContent, /Stopping sharing…/);
+  assert.equal(ui.body.querySelector("#sh_people"), null);
+});
