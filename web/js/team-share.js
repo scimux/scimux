@@ -315,7 +315,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
 
   function shareToken(v) {
     if (!v) return "";
-    return String(v.uid) + "\n" + String(v.state);
+    return String(v.uid) + "\n" + String(v.state) + "\n" + String(v.server) + "\n" + String(v.scope) + "\n" + String(v.shared_at);
   }
 
   function rememberDrawn() {
