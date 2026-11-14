@@ -1336,6 +1336,9 @@ export function createChatFeature(deps){
   let foldRows = [];
   let foldCanAny = false;
   let foldAnchor = null;
+  /* Where to put the focus after this fold, or null when the control that
+     started it did not hold the focus. Cleared once the rebuild is queued. */
+  let foldReturnFocus = null;
   /* Per-node chat poll validator (ETag). Keyed by node id so a tag from A is
      never sent for B; cleared on node switch (onSelectChange). */
   let chatETag = { node: "", etag: "" };
@@ -1658,7 +1661,9 @@ export function createChatFeature(deps){
   function commitFold(){
     if (foldUID && d.foldStorage) writeFoldState(d.foldStorage, foldUID, foldState);
     chatSig = "";
-    refreshChat();
+    const restoreFocus = foldReturnFocus;
+    foldReturnFocus = null;
+    refreshChat(restoreFocus);
   }
 
   /* Distance from the top of the scroll area, so the clicked control can be
@@ -1700,6 +1705,48 @@ export function createChatFeature(deps){
     const node = findFoldAnchor(el, anchor);
     if (!node || node.offsetTop == null) return;
     el.scrollTop = node.offsetTop - anchor.distance;
+  }
+
+  function controlHasFocus(node){
+    return doc.activeElement === node;
+  }
+
+  /* A plain focus() scrolls the target into view and would move the reader
+     a second time, after the anchor above has already placed them. */
+  function focusWithoutScroll(node){
+    if (node) node.focus({ preventScroll: true });
+  }
+
+  function firstShowOfTurn(el, firstKey){
+    const owned = new Set();
+    for (let i = 0; i < foldTurnEntries.length; i++){
+      const entry = foldTurnEntries[i];
+      if (entry.firstKey !== firstKey) continue;
+      const keys = entry.bubbleKeys;
+      for (let k = 0; k < keys.length; k++) owned.add(keys[k]);
+      break;
+    }
+    let target = null;
+    for (let i = 0; i < foldRows.length; i++){
+      const row = foldRows[i];
+      if (row.kind !== "open" || !owned.has(row.key)) continue;
+      target = findFoldControl(el, "open", row.key);
+      break;
+    }
+    return target;
+  }
+
+  function restoreFoldFocus(el, focus){
+    if (focus.where === "info"){
+      focusWithoutScroll(infobtn);
+      return;
+    }
+    if (focus.where === "turn"){
+      focusWithoutScroll(firstShowOfTurn(el, focus.firstKey));
+      return;
+    }
+    const kind = focus.kind === "open" ? "close" : "open";
+    focusWithoutScroll(findFoldControl(el, kind, focus.key));
   }
 
   /* A jump to a hidden bubble opens that bubble's range before the transcript
@@ -1748,12 +1795,14 @@ export function createChatFeature(deps){
     }
     if (!keys) return;
     rememberFoldAnchor(btn, { kind, key });
+    foldReturnFocus = controlHasFocus(btn) ? { where: "range", kind, key } : null;
     if (kind === "open") foldState = openRange(foldState, keys);
     else foldState = closeRange(foldState, keys);
     commitFold();
   }
 
   function onFoldAllClick(){
+    foldReturnFocus = controlHasFocus(chatfoldall) ? { where: "info" } : null;
     foldState = foldAll(foldState);
     foldAnchor = null;
     commitFold();
@@ -2164,7 +2213,7 @@ export function createChatFeature(deps){
     msgs.scrollTop = msgs.scrollHeight;
   }
 
-  async function refreshChat(){
+  async function refreshChat(restoreFocus){
     const n = nodeById(g("sel", ""));
     if (!n){
       foldUID = "";
@@ -2490,6 +2539,7 @@ export function createChatFeature(deps){
     /* Unconditional clamp backstop after every rebuild — overscroll from a
        shrink or a stale offset never leaves a blank viewport. */
     clampChatScroll(el);
+    if (restoreFocus) restoreFoldFocus(el, restoreFocus);
     const onRendered = (node, event, handler) => {
       if (!node || typeof node.addEventListener !== "function") return;
       node.addEventListener(event, handler);
@@ -2822,6 +2872,7 @@ export function createChatFeature(deps){
         const entry = foldByBK[tappedTurn];
         if (entry){
           rememberFoldAnchor(q(msgs, `.turn[data-bk="${tappedTurn}"]`), { kind: "bubble", bk: tappedTurn });
+          foldReturnFocus = controlHasFocus(ba) ? { where: "turn", firstKey: entry.firstKey } : null;
           foldState = foldTurn(foldState, { turns: foldTurnEntries }, entry.firstKey);
           tappedTurn = "";
           commitFold();
