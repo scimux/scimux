@@ -357,10 +357,10 @@ func TestCopyRejectsABadPath(t *testing.T) {
 	cases := []CopyID{
 		{},
 		{Server: "abcd", Owner: id.Owner, Chat: id.Chat, Generation: id.Generation},
-		{Server: strings.ToUpper(id.Server), Owner: id.Owner, Chat: id.Chat, Generation: id.Generation},
+		{Server: strings.ToUpper("a" + id.Server[1:]), Owner: id.Owner, Chat: id.Chat, Generation: id.Generation},
 		{Server: id.Server, Owner: "abcd", Chat: id.Chat, Generation: id.Generation},
 		{Server: id.Server, Owner: id.Owner, Chat: "main", Generation: id.Generation},
-		{Server: id.Server, Owner: id.Owner, Chat: strings.ToUpper(id.Chat), Generation: id.Generation},
+		{Server: id.Server, Owner: id.Owner, Chat: strings.ToUpper("a" + id.Chat[1:]), Generation: id.Generation},
 		{Server: id.Server, Owner: id.Owner, Chat: id.Chat, Generation: "abcd"},
 		{Server: id.Server + "/x", Owner: id.Owner, Chat: id.Chat, Generation: id.Generation},
 	}
