@@ -44,6 +44,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   a write happens only from an explicit join or forget.
   A damaged file is never overwritten.
   With the gate off it is neither read nor written.
+- **Shared chats name a server and who may read them.** `team-shares.json`
+  holds each share's server, scope, members, and delivery cursor.
+  It holds no chat content and no token. Only the muxer reads and writes
+  it. With the gate off it is neither read nor written.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth
   (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a
   default 64 MiB free-space reserve plus optional global/per-node byte budgets

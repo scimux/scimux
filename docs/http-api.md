@@ -1411,4 +1411,106 @@ forgotten, and `404` `not_found` when it was not in the file. The call
 does not contact the team server. The seat stays registered there until the operator revokes it. Use this when leaving is not possible. A damaged server file is
 `500` `store_unavailable` and is left untouched.
 
+### Seats
+
+`GET /api/team/servers/{id}/seats` answers `200` and
+`{"self":"<installation id>","seats":[{"id","name"}]}` in the order the
+team server sent. An empty roster is `"seats":[]`. The token is sent only
+after Hello on the stored URL names the stored server. The call does not
+write a file.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 404 | `not_found` | The id is not in the server file |
+| 500 | `identity_unavailable` | The installation ID cannot be read |
+| 500 | `store_unavailable` | The server file cannot be read |
+| 502 | `unreachable` | Hello or the roster call could not reach the server |
+| 502 | `bad_server` | Hello named another server, or the answer was not the roster |
+| 502 | `refused` | The team server answered 401 |
+| 422 | `unknown_member` | The team server rejected a member |
+| 507 | `server_full` | The team server is at its quota |
+
+### Shares
+
+`GET /api/team/shares` answers `200` and `{"shares":[<view>]}` ordered by
+node, then chat id. An empty list is `{"shares":[]}`. The file is not
+created when there are no shares.
+`GET /api/team/shares/{node}` answers one view, or `404` `not_found`.
+Neither call contacts a team server.
+
+```json
+{"uid":"...","node":"...","server":"...","scope":"from_now",
+ "state":"active","delivery":"ok","members":[{"seat":"...","access":"read"}],
+ "shared_at":"2026-11-14T09:30:00Z"}
+```
+
+`members` is `[]` when no seat was named. `delivery` is what the outbox
+last saw for that server in this process.
+
+| Delivery | When |
+| --- | --- |
+| `ok` | The last copy succeeded, or no copy has been attempted |
+| `offline` | The team server could not be reached |
+| `refused` | The team server answered 401 |
+| `changed` | Hello named another server, or the answer was not protocol 1 |
+
+Before the first attempt it is `ok`. A word outside this list is reported
+as `ok`.
+
+`PUT /api/team/shares/{node}` takes
+`{"server","scope","members":[{"seat","access"}]}`, at most 64 KiB, with
+no unknown fields. `scope` is `from_now` or `all`. `access` is `read` or
+`write`. `seat` is 32 lowercase hexadecimal characters, not this
+installation's id, and not repeated. At most 200 members. `members` may
+be `[]` and may not be null or absent.
+
+The node must still be in `nodes.jsonl`, and its session log must carry
+one chat id. Otherwise `404` `not_found` or `409` `no_history`.
+
+No share for that chat: Hello, create the channel, set the members, then
+save state `active`. Success is `201` and the view. `from_now` starts at
+the current record count. `all` starts at 0. A channel that already
+exists is deleted and created once more. If it still exists, the answer
+is `502` `bad_server` and nothing is stored. A failure after the channel
+exists deletes it again, best effort, and stores nothing.
+
+A share for that chat: `server` and `scope` must equal the stored ones,
+otherwise `409` `share_fixed`. State `active` replaces the members and
+answers `200` and the view. The cursor, title, generation, and sharing
+time stay as they were. Any other state is `409` `not_active`.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `bad_request` | The body, the scope, or a member is not usable |
+| 404 | `not_found` | The node or the server is not known |
+| 409 | `no_history` | The node has no single chat id in its session log |
+| 409 | `share_fixed` | The server or the scope differs from the stored share |
+| 409 | `not_active` | The share is stopping, lost, or full |
+| 422 | `unknown_member` | The team server rejected a member |
+| 500 | `identity_unavailable` | The installation ID cannot be read |
+| 500 | `store_unavailable` | A file cannot be read or written |
+| 502 | `unreachable` | Hello or a channel call could not reach the server |
+| 502 | `bad_server` | Hello named another server, or the answer was not protocol 1 |
+| 502 | `refused` | The team server answered 401 |
+| 507 | `server_full` | The team server is at its quota |
+| 507 | `too_many` | This seat already has 256 shares |
+
+`DELETE /api/team/shares/{node}` stops sharing. The share is saved as
+`stopping` before any call, and from then on the outbox sends no content
+for it. Hello and delete follow. Success, a missing channel, and a
+refused token all count as stopped: the share is removed and the answer
+is `204` with an empty body. When Hello cannot reach the server, or Hello
+names another server, the answer is `202` and the view with state
+`stopping`. The outbox finishes the job. A server that is no longer in
+the server file has no URL to call, so the share is removed locally and
+the answer is `204`.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 404 | `not_found` | This node has no share |
+| 500 | `identity_unavailable` | The installation ID cannot be read. The share stays as it was |
+| 500 | `store_unavailable` | A file cannot be read or written. A failed save leaves the previous state |
+| 502 | `bad_server` | Hello or the delete call failed for a reason other than being unreachable or naming another server. The share stays `stopping` |
+| 202 | `stopping` | The server could not be reached, or Hello named another server |
+
 Any other method or path under `/api/team` is `404` `not_found`.
