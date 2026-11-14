@@ -465,6 +465,7 @@ func forEachRecord(r io.Reader, fn func(rec []byte, off int64) bool) (int64, err
 	br := bufio.NewReaderSize(r, 64*1024)
 	var (
 		off     int64
+		pending int64 // bytes of the current line that has no '\n' yet
 		carry   []byte
 		toolong bool
 	)
@@ -472,8 +473,10 @@ func forEachRecord(r io.Reader, fn func(rec []byte, off int64) bool) (int64, err
 		chunk, err := br.ReadSlice('\n')
 		if err == bufio.ErrBufferFull {
 			// A record longer than one buffer: keep collecting until the cap,
-			// then drop the rest of it without ever holding it.
-			off += int64(len(chunk))
+			// then drop the rest of it without ever holding it. Its bytes
+			// count toward the offset only once its newline arrives, so a
+			// reader that resumes never starts inside a half-written record.
+			pending += int64(len(chunk))
 			if !toolong {
 				if len(carry)+len(chunk) > maxRecordBytes {
 					toolong, carry = true, nil
@@ -488,7 +491,8 @@ func forEachRecord(r io.Reader, fn func(rec []byte, off int64) bool) (int64, err
 			// record, and neither advances the watermark past it.
 			return off, ignoreEOF(err)
 		}
-		off += int64(len(chunk))
+		off += pending + int64(len(chunk))
+		pending = 0
 		if !toolong {
 			rec := chunk[:len(chunk)-1] // drop '\n'
 			if len(carry) > 0 {
