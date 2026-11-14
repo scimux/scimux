@@ -1558,7 +1558,8 @@ func TestStopSharingAnswersStoppingWhenTheServerStays(t *testing.T) {
 		mustSaveShare(t, dir, shareNodeShare())
 		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
 		assertStopping(t, rec, dir)
-		if countDeletes(snapshotCalls(calls)) != 0 || len(snapshotCalls(calls)) != 2 {
+		// The recorder logs the DELETE before the script closes the connection.
+		if countDeletes(snapshotCalls(calls)) != 1 || len(snapshotCalls(calls)) != 2 {
 			t.Fatalf("calls = %+v", snapshotCalls(calls))
 		}
 	})
