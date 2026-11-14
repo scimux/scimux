@@ -1615,3 +1615,140 @@ test("a late roster after stopping changes nothing and settled resolves", async 
   assert.match(ui.body.textContent, /Stopping sharing…/);
   assert.equal(ui.body.querySelector("#sh_people"), null);
 });
+
+test("save people sends no put when the share was started again", async () => {
+  let again = false;
+  const first = viewOf({ server: north.id, scope: "from_now" });
+  const next = viewOf({ server: south.id, scope: "all", shared_at: "2026-11-14T11:00:00Z" });
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north, south] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return first;
+    return again ? next : first;
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  const row = selects(ui.body)[0];
+  row.value = "write";
+  row.emit("change");
+  assert.equal(ui.apply.disabled, false);
+  assert.match(ui.body.innerHTML, />North</);
+  assert.match(ui.body.innerHTML, /From now on/);
+  again = true;
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.match(ui.body.innerHTML, />North</);
+  assert.match(ui.body.innerHTML, /From now on/);
+  assert.equal(ui.note.textContent, "");
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.hidden, false);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.match(ui.body.innerHTML, />South</);
+  assert.match(ui.body.innerHTML, /Entire history/);
+  assert.doesNotMatch(ui.body.innerHTML, /From now on/);
+});
+
+test("save people sends no put when only the scope differs", async () => {
+  let scope = "from_now";
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ scope: "from_now" });
+    return viewOf({ scope });
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  const row = selects(ui.body)[0];
+  row.value = "write";
+  row.emit("change");
+  scope = "all";
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.match(ui.body.innerHTML, /From now on/);
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.match(ui.body.innerHTML, />North</);
+  assert.match(ui.body.innerHTML, /Entire history/);
+  assert.doesNotMatch(ui.body.innerHTML, /From now on/);
+});
+
+test("save people sends no put when only the shared time differs", async () => {
+  let at = "2026-11-14T09:30:00Z";
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north, south] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ server: south.id });
+    return viewOf({ shared_at: at });
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  const row = selects(ui.body)[0];
+  row.value = "write";
+  row.emit("change");
+  at = "2026-11-14T11:00:00Z";
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(row.value, "write");
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.match(ui.body.innerHTML, />North</);
+  assert.match(ui.body.innerHTML, /From now on/);
+  assert.doesNotMatch(ui.body.innerHTML, />South</);
+  assert.equal(selects(ui.body)[0].value, "read");
+});
+
+test("save people still sends a put when only members and delivery differ", async () => {
+  let changed = false;
+  const seen = [];
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") {
+      seen.push(call.body);
+      return viewOf({ members: call.body.members, delivery: "offline" });
+    }
+    if (!changed) return viewOf({ delivery: "ok" });
+    return viewOf({
+      delivery: "offline",
+      members: [{ seat: blue.id, access: "write" }],
+    });
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  const row = selects(ui.body)[0];
+  row.value = "write";
+  row.emit("change");
+  changed = true;
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.apply.disabled, false);
+  assert.match(ui.body.innerHTML, /From now on/);
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], {
+    server: north.id,
+    scope: "from_now",
+    members: [{ seat: blue.id, access: "write" }],
+  });
+  assert.equal(ui.note.textContent, "");
+  assert.equal(ui.live.textContent, "People updated.");
+});
