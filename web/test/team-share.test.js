@@ -1251,3 +1251,225 @@ test("share controls keep a 44px target and hidden still hides them", () => {
   assert.doesNotMatch(chatShare, /@import|url\(/);
   assert.doesNotMatch(sheetShare, /@import|url\(/);
 });
+
+const CHANGED = "Sharing of this chat changed. Check and try again.";
+
+test("a save after the share ended elsewhere sends no put and shows the unshared sheet", async () => {
+  let shared = true;
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [south, north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ server: call.body.server, members: call.body.members });
+    if (shared) return viewOf({ server: north.id });
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  const row = selects(ui.body)[0];
+  row.value = "write";
+  row.emit("change");
+  assert.equal(ui.apply.textContent, "Save people");
+  assert.match(ui.body.innerHTML, />North</);
+  shared = false;
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.apply.textContent, "Save people");
+  assert.match(ui.body.innerHTML, />North</);
+  assert.equal(ui.note.textContent, "");
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.hidden, false);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.equal(ui.apply.textContent, "Share chat");
+  assert.equal(ui.apply.hidden, false);
+  const servers = inputs(ui.body, "sh_server");
+  assert.equal(servers[0].value, south.id);
+  assert.equal(servers[0].checked, true);
+  assert.equal(servers[1].value, north.id);
+});
+
+test("share chat sends no put when a tick already found the share", async () => {
+  let shared = false;
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    if (!shared) return rejected(404, JSON.stringify({ error: "not_found" }));
+    return viewOf();
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  assert.equal(ui.apply.textContent, "Share chat");
+  shared = true;
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.apply.textContent, "Share chat");
+  assert.equal(inputs(ui.body, "sh_server").length, 1);
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.equal(ui.apply.textContent, "Save people");
+  assert.equal(inputs(ui.body, "sh_server").length, 0);
+  assert.match(ui.body.innerHTML, />North</);
+});
+
+test("save people sends no put when a tick finds the share lost", async () => {
+  let state = "active";
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    return viewOf({ state });
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  const row = selects(ui.body)[0];
+  row.value = "write";
+  row.emit("change");
+  state = "lost";
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.apply.textContent, "Save people");
+  assert.equal(ui.apply.disabled, false);
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.match(ui.body.textContent, /Sharing ended on North/);
+  assert.equal(ui.apply.hidden, true);
+  assert.equal(ui.stop.hidden, false);
+  assert.equal(ui.stop.textContent, "Stop sharing");
+});
+
+test("the confirming stop sends no delete until the sheet is drawn again", async () => {
+  let state = "active";
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "DELETE") return "";
+    return viewOf({ state });
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  state = "lost";
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.stop.textContent, "Stop sharing");
+  ui.stop.click();
+  assert.equal(ui.stop.textContent, "Confirm stop");
+  assert.equal(ui.note.textContent, "");
+  assert.equal(ui.calls.some((call) => call.method === "DELETE"), false);
+  ui.stop.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.filter((call) => call.method === "DELETE").length, 0);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.equal(ui.stop.textContent, "Stop sharing");
+  assert.match(ui.body.textContent, /Sharing ended on North/);
+  ui.stop.click();
+  ui.stop.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.filter((call) => call.method === "DELETE").length, 1);
+  assert.equal(ui.live.textContent, "Sharing stopped.");
+});
+
+test("share chat sends no put when the chosen server has left", async () => {
+  let servers = [south, north];
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ server: call.body.server });
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  assert.equal(inputs(ui.body, "sh_server")[0].value, south.id);
+  assert.equal(inputs(ui.body, "sh_server")[0].checked, true);
+  servers = [north];
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.apply.textContent, "Share chat");
+  assert.equal(inputs(ui.body, "sh_server")[0].value, south.id);
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.textContent, CHANGED);
+  const again = inputs(ui.body, "sh_server");
+  assert.equal(again.length, 1);
+  assert.equal(again[0].value, north.id);
+  assert.equal(again[0].checked, true);
+});
+
+test("share chat with no joined server closes the sheet and a later share works", async () => {
+  let servers = [north];
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  servers = [];
+  ui.time.now = 10000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.apply.textContent, "Share chat");
+  assert.equal(ui.closed.length, 0);
+  assert.doesNotThrow(() => ui.apply.click());
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.deepEqual(ui.closed, ["closed"]);
+  servers = [north];
+  ui.time.now = 20000;
+  ui.feature.tick();
+  await ui.feature.settled();
+  assert.equal(ui.btn.hidden, false);
+  ui.btn.click();
+  await ui.feature.settled();
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.filter((call) => call.method === "PUT").length, 1);
+  assert.equal(ui.apply.textContent, "Save people");
+  assert.equal(ui.live.textContent, "Sharing started.");
+});
+
+test("a click on a sheet drawn for another node sends no put", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  ui.feature.select("node-2");
+  await ui.feature.settled();
+  assert.deepEqual(ui.closed, ["closed"]);
+  assert.equal(ui.apply.textContent, "Share chat");
+  ui.apply.click();
+  await ui.feature.settled();
+  assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
+  assert.equal(ui.note.textContent, CHANGED);
+  assert.equal(ui.apply.textContent, "Share chat");
+});
