@@ -590,7 +590,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const laneModel = () => laneModelMod(nodes, getUI().lanes);
   const isArchived = id => isArchivedMod(id, getUI().archived);
 
-  const guestFeature = own(createGuestFeature({ api, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); } }));
+  const guestFeature = own(createGuestFeature({ api, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)) }));
   /* Activities card feature factory — owns #cardtabs/#cardlist only. */
   const cardsFeature = own(createCardsFeature({
     sharedTab: guestFeature.tab,

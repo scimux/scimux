@@ -376,11 +376,13 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function updateCompose(current) {
     let visible = false;
+    let hideRemove = false;
     if (current.view.state === "live") {
       if (current.view.access === "write") visible = true;
-      if (current.view.access === "owner") visible = true;
+      if (current.view.access === "owner") { visible = true; hideRemove = true; }
     }
     $("sv_compose").hidden = !visible;
+    $("sv_remove").hidden = hideRemove;
     const text = $("sv_text").value;
     const tooLong = new TextEncoder().encode(text).length > 16384;
     let disabled = current.draft.sending;
