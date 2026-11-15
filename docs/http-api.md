@@ -1521,25 +1521,30 @@ A view contains `server`, `server_name`, `owner`, `owner_name`, `chat`,
 `generation`, `title`, `access`, `state`, `mirror_last`, `seen_mirror`,
 `unread` and `first_seen`. Views are ordered by server, owner, chat and first
 sighting. Access is `read` or `write`; state is `live` or `ended`; unread
-means `mirror_last` exceeds `seen_mirror`. `truncated` says the 4096-entry
+means the subscription is live and `mirror_last` exceeds `seen_mirror`. `truncated` says the 4096-entry
 limit prevented a new subscription from being stored. Delivery is `ok`,
 `offline`, `refused` or `changed` as in the share view, and starts at `ok`.
 Channels whose owner, chat or generation is not fixed-length lowercase hex
 are skipped.
 
 The list refreshes each joined server at most once per ten seconds, after
-Hello confirms its identity. Missing or revoked shares become ended; an
-ended subscription remains ended. Owner names come from the server roster.
+Hello confirms its identity. Missing or revoked shares become ended; a subscription becomes live again
+if the same generation is listed again, retaining its read position and copy.
+A new subscription inherits a known owner name from the same server; otherwise
+a new unnamed owner prompts a roster request. Other roster refreshes are at
+least ten minutes apart, including after a failed request.
 A damaged or inaccessible server or subscription file is `500`
 `store_unavailable`.
 
 `GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}?after=N`
 fetches up to eight pages for a live subscription on a joined server, appends
 valid entries to its local copy, then answers `200` with
-`{"view":<view with delivery>,"entries":[...],"last":N,"more":false}`.
+`{"view":<view with delivery>,"entries":[...],"last":N,"next":N,"more":false}`.
 `after` defaults to zero. The answer includes at most 256 entries and 4 MiB
-of text; `last` is the highest sequence in the copy and `more` indicates
-more copied entries or a fetch stopped at its page limit. Known start, user,
+of text; `last` is the highest sequence in the copy. `next` is the last
+sequence dealt with, including omitted entries; pass it as `after` to continue.
+When no entry was dealt with, `next` is `after`, capped at `last`. `more`
+is true when `next` is below `last` or the fetch stopped at its page limit. Known start, user,
 assistant and source bodies are projected with `seq` and `at`; unknown bodies
 remain in the copy and are omitted. Ended subscriptions and unavailable
 servers remain readable from the copy.
