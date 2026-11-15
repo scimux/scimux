@@ -3354,15 +3354,16 @@ func TestSubCommentsIncrementalNamesRefresh(t *testing.T) {
 
 func TestSubCommentsEmptyReadReturnsRosterAndOwnName(t *testing.T) {
 	roster := 0
+	var inst string
 	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/seats" {
 			roster++
-			_, _ = io.WriteString(w, seatsOf(subOwner, "Bob", subOwnerB, "Cy"))
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Bob", subOwnerB, "Cy", inst, "Old"))
 			return
 		}
 		_, _ = io.WriteString(w, subPage(subGen, 0, false))
 	})
-	inst := installationOf(t, dir)
+	inst = installationOf(t, dir)
 	servers, err := team.Load(dir)
 	if err != nil {
 		t.Fatal("server state unavailable")
@@ -3374,6 +3375,13 @@ func TestSubCommentsEmptyReadReturnsRosterAndOwnName(t *testing.T) {
 	_ = decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
 	if roster != 1 {
 		t.Fatal("empty read made an extra roster call")
+	}
+	if err := team.Remove(dir, teamServerID); err != nil {
+		t.Fatal("cannot forget server")
+	}
+	forgotten := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if forgotten.Names[subOwner] != "Bob" || forgotten.Names[subOwnerB] != "Cy" || forgotten.Names[inst] != "Old" || roster != 1 {
+		t.Fatal("unjoined read did not return cached names")
 	}
 }
 
