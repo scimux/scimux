@@ -519,16 +519,17 @@ test("removal blocks duplicate deletes and read runs, then focuses the remaining
   f.feature.tab.render(f.get("cardlist")); assert.equal(f.get("cardlist").innerHTML.includes('data-sub="s/o/c/g"'), false);
 });
 
-test("not found removal succeeds and focuses the card list when the tab is gone", async () => {
+test("not found removal succeeds and focuses the current tab when shared is gone", async () => {
   const f = viewFixture(async (path, opts) => {
     if (path === "/api/team/subscriptions") return list([base]);
     if (opts) { if (opts.method === "DELETE") throw Object.assign(new Error('{"error":"not_found"}'), { status: 404 }); }
     return readAnswer();
   });
-  f.get("cardtabs").querySelector = () => null;
+  const current = { focus() { f.doc.activeElement = current; } };
+  f.get("cardtabs").querySelector = sel => sel === '[data-tab="current"]' ? current : null;
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
   const before = f.invalidations(); f.click("sv_remove"); f.click("sv_remove"); await f.feature.settled();
-  assert.equal(f.get("sharedview").hidden, true); assert.equal(f.doc.activeElement, f.get("cardlist"));
+  assert.equal(f.get("sharedview").hidden, true); assert.equal(f.doc.activeElement, current);
   assert.equal(f.feature.tab.tabHTML(false), ""); assert.equal(f.invalidations(), before + 1);
 });
 
