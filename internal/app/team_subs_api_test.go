@@ -3387,3 +3387,62 @@ func TestSubCommentsReadBoundsAndMissingIdentity(t *testing.T) {
 		}
 	})
 }
+
+func TestSubCommentsRosterNamesArePerServer(t *testing.T) {
+	server := func(id, name string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/hello":
+				_, _ = io.WriteString(w, helloJSON(id, "Synthetic"))
+			case "/v1/seats":
+				_, _ = io.WriteString(w, seatsOf(subOwner, name))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	a, b := server(teamServerID, "Ada"), server(teamOtherID, "Bea")
+	h, dir := testTeamSurface(t, clientFor(a))
+	joinLab(t, dir, teamServerID, a.URL)
+	joinLab(t, dir, teamOtherID, b.URL)
+	for _, serverID := range []string{teamServerID, teamOtherID} {
+		s := baseSub()
+		s.Server = serverID
+		s.State = "ended"
+		seedSub(t, dir, s)
+		id := team.CopyID{Server: serverID, Owner: subOwner, Chat: subChat, Generation: subGen}
+		record := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"comment","text":"synthetic","anchor":0}`)}
+		if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{record}); err != nil {
+			t.Fatal("cannot seed comments")
+		}
+	}
+	first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	second := decodeCommentsRead(t, doTeam(h, http.MethodGet, strings.Replace(subReadPath(), teamServerID, teamOtherID, 1)+"/comments", ""))
+	if first.Names[subOwner] != "Ada" || second.Names[subOwner] != "Bea" {
+		t.Error("server names were mixed")
+	}
+}
+
+func TestSubCommentsBudgetKeepsSavedEntries(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 2, false, subRecord(2, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+	})
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	record := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"comment","text":"synthetic","anchor":0}`)}
+	if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal("cannot seed comments")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_global_limit_bytes":1,"storage_min_free_bytes":0}`), 0o600); err != nil {
+		t.Fatal("cannot set budget")
+	}
+	got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if got.Last != 1 || len(got.Entries) != 1 {
+		t.Error("saved comments were not returned")
+	}
+}
