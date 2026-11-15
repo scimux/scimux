@@ -14,23 +14,35 @@ function compare(a, b) {
 export function guestGroups(subs, servers) {
   const groups = new Map();
   for (const view of subs) {
-    const key = view.server + "/" + view.owner;
+    const mine = view.access === "owner";
+    let key = view.server + "/" + view.owner;
+    if (mine) key = view.server + "/@mine";
     if (!groups.has(key)) {
       let ownerName = view.owner_name;
       if (!ownerName) ownerName = "Unknown person";
       let label = ownerName + " · " + view.server_name;
+      if (mine) label = "Mine · " + view.server_name;
       const server = servers.find(item => item.id === view.server);
       if (server) {
         if (server.delivery === "offline") label += " · offline";
         if (server.delivery === "refused") label += " · access ended";
         if (server.delivery === "changed") label += " · not the same server";
       }
-      groups.set(key, { key, label, ownerName, serverName: view.server_name, owner: view.owner, server: view.server, items: [] });
+      groups.set(key, { key, label, ownerName, serverName: view.server_name, owner: view.owner, server: view.server, mine, items: [] });
     }
     groups.get(key).items.push(view);
   }
   const result = [...groups.values()];
   result.sort((a, b) => {
+    if (a.mine !== b.mine) {
+      if (a.mine) return -1;
+      return 1;
+    }
+    if (a.mine) {
+      const order = compare(a.serverName, b.serverName);
+      if (order) return order;
+      return a.server.localeCompare(b.server);
+    }
     let order = compare(a.ownerName, b.ownerName);
     if (order) return order;
     order = compare(a.serverName, b.serverName);
@@ -81,7 +93,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     const count = answer.subscriptions.filter(item => item.unread).length;
     let badge = "";
     if (count) badge = `<span class="tabbadge" aria-label="${count} unread">${count}</span>`;
-    return `<button data-tab="shared" class="${cls}">Shared with me${badge}</button>`;
+    return `<button data-tab="shared" class="${cls}">Shared${badge}</button>`;
   }
   function html() {
     let out = '<div class="glist">';
@@ -94,6 +106,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
         if (!title) title = "Untitled chat";
         let state = "Can view";
         if (item.access === "write") state = "Can comment";
+        if (item.access === "owner") state = "Shared by you";
         if (item.state === "ended") state = "Sharing ended";
         let cls = "gitem";
         let unread = "";
