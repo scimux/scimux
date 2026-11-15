@@ -34,6 +34,7 @@ type subAsk struct {
 
 type subOutcome struct {
 	entry    team.Entry
+	started  time.Time
 	delivery string
 	channels []team.Channel
 	err      error
@@ -162,6 +163,11 @@ func (h *teamHandler) readSubs() ([]team.Subscription, error) {
 func (h *teamHandler) dueServers(entries []team.Entry, now time.Time) []team.Entry {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	for key, removed := range h.removedSubs {
+		if now.Sub(removed) > 60*time.Second {
+			delete(h.removedSubs, key)
+		}
+	}
 	if h.subAsks == nil {
 		h.subAsks = map[string]subAsk{}
 	}
@@ -179,7 +185,7 @@ func (h *teamHandler) dueServers(entries []team.Entry, now time.Time) []team.Ent
 }
 
 func (h *teamHandler) askChannels(ctx context.Context, entry team.Entry) subOutcome {
-	out := subOutcome{entry: entry}
+	out := subOutcome{entry: entry, started: h.now().UTC()}
 	if err := h.confirmed(ctx, entry); err != nil {
 		out.err = err
 		if errors.Is(err, team.ErrUnreachable) {
@@ -254,6 +260,19 @@ func (h *teamHandler) commitSubs(inst string, outcomes []subOutcome, seats []sea
 	entries, subs, err := h.loadSubState()
 	if err != nil {
 		return subListResponse{}, err
+	}
+	for i := range outcomes {
+		channels := outcomes[i].channels[:0]
+		for _, channel := range outcomes[i].channels {
+			key := team.CopyID{Server: outcomes[i].entry.ID, Owner: channel.Owner, Chat: channel.Chat, Generation: channel.Generation}
+			if removed, ok := h.removedSubs[key]; ok {
+				if !removed.Before(outcomes[i].started) {
+					continue
+				}
+			}
+			channels = append(channels, channel)
+		}
+		outcomes[i].channels = channels
 	}
 	subs, truncation, changed := mergeSubs(subs, entries, outcomes, inst, now)
 	joined := entryMap(entries)
@@ -903,5 +922,9 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
+	if h.removedSubs == nil {
+		h.removedSubs = make(map[team.CopyID]time.Time)
+	}
+	h.removedSubs[id] = h.now().UTC()
 	w.WriteHeader(http.StatusNoContent)
 }
