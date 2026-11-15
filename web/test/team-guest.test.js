@@ -656,6 +656,9 @@ test("owner groups lead shared groups by server name and id", () => {
   assert.match(groups[1].label, /^Mine · lab · access ended$/);
   assert.equal(groups[0].items.length, 2);
   assert.equal(groups[2].ownerName, "Aaron");
+  assert.match(guestGroups([mineA, guest], [])[0].label, /^Mine/);
+  const later = { ...mineA, server: "z", server_name: "Zulu" };
+  assert.deepEqual(guestGroups([later, mineA], []).map(group => group.server), ["a", "z"]);
 });
 
 test("owner items describe active and ended sharing", async () => {
