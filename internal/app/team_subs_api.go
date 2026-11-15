@@ -539,6 +539,7 @@ type subscriptionReadResponse struct {
 	} `json:"view"`
 	Entries []map[string]any `json:"entries"`
 	Last    uint64           `json:"last"`
+	Next    uint64           `json:"next"`
 	More    bool             `json:"more"`
 }
 
@@ -698,10 +699,14 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 	out.Last = last
 	out.Entries = []map[string]any{}
 	textBytes := 0
-	returnedThrough := after
-	for i, record := range records {
+	out.Next = after
+	if out.Next > last {
+		out.Next = last
+	}
+	for _, record := range records {
 		entry, size, ok := projectSubRecord(record)
 		if !ok {
+			out.Next = record.Seq
 			continue
 		}
 		if len(out.Entries) >= 256 || textBytes+size > 4<<20 {
@@ -709,13 +714,10 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 			break
 		}
 		out.Entries = append(out.Entries, entry)
-		returnedThrough = record.Seq
+		out.Next = record.Seq
 		textBytes += size
-		if i == len(records)-1 {
-			break
-		}
 	}
-	out.More = out.More || stopped || last > returnedThrough
+	out.More = stopped || out.Next < last
 	if full && len(records) == 0 {
 		writeTeamError(w, 507, "storage_full")
 		return
