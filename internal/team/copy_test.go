@@ -711,3 +711,19 @@ func TestCopySameLengthDamageIsNotAppendedWithoutReading(t *testing.T) {
 		t.Fatal("damaged copy was appended")
 	}
 }
+
+func TestCopySameLengthMissingNewlineIsDamaged(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	path := copyPathOf(dir, id)
+	raw := readCopyFile(t, dir, id)
+	raw[len(raw)-1] = '!'
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadCopy(dir, id, 0); !errors.Is(err, ErrCopyDamaged) {
+		t.Fatalf("read error = %v", err)
+	}
+}
