@@ -2303,3 +2303,27 @@ func TestSubBranchMalformedVersionAndKindAreOmitted(t *testing.T) {
 		})
 	}
 }
+
+func TestSubBranchSkipsEmptyPriorOwnerName(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1), guestChannel(subOwner, subChatB, "Synthetic title", subGen, "read", 1), guestChannel(subOwner, subChatC, "Synthetic title", subGen, "read", 1))}
+	h, dir, _ := subSurface(t, script)
+	a := baseSub()
+	a.OwnerName = ""
+	b := baseSub()
+	b.Chat = subChatB
+	b.OwnerName = "Ada"
+	seedSub(t, dir, a)
+	seedSub(t, dir, b)
+	got, _ := readSubList(t, h)
+	if s := mustFindSub(t, got, subOwner, subChatC, subGen); s.OwnerName != "Ada" {
+		t.Fatalf("name = %q", s.OwnerName)
+	}
+}
+
+func TestSubBranchSkipsNonMemberAccess(t *testing.T) {
+	outcome := subOutcome{entry: team.Entry{ID: teamServerID, Name: "Lab One"}, channels: []team.Channel{{Owner: subOwner, Chat: subChat, Generation: subGen, Access: "owner"}}}
+	subs, changed, truncated := applyChannels(nil, outcome, subOwnerB, fixedTeamClock()(), false)
+	if len(subs) != 0 || changed || truncated {
+		t.Fatalf("non-member access stored: %+v", subs)
+	}
+}
