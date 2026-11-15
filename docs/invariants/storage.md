@@ -48,6 +48,15 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   holds each share's server, scope, members, and delivery cursor.
   It holds no chat content and no token. Only the muxer reads and writes
   it. With the gate off it is neither read nor written.
+- **Guest subscription state is metadata.** `team-subs.json` holds the identities,
+  names, access, state and read positions of subscriptions, with no chat content
+  or token. Only the muxer writes it; with the team gate off it is neither read
+  nor written.
+- **Guest copies are retained received history.** `team-copies/` holds received
+  entries of other people's chats unchanged and append-only, including after
+  sharing ends. Copies count toward total storage usage and belong to no node.
+  They are never sent anywhere or logged; with the team gate off they are
+  neither read nor written.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth
   (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a
   default 64 MiB free-space reserve plus optional global/per-node byte budgets

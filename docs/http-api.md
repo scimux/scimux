@@ -1513,4 +1513,51 @@ the answer is `204`.
 | 502 | `bad_server` | Hello or the delete call failed for a reason other than being unreachable or naming another server. The share stays `stopping` |
 | 202 | `stopping` | The server could not be reached, or Hello named another server |
 
+### Subscriptions
+
+`GET /api/team/subscriptions` lists chats shared with this seat. It answers
+`200` with `{"subscriptions":[<view>],"servers":[{"id","delivery"}],"truncated":false}`.
+A view contains `server`, `server_name`, `owner`, `owner_name`, `chat`,
+`generation`, `title`, `access`, `state`, `mirror_last`, `seen_mirror`,
+`unread` and `first_seen`. Views are ordered by server, owner, chat and first
+sighting. Access is `read` or `write`; state is `live` or `ended`; unread
+means `mirror_last` exceeds `seen_mirror`. `truncated` says the 4096-entry
+limit prevented a new subscription from being stored. Delivery is `ok`,
+`offline`, `refused` or `changed` as in the share view, and starts at `ok`.
+Channels whose owner, chat or generation is not fixed-length lowercase hex
+are skipped.
+
+The list refreshes each joined server at most once per ten seconds, after
+Hello confirms its identity. Missing or revoked shares become ended; an
+ended subscription remains ended. Owner names come from the server roster.
+A damaged or inaccessible server or subscription file is `500`
+`store_unavailable`.
+
+`GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}?after=N`
+fetches up to eight pages for a live subscription on a joined server, appends
+valid entries to its local copy, then answers `200` with
+`{"view":<view with delivery>,"entries":[...],"last":N,"more":false}`.
+`after` defaults to zero. The answer includes at most 256 entries and 4 MiB
+of text; `last` is the highest sequence in the copy and `more` indicates
+more copied entries or a fetch stopped at its page limit. Known start, user,
+assistant and source bodies are projected with `seq` and `at`; unknown bodies
+remain in the copy and are omitted. Ended subscriptions and unavailable
+servers remain readable from the copy.
+
+Errors are `404` `not_found` for an invalid identity or unknown subscription,
+`400` `bad_request` for an invalid `after`, `500` `store_unavailable` for
+unavailable state, `500` `copy_damaged` for a damaged copy, and `507`
+`storage_full` when the storage budget refuses an append and the copy has no
+entry after `after`.
+
+`PUT /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/seen`
+takes `{"mirror":N}` with no unknown fields and at most 1 KiB, and requires
+the CSRF header. It records the greater of the old seen position and `N`,
+capped at the highest copied sequence, without contacting a server. Success
+is `204`; errors are `404` `not_found`, `400` `bad_request`, and `500`
+`store_unavailable`.
+
+Only the subscription list and read routes ask a team server for chats on
+behalf of this seat; no background subscription fetch is performed.
+
 Any other method or path under `/api/team` is `404` `not_found`.
