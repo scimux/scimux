@@ -389,8 +389,6 @@ test("browser-normalized HTML does not rewrite an unchanged shared list", async 
  * tab active class follows the selected tab: archived and current.
  * cards waiting prefix conditional | shared cards path keeps the list (one waiting),
  * shared cards title has no waiting prefix when nobody is waiting (zero waiting).
- * cards test shared-tab active conditional | shared cards path keeps the list:
- * render shared, then current.
  * guest test error-body conditional | read failures show fixed notes: bad-json and
  * copy_damaged/storage_full/not_found.
  * A newer list request cannot overtake an older one: tick refuses a second load

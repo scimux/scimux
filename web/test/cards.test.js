@@ -1931,7 +1931,7 @@ test("empty shared tab preserves existing tab and list HTML", () => {
 
 test("shared cards path keeps the list and refreshes only changed tabs", () => {
   let badge = "1";
-  const f = sharedCardsFixture({ tabHTML: active => `<button data-tab="shared" class="${active ? "on" : ""}">${badge}</button>`, render: () => true }, "shared", [{ id: "n", attention: "approval" }]);
+  const f = sharedCardsFixture({ tabHTML: () => `<button data-tab="shared">${badge}</button>`, render: () => true }, "shared", [{ id: "n", attention: "approval" }]);
   for (let i = 0; i < 10; i++) f.feature.render();
   assert.equal(f.listWrites(), 0); assert.equal(f.tabWrites(), 1); assert.equal(f.sig(), ""); assert.equal(f.doc.title, "(1) scimux");
   assert.match(f.tabs.innerHTML, /Archived.*data-tab="shared"/);
