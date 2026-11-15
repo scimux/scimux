@@ -1134,3 +1134,46 @@ func TestRemoveCopyDoesNotTraverseParentLinks(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveCopySerializesWaitingAppend(t *testing.T) {
+	snapshotCopy(t)
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("initial append failed")
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	copyOps.removeAll = func(root *os.Root, name string) error {
+		close(entered)
+		<-release
+		return root.RemoveAll(name)
+	}
+	removed := make(chan error, 1)
+	go func() { removed <- RemoveCopy(dir, id) }()
+	select {
+	case <-entered:
+	case <-removed:
+		t.Fatal("removal did not enter the filesystem seam")
+	}
+	started := make(chan struct{})
+	appended := make(chan error, 1)
+	go func() {
+		close(started)
+		appended <- AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")})
+	}()
+	<-started
+	close(release)
+	if err := <-removed; err != nil {
+		t.Fatal("removal failed")
+	}
+	if err := <-appended; err != nil {
+		t.Fatal("waiting append failed")
+	}
+	_, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil {
+		t.Fatal("cannot read new copy")
+	}
+	if last != 1 {
+		t.Errorf("last = %d, want 1", last)
+	}
+}
