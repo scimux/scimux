@@ -1906,3 +1906,64 @@ func TestTeamRenameSeatRejectsInvalidInput(t *testing.T) {
 		t.Fatal("invalid input reached the server")
 	}
 }
+
+func TestTeamRenameSeatConcurrentRemovalAndDamage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		damage bool
+		status int
+		code   string
+	}{
+		{"removed", false, http.StatusNotFound, "not_found"},
+		{"damaged", true, http.StatusInternalServerError, "store_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := team.NewClient()
+			h, dir := testTeamSurface(t, client)
+			seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+			calls := 0
+			client.Transport = teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Path == "/v1/hello" {
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(helloJSON(teamServerID, "Lab relay"))), Header: make(http.Header), Request: r}, nil
+				}
+				if tc.damage {
+					if err := os.WriteFile(filepath.Join(dir, team.File), []byte("broken"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := team.Remove(dir, teamServerID); err != nil {
+					t.Fatal(err)
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header), Request: r}, nil
+			})
+			rec := doTeam(h, http.MethodPut, "/api/team/servers/"+teamServerID+"/seat", `{"name":"Synthetic"}`)
+			assertAPIError(t, rec, tc.status, tc.code)
+			if calls != 2 {
+				t.Fatalf("request count = %d", calls)
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, team.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.damage && string(raw) != "broken" {
+				t.Fatal("damaged state was overwritten")
+			}
+			if !tc.damage {
+				entries, err := team.Load(dir)
+				if err != nil || len(entries) != 0 {
+					t.Fatal("removed server was restored")
+				}
+			}
+		})
+	}
+}
+
+func TestTeamRenameStorageInvariantDocumented(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRootFromTest(t), "docs", "invariants", "storage.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "changing this seat's own name on a server") {
+		t.Fatal("rename missing from team storage invariant")
+	}
+}
