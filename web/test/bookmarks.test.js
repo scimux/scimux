@@ -3,6 +3,7 @@
  * re-test format escaping, lanes hash, Notes workspace, or search. */
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as bookmarkModule from "../js/bookmarks.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -36,6 +37,32 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const bookmarksSrc = readFileSync(join(__dirname, "../js/bookmarks.js"), "utf8");
 const chatSrc = readFileSync(join(__dirname, "../js/chat.js"), "utf8");
 const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+
+test("quoted shared text identifies its writer and any AI content", () => {
+  const quote = bookmarkModule.discloseQuoted;
+  assert.equal(typeof quote, "function");
+  assert.equal(quote("", { role: "person", who: "A" }), "");
+  assert.equal(quote("x", { role: "assistant" }), AI_DISCLOSURE + "\n\nx");
+  assert.equal(quote("x", { role: "user" }), "x");
+  assert.equal(quote("x", {}), "x");
+  for (const prov of [false, {}, undefined]) {
+    assert.equal(quote("x", { role: "person", who: "A", prov }), "[Written by A, quoted from a shared chat — not written by me:]\n\nx");
+  }
+  assert.equal(quote("x", { role: "person", who: "A", prov: true }), "[Written by A, includes AI-generated text, quoted from a shared chat — not written by me:]\n\nx");
+  assert.equal(quote("x", { role: "person" }), "[Written by another person, quoted from a shared chat — not written by me:]\n\nx");
+  for (const role of ["assistant", "user", ""]) for (const prov of [undefined, {}]) {
+    assert.equal(quote("x", { role, prov }), discloseAgentOutput("x", role));
+  }
+});
+
+test("send-to quotes a shared person's text", () => {
+  const ctx = createFeature({ nodes: sendtoNodes });
+  ctx.feature.openSendTo({ text: "synthetic", role: "person", who: "A", prov: true });
+  const target = el("button", { dataset: { fwd: "ok" } });
+  target.closest = sel => sel === "[data-fwd]" ? target : null;
+  ctx.roots.sendtoList.onclick({ target });
+  assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "ok"), "[Written by A, includes AI-generated text, quoted from a shared chat — not written by me:]\n\nsynthetic");
+});
 
 /* ---------- module shape ---------- */
 test("bookmarks.js exports factory and pure helpers; no later-feature imports", () => {
