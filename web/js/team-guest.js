@@ -145,8 +145,15 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   function tick() {
     if (destroyed) return;
     if (off) return;
-    if (loading) return;
     const time = now();
+    if (open) {
+      if (!open.busy) {
+        if (!open.failed) {
+          if (time - open.lastRead >= 5000) startRead();
+        }
+      }
+    }
+    if (loading) return;
     if (lastLoad !== null) {
       if (time - lastLoad < 10000) return;
     }
@@ -181,7 +188,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   }
   function openView(view) {
     readGeneration++;
-    open = { key: guestKey(view), view, next: 0, first: true, seenAtOpen: view.seen_mirror, busy: false, failed: false };
+    open = { key: guestKey(view), view, next: 0, first: true, seenAtOpen: view.seen_mirror, seen: view.seen_mirror, lastRead: 0, busy: false, failed: false };
     header(view);
     $("sv_body").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("sv_note").textContent = "";
@@ -213,6 +220,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     if (open.failed) return;
     const current = open;
     current.busy = true;
+    current.lastRead = now();
     const gen = ++readGeneration;
     track(readRun(current, gen));
   }
@@ -259,6 +267,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
         } else body.scrollTop = body.scrollHeight;
       } else if (nearEnd) body.scrollTop = body.scrollHeight;
       $("sv_more").hidden = !morePages;
+      if (current.next > current.seen) await markSeen(current, gen);
     } catch (error) {
       if (!currentRead(current, gen)) return;
       let code = "";
@@ -268,6 +277,23 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     } finally {
       if (currentRead(current, gen)) current.busy = false;
     }
+  }
+  async function markSeen(current, gen) {
+    const next = current.next;
+    try {
+      await api(LIST + "/" + current.key + "/seen", { method: "PUT", body: JSON.stringify({ mirror: next }) });
+      if (!currentRead(current, gen)) return;
+      current.seen = next;
+      const view = answer.subscriptions.find(item => guestKey(item) === current.key);
+      if (!view) return;
+      const before = JSON.stringify(view);
+      view.seen_mirror = next;
+      view.unread = false;
+      if (view.state === "live") {
+        if (view.mirror_last > next) view.unread = true;
+      }
+      if (JSON.stringify(view) !== before) invalidateCards();
+    } catch {}
   }
   function bind() {
     if (bound) return;
