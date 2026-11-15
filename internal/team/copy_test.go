@@ -1489,3 +1489,60 @@ func TestCopyCommentsRefuseBudgetAndInvalidLog(t *testing.T) {
 		t.Error("bad log accepted for read")
 	}
 }
+
+func TestCopyLogRulesOnBothFiles(t *testing.T) {
+	for _, tc := range []struct{ log, filename string }{{MirrorLog, "mirror.jsonl"}, {CommentsLog, "comments.jsonl"}} {
+		t.Run(tc.log, func(t *testing.T) {
+			dir, id := t.TempDir(), sampleCopyID()
+			records := []MirrorRecord{copyRec(1, ""), copyRec(2, ""), copyRec(3, "")}
+			if err := AppendCopy(dir, id, tc.log, records); err != nil {
+				t.Fatal("append failed")
+			}
+			got, last, err := ReadCopy(dir, id, tc.log, 0, 1, 4<<20)
+			if err != nil || last != 3 || len(got) != 1 {
+				t.Fatal("entry limit failed")
+			}
+			got, _, err = ReadCopy(dir, id, tc.log, 0, 256, 1)
+			if err != nil || len(got) != 1 {
+				t.Fatal("body limit failed")
+			}
+			path := filepath.Join(filepath.Dir(copyPathOf(dir, id)), tc.filename)
+			dirInfo, err := os.Stat(filepath.Dir(path))
+			if err != nil || dirInfo.Mode().Perm() != 0o700 {
+				t.Fatal("wrong directory mode")
+			}
+			if err := os.WriteFile(path, []byte(`{"seq":2}`+"\n"), 0o600); err != nil {
+				t.Fatal("cannot write invalid record")
+			}
+			copyMetas.Delete(path)
+			if _, _, err := ReadCopy(dir, id, tc.log, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+				t.Error("invalid complete record accepted")
+			}
+			if err := os.WriteFile(path, []byte(`{"seq":1`), 0o600); err != nil {
+				t.Fatal("cannot write torn record")
+			}
+			copyMetas.Delete(path)
+			_, last, err = ReadCopy(dir, id, tc.log, 0, 256, 4<<20)
+			if err != nil || last != 0 {
+				t.Fatal("single torn line not repaired")
+			}
+			if err := AppendCopy(dir, id, tc.log, []MirrorRecord{copyRec(1, "")}); err != nil {
+				t.Fatal("repaired copy did not accept first entry")
+			}
+		})
+	}
+}
+
+func TestCopyLogReservationOnBothFiles(t *testing.T) {
+	for _, log := range []string{MirrorLog, CommentsLog} {
+		t.Run(log, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_min_free_bytes":0,"storage_global_limit_bytes":1}`), 0o600); err != nil {
+				t.Fatal("cannot set budget")
+			}
+			if err := AppendCopy(dir, sampleCopyID(), log, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, storagebudget.ErrBudget) {
+				t.Error("reservation not refused")
+			}
+		})
+	}
+}
