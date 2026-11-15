@@ -1231,3 +1231,12 @@ test("shared view receives local people lazily", () => {
   const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
   assert.match(app, /people:\s*\(\)\s*=>\s*getUI\(\)\.people/);
 });
+
+test("a read answer invalidates the list when local names changed", async () => {
+  const people = { "s/o": "First" };
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(), undefined, undefined, { people: () => people });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const before = f.invalidations(); people["s/o"] = "Second";
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(f.invalidations(), before + 1);
+});
