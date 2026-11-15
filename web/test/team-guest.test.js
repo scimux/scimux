@@ -131,7 +131,7 @@ function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, l
     const el = { id, innerHTML: "", textContent: "", value: "", selectionStart: 0, selectionEnd: 0, disabled: false, hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
       addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
       focus() { doc.activeElement = el; }, contains(node) { return node === el; },
-      querySelector() { return null; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
+      querySelector() { return null; }, querySelectorAll() { return []; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
     elements.set("#" + id, el);
   }
   const body = elements.get("#sv_body");
@@ -1214,4 +1214,15 @@ test("shared header and groups use the current local owner name", async () => {
   f.feature.tick(); await f.feature.settled(); f.feature.tab.render(f.get("cardlist"));
   assert.match(f.get("cardlist").innerHTML, /Local owner/);
   f.click("cardlist", f.item); await f.feature.settled(); assert.equal(f.get("sv_from").textContent, "From Local owner · Server");
+});
+
+test("a local name change appears when a new answer arrives", async () => {
+  const people = { "s/o": "First" };
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(), undefined, undefined, { people: () => people });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(f.get("sv_from").textContent, "From First · Server");
+  people["s/o"] = "Second";
+  assert.equal(f.get("sv_from").textContent, "From First · Server");
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(f.get("sv_from").textContent, "From Second · Server");
 });
