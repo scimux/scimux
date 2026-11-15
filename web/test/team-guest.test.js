@@ -372,3 +372,25 @@ test("a completed read mark tolerates its subscription disappearing", async () =
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await Promise.resolve(); f.setTime(10000); f.feature.tick(); await Promise.resolve(); await Promise.resolve(); seen.resolve(""); await f.feature.settled();
   assert.equal(f.feature.tab.tabHTML(false), "");
 });
+
+test("browser-normalized HTML does not rewrite an unchanged shared list", async () => {
+  const f = fixture(async () => list([{ ...base, title: 'Quoted "title"' }]));
+  let value = "", writes = 0;
+  Object.defineProperty(f.el, "innerHTML", { get() { return value; }, set(v) { value = v.replaceAll("&quot;", '"'); writes++; } });
+  f.feature.tick(); await f.feature.settled(); f.feature.tab.render(f.el); f.feature.tab.render(f.el);
+  assert.equal(writes, 1);
+});
+
+/* Condition table (condition | test for each deciding half):
+ * guestEntryHTML: user || assistant | shared entries render all kinds: user and assistant.
+ * cards tab Archived class, carried from the original cardTabsHTML | existing
+ * cardTabsHTML All/Pinned/Archived order test: archived and current.
+ * cards waiting prefix conditional | shared cards path keeps the list (one waiting),
+ * clicking the shared tab selects it (zero waiting).
+ * cards test shared-tab active conditional | shared cards path keeps the list:
+ * render shared, then current.
+ * guest test error-body conditional | read failures show fixed notes: bad-json and
+ * copy_damaged/storage_full/not_found.
+ * A newer list request cannot overtake an older one: tick refuses a second load
+ * while loading, and destroy drops the pending response.
+ */
