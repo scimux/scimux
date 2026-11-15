@@ -1177,3 +1177,57 @@ func TestRemoveCopySerializesWaitingAppend(t *testing.T) {
 		t.Errorf("last = %d, want 1", last)
 	}
 }
+
+func TestRemoveCopyReportsFilesystemFailures(t *testing.T) {
+	for _, part := range []string{"open root", "open child", "lstat", "stat", "remove parent"} {
+		t.Run(part, func(t *testing.T) {
+			snapshotCopy(t)
+			dir, id := t.TempDir(), sampleCopyID()
+			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+				t.Fatal("initial append failed")
+			}
+			boom := errors.New("synthetic filesystem failure")
+			switch part {
+			case "open root":
+				copyOps.openRoot = func(string) (*os.Root, error) { return nil, boom }
+			case "open child":
+				copyOps.openChild = func(*os.Root, string) (*os.Root, error) { return nil, boom }
+			case "lstat":
+				copyOps.lstat = func(*os.Root, string) (os.FileInfo, error) { return nil, boom }
+			case "stat":
+				copyOps.stat = func(*os.Root, string) (os.FileInfo, error) { return nil, boom }
+			case "remove parent":
+				copyOps.remove = func(*os.Root, string) error { return boom }
+			}
+			if err := RemoveCopy(dir, id); !errors.Is(err, boom) {
+				t.Error("filesystem failure not returned")
+			}
+		})
+	}
+}
+
+func TestRemoveCopyRejectsChangedRoot(t *testing.T) {
+	snapshotCopy(t)
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("initial append failed")
+	}
+	other, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal("cannot stat other directory")
+	}
+	copyOps.stat = func(*os.Root, string) (os.FileInfo, error) { return other, nil }
+	if err := RemoveCopy(dir, id); !errors.Is(err, ErrCopyPath) {
+		t.Error("changed copy root was not refused")
+	}
+	if _, err := os.Stat(copyPathOf(dir, id)); err != nil {
+		t.Error("copy was removed")
+	}
+}
+
+func TestRemoveCopyMissingDataDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing")
+	if err := RemoveCopy(path, sampleCopyID()); err != nil {
+		t.Error("missing data directory must succeed")
+	}
+}
