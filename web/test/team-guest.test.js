@@ -1252,3 +1252,65 @@ test("shared group and header mark the person they show", async () => {
   g.feature.tick(); await g.feature.settled(); g.click("cardlist", g.item); await g.feature.settled();
   assert.equal(g.get("sv_from").dataset.seat, undefined); assert.equal(g.get("sv_from").textContent, "Your chat · Server");
 });
+
+function sharedRenameBubble(seq, fixture) {
+  const turn = { dataset: { seq: String(seq) }, nextElementSibling: null };
+  const bubble = { closest(sel) { if (sel === ".bubble") return bubble; if (sel === "[data-seq], [data-cseq]") return turn; return null; } };
+  turn.insertAdjacentHTML = (_where, html) => {
+    let inner = html, field = null;
+    const renameButton = { focus() { fixture.doc.activeElement = renameButton; } };
+    const row = { dataset: { gactions: "" }, remove() { turn.nextElementSibling = null; }, querySelector(sel) {
+      if (sel === "[data-grename]") return field;
+      if (sel === '[data-gact="rename"]') return renameButton;
+      return null;
+    } };
+    Object.defineProperty(row, "innerHTML", { get() { return inner; }, set(value) {
+      inner = value;
+      const match = /value="([^"]*)"/.exec(value);
+      field = match ? { dataset: { grename: "" }, value: match[1].replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&"), focus() { fixture.doc.activeElement = this; } } : null;
+    } });
+    turn.nextElementSibling = row;
+  };
+  return { turn, bubble };
+}
+function sharedNameAction(f, name) {
+  const node = { dataset: { gact: name }, closest(sel) { return sel === "[data-gact]" ? this : null; } };
+  f.click("sharedview", node);
+}
+
+test("person rename edits local names and updates labels without closing the row", async () => {
+  for (const [choice, typed, expected] of [["save", " New <&\" ", "New <&\""], ["save", "", ""], ["save", "Owner", ""], ["use", "ignored", ""]]) {
+    const people = { "s/o": "Local" }, ops = [];
+    const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([{ t: "user", seq: 1, text: "x", prov: true }], 1), undefined, undefined, {
+      people: () => people, bookmarks: () => [], openSendTo() {}, uiMutate(op) { ops.push(op); if (op.name) people[op.key] = op.name; else delete people[op.key]; },
+    });
+    const label = { dataset: { seat: "o", prompt: "1", prov: "true" }, textContent: "" };
+    f.get("sv_body").querySelectorAll = sel => sel === "[data-seat]" ? [label] : [];
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    const bubble = sharedRenameBubble(1, f); f.click("sharedview", bubble.bubble);
+    assert.match(bubble.turn.nextElementSibling.innerHTML, /data-gact="rename"/);
+    sharedNameAction(f, "rename"); const row = bubble.turn.nextElementSibling, field = row.querySelector("[data-grename]");
+    assert.ok(field); assert.equal(field.value, "Local"); assert.equal(f.doc.activeElement, field); field.value = typed;
+    f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(row.querySelector("[data-grename]"), field); assert.equal(field.value, typed);
+    const before = f.invalidations(); sharedNameAction(f, choice === "save" ? "name-save" : "name-use");
+    assert.deepEqual(ops, [{ k: "person-name", key: "s/o", name: expected }]); assert.equal(f.invalidations(), before + 1);
+    const shown = expected || "Owner"; assert.equal(f.get("sv_from").textContent, "From " + shown + " · Server");
+    assert.equal(label.textContent, shown + " · prompt · includes forwarded AI text");
+    assert.equal(f.doc.activeElement, row.querySelector('[data-gact="rename"]'));
+  }
+});
+
+test("rename escape cancels and only other people's bubbles offer it", async () => {
+  const view = { ...base, access: "owner" }, ops = [];
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([view]) : readAnswer([{ t: "user", seq: 1, text: "mine" }, { t: "assistant", seq: 2, text: "agent" }], 2, false, view),
+    async () => commentsAnswer([{ seq: 1, anchor: 2, text: "other", author: "a", mine: false }], 1, false, { a: "Writer" }), undefined,
+    { people: () => ({}), uiMutate: op => ops.push(op), bookmarks: () => [], openSendTo() {} });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  for (const seq of [1, 2]) { const own = sharedRenameBubble(seq, f); f.click("sharedview", own.bubble); assert.doesNotMatch(own.turn.nextElementSibling.innerHTML, /data-gact="rename"/); f.click("sharedview", own.bubble); }
+  const other = sharedRenameBubble(0, f); other.turn.dataset = { cseq: "1" }; f.click("sharedview", other.bubble);
+  sharedNameAction(f, "rename"); const row = other.turn.nextElementSibling, field = row.querySelector("[data-grename]"); assert.equal(field.value, "Writer");
+  let prevented = false, stopped = false;
+  f.get("sharedview").listeners.get("keydown")({ key: "Escape", target: field, preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented, true); assert.equal(stopped, true); assert.equal(f.get("sharedview").hidden, false); assert.deepEqual(ops, []);
+  assert.equal(f.doc.activeElement, row.querySelector('[data-gact="rename"]'));
+});
