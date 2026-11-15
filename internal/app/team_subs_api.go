@@ -2,12 +2,17 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/scimux/scimux/internal/identity"
+	"github.com/scimux/scimux/internal/storagebudget"
 	"github.com/scimux/scimux/internal/team"
 )
 
@@ -72,15 +77,38 @@ type subListResponse struct {
 
 // serveSubscriptions handles /api/team/subscriptions and paths below it.
 func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/api/team/subscriptions" {
+	if r.URL.Path == "/api/team/subscriptions" && r.Method == http.MethodGet {
+		h.listSubscriptions(w, r)
+		return
+	}
+	rest, ok := strings.CutPrefix(r.URL.Path, "/api/team/subscriptions/")
+	parts := strings.Split(rest, "/")
+	if !ok || (len(parts) != 4 && (len(parts) != 5 || parts[4] != "seen")) || !subHex(parts[0], 32) || !subHex(parts[1], 32) || !subHex(parts[2], 16) || !subHex(parts[3], 16) {
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	if r.Method != http.MethodGet {
-		writeTeamError(w, http.StatusNotFound, "not_found")
+	id := team.CopyID{Server: parts[0], Owner: parts[1], Chat: parts[2], Generation: parts[3]}
+	if len(parts) == 4 && r.Method == http.MethodGet {
+		h.readSubscription(w, r, id)
 		return
 	}
-	h.listSubscriptions(w, r)
+	if len(parts) == 5 && r.Method == http.MethodPut {
+		h.seeSubscription(w, r, id)
+		return
+	}
+	writeTeamError(w, http.StatusNotFound, "not_found")
+}
+
+func subHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *teamHandler) listSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -493,4 +521,295 @@ func subLess(a, b subscriptionView) bool {
 		return a.Chat < b.Chat
 	}
 	return a.FirstSeen < b.FirstSeen
+}
+
+type subscriptionReadResponse struct {
+	View struct {
+		subscriptionView
+		Delivery string `json:"delivery"`
+	} `json:"view"`
+	Entries []map[string]any `json:"entries"`
+	Last    uint64           `json:"last"`
+	More    bool             `json:"more"`
+}
+
+func sameCopy(s team.Subscription, id team.CopyID) bool {
+	return s.Server == id.Server && s.Owner == id.Owner && s.Chat == id.Chat && s.Generation == id.Generation
+}
+
+func (h *teamHandler) lookupSubscription(id team.CopyID) (team.Subscription, team.Entry, bool, bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entries, subs, err := h.loadSubState()
+	if err != nil {
+		return team.Subscription{}, team.Entry{}, false, false, err
+	}
+	for _, s := range subs {
+		if sameCopy(s, id) {
+			for _, e := range entries {
+				if e.ID == id.Server {
+					return s, e, true, true, nil
+				}
+			}
+			return s, team.Entry{}, true, false, nil
+		}
+	}
+	return team.Subscription{}, team.Entry{}, false, false, nil
+}
+
+func (h *teamHandler) endSubscription(id team.CopyID, whole bool) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	subs, err := team.LoadSubs(h.dataDir)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for i := range subs {
+		if (whole && subs[i].Server == id.Server) || (!whole && sameCopy(subs[i], id)) {
+			if markEnded(&subs[i]) {
+				changed = true
+			}
+		}
+	}
+	if changed {
+		return h.saveSubscriptionState(subs)
+	}
+	return nil
+}
+
+func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
+	var after uint64
+	vals, exists := r.URL.Query()["after"]
+	if exists {
+		if len(vals) != 1 || vals[0] == "" {
+			writeTeamError(w, 400, "bad_request")
+			return
+		}
+		var err error
+		after, err = strconv.ParseUint(vals[0], 10, 64)
+		if err != nil {
+			writeTeamError(w, 400, "bad_request")
+			return
+		}
+	}
+	sub, server, found, joined, err := h.lookupSubscription(id)
+	if err != nil {
+		writeTeamError(w, 500, "store_unavailable")
+		return
+	}
+	if !found {
+		writeTeamError(w, 404, "not_found")
+		return
+	}
+	_, last, err := team.ReadCopy(h.dataDir, id, ^uint64(0))
+	if err != nil {
+		writeTeamError(w, 500, "copy_damaged")
+		return
+	}
+	delivery := "ok"
+	stopped := false
+	full := false
+	if sub.State == "live" && joined {
+		err = h.confirmed(r.Context(), server)
+		if err == nil {
+			for pageNo := 0; pageNo < 8; pageNo++ {
+				var page team.MirrorPage
+				page, err = h.client.ReadMirror(r.Context(), server.URL, server.Token, id.Owner, id.Chat, last)
+				if err != nil {
+					break
+				}
+				if page.Generation != id.Generation {
+					err = h.endSubscription(id, false)
+					if err != nil {
+						writeTeamError(w, 500, "store_unavailable")
+						return
+					}
+					sub.State = "ended"
+					break
+				}
+				err = team.AppendCopy(h.dataDir, id, page.Entries)
+				if err != nil {
+					break
+				}
+				if len(page.Entries) > 0 {
+					last = page.Entries[len(page.Entries)-1].Seq
+				}
+				if !page.More {
+					break
+				}
+				if pageNo == 7 {
+					stopped = true
+				}
+			}
+		}
+		switch {
+		case err == nil:
+		case errors.Is(err, team.ErrNoChannel):
+			err = h.endSubscription(id, false)
+			sub.State = "ended"
+		case errors.Is(err, team.ErrUnauthorized):
+			err = h.endSubscription(id, true)
+			sub.State = "ended"
+			delivery = "refused"
+		case errors.Is(err, team.ErrUnreachable):
+			delivery = "offline"
+			err = nil
+		case errors.Is(err, storagebudget.ErrBudget):
+			full = true
+			err = nil
+		case errors.Is(err, team.ErrCopyDamaged):
+			writeTeamError(w, 500, "copy_damaged")
+			return
+		case errors.Is(err, team.ErrCopyRange), errors.Is(err, team.ErrProtocol):
+			delivery = "changed"
+			err = nil
+		default:
+			delivery = "changed"
+			err = nil
+		}
+		if err != nil {
+			writeTeamError(w, 500, "store_unavailable")
+			return
+		}
+	}
+	records, last, err := team.ReadCopy(h.dataDir, id, after)
+	if err != nil {
+		writeTeamError(w, 500, "copy_damaged")
+		return
+	}
+	var out subscriptionReadResponse
+	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, Unread: sub.MirrorLast > sub.SeenMirror, FirstSeen: sub.FirstSeen}
+	out.View.Delivery = delivery
+	out.Last = last
+	out.Entries = []map[string]any{}
+	textBytes := 0
+	returnedThrough := after
+	for i, record := range records {
+		entry, size, ok := projectSubRecord(record)
+		if !ok {
+			continue
+		}
+		if len(out.Entries) >= 256 || textBytes+size > 4<<20 {
+			out.More = true
+			break
+		}
+		out.Entries = append(out.Entries, entry)
+		returnedThrough = record.Seq
+		textBytes += size
+		if i == len(records)-1 {
+			break
+		}
+	}
+	out.More = out.More || stopped || last > returnedThrough
+	if full && len(records) == 0 {
+		writeTeamError(w, 507, "storage_full")
+		return
+	}
+	writeJSONStatus(w, 200, out)
+}
+
+func projectSubRecord(record team.MirrorRecord) (map[string]any, int, bool) {
+	var body map[string]json.RawMessage
+	if json.Unmarshal(record.Body, &body) != nil || body == nil {
+		return nil, 0, false
+	}
+	var version int
+	var kind string
+	if json.Unmarshal(body["v"], &version) != nil || version != 1 || json.Unmarshal(body["t"], &kind) != nil {
+		return nil, 0, false
+	}
+	var fields []string
+	switch kind {
+	case "start":
+		fields = []string{"scope", "time"}
+	case "user":
+		fields = []string{"time", "text"}
+	case "assistant":
+		fields = []string{"time", "text", "agent", "prov", "omitted"}
+	case "source":
+		fields = []string{"time", "reason"}
+	default:
+		return nil, 0, false
+	}
+	out := map[string]any{"seq": record.Seq, "at": record.At, "t": kind}
+	size := 0
+	for _, field := range fields {
+		raw, ok := body[field]
+		if !ok {
+			continue
+		}
+		if field == "prov" {
+			var b bool
+			if json.Unmarshal(raw, &b) != nil {
+				return nil, 0, false
+			}
+			out[field] = b
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return nil, 0, false
+		}
+		out[field] = s
+		if field == "text" {
+			size += len(s)
+		}
+	}
+	return out, size, true
+}
+
+func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
+	var req struct {
+		Mirror *uint64 `json:"mirror"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if dec.Decode(&req) != nil || req.Mirror == nil {
+		writeTeamError(w, 400, "bad_request")
+		return
+	}
+	var extra any
+	if dec.Decode(&extra) != io.EOF {
+		writeTeamError(w, 400, "bad_request")
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	subs, err := team.LoadSubs(h.dataDir)
+	if err != nil {
+		writeTeamError(w, 500, "store_unavailable")
+		return
+	}
+	for i := range subs {
+		if sameCopy(subs[i], id) {
+			_, last, err := team.ReadCopy(h.dataDir, id, ^uint64(0))
+			if err != nil {
+				writeTeamError(w, 500, "store_unavailable")
+				return
+			}
+			value := *req.Mirror
+			if value > last {
+				value = last
+			}
+			if value > subs[i].SeenMirror {
+				subs[i].SeenMirror = value
+				if h.saveSubscriptionState(subs) != nil {
+					writeTeamError(w, 500, "store_unavailable")
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	writeTeamError(w, 404, "not_found")
+}
+
+func (h *teamHandler) saveSubscriptionState(subs []team.Subscription) error {
+	if h.saveSubs != nil {
+		return h.saveSubs(h.dataDir, subs)
+	}
+	return team.SaveSubs(h.dataDir, subs)
 }
