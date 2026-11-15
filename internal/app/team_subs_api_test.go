@@ -43,6 +43,7 @@ type subScript struct {
 	helloStatus    int
 	helloID        string
 	channelsStatus int
+	mirrorStatus   int
 	channelsBody   string
 	seatsStatus    int
 	seatsBody      string
@@ -57,6 +58,7 @@ func (s *subScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	helloStatus, helloID := s.helloStatus, s.helloID
 	chStatus, chBody := s.channelsStatus, s.channelsBody
 	seatStatus, seatBody := s.seatsStatus, s.seatsBody
+	mirrorStatus := s.mirrorStatus
 	s.mu.Unlock()
 	if drop {
 		hj, ok := w.(http.Hijacker)
@@ -105,6 +107,10 @@ func (s *subScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, seatBody)
 		}
 	default:
+		if strings.HasSuffix(r.URL.Path, "/mirror") && mirrorStatus != 0 {
+			w.WriteHeader(mirrorStatus)
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 	}
 }
@@ -525,13 +531,22 @@ func TestSubListEndsAChannelThatIsGone(t *testing.T) {
 	}
 }
 
-func TestSubListKeepsAnEndedSubscriptionEnded(t *testing.T) {
-	script := &subScript{
-		channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 2)),
-		seatsBody:    seatsOf(subOwner, "Ada"),
-	}
+func TestSubListRevivesSameGeneration(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 2)), seatsBody: seatsOf(subOwner, "Ada")}
 	h, dir, _ := subSurface(t, script)
 	clock := holdClock(t, h)
+	sub := baseSub()
+	sub.SeenMirror = 1
+	seedSub(t, dir, sub)
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	if err := team.AppendCopy(dir, id, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	readSubList(t, h)
 	*clock = clock.Add(10 * time.Second)
 	script.mu.Lock()
@@ -544,25 +559,32 @@ func TestSubListKeepsAnEndedSubscriptionEnded(t *testing.T) {
 	script.mu.Unlock()
 	got, _ := readSubList(t, h)
 	one := mustFindSub(t, got, subOwner, subChat, subGen)
-	if len(got.Subscriptions) != 1 || one.State != "ended" || one.Title != "Synthetic title" || one.Access != "read" || one.MirrorLast != 2 || one.SeenMirror != 0 {
-		t.Fatalf("revived = %+v list %+v", one, got.Subscriptions)
-	}
-	path := filepath.Join(dir, team.SubsFile)
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	*clock = clock.Add(10 * time.Second)
-	script.mu.Lock()
-	script.channelsBody = `{"channels":[]}`
-	script.mu.Unlock()
-	again, _ := readSubList(t, h)
-	if mustFindSub(t, again, subOwner, subChat, subGen).State != "ended" {
-		t.Fatalf("ended twice = %+v", again.Subscriptions)
+	if one.State != "live" || one.Title != "North <relay>" || one.Access != "write" || one.MirrorLast != 9 || one.SeenMirror != 1 || one.FirstSeen != sub.FirstSeen {
+		t.Fatalf("revived = %+v", one)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("ending an ended subscription rewrote the file")
+		t.Fatal("revival changed copy")
+	}
+}
+
+func TestSubListRevivesAfterReadRefusal(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusUnauthorized} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 2)), seatsBody: seatsOf(subOwner, "Ada")}
+			h, dir, _ := subSurface(t, script)
+			clock := holdClock(t, h)
+			seedSub(t, dir, baseSub())
+			script.mu.Lock()
+			script.mirrorStatus = status
+			script.mu.Unlock()
+			decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+			*clock = clock.Add(10 * time.Second)
+			got, _ := readSubList(t, h)
+			if s := mustFindSub(t, got, subOwner, subChat, subGen); s.State != "live" {
+				t.Fatalf("subscription = %+v", s)
+			}
+		})
 	}
 }
 
