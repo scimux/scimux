@@ -1130,3 +1130,39 @@ test("a later shared entry does not split the action row", async () => {
   f.setTime(5000); f.feature.tick(); await f.feature.settled();
   assert.match(body.innerHTML, /data-seq="1"[\s\S]*data-gactions[\s\S]*data-seq="2"[\s\S]*data-seq="3"/);
 });
+
+test("shared send keeps focus and ignores unrelated bookmarks", async () => {
+  const ops = [], sends = [];
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([{ t: "user", seq: 1, text: "synthetic" }], 1), undefined, undefined,
+    { bookmarks: () => [{ text: "old" }], uiMutate: op => ops.push(op), openSendTo: opts => sends.push(opts) });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const item = sharedActionBubble(1); f.click("sharedview", item.bubble);
+  const act = { dataset: { gact: "bookmark" }, closest(sel) { return sel === "[data-gact]" ? this : null; } };
+  f.click("sharedview", act); assert.equal(ops.length, 1);
+  const focus = { focus() { f.doc.activeElement = this; } }; focus.focus();
+  act.dataset.gact = "sendto"; f.click("sharedview", act);
+  assert.equal(f.doc.activeElement, focus); assert.equal(sends.length, 1); assert.equal(sends[0].who, "Owner");
+});
+
+/* Wave 6 condition table: condition | each half decides the result.
+ * entry.t !== user && entry.t !== assistant | capture: user; assistant and invalid divider.
+ * Enter || Space | shared action keyboard: Enter and Space; unrelated key in shared actions ignore.
+ * item.team && keys.every | shared send ignores unrelated bookmarks; duplicate fields test matches and differs.
+ * comment ? at : time; comment ? comments : mirror | shared capture: comment and mirror.
+ * names[author] || Unknown; owner_name || Unknown | shared capture: known and unknown for each.
+ * title || Untitled | shared capture: named and empty title.
+ * bookmarks who || another person; prov === true ? AI : empty | quoted shared text: named/empty, true/false.
+ * bookmark/notes who and from source choices | shared source-line tests: each, both, neither.
+ * nt && nt.from || empty; nd ? title : shared | shared snapshot tests: null, local, shared and empty.
+ * snapshot && role === person ? speaker : empty | reference sends: null, person, and assistant.
+ * snapshot && prov | reference sends: null and person provenance.
+ * nt.who || empty in send paths | bookmark pane and notes inbox: named and legacy unnamed.
+ */
+
+test("comment author classification holds for guests and owners", () => {
+  const message = { seq: 2, text: "x", author: "seat", mine: false };
+  for (const access of ["read", "write", "owner"]) {
+    assert.equal(guestModule.guestCapture(message, { ...base, access }, { seat: "Ann" }).role, "person");
+    assert.equal(guestModule.guestCapture({ ...message, mine: true }, { ...base, access }, {}).role, "user");
+  }
+});

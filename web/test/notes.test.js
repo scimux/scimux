@@ -3807,3 +3807,21 @@ test("placing a shared person's bookmark freezes its source details", async () =
   ctx.setBookmarks([]); await openNote(ctx, "n1"); await settle();
   assert.equal(ctx.docs.n1.sections[0].references[0].snapshot.speaker, "Ann");
 });
+
+test("shared snapshot station handles absent, local and untitled sources", () => {
+  assert.equal(buildBookmarkSnapshot(null, { bookmarkLaneId: () => "" }).station, "");
+  assert.equal(buildBookmarkSnapshot({ text: "x" }).station, "");
+  assert.equal(buildBookmarkSnapshot({ node: "n", from: "Shared" }, { nodeById: () => ({ title: "Local" }) }).station, "Local");
+  assert.equal(buildBookmarkSnapshot({ from: "Shared" }).station, "Shared");
+});
+
+test("note reference send handles a missing snapshot", async () => {
+  const calls = [];
+  const ctx = createFeature({ notes: [{ id: "n1", title: "N", order: 0 }], docs: { n1: { id: "n1", title: "N", sections: [{ id: "s1", title: "", body: "", order: 0, references: [{ id: "r1", source: {} }] }] } }, deps: { openSendTo: opts => calls.push(opts) } });
+  ctx.feature.bind(); ctx.feature.open(); await settle(); await openNote(ctx, "n1");
+  const sec = el("div", { dataset: { sec: "s1" } }), ref = el("div", { dataset: { ref: "r1" } });
+  const btn = el("button", { dataset: { refact: "sendto" } });
+  btn.closest = sel => sel === "[data-refact]" ? btn : sel === ".wsref" ? ref : sel === ".wssec" ? sec : null;
+  ctx.roots.wssections.dispatch("click", { target: btn });
+  assert.equal(calls[0].who, ""); assert.equal(calls[0].prov, undefined); assert.equal(calls[0].role, "");
+});
