@@ -285,7 +285,7 @@ func TestShareSheetSlotsAndConstruction(t *testing.T) {
 
 func TestSharedViewSlotsAndConstruction(t *testing.T) {
 	html := readWebFile(t, "web/index.html")
-	for _, id := range []string{"sharedview", "sv_scrim", "sv_panel", "sv_head", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note"} {
+	for _, id := range []string{"sharedview", "sv_scrim", "sv_panel", "sv_head", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note", "sv_remove"} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html has no id=%q", id)
 		}

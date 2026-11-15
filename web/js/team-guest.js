@@ -306,6 +306,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       if (JSON.stringify(view) !== before) invalidateCards();
     } catch {}
   }
+  function removeClick() {}
+  function sharedClick() {}
   function bind() {
     if (bound) return;
     bound = true;
@@ -314,6 +316,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     doc.querySelector("#sv_scrim").addEventListener("click", close);
     doc.querySelector("#sv_more").addEventListener("click", more);
     doc.querySelector("#sharedview").addEventListener("keydown", keydown);
+    doc.querySelector("#sharedview").addEventListener("click", sharedClick);
+    doc.querySelector("#sv_remove").addEventListener("click", removeClick);
   }
   function destroy() {
     if (bound) {
@@ -322,6 +326,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       doc.querySelector("#sv_scrim").removeEventListener("click", close);
       doc.querySelector("#sv_more").removeEventListener("click", more);
       doc.querySelector("#sharedview").removeEventListener("keydown", keydown);
+      doc.querySelector("#sharedview").removeEventListener("click", sharedClick);
+      doc.querySelector("#sv_remove").removeEventListener("click", removeClick);
     }
     open = null;
     readGeneration++;

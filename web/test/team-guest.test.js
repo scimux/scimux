@@ -115,7 +115,7 @@ function viewFixture(api) {
   let time = 0, invalidations = 0;
   const elements = new Map();
   const doc = { activeElement: null, querySelector(sel) { return elements.get(sel); } };
-  for (const id of ["cardlist", "cardtabs", "sharedview", "sv_scrim", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note"]) {
+  for (const id of ["cardlist", "cardtabs", "sharedview", "sv_scrim", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note", "sv_remove"]) {
     const listeners = new Map();
     const el = { id, innerHTML: "", textContent: "", hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
       addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
@@ -269,9 +269,10 @@ test("ended subscriptions remain readable", async () => {
 test("destroy removes all guest listeners and prevents later requests", async () => {
   let calls = 0;
   const f = viewFixture(async path => { calls++; if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
-  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sharedview"]) assert.equal(f.get(id).listeners.size, 1);
+  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sv_remove"]) assert.equal(f.get(id).listeners.size, 1);
+  assert.equal(f.get("sharedview").listeners.size, 2);
   f.feature.destroy();
-  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sharedview"]) assert.equal(f.get(id).listeners.size, 0);
+  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sv_remove", "sharedview"]) assert.equal(f.get(id).listeners.size, 0);
   f.feature.tick(); await f.feature.settled(); assert.equal(calls, 0);
 });
 
@@ -413,4 +414,140 @@ test("an omitted field displays the omission message even when empty", () => {
   for (const kind of ["user", "assistant"]) {
     assert.match(guestEntryHTML({ t: kind, seq: 1, omitted: "" }, "Owner"), /This message was too large to share\./);
   }
+});
+
+test("remove first click arms with a warning and another click disarms", async () => {
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const button = f.get("sv_remove");
+  assert.equal(button.textContent, "Remove from my list"); assert.equal(button.disabled, false);
+  button.focus(); f.click("sv_remove");
+  assert.equal(button.textContent, "Confirm remove");
+  assert.equal(f.get("sv_note").textContent, "This leaves the chat and deletes the saved copy from this computer.");
+  assert.equal(f.doc.activeElement, button);
+  f.click("sharedview", button); assert.equal(button.textContent, "Confirm remove");
+  f.click("sharedview", f.get("sv_body"));
+  assert.equal(button.textContent, "Remove from my list"); assert.equal(f.get("sv_note").textContent, "");
+});
+
+test("escape first disarms removal and then closes the view", async () => {
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_remove");
+  let stopped = 0;
+  const escape = () => f.get("sharedview").listeners.get("keydown")({ key: "Escape", stopPropagation() { stopped++; } });
+  escape(); assert.equal(f.get("sharedview").hidden, false); assert.equal(f.get("sv_remove").textContent, "Remove from my list"); assert.equal(f.get("sv_note").textContent, "");
+  escape(); assert.equal(f.get("sharedview").hidden, true); assert.equal(stopped, 2);
+});
+
+test("removal blocks duplicate deletes and read runs, then focuses the remaining tab", async () => {
+  const pending = deferred(); let deletes = 0, reads = 0;
+  const other = { ...base, chat: "d" };
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([base, other]);
+    if (opts) { if (opts.method === "DELETE") { deletes++; return pending.promise; } }
+    reads++; return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const before = f.invalidations(); f.get("sv_remove").focus(); f.click("sv_remove"); f.click("sv_remove");
+  assert.equal(deletes, 1); assert.equal(f.get("sv_remove").disabled, true); f.click("sv_remove");
+  f.setTime(5000); f.feature.tick(); assert.equal(reads, 1); assert.equal(deletes, 1);
+  pending.resolve(""); await f.feature.settled();
+  assert.equal(f.get("sharedview").hidden, true); assert.equal(f.doc.activeElement, f.get("cardtabs"));
+  assert.equal(f.invalidations(), before + 1); assert.match(f.feature.tab.tabHTML(false), /Shared with me/);
+  f.feature.tab.render(f.get("cardlist")); assert.equal(f.get("cardlist").innerHTML.includes('data-sub="s/o/c/g"'), false);
+});
+
+test("not found removal succeeds and focuses the card list when the tab is gone", async () => {
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([base]);
+    if (opts) { if (opts.method === "DELETE") throw Object.assign(new Error('{"error":"not_found"}'), { status: 404 }); }
+    return readAnswer();
+  });
+  f.get("cardtabs").querySelector = () => null;
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const before = f.invalidations(); f.click("sv_remove"); f.click("sv_remove"); await f.feature.settled();
+  assert.equal(f.get("sharedview").hidden, true); assert.equal(f.doc.activeElement, f.get("cardlist"));
+  assert.equal(f.feature.tab.tabHTML(false), ""); assert.equal(f.invalidations(), before + 1);
+});
+
+test("removal failures reset the button and keep their note across ticks", async () => {
+  for (const [code, expected] of [["unreachable", "The server could not be reached. Try again later."], ["other", "That did not work. Try again."]]) {
+    let deletes = 0;
+    const f = viewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list([base]);
+      if (opts) { if (opts.method === "DELETE") { deletes++; throw new Error(JSON.stringify({ error: code })); } }
+      return readAnswer();
+    });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    f.click("sv_remove"); f.click("sv_remove"); await f.feature.settled();
+    assert.equal(deletes, 1); assert.equal(f.get("sv_remove").disabled, false); assert.equal(f.get("sv_remove").textContent, "Remove from my list");
+    assert.equal(f.get("sv_note").textContent, expected); f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(f.get("sv_note").textContent, expected);
+  }
+});
+
+test("tick keeps the armed removal warning", async () => {
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_remove");
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(f.get("sv_remove").textContent, "Confirm remove"); assert.equal(f.get("sv_note").textContent, "This leaves the chat and deletes the saved copy from this computer.");
+});
+
+test("late successful removal drops its item without changing a different open view", async () => {
+  for (const status of [204, 404]) {
+    const pending = deferred(), other = { ...base, chat: "d", title: "Other" };
+    const f = viewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list([base, other]);
+      if (opts) { if (opts.method === "DELETE") return pending.promise; }
+      if (path.includes("/d/g?")) return readAnswer([], 0, false, other);
+      return readAnswer();
+    });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_remove"); f.click("sv_remove");
+    const second = { dataset: { sub: guestKey(other) }, closest(sel) { if (sel === "[data-sub]") return this; return null; } };
+    f.click("cardlist", second); await Promise.resolve();
+    if (status === 404) pending.reject(Object.assign(new Error('{"error":"not_found"}'), { status: 404 }));
+    else pending.resolve("");
+    await f.feature.settled(); assert.equal(f.get("sharedview").hidden, false); assert.equal(f.get("sv_title").textContent, "Other");
+    f.feature.tab.render(f.get("cardlist")); assert.equal(f.get("cardlist").innerHTML.includes('data-sub="s/o/c/g"'), false);
+  }
+});
+
+test("late failed removal does not alter the newly opened view", async () => {
+  const pending = deferred(), other = { ...base, chat: "d", title: "Other" };
+  let deletes = 0;
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([base, other]);
+    if (opts) { if (opts.method === "DELETE") { deletes++; return pending.promise; } }
+    return readAnswer([], 0, false, other);
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_remove"); f.click("sv_remove");
+  const second = { dataset: { sub: guestKey(other) }, closest(sel) { if (sel === "[data-sub]") return this; return null; } };
+  assert.equal(deletes, 1); f.click("cardlist", second); pending.reject(new Error('{"error":"unreachable"}')); await f.feature.settled();
+  assert.equal(f.get("sharedview").hidden, false); assert.equal(f.get("sv_title").textContent, "Other"); assert.equal(f.get("sv_note").textContent, "");
+});
+
+test("late removal after closing drops the chat without reopening the view", async () => {
+  for (const status of [204, 404]) {
+    const pending = deferred();
+    const f = viewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list([base]);
+      if (opts) { if (opts.method === "DELETE") return pending.promise; }
+      return readAnswer();
+    });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    f.click("sv_remove"); f.click("sv_remove"); f.click("sv_back");
+    const before = f.invalidations();
+    if (status === 404) pending.reject(Object.assign(new Error("not found"), { status: 404 }));
+    else pending.resolve("");
+    await f.feature.settled(); assert.equal(f.get("sharedview").hidden, true); assert.equal(f.feature.tab.tabHTML(false), ""); assert.equal(f.invalidations(), before + 1);
+  }
+});
+
+test("a non-JSON removal error uses the generic message", async () => {
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([base]);
+    if (opts) { if (opts.method === "DELETE") throw new Error("not json"); }
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_remove"); f.click("sv_remove"); await f.feature.settled();
+  assert.equal(f.get("sv_note").textContent, "That did not work. Try again.");
 });
