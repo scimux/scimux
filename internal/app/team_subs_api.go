@@ -392,10 +392,8 @@ func applyChannels(subs []team.Subscription, outcome subOutcome, inst string, no
 		channel := listed[key]
 		idx := subIndex(subs, id, key)
 		if idx >= 0 {
-			if subs[idx].State != "live" {
-				continue
-			}
-			if subs[idx].Title != channel.Title || subs[idx].Access != channel.Access || subs[idx].MirrorLast != channel.MirrorLast {
+			if subs[idx].State != "live" || subs[idx].Title != channel.Title || subs[idx].Access != channel.Access || subs[idx].MirrorLast != channel.MirrorLast {
+				subs[idx].State = "live"
 				subs[idx].Title = channel.Title
 				subs[idx].Access = channel.Access
 				subs[idx].MirrorLast = channel.MirrorLast
