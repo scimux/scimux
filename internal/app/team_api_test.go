@@ -1967,3 +1967,58 @@ func TestTeamRenameStorageInvariantDocumented(t *testing.T) {
 		t.Fatal("rename missing from team storage invariant")
 	}
 }
+
+func TestTeamRenameSeatSaveTooLargeKeepsOriginalFile(t *testing.T) {
+	client, hits := scriptedClient(struct {
+		helloStatus int
+		helloBody   string
+		helloErr    bool
+		nextStatus  int
+		nextBody    string
+		nextErr     bool
+	}{helloStatus: 200, helloBody: helloJSON(teamServerID, "Lab relay"), nextStatus: 200})
+	h, dir := testTeamSurface(t, client)
+	entry := labEntry(teamServerID, "http://x", teamToken)
+	entry.SeatName = "A"
+	shape := struct {
+		V       int          `json:"v"`
+		Servers []team.Entry `json:"servers"`
+	}{V: 1, Servers: []team.Entry{entry}}
+	encoded, err := json.Marshal(shape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.URL = "http://" + strings.Repeat("x", 65520-len(encoded))
+	seedTeam(t, dir, entry)
+	before, err := os.ReadFile(filepath.Join(dir, team.File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doTeam(h, http.MethodPut, "/api/team/servers/"+teamServerID+"/seat", `{"name":"`+strings.Repeat("n", 64)+`"}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want store failure", rec.Code)
+	}
+	assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+	if len(*hits) != 2 {
+		t.Fatalf("request count = %d", len(*hits))
+	}
+	after, err := os.ReadFile(filepath.Join(dir, team.File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("failed save changed the old file")
+	}
+}
+
+func TestTeamRenameRouteDocumented(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRootFromTest(t), "docs", "http-api.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{"PUT /api/team/servers/{id}/seat", "name_refused", "next successful change"} {
+		if !strings.Contains(string(raw), needle) {
+			t.Errorf("rename documentation missing %q", needle)
+		}
+	}
+}
