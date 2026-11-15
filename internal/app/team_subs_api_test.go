@@ -195,19 +195,21 @@ func holdClock(t *testing.T, h http.Handler) *time.Time {
 }
 
 type subView struct {
-	Server     string `json:"server"`
-	ServerName string `json:"server_name"`
-	Owner      string `json:"owner"`
-	OwnerName  string `json:"owner_name"`
-	Chat       string `json:"chat"`
-	Generation string `json:"generation"`
-	Title      string `json:"title"`
-	Access     string `json:"access"`
-	State      string `json:"state"`
-	MirrorLast uint64 `json:"mirror_last"`
-	SeenMirror uint64 `json:"seen_mirror"`
-	Unread     bool   `json:"unread"`
-	FirstSeen  string `json:"first_seen"`
+	Server       string `json:"server"`
+	ServerName   string `json:"server_name"`
+	Owner        string `json:"owner"`
+	OwnerName    string `json:"owner_name"`
+	Chat         string `json:"chat"`
+	Generation   string `json:"generation"`
+	Title        string `json:"title"`
+	Access       string `json:"access"`
+	State        string `json:"state"`
+	MirrorLast   uint64 `json:"mirror_last"`
+	SeenMirror   uint64 `json:"seen_mirror"`
+	CommentsLast uint64 `json:"comments_last"`
+	SeenComments uint64 `json:"seen_comments"`
+	Unread       bool   `json:"unread"`
+	FirstSeen    string `json:"first_seen"`
 }
 
 type subServerView struct {
@@ -380,7 +382,7 @@ func TestSubListWithNoChannel(t *testing.T) {
 	}
 }
 
-func TestSubListIgnoresOwnedChannels(t *testing.T) {
+func TestSubListIncludesOwnedChannels(t *testing.T) {
 	script := &subScript{}
 	srv := httptest.NewServer(script)
 	t.Cleanup(srv.Close)
@@ -394,15 +396,15 @@ func TestSubListIgnoresOwnedChannels(t *testing.T) {
 	)
 	script.seatsBody = seatsOf(subOwner, "Ada")
 	got, _ := readSubList(t, h)
-	if len(got.Subscriptions) != 1 {
+	if len(got.Subscriptions) != 2 {
 		t.Fatalf("subscriptions = %+v", got.Subscriptions)
 	}
 	one := mustFindSub(t, got, subOwner, subChatC, subGen)
 	if one.State != "live" || one.Access != "write" || one.Title != "North <relay>" || one.OwnerName != "Ada" {
 		t.Fatalf("kept = %+v", one)
 	}
-	if _, ok := findSub(got, inst, subChat, subGen); ok {
-		t.Fatal("owned channel was stored")
+	if own, ok := findSub(got, inst, subChat, subGen); !ok || own.Access != "owner" {
+		t.Fatal("owned channel was not stored")
 	}
 	if _, ok := findSub(got, inst, subChatB, subGen); ok {
 		t.Fatal("a read channel this seat owns was stored")
@@ -3020,5 +3022,79 @@ func TestSubListRefreshAfterRemovalAddsAgain(t *testing.T) {
 	}
 	if again := doTeam(h, http.MethodDelete, subReadPath(), ""); again.Code != http.StatusNoContent {
 		t.Errorf("second remove status %d", again.Code)
+	}
+}
+
+func TestSubListOwnerNameAndComments(t *testing.T) {
+	script := &subScript{}
+	h, dir, _ := subSurface(t, script)
+	clock := holdClock(t, h)
+	inst := installationOf(t, dir)
+	entries, err := team.Load(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatal("server state unavailable")
+	}
+	own := channelJSON(inst, subChat, "Synthetic", subGen)
+	own = strings.Replace(own, `"comments_last":0`, `"comments_last":3`, 1)
+	script.channelsBody = channelsOf(own)
+	first, _ := readSubList(t, h)
+	got := mustFindSub(t, first, inst, subChat, subGen)
+	if got.Access != "owner" || got.OwnerName != entries[0].SeatName || got.CommentsLast != 3 || got.SeenComments != 0 || !got.Unread {
+		t.Error("owner subscription did not reflect server and seat")
+	}
+	if countSubPath(script.snapshot(), "/v1/seats") != 0 {
+		t.Error("owner alone caused a roster call")
+	}
+	*clock = clock.Add(10 * time.Second)
+	script.mu.Lock()
+	script.channelsBody = channelsOf()
+	script.mu.Unlock()
+	ended, _ := readSubList(t, h)
+	if got := mustFindSub(t, ended, inst, subChat, subGen); got.State != "ended" || got.Unread {
+		t.Error("owner subscription was not ended")
+	}
+	*clock = clock.Add(10 * time.Second)
+	script.mu.Lock()
+	script.channelsBody = channelsOf(own)
+	script.mu.Unlock()
+	revived, _ := readSubList(t, h)
+	if got := mustFindSub(t, revived, inst, subChat, subGen); got.State != "live" || !got.Unread {
+		t.Error("owner subscription was not revived")
+	}
+}
+
+func TestSubListUnreadIncludesCommentsByAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name, access, state                        string
+		mirror, seenMirror, comments, seenComments uint64
+		want                                       bool
+	}{
+		{"guest mirror", "read", "live", 1, 0, 0, 0, true},
+		{"guest comments", "write", "live", 0, 0, 1, 0, true},
+		{"guest all seen", "read", "live", 1, 1, 1, 1, false},
+		{"guest ended", "write", "ended", 1, 0, 1, 0, false},
+		{"owner mirror", "owner", "live", 1, 0, 0, 0, false},
+		{"owner comments", "owner", "live", 1, 0, 1, 0, true},
+		{"owner ended", "owner", "ended", 1, 0, 1, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := testTeamSurface(t, team.NewClient())
+			s := baseSub()
+			s.Access, s.State = tc.access, tc.state
+			s.MirrorLast, s.SeenMirror, s.CommentsLast, s.SeenComments = tc.mirror, tc.seenMirror, tc.comments, tc.seenComments
+			view := asTeamHandler(t, h).subscriptionView([]team.Subscription{s}, nil, false).Subscriptions[0]
+			if view.Unread != tc.want {
+				t.Errorf("unread = %v, want %v", view.Unread, tc.want)
+			}
+			encoded, _ := json.Marshal(view)
+			var fields map[string]json.RawMessage
+			_ = json.Unmarshal(encoded, &fields)
+			if _, ok := fields["comments_last"]; !ok {
+				t.Error("comments_last missing")
+			}
+			if _, ok := fields["seen_comments"]; !ok {
+				t.Error("seen_comments missing")
+			}
+		})
 	}
 }
