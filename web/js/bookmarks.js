@@ -231,7 +231,9 @@ export function bookmarkListHTML(opts){
   }
   return list.map(nt => {
     const nd = nt.node && typeof nodeById === "function" ? nodeById(nt.node) : null;
-    const src = nd ? " · " + e(nd.title) : "";
+    let src = nd ? " · " + e(nd.title) : "";
+    if (nt.who) src += " · " + e(nt.who);
+    if (nt.from) src += " · " + e(nt.from);
     const rendered = nt.media
       ? mediaTextAndTiles(nt.text || "", nt.media, { esc: e, assetURL: opts.assetURL })
       : (hasSupportedImageMarker(nt.text) ? legacyMediaTextAndTiles(nt, opts.legacyMedia, { esc:e, assetURL:opts.assetURL }) : { clean: nt.text || "", html: "" });

@@ -562,7 +562,7 @@ export function buildBookmarkSnapshot(nt, deps = {}){
   const speaker = snapshotSpeaker(nt);
   const snap = {
     lane: laneId ? laneColor(laneId) : "",
-    station: nd ? nd.title : "",
+    station: nd ? nd.title : (nt && nt.from) || "",
     speaker,
     time: (nt && (nt.turnTime || nt.t)) || "",
     text: (nt && nt.text) || "",
@@ -590,6 +590,7 @@ function snapshotSpeaker(nt){
   if (!nt) return "";
   if (nt.role === "user") return "you";
   if (nt.role === "assistant") return nt.agent || "agent";
+  if (nt.role === "person") return nt.who || "another person";
   return "";
 }
 
@@ -759,7 +760,9 @@ export function inboxItemHTML(nt, color, deps = {}){
   const actions = deps.bookmarkActionsHTML || bookmarkActionsHTMLDefault;
   const nodeById = deps.nodeById || (() => null);
   const nd = nt.node ? nodeById(nt.node) : null;
-  const src = nd ? " · " + esc(nd.title) : "";
+  let src = nd ? " · " + esc(nd.title) : "";
+  if (nt.who) src += " · " + esc(nt.who);
+  if (nt.from) src += " · " + esc(nt.from);
   const rendered = nt.media
     ? mediaTextAndTiles(nt.text || "", nt.media, { esc, assetURL: deps.assetURL })
     : (hasSupportedImageMarker(nt.text) ? legacyMediaTextAndTiles(nt, deps.legacyMedia, { esc, assetURL:deps.assetURL }) : { clean: nt.text || "", html: "" });
