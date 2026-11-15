@@ -188,7 +188,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   }
   function openView(view) {
     readGeneration++;
-    open = { key: guestKey(view), view, next: 0, first: true, seenAtOpen: view.seen_mirror, seen: view.seen_mirror, lastRead: 0, busy: false, failed: false };
+    open = { key: guestKey(view), view, next: 0, first: true, seenAtOpen: view.seen_mirror, seen: view.seen_mirror, lastRead: 0, busy: false, failed: false, empty: false };
     header(view);
     $("sv_body").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("sv_note").textContent = "";
@@ -247,6 +247,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
         for (const entry of result.entries) {
           const rendered = guestEntryHTML(entry, result.view.owner_name);
           if (rendered) {
+            if (current.empty) { body.innerHTML = ""; current.empty = false; }
             body.insertAdjacentHTML("beforeend", rendered);
             hasEntries = true;
             if (unreadSeq === null) {
@@ -260,7 +261,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       }
       if (!currentRead(current, gen)) return;
       if (first) {
-        if (!hasEntries) body.innerHTML = '<div class="previewtrunc">Nothing has been shared yet.</div>';
+        if (!hasEntries) {
+          body.innerHTML = '<div class="previewtrunc">Nothing has been shared yet.</div>';
+          current.empty = true;
+        }
         if (unreadSeq !== null) {
           const unread = body.querySelector(`[data-seq="${unreadSeq}"]`);
           if (unread) unread.scrollIntoView({ block: "start" });
