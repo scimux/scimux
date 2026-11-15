@@ -332,6 +332,9 @@ func parseTail(buf []byte, seq, after uint64) ([]MirrorRecord, error) {
 	rest := buf
 	for len(rest) > 0 {
 		i := bytes.IndexByte(rest, '\n')
+		if i < 0 {
+			return nil, ErrCopyDamaged
+		}
 		rec, ok := acceptLine(rest[:i], seq)
 		if !ok {
 			return nil, ErrCopyDamaged
