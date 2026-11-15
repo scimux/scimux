@@ -1546,7 +1546,7 @@ sequence dealt with, including omitted entries; pass it as `after` to continue.
 When no entry was dealt with, `next` is `after`, capped at `last`. `more`
 is true when `next` is below `last` or the fetch stopped at its page limit. Known start, user,
 assistant and source bodies are projected with `seq` and `at`; unknown bodies
-remain in the copy and are omitted. Ended subscriptions and unavailable
+remain in the copy and are omitted. A user entry may carry boolean `prov` to identify forwarded AI text. Ended subscriptions and unavailable
 servers remain readable from the copy.
 
 Errors are `404` `not_found` for an invalid identity or unknown subscription,
