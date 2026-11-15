@@ -1436,3 +1436,12 @@ func TestChannelsUsesExplicitSubscriptionMode(t *testing.T) {
 		t.Fatal("channel mode must be explicit")
 	}
 }
+
+func TestSubscriptionChannelsRejectMalformedListedItem(t *testing.T) {
+	srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		_, _ = io.WriteString(w, `{"channels":["not-an-object"]}`)
+	})
+	if _, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken, true); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("error = %v", err)
+	}
+}

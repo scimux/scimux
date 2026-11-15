@@ -2292,3 +2292,14 @@ func TestSubBranchUnknownValidIdentityParts(t *testing.T) {
 		}
 	}
 }
+
+func TestSubBranchMalformedVersionAndKindAreOmitted(t *testing.T) {
+	for i, body := range []string{`{"t":"user","text":"x"}`, `{"v":"one","t":"user"}`, `{"v":1}`, `{"v":1,"t":false}`} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			r := team.MirrorRecord{Seq: 1, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(body)}
+			if _, _, ok := projectSubRecord(r); ok {
+				t.Fatal("malformed shape was projected")
+			}
+		})
+	}
+}
