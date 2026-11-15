@@ -2908,3 +2908,109 @@ func TestSubRemoveEntryVanishedDuringCopyRemoval(t *testing.T) {
 		t.Error("subscription was restored")
 	}
 }
+
+func TestSubListRemovalDuringRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		expire bool
+	}{
+		{name: "stale refresh"},
+		{name: "removal expires", expire: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var seats atomic.Int32
+			var empty atomic.Bool
+			var seconds atomic.Int64
+			start := fixedTeamClock()()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/hello":
+					_, _ = io.WriteString(w, helloJSON(teamServerID, "Synthetic"))
+				case "/v1/channels":
+					if empty.Load() {
+						_, _ = io.WriteString(w, channelsOf())
+					} else {
+						_, _ = io.WriteString(w, channelsOf(guestChannel(subOwner, subChat, "Synthetic", subGen, "read", 2), guestChannel(subOwnerB, subChatB, "Synthetic", subGenB, "read", 1)))
+					}
+				case "/v1/seats":
+					if seats.Add(1) == 1 {
+						close(entered)
+						<-release
+					}
+					_, _ = io.WriteString(w, seatsOf(subOwner, "Synthetic"))
+				case "/v1/channels/" + subOwner + "/" + subChat + "/membership":
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			h, dir := testTeamSurface(t, clientFor(srv))
+			asTeamHandler(t, h).now = func() time.Time { return start.Add(time.Duration(seconds.Load()) * time.Second) }
+			joinLab(t, dir, teamServerID, srv.URL)
+			seedSub(t, dir, baseSub())
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- doTeam(h, http.MethodGet, "/api/team/subscriptions", "") }()
+			<-entered
+			removed := doTeam(h, http.MethodDelete, subReadPath(), "")
+			if tc.expire {
+				seconds.Store(61)
+				empty.Store(true)
+				refresh := doTeam(h, http.MethodGet, "/api/team/subscriptions", "")
+				if refresh.Code != http.StatusOK {
+					t.Errorf("refresh status %d", refresh.Code)
+				}
+			}
+			close(release)
+			listed := <-done
+			if removed.Code != http.StatusNoContent {
+				t.Errorf("remove status %d", removed.Code)
+			}
+			if listed.Code != http.StatusOK {
+				t.Errorf("list status %d", listed.Code)
+			}
+			subs := loadSubFile(t, dir)
+			foundA, foundB := false, false
+			for _, sub := range subs {
+				if sub.Chat == subChat {
+					foundA = true
+				}
+				if sub.Chat == subChatB {
+					foundB = true
+				}
+			}
+			if foundA != tc.expire {
+				t.Errorf("removed key present = %v, want %v", foundA, tc.expire)
+			}
+			if !foundB {
+				t.Error("other key was not added")
+			}
+		})
+	}
+}
+
+func TestSubListRefreshAfterRemovalAddsAgain(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic", subGen, "read", 2))}
+	h, dir, _ := subSurface(t, script)
+	clock := holdClock(t, h)
+	sub := baseSub()
+	sub.State = "ended"
+	seedSub(t, dir, sub)
+	removed := doTeam(h, http.MethodDelete, subReadPath(), "")
+	*clock = clock.Add(time.Second)
+	listed := doTeam(h, http.MethodGet, "/api/team/subscriptions", "")
+	if removed.Code != http.StatusNoContent {
+		t.Errorf("remove status %d", removed.Code)
+	}
+	if listed.Code != http.StatusOK {
+		t.Errorf("list status %d", listed.Code)
+	}
+	subs := loadSubFile(t, dir)
+	if len(subs) != 1 {
+		t.Fatalf("got %d subscriptions", len(subs))
+	}
+	if subs[0].SeenMirror != 0 {
+		t.Error("re-added subscription was not new")
+	}
+}
