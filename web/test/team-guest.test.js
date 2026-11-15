@@ -570,3 +570,8 @@ test("removal controls do nothing when no view is open", async () => {
   f.click("sv_remove"); f.click("sharedview", f.get("sv_body"));
   f.feature.tick(); await f.feature.settled(); assert.equal(calls, 1);
 });
+
+/* Wave 4c condition table:
+ * | condition | test for each half |
+ * | none | Wave 4c adds no &&, ||, or ?: condition. |
+ */
