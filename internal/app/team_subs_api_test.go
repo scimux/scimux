@@ -1464,6 +1464,7 @@ type readSubBody struct {
 	} `json:"view"`
 	Entries []map[string]any `json:"entries"`
 	Last    uint64           `json:"last"`
+	Next    uint64           `json:"next"`
 	More    bool             `json:"more"`
 }
 
@@ -1520,7 +1521,7 @@ func TestSubReadFetchesCopiesAndProjects(t *testing.T) {
 	})
 	first := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
 	second := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
-	if first.Last != 8 || !first.More || len(first.Entries) != 5 || first.View.Delivery != "ok" || !first.View.Unread {
+	if first.Last != 8 || first.More || first.Next != 8 || len(first.Entries) != 5 || first.View.Delivery != "ok" || !first.View.Unread {
 		t.Fatalf("first = %+v", first)
 	}
 	if !reflect.DeepEqual(first.Entries, second.Entries) || second.Last != 8 || strings.Join(queries, ",") != "after=0,after=8" {
@@ -1559,7 +1560,7 @@ func TestSubReadPageLimitAndResultLimit(t *testing.T) {
 		_, _ = io.WriteString(w, subPage(subGen, 1000, true, entries...))
 	})
 	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
-	if len(queries) != 8 || got.Last != 512 || len(got.Entries) != 256 || !got.More {
+	if len(queries) != 8 || got.Last != 512 || got.Next != 256 || len(got.Entries) != 256 || !got.More {
 		t.Fatalf("queries %v result %+v", queries, got)
 	}
 }
@@ -1722,7 +1723,7 @@ func TestSubReadStorageBudgetAndTextLimit(t *testing.T) {
 			_, _ = io.WriteString(w, subPage(subGen, 2, false, subRecord(1, item), subRecord(2, item)))
 		})
 		got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
-		if len(got.Entries) != 1 || got.Last != 2 || !got.More {
+		if len(got.Entries) != 1 || got.Last != 2 || got.Next != 1 || !got.More {
 			t.Fatalf("entries = %d last = %d more = %v", len(got.Entries), got.Last, got.More)
 		}
 	})
@@ -2037,5 +2038,40 @@ func TestSubNewMissingOwnerAsksRosterOnlyOnce(t *testing.T) {
 	readSubList(t, h)
 	if n := countSubPath(script.snapshot(), "/v1/seats"); n != 2 {
 		t.Fatalf("roster calls = %d", n)
+	}
+}
+
+func TestSubReadNextTracksUnknownEntries(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		bodies   []string
+		after    string
+		wantNext uint64
+		count    int
+	}{
+		{"middle", []string{`{"v":1,"t":"user","text":"x"}`, `{"v":2,"t":"user"}`, `{"v":1,"t":"user","text":"y"}`}, "", 3, 2},
+		{"only", []string{`{"v":2,"t":"user"}`, `42`}, "", 2, 0},
+		{"past end", []string{`{"v":2,"t":"user"}`}, "?after=99", 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) { t.Fatal("ended subscription contacted server") })
+			subs := loadSubFile(t, dir)
+			subs[0].State = "ended"
+			if err := team.SaveSubs(dir, subs); err != nil {
+				t.Fatal(err)
+			}
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			var entries []team.MirrorRecord
+			for i, body := range tc.bodies {
+				entries = append(entries, team.MirrorRecord{Seq: uint64(i + 1), Key: fmt.Sprintf("k%d", i+1), Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(body)})
+			}
+			if err := team.AppendCopy(dir, id, entries); err != nil {
+				t.Fatal(err)
+			}
+			got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath()+tc.after, ""))
+			if got.Next != tc.wantNext || got.More || len(got.Entries) != tc.count {
+				t.Fatalf("read = %+v", got)
+			}
+		})
 	}
 }
