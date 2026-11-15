@@ -295,7 +295,11 @@ func TestSharedViewSlotsAndConstruction(t *testing.T) {
 			t.Error("shared composer markup is incomplete")
 		}
 	}
-	if !strings.Contains(readWebFile(t, "web/js/app.js"), "createGuestFeature") {
+	app := readWebFile(t, "web/js/app.js")
+	if !strings.Contains(app, "createGuestFeature") {
 		t.Error("web/js/app.js does not name createGuestFeature")
+	}
+	if !strings.Contains(app, "randomBytes: n => crypto.getRandomValues(new Uint8Array(n))") {
+		t.Error("web/js/app.js does not wire guest random bytes")
 	}
 }

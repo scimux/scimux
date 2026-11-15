@@ -936,3 +936,20 @@ test("an over-limit draft keeps its warning when a read fails", async () => {
   setGuestDraft(f, "x".repeat(16385)); f.setTime(5000); f.feature.tick(); await f.feature.settled();
   assert.equal(f.get("sv_note").textContent, "That message is too long.");
 });
+
+test("only a live owner hides the remove button", async () => {
+  for (const tc of [
+    { access:"read", state:"live", hidden:false }, { access:"write", state:"live", hidden:false },
+    { access:"owner", state:"live", hidden:true }, { access:"owner", state:"ended", hidden:false },
+    { access:"read", state:"ended", hidden:false }, { access:"write", state:"ended", hidden:false },
+  ]) {
+    const view = { ...base, ...tc };
+    const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([view]); return readAnswer([], 0, false, view); });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    assert.equal(f.get("sv_remove").hidden, tc.hidden);
+  }
+  const owner = { ...base, access:"owner" }, ended = { ...owner, state:"ended" }, pending = deferred();
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([owner]); return pending.promise; });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); assert.equal(f.get("sv_remove").hidden, true);
+  pending.resolve(readAnswer([], 0, false, ended)); await f.feature.settled(); assert.equal(f.get("sv_remove").hidden, false);
+});
