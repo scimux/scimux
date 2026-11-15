@@ -120,6 +120,7 @@ import { createSheetsFeature } from "./sheets.js";
 import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl, homeScreenInstallable } from "./pairing-ui.js";
 import { createSharingSection } from "./team-ui.js";
 import { createShareFeature } from "./team-share.js";
+import { createGuestFeature } from "./team-guest.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { APP_SLOT, claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
@@ -589,8 +590,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const laneModel = () => laneModelMod(nodes, getUI().lanes);
   const isArchived = id => isArchivedMod(id, getUI().archived);
 
+  const guestFeature = own(createGuestFeature({ api, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); } }));
   /* Activities card feature factory — owns #cardtabs/#cardlist only. */
   const cardsFeature = own(createCardsFeature({
+    sharedTab: guestFeature.tab,
     roots: { tabs: $("#cardtabs"), list: $("#cardlist") },
     document,
     CSS,
@@ -1619,6 +1622,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   unlinkControl.bind();
   sharingSection.bind();
   shareFeature.bind();
+  guestFeature.bind();
   const refocusTitleEditor = () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
   };
@@ -2051,7 +2055,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderMapTabs: () => renderMapTabs(),
     renderBookmarksPane: () => renderBookmarksPane(),
     renderChatHead: () => renderChatHead(),
-    refreshChat: () => { refreshChat(); shareFeature.tick(); },
+    refreshChat: () => { refreshChat(); shareFeature.tick(); guestFeature.tick(); },
     renderWsInbox: () => renderWsInbox(),
     invalidateCardsSig: () => { cardsSig = ""; },
     invalidateMap: () => mapFeature.invalidate(),
