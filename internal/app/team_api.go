@@ -37,6 +37,9 @@ type teamHandler struct {
 	removeShare func(dataDir, uid string) error
 	// saveSubs replaces subscription persistence in tests.
 	saveSubs func(string, []team.Subscription) error
+	// seatOpen and seatRename let tests force atomic publication failures.
+	seatOpen   func(string) (*os.File, error)
+	seatRename func(string, string) error
 	// subAsks is the last channels ask, the last seats ask, and the delivery
 	// word for one server in this process. It is not stored in the state file.
 	subAsks     map[string]subAsk
@@ -186,7 +189,11 @@ func (h *teamHandler) saveSeatName(original team.Entry, name string) (team.Entry
 		if len(body)+1 > 64<<10 {
 			return team.Entry{}, team.ErrDamaged
 		}
-		f, err := os.CreateTemp(h.dataDir, ".team-*.tmp")
+		open := h.seatOpen
+		if open == nil {
+			open = func(dir string) (*os.File, error) { return os.CreateTemp(dir, ".team-*.tmp") }
+		}
+		f, err := open(h.dataDir)
 		if err != nil {
 			return team.Entry{}, err
 		}
@@ -198,12 +205,21 @@ func (h *teamHandler) saveSeatName(original team.Entry, name string) (team.Entry
 		if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 			return team.Entry{}, err
 		}
-		if err := os.Rename(tmp, filepath.Join(h.dataDir, team.File)); err != nil {
+		rename := h.seatRename
+		if rename == nil {
+			rename = os.Rename
+		}
+		if err := rename(tmp, filepath.Join(h.dataDir, team.File)); err != nil {
 			return team.Entry{}, err
 		}
 		return entries[i], nil
 	}
 	return team.Entry{}, team.ErrNotFound
+}
+
+func (h *teamHandler) setSeatIO(open func(string) (*os.File, error), rename func(string, string) error) {
+	h.seatOpen = open
+	h.seatRename = rename
 }
 
 func (h *teamHandler) list(w http.ResponseWriter) {
