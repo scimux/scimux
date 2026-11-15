@@ -263,3 +263,12 @@ test("ended subscriptions remain readable", async () => {
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
   assert.equal(reads, 1); assert.match(f.get("sv_body").innerHTML, /saved/); assert.equal(f.get("sv_state").textContent, "Sharing ended · saved copy");
 });
+
+test("destroy removes all guest listeners and prevents later requests", async () => {
+  let calls = 0;
+  const f = viewFixture(async path => { calls++; if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
+  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sharedview"]) assert.equal(f.get(id).listeners.size, 1);
+  f.feature.destroy();
+  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sharedview"]) assert.equal(f.get(id).listeners.size, 0);
+  f.feature.tick(); await f.feature.settled(); assert.equal(calls, 0);
+});
