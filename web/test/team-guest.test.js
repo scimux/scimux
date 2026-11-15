@@ -1240,3 +1240,15 @@ test("a read answer invalidates the list when local names changed", async () => 
   f.setTime(5000); f.feature.tick(); await f.feature.settled();
   assert.equal(f.invalidations(), before + 1);
 });
+
+test("shared group and header mark the person they show", async () => {
+  const people = { "s/o": "Local" };
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(), undefined, undefined, { people: () => people });
+  f.feature.tick(); await f.feature.settled(); f.feature.tab.render(f.get("cardlist"));
+  assert.match(f.get("cardlist").innerHTML, /data-seat="o"/);
+  f.click("cardlist", f.item); await f.feature.settled(); assert.equal(f.get("sv_from").dataset.seat, "o");
+  const owned = { ...base, access: "owner" };
+  const g = viewFixture(async path => path === "/api/team/subscriptions" ? list([owned]) : readAnswer([], 0, false, owned), undefined, undefined, { people: () => people });
+  g.feature.tick(); await g.feature.settled(); g.click("cardlist", g.item); await g.feature.settled();
+  assert.equal(g.get("sv_from").dataset.seat, undefined); assert.equal(g.get("sv_from").textContent, "Your chat · Server");
+});
