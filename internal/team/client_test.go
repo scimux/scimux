@@ -900,3 +900,59 @@ func TestClientLeavesNoConnectionOpen(t *testing.T) {
 		}
 	}
 }
+
+func TestRenameSeatStatusAndRequest(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{"success", http.StatusOK, nil},
+		{"unauthorized", http.StatusUnauthorized, ErrUnauthorized},
+		{"bad request", http.StatusBadRequest, ErrRejected},
+		{"unprocessable", http.StatusUnprocessableEntity, ErrRejected},
+		{"unexpected", http.StatusInternalServerError, ErrProtocol},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, got := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) { w.WriteHeader(tc.status) })
+			client := clientOn(srv)
+			rename, ok := any(client).(interface {
+				Rename(context.Context, string, string, string) error
+			})
+			if !ok {
+				t.Fatal("Rename is missing")
+			}
+			err := rename.Rename(context.Background(), srv.URL, regToken, "Synthetic & Name")
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("unexpected error class: %v", err)
+			}
+			if len(*got) != 1 || (*got)[0].method != http.MethodPut || (*got)[0].path != "/v1/seat" {
+				t.Fatal("wrong request")
+			}
+			if (*got)[0].body != `{"name":"Synthetic & Name"}` {
+				t.Fatal("wrong body")
+			}
+			if (*got)[0].header.Get("Authorization") != "Bearer "+regToken {
+				t.Fatal("wrong authorization")
+			}
+		})
+	}
+}
+
+func TestRenameSeatTransportErrors(t *testing.T) {
+	client := NewClient()
+	rename, ok := any(client).(interface {
+		Rename(context.Context, string, string, string) error
+	})
+	if !ok {
+		t.Fatal("Rename is missing")
+	}
+	if err := rename.Rename(context.Background(), "not a URL", regToken, "Synthetic"); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("invalid URL: %v", err)
+	}
+	client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })
+	if err := rename.Rename(context.Background(), "https://example.test", regToken, "Synthetic"); !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("transport: %v", err)
+	}
+}
