@@ -396,7 +396,7 @@ type MirrorPage struct {
 }
 
 // Channels is GET /v1/channels.
-func (c *Client) Channels(ctx context.Context, baseURL, token string, skipInvalidIDs ...bool) ([]Channel, error) {
+func (c *Client) Channels(ctx context.Context, baseURL, token string, skipInvalidIDs bool) ([]Channel, error) {
 	status, raw, err := c.doAuthed(ctx, http.MethodGet, baseURL, "/v1/channels", token, nil, maxChannelsBody)
 	if err != nil {
 		return nil, err
@@ -404,8 +404,7 @@ func (c *Client) Channels(ctx context.Context, baseURL, token string, skipInvali
 	if status != http.StatusOK {
 		return nil, mapChannelStatus(status)
 	}
-	skip := len(skipInvalidIDs) > 0 && skipInvalidIDs[0]
-	list, err := parseChannels(raw, skip)
+	list, err := parseChannels(raw, skipInvalidIDs)
 	if err != nil {
 		return nil, ErrProtocol
 	}
