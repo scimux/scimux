@@ -61,10 +61,10 @@ func TestCopyAppendsInOrderAndSkipsARepeat(t *testing.T) {
 	id := sampleCopyID()
 	first := copyRec(1, `{"v":1,"text":"North <relay>"}`)
 	second := copyRec(2, `{"v":1}`)
-	if err := AppendCopy(dir, id, []MirrorRecord{first, second}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{first, second}); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestCopyAppendsInOrderAndSkipsARepeat(t *testing.T) {
 		}
 	}
 	before := append([]byte(nil), raw...)
-	if err := AppendCopy(dir, id, []MirrorRecord{first, second}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{first, second}); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(before, readCopyFile(t, dir, id)) {
@@ -109,21 +109,21 @@ func TestCopyAppendsInOrderAndSkipsARepeat(t *testing.T) {
 	}
 	fourth := copyRec(3, "null")
 	overlap := []MirrorRecord{second, fourth}
-	if err := AppendCopy(dir, id, overlap); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, overlap); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err = ReadCopy(dir, id, 1, 256, 4<<20)
+	got, last, err = ReadCopy(dir, id, MirrorLog, 1, 256, 4<<20)
 	if err != nil || last != 3 || len(got) != 2 || got[0].Seq != 2 || got[1].Seq != 3 || string(got[1].Body) != "null" {
 		t.Fatalf("after overlap = %+v last = %d err = %v", got, last, err)
 	}
 	if !bytes.HasPrefix(readCopyFile(t, dir, id), before) {
 		t.Fatal("overlap append rewrote earlier lines")
 	}
-	none, last, err := ReadCopy(dir, id, 3, 256, 4<<20)
+	none, last, err := ReadCopy(dir, id, MirrorLog, 3, 256, 4<<20)
 	if err != nil || last != 3 || len(none) != 0 {
 		t.Fatalf("after last = %+v last = %d err = %v", none, last, err)
 	}
-	none, last, err = ReadCopy(dir, id, 9, 256, 4<<20)
+	none, last, err = ReadCopy(dir, id, MirrorLog, 9, 256, 4<<20)
 	if err != nil || last != 3 || len(none) != 0 {
 		t.Fatalf("past last = %+v last = %d err = %v", none, last, err)
 	}
@@ -131,16 +131,16 @@ func TestCopyAppendsInOrderAndSkipsARepeat(t *testing.T) {
 
 func TestCopyNilAppendCreatesNothing(t *testing.T) {
 	dir := t.TempDir()
-	if err := AppendCopy(dir, sampleCopyID(), nil); err != nil {
+	if err := AppendCopy(dir, sampleCopyID(), MirrorLog, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := AppendCopy(dir, sampleCopyID(), []MirrorRecord{}); err != nil {
+	if err := AppendCopy(dir, sampleCopyID(), MirrorLog, []MirrorRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat = %v", err)
 	}
-	got, last, err := ReadCopy(dir, sampleCopyID(), 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, sampleCopyID(), MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 0 || len(got) != 0 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
@@ -149,19 +149,19 @@ func TestCopyNilAppendCreatesNothing(t *testing.T) {
 func TestCopyGapStoresNothing(t *testing.T) {
 	dir := t.TempDir()
 	id := sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, ErrCopyRange) {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, ErrCopyRange) {
 		t.Fatalf("error = %v", err)
 	}
 	if _, err := os.Stat(copyPathOf(dir, id)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat = %v", err)
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, ""), copyRec(3, "")}); !errors.Is(err, ErrCopyRange) {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, ""), copyRec(3, "")}); !errors.Is(err, ErrCopyRange) {
 		t.Fatalf("batch error = %v", err)
 	}
 	if _, err := os.Stat(copyPathOf(dir, id)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("batch stat = %v", err)
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal(err)
 	}
 	before := readCopyFile(t, dir, id)
@@ -173,7 +173,7 @@ func TestCopyGapStoresNothing(t *testing.T) {
 		{{Seq: 2, Key: "k-2", Author: copyRec(2, "").Author, At: copyRec(2, "").At}},
 	}
 	for i, entries := range bad {
-		if err := AppendCopy(dir, id, entries); !errors.Is(err, ErrCopyRange) {
+		if err := AppendCopy(dir, id, MirrorLog, entries); !errors.Is(err, ErrCopyRange) {
 			t.Fatalf("case %d error = %v", i, err)
 		}
 		if !bytes.Equal(before, readCopyFile(t, dir, id)) {
@@ -226,18 +226,18 @@ func TestCopyDamageIsLeftUntouched(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := []byte(tc.body)
-			_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+			_, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 			if !errors.Is(err, ErrCopyDamaged) {
 				t.Fatalf("Read = %v", err)
 			}
 			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "North") {
 				t.Fatalf("Read quotes the copy: %v", err)
 			}
-			_, _, err = ReadCopy(dir, id, 0, 256, 4<<20)
+			_, _, err = ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 			if !errors.Is(err, ErrCopyDamaged) {
 				t.Fatalf("second Read = %v", err)
 			}
-			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyDamaged) {
+			if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyDamaged) {
 				t.Fatalf("Append = %v", err)
 			}
 			after, err := os.ReadFile(path)
@@ -261,18 +261,18 @@ func TestCopyEmptyFileIsAnEmptyCopy(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 0 || len(got) != 0 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
-	got, last, err = ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err = ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 0 || len(got) != 0 {
 		t.Fatalf("second = %+v last = %d err = %v", got, last, err)
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err = ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err = ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 1 || len(got) != 1 {
 		t.Fatalf("after append = %+v last = %d err = %v", got, last, err)
 	}
@@ -294,7 +294,7 @@ func TestCopyReadNearTheEndDoesNotReadTheWholeFile(t *testing.T) {
 		readBytes.Add(int64(nn))
 		return nn, err
 	}
-	if err := AppendCopy(dir, id, entries); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, entries); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(copyPathOf(dir, id))
@@ -303,7 +303,7 @@ func TestCopyReadNearTheEndDoesNotReadTheWholeFile(t *testing.T) {
 	}
 	readBytes.Store(0)
 	const after = 9900
-	got, last, err := ReadCopy(dir, id, after, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, after, 256, 4<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestCopyReadNearTheEndDoesNotReadTheWholeFile(t *testing.T) {
 func TestCopyReadScansAFileItDidNotWrite(t *testing.T) {
 	src := t.TempDir()
 	id := sampleCopyID()
-	if err := AppendCopy(src, id, []MirrorRecord{copyRec(1, `{"v":1}`), copyRec(2, `{"v":1}`)}); err != nil {
+	if err := AppendCopy(src, id, MirrorLog, []MirrorRecord{copyRec(1, `{"v":1}`), copyRec(2, `{"v":1}`)}); err != nil {
 		t.Fatal(err)
 	}
 	raw := readCopyFile(t, src, id)
@@ -330,7 +330,7 @@ func TestCopyReadScansAFileItDidNotWrite(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err := ReadCopy(dst, id, 1, 256, 4<<20)
+	got, last, err := ReadCopy(dst, id, MirrorLog, 1, 256, 4<<20)
 	if err != nil || last != 2 || len(got) != 1 || got[0].Seq != 2 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
@@ -342,7 +342,7 @@ func TestCopyRefusesAReservation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := AppendCopy(dir, sampleCopyID(), []MirrorRecord{copyRec(1, `{"text":"North <relay>"}`)})
+	err := AppendCopy(dir, sampleCopyID(), MirrorLog, []MirrorRecord{copyRec(1, `{"text":"North <relay>"}`)})
 	if !errors.Is(err, storagebudget.ErrBudget) {
 		t.Fatalf("error = %v", err)
 	}
@@ -368,10 +368,10 @@ func TestCopyRejectsABadPath(t *testing.T) {
 	}
 	for _, id := range cases {
 		dir := t.TempDir()
-		if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyPath) {
+		if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyPath) {
 			t.Fatalf("Append %v error = %v", id, err)
 		}
-		if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyPath) {
+		if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyPath) {
 			t.Fatalf("Read %v error = %v", id, err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
@@ -381,7 +381,7 @@ func TestCopyRejectsABadPath(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	bad := sampleCopyID()
 	bad.Chat = "main"
-	if err := AppendCopy(missing, bad, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyPath) {
+	if err := AppendCopy(missing, bad, MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyPath) {
 		t.Fatalf("missing dir error = %v", err)
 	}
 	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
@@ -392,7 +392,7 @@ func TestCopyRejectsABadPath(t *testing.T) {
 func TestCopySameLengthEditIsDamaged(t *testing.T) {
 	dir := t.TempDir()
 	id := sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`), copyRec(2, `{"v":1}`)}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, `{"v":1}`), copyRec(2, `{"v":1}`)}); err != nil {
 		t.Fatal(err)
 	}
 	path := copyPathOf(dir, id)
@@ -405,11 +405,11 @@ func TestCopySameLengthEditIsDamaged(t *testing.T) {
 	if err := os.WriteFile(path, edited, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	_, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("Read = %v", err)
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(3, "")}); !errors.Is(err, ErrCopyDamaged) {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(3, "")}); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("Append = %v", err)
 	}
 	if !bytes.Equal(edited, readCopyFile(t, dir, id)) {
@@ -420,7 +420,7 @@ func TestCopySameLengthEditIsDamaged(t *testing.T) {
 func TestCopyTamperRescans(t *testing.T) {
 	dir := t.TempDir()
 	id := sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal(err)
 	}
 	path := copyPathOf(dir, id)
@@ -435,11 +435,11 @@ func TestCopyTamperRescans(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := readCopyFile(t, dir, id)
-	_, _, err = ReadCopy(dir, id, 0, 256, 4<<20)
+	_, _, err = ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("Read = %v", err)
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, ErrCopyDamaged) {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("Append = %v", err)
 	}
 	if !bytes.Equal(before, readCopyFile(t, dir, id)) {
@@ -454,7 +454,7 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 	realOpen := copyOps.open
 	dir := t.TempDir()
 	id := sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal(err)
 	}
 	before := readCopyFile(t, dir, id)
@@ -463,17 +463,17 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 		defer func() { copyOps.write = realWrite }()
 		boom := errors.New("write failed")
 		copyOps.write = func(*os.File, []byte) (int, error) { return 0, boom }
-		if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, boom) {
+		if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
 		if !bytes.Equal(before, readCopyFile(t, dir, id)) {
 			t.Fatal("failed write changed the copy")
 		}
 		copyOps.write = realWrite
-		if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, "")}); err != nil {
+		if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(2, "")}); err != nil {
 			t.Fatal(err)
 		}
-		got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+		got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 		if err != nil || last != 2 || len(got) != 2 {
 			t.Fatalf("retry = %+v last = %d err = %v", got, last, err)
 		}
@@ -482,22 +482,22 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 	t.Run("short write", func(t *testing.T) {
 		defer func() { copyOps.write = realWrite }()
 		fresh := t.TempDir()
-		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		if err := AppendCopy(fresh, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 			t.Fatal(err)
 		}
 		kept := readCopyFile(t, fresh, id)
 		copyOps.write = func(*os.File, []byte) (int, error) { return 1, nil }
-		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, io.ErrShortWrite) {
+		if err := AppendCopy(fresh, id, MirrorLog, []MirrorRecord{copyRec(2, "")}); !errors.Is(err, io.ErrShortWrite) {
 			t.Fatalf("error = %v", err)
 		}
 		if !bytes.Equal(kept, readCopyFile(t, fresh, id)) {
 			t.Fatal("short write changed the copy")
 		}
 		copyOps.write = realWrite
-		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(2, "")}); err != nil {
+		if err := AppendCopy(fresh, id, MirrorLog, []MirrorRecord{copyRec(2, "")}); err != nil {
 			t.Fatal(err)
 		}
-		got, last, err := ReadCopy(fresh, id, 0, 256, 4<<20)
+		got, last, err := ReadCopy(fresh, id, MirrorLog, 0, 256, 4<<20)
 		if err != nil || last != 2 || len(got) != 2 || got[1].Seq != 2 {
 			t.Fatalf("retry = %+v last = %d err = %v", got, last, err)
 		}
@@ -507,7 +507,7 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 		fresh := t.TempDir()
 		boom := errors.New("chmod failed")
 		copyOps.chmod = func(string, os.FileMode) error { return boom }
-		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
+		if err := AppendCopy(fresh, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
 		if _, err := os.Stat(copyPathOf(fresh, id)); !errors.Is(err, os.ErrNotExist) {
@@ -524,7 +524,7 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 			}
 			return realChmod(name, mode)
 		}
-		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
+		if err := AppendCopy(fresh, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
 		raw, err := os.ReadFile(copyPathOf(fresh, id))
@@ -540,7 +540,7 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 		fresh := t.TempDir()
 		boom := errors.New("open failed")
 		copyOps.open = func(string, int, os.FileMode) (*os.File, error) { return nil, boom }
-		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
+		if err := AppendCopy(fresh, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
 		if _, err := os.Stat(copyPathOf(fresh, id)); !errors.Is(err, os.ErrNotExist) {
@@ -551,7 +551,7 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 		fresh := t.TempDir()
 		boom := errors.New("marshal failed")
 		copyOps.marshal = func(any) ([]byte, error) { return nil, boom }
-		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
+		if err := AppendCopy(fresh, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(fresh, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
@@ -565,7 +565,7 @@ func TestCopyMkdirFailureStoresNothing(t *testing.T) {
 	dir := t.TempDir()
 	boom := errors.New("mkdir failed")
 	copyOps.mkdir = func(string, os.FileMode) error { return boom }
-	if err := AppendCopy(dir, sampleCopyID(), []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
+	if err := AppendCopy(dir, sampleCopyID(), MirrorLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, boom) {
 		t.Fatalf("error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
@@ -577,7 +577,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	snapshotCopy(t)
 	dir := t.TempDir()
 	id := sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
 		t.Fatal(err)
 	}
 	before := readCopyFile(t, dir, id)
@@ -585,7 +585,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		boom := errors.New("read failed")
 		copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 0, boom }
-		_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+		_, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 		if !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
@@ -595,7 +595,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	})
 	t.Run("short", func(t *testing.T) {
 		copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 1, nil }
-		_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+		_, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 		if !errors.Is(err, ErrCopyDamaged) {
 			t.Fatalf("error = %v", err)
 		}
@@ -608,7 +608,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 			}
 			return n, io.EOF
 		}
-		got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+		got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 		if err != nil || last != 2 || len(got) != 2 {
 			t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 		}
@@ -616,7 +616,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	t.Run("open", func(t *testing.T) {
 		boom := errors.New("open read failed")
 		copyOps.open = func(string, int, os.FileMode) (*os.File, error) { return nil, boom }
-		_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+		_, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 		if !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
@@ -633,11 +633,11 @@ func TestCopyDirectoryFileIsAnError(t *testing.T) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	_, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("Read = %v", err)
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err == nil || !strings.Contains(err.Error(), "is a directory") {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err == nil || !strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("Append = %v", err)
 	}
 	info, err := os.Stat(path)
@@ -655,11 +655,11 @@ func TestCopyFileDataDirIsAnError(t *testing.T) {
 	if err := os.WriteFile(file, []byte("synthetic"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := ReadCopy(file, sampleCopyID(), 0, 256, 4<<20)
+	_, _, err := ReadCopy(file, sampleCopyID(), MirrorLog, 0, 256, 4<<20)
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("Read = %v", err)
 	}
-	if err := AppendCopy(file, sampleCopyID(), []MirrorRecord{copyRec(1, "")}); err == nil || !strings.Contains(err.Error(), "not a directory") {
+	if err := AppendCopy(file, sampleCopyID(), MirrorLog, []MirrorRecord{copyRec(1, "")}); err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("Append = %v", err)
 	}
 	raw, err := os.ReadFile(file)
@@ -677,7 +677,7 @@ func TestCopyConcurrentAppendStoresOnce(t *testing.T) {
 	errc := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			errc <- AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)})
+			errc <- AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, `{"v":1}`)})
 		}()
 	}
 	for i := 0; i < 2; i++ {
@@ -685,7 +685,7 @@ func TestCopyConcurrentAppendStoresOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 1 || len(got) != 1 || got[0].Seq != 1 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
@@ -697,7 +697,7 @@ func TestCopyConcurrentAppendStoresOnce(t *testing.T) {
 
 func TestCopySameLengthDamageIsDetectedByFreshIndex(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
 		t.Fatal(err)
 	}
 	path := copyPathOf(dir, id)
@@ -708,10 +708,10 @@ func TestCopySameLengthDamageIsDetectedByFreshIndex(t *testing.T) {
 	}
 	// Discard this process's cached index to model opening the copy after restart.
 	copyMetas.Delete(path)
-	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("read error = %v", err)
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("append error = %v", err)
 	}
 	if !bytes.Equal(raw, readCopyFile(t, dir, id)) {
@@ -721,7 +721,7 @@ func TestCopySameLengthDamageIsDetectedByFreshIndex(t *testing.T) {
 
 func TestCopySizeChangeMakesWarmIndexRescan(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("initial append failed")
 	}
 	path := copyPathOf(dir, id)
@@ -730,7 +730,7 @@ func TestCopySizeChangeMakesWarmIndexRescan(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal("cannot write synthetic tear")
 	}
-	_, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	_, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal("warm rescan did not repair tear")
 	}
@@ -740,14 +740,14 @@ func TestCopySizeChangeMakesWarmIndexRescan(t *testing.T) {
 	if !bytes.Equal(before, readCopyFile(t, dir, id)) {
 		t.Error("repair did not preserve complete lines")
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(2, "")}); err != nil {
 		t.Error("append after repair failed")
 	}
 }
 
 func TestCopySameLengthMissingNewlineIsDamaged(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
 		t.Fatal(err)
 	}
 	path := copyPathOf(dir, id)
@@ -756,7 +756,7 @@ func TestCopySameLengthMissingNewlineIsDamaged(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("read error = %v", err)
 	}
 }
@@ -768,7 +768,7 @@ func TestCopyReadIsBoundedAtEveryPosition(t *testing.T) {
 	for i := range records {
 		records[i] = copyRec(uint64(i+1), `{"v":1,"text":"`+strings.Repeat("x", 64)+`"}`)
 	}
-	if err := AppendCopy(dir, id, records); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, records); err != nil {
 		t.Fatal(err)
 	}
 	snapshotCopy(t)
@@ -785,7 +785,7 @@ func TestCopyReadIsBoundedAtEveryPosition(t *testing.T) {
 	}
 	for _, after := range []uint64{0, 2000, 3900} {
 		bytesRead = 0
-		got, last, err := ReadCopy(dir, id, after, 256, 4<<20)
+		got, last, err := ReadCopy(dir, id, MirrorLog, after, 256, 4<<20)
 		if err != nil || last != total || len(got) == 0 || len(got) > 256 {
 			t.Fatalf("after %d count %d last %d err %v", after, len(got), last, err)
 		}
@@ -794,7 +794,7 @@ func TestCopyReadIsBoundedAtEveryPosition(t *testing.T) {
 		}
 	}
 	bytesRead = 0
-	_, _, err = ReadCopy(dir, id, ^uint64(0), 256, 4<<20)
+	_, _, err = ReadCopy(dir, id, MirrorLog, ^uint64(0), 256, 4<<20)
 	if err != nil || bytesRead != 0 {
 		t.Fatalf("last read bytes %d err %v", bytesRead, err)
 	}
@@ -803,10 +803,10 @@ func TestCopyReadIsBoundedAtEveryPosition(t *testing.T) {
 func TestCopyReadReturnsOversizedFirstBody(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
 	body := `"` + strings.Repeat("x", (4<<20)+1) + `"`
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, body), copyRec(2, `{}`)}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, body), copyRec(2, `{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 2 || len(got) != 1 || got[0].Seq != 1 {
 		t.Fatalf("count %d last %d err %v", len(got), last, err)
 	}
@@ -818,7 +818,7 @@ func TestCopyInitialScanUsesPiecesAndFindsBoundaryDamage(t *testing.T) {
 	for i := range records {
 		records[i] = copyRec(uint64(i+1), `{"text":"`+strings.Repeat("x", 100)+`"}`)
 	}
-	if err := AppendCopy(dir, id, records); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, records); err != nil {
 		t.Fatal(err)
 	}
 	path := copyPathOf(dir, id)
@@ -834,7 +834,7 @@ func TestCopyInitialScanUsesPiecesAndFindsBoundaryDamage(t *testing.T) {
 		}
 		return real(f, p, off)
 	}
-	_, last, err := ReadCopy(dir, id, ^uint64(0), 256, 4<<20)
+	_, last, err := ReadCopy(dir, id, MirrorLog, ^uint64(0), 256, 4<<20)
 	info, e := os.Stat(path)
 	if err != nil || e != nil || last != 1200 || calls < 2 || int64(largest) >= info.Size() {
 		t.Fatalf("scan calls %d largest %d last %d err %v", calls, largest, last, err)
@@ -852,7 +852,7 @@ func TestCopyInitialScanUsesPiecesAndFindsBoundaryDamage(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyMetas.Delete(path)
-	if _, _, err = ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err = ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("boundary error %v", err)
 	}
 }
@@ -861,7 +861,7 @@ func TestCopyScanOpenAndStatFailures(t *testing.T) {
 	for _, mode := range []string{"open", "stat"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, id := t.TempDir(), sampleCopyID()
-			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{}`)}); err != nil {
+			if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, `{}`)}); err != nil {
 				t.Fatal(err)
 			}
 			path := copyPathOf(dir, id)
@@ -880,7 +880,7 @@ func TestCopyScanOpenAndStatFailures(t *testing.T) {
 				_ = f.Close()
 				return f, nil
 			}
-			_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+			_, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 			if err == nil {
 				t.Fatal("scan accepted failed open or stat")
 			}
@@ -897,7 +897,7 @@ func TestCopyFailedIndexScanDoesNotCachePartialIndex(t *testing.T) {
 	for i := range records {
 		records[i] = copyRec(uint64(i+1), `{"text":"`+strings.Repeat("x", 100)+`"}`)
 	}
-	if err := AppendCopy(dir, id, records); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, records); err != nil {
 		t.Fatal(err)
 	}
 	path := copyPathOf(dir, id)
@@ -911,11 +911,11 @@ func TestCopyFailedIndexScanDoesNotCachePartialIndex(t *testing.T) {
 		}
 		return real(f, p, off)
 	}
-	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, boom) {
+	if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, boom) {
 		t.Fatalf("first scan error = %v", err)
 	}
 	copyOps.readAt = real
-	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 100 || len(got) != 100 {
 		t.Fatalf("retry last %d count %d err %v", last, len(got), err)
 	}
@@ -925,7 +925,7 @@ func TestCopyBranchShortReadWithoutError(t *testing.T) {
 	for _, fresh := range []bool{false, true} {
 		t.Run(strconv.FormatBool(fresh), func(t *testing.T) {
 			dir, id := t.TempDir(), sampleCopyID()
-			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{}`)}); err != nil {
+			if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, `{}`)}); err != nil {
 				t.Fatal(err)
 			}
 			if fresh {
@@ -933,7 +933,7 @@ func TestCopyBranchShortReadWithoutError(t *testing.T) {
 			}
 			snapshotCopy(t)
 			copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 1, nil }
-			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+			if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 				t.Fatalf("error = %v", err)
 			}
 		})
@@ -944,7 +944,7 @@ func TestCopyShortValidPrefixWithoutErrorIsDamaged(t *testing.T) {
 	for _, fresh := range []bool{false, true} {
 		t.Run(strconv.FormatBool(fresh), func(t *testing.T) {
 			dir, id := t.TempDir(), sampleCopyID()
-			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
+			if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
 				t.Fatal(err)
 			}
 			if fresh {
@@ -967,7 +967,7 @@ func TestCopyShortValidPrefixWithoutErrorIsDamaged(t *testing.T) {
 				}
 				return real(f, p, off)
 			}
-			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+			if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 				t.Fatalf("error = %v", err)
 			}
 			if calls != 1 {
@@ -979,7 +979,7 @@ func TestCopyShortValidPrefixWithoutErrorIsDamaged(t *testing.T) {
 
 func TestRemoveCopyForgetsIndexAndPrunesParents(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("append failed")
 	}
 	path := copyPathOf(dir, id)
@@ -998,10 +998,10 @@ func TestRemoveCopyForgetsIndexAndPrunesParents(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); err != nil {
 		t.Error("copy root was removed")
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("fresh append did not start at one")
 	}
-	_, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	_, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal("fresh copy cannot be read")
 	}
@@ -1014,10 +1014,10 @@ func TestRemoveCopyPreservesSiblingsAndMissing(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
 	sibling := id
 	sibling.Generation = fmt.Sprintf("%016x", 5)
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("append failed")
 	}
-	if err := AppendCopy(dir, sibling, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, sibling, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("sibling append failed")
 	}
 	if err := RemoveCopy(dir, id); err != nil {
@@ -1086,7 +1086,7 @@ func TestRemoveCopyRemovesLinkWithoutFollowingIt(t *testing.T) {
 func TestRemoveCopySurfacesRemovalFailure(t *testing.T) {
 	snapshotCopy(t)
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("append failed")
 	}
 	boom := errors.New("synthetic failure")
@@ -1141,7 +1141,7 @@ func TestRemoveCopyDoesNotTraverseParentLinks(t *testing.T) {
 func TestRemoveCopySerializesWaitingAppend(t *testing.T) {
 	snapshotCopy(t)
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("initial append failed")
 	}
 	entered := make(chan struct{})
@@ -1162,7 +1162,7 @@ func TestRemoveCopySerializesWaitingAppend(t *testing.T) {
 	appended := make(chan error, 1)
 	go func() {
 		close(started)
-		appended <- AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")})
+		appended <- AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")})
 	}()
 	<-started
 	close(release)
@@ -1172,7 +1172,7 @@ func TestRemoveCopySerializesWaitingAppend(t *testing.T) {
 	if err := <-appended; err != nil {
 		t.Fatal("waiting append failed")
 	}
-	_, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	_, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal("cannot read new copy")
 	}
@@ -1186,7 +1186,7 @@ func TestRemoveCopyReportsFilesystemFailures(t *testing.T) {
 		t.Run(part, func(t *testing.T) {
 			snapshotCopy(t)
 			dir, id := t.TempDir(), sampleCopyID()
-			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+			if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 				t.Fatal("initial append failed")
 			}
 			boom := errors.New("synthetic filesystem failure")
@@ -1212,7 +1212,7 @@ func TestRemoveCopyReportsFilesystemFailures(t *testing.T) {
 func TestRemoveCopyRejectsChangedRoot(t *testing.T) {
 	snapshotCopy(t)
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("initial append failed")
 	}
 	other, err := os.Stat(t.TempDir())
@@ -1238,7 +1238,7 @@ func TestRemoveCopyMissingDataDirectory(t *testing.T) {
 func TestRemoveCopyRejectsNonDirectoryRoot(t *testing.T) {
 	snapshotCopy(t)
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("initial append failed")
 	}
 	marker := filepath.Join(t.TempDir(), "marker")
@@ -1273,7 +1273,7 @@ func TestRemoveCopyWithMissingParents(t *testing.T) {
 
 func TestCopyRepairsTornLastLineAndContinues(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
 		t.Fatal("initial append failed")
 	}
 	path := copyPathOf(dir, id)
@@ -1283,7 +1283,7 @@ func TestCopyRepairsTornLastLineAndContinues(t *testing.T) {
 		t.Fatal("cannot write synthetic tear")
 	}
 	copyMetas.Delete(path)
-	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal("repair failed")
 	}
@@ -1296,10 +1296,10 @@ func TestCopyRepairsTornLastLineAndContinues(t *testing.T) {
 	if !bytes.Equal(readCopyFile(t, dir, id), before) {
 		t.Error("repair did not preserve complete lines")
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(3, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(3, "")}); err != nil {
 		t.Fatal("append after repair failed")
 	}
-	_, last, err = ReadCopy(dir, id, 0, 256, 4<<20)
+	_, last, err = ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal("cannot read continued copy")
 	}
@@ -1317,7 +1317,7 @@ func TestCopyRepairsOnlyTornLineToEmpty(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"seq":1`), 0o600); err != nil {
 		t.Fatal("cannot write synthetic tear")
 	}
-	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	got, last, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal("repair failed")
 	}
@@ -1330,7 +1330,7 @@ func TestCopyRepairsOnlyTornLineToEmpty(t *testing.T) {
 	if len(readCopyFile(t, dir, id)) != 0 {
 		t.Error("torn file was not emptied")
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Error("append to repaired copy failed")
 	}
 }
@@ -1345,7 +1345,7 @@ func TestCopyBadCompleteLineBeforeTearIsUnchanged(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal("cannot write synthetic damage")
 	}
-	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Error("bad complete line was accepted")
 	}
 	if !bytes.Equal(readCopyFile(t, dir, id), raw) {
@@ -1358,7 +1358,7 @@ func TestCopyRepairFailuresLeaveUnindexedFile(t *testing.T) {
 		t.Run(part, func(t *testing.T) {
 			snapshotCopy(t)
 			dir, id := t.TempDir(), sampleCopyID()
-			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+			if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 				t.Fatal("initial append failed")
 			}
 			path := copyPathOf(dir, id)
@@ -1380,7 +1380,7 @@ func TestCopyRepairFailuresLeaveUnindexedFile(t *testing.T) {
 			} else {
 				copyOps.truncate = func(*os.File, int64) error { return boom }
 			}
-			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, boom) {
+			if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, boom) {
 				t.Error("repair failure not returned")
 			}
 			if metaFor(path).ready {
@@ -1391,7 +1391,7 @@ func TestCopyRepairFailuresLeaveUnindexedFile(t *testing.T) {
 			}
 			copyOps.open = realOpen
 			copyOps.truncate = realTruncate
-			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); err != nil {
+			if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); err != nil {
 				t.Error("retry after repair failure failed")
 			}
 		})
@@ -1401,17 +1401,91 @@ func TestCopyRepairFailuresLeaveUnindexedFile(t *testing.T) {
 func TestCopyScanEmptyUnexpectedEOFIsDamage(t *testing.T) {
 	snapshotCopy(t)
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal("initial append failed")
 	}
 	path := copyPathOf(dir, id)
 	before := readCopyFile(t, dir, id)
 	copyMetas.Delete(path)
 	copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 0, io.EOF }
-	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Error("unexpected empty read was accepted")
 	}
 	if !bytes.Equal(before, readCopyFile(t, dir, id)) {
 		t.Error("unexpected empty read changed the file")
+	}
+}
+
+func TestCopyLogFilesRemainIndependent(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	for _, tc := range []struct{ log, filename string }{{MirrorLog, "mirror.jsonl"}, {CommentsLog, "comments.jsonl"}} {
+		t.Run(tc.log, func(t *testing.T) {
+			if err := AppendCopy(dir, id, tc.log, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
+				t.Fatal("append failed")
+			}
+			if err := AppendCopy(dir, id, tc.log, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
+				t.Fatal("repeat failed")
+			}
+			if err := AppendCopy(dir, id, tc.log, []MirrorRecord{copyRec(4, "")}); !errors.Is(err, ErrCopyRange) {
+				t.Error("gap accepted")
+			}
+			got, last, err := ReadCopy(dir, id, tc.log, 1, 256, 4<<20)
+			if err != nil || last != 2 || len(got) != 1 || got[0].Seq != 2 {
+				t.Fatal("bad bounded read")
+			}
+			path := filepath.Join(filepath.Dir(copyPathOf(dir, id)), tc.filename)
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal("log file missing")
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Error("wrong file mode")
+			}
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal("cannot open copy")
+			}
+			_, _ = f.WriteString(`{"seq":3`)
+			_ = f.Close()
+			copyMetas.Delete(path)
+			_, last, err = ReadCopy(dir, id, tc.log, 0, 256, 4<<20)
+			if err != nil || last != 2 {
+				t.Fatal("torn line not repaired")
+			}
+			if err := AppendCopy(dir, id, tc.log, []MirrorRecord{copyRec(3, "")}); err != nil {
+				t.Fatal("append after repair failed")
+			}
+		})
+	}
+	for _, log := range []string{MirrorLog, CommentsLog} {
+		_, last, err := ReadCopy(dir, id, log, 0, 256, 4<<20)
+		if err != nil || last != 3 {
+			t.Errorf("wrong last for %s", log)
+		}
+	}
+	if err := RemoveCopy(dir, id); err != nil {
+		t.Fatal("remove failed")
+	}
+	for _, log := range []string{MirrorLog, CommentsLog} {
+		_, last, err := ReadCopy(dir, id, log, 0, 256, 4<<20)
+		if err != nil || last != 0 {
+			t.Errorf("removed log %s retained entries", log)
+		}
+	}
+}
+
+func TestCopyCommentsRefuseBudgetAndInvalidLog(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_min_free_bytes":0,"storage_global_limit_bytes":1}`), 0o600); err != nil {
+		t.Fatal("cannot set budget")
+	}
+	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, storagebudget.ErrBudget) {
+		t.Error("budget did not refuse comments")
+	}
+	if err := AppendCopy(dir, id, "invalid", []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyPath) {
+		t.Error("bad log accepted for append")
+	}
+	if _, _, err := ReadCopy(dir, id, "invalid", 0, 256, 4<<20); !errors.Is(err, ErrCopyPath) {
+		t.Error("bad log accepted for read")
 	}
 }

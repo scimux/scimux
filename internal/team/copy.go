@@ -22,7 +22,9 @@ import (
 const CopiesDir = "team-copies"
 
 const (
-	mirrorFile = "mirror.jsonl"
+	mirrorFile  = "mirror.jsonl"
+	MirrorLog   = "mirror"
+	CommentsLog = "comments"
 	// copyStride is the spacing of the in-memory index. For each open copy
 	// this process keeps the byte offset of lines 1, 257, 513, and so on.
 	copyStride = 256
@@ -132,7 +134,7 @@ type copyLine struct {
 
 // AppendCopy stores the entries that continue the copy.
 // A repeated suffix, a gap, a damaged copy, or a refused reservation stores nothing.
-func AppendCopy(dataDir string, id CopyID, entries []MirrorRecord) error {
+func AppendCopy(dataDir string, id CopyID, log string, entries []MirrorRecord) error {
 	path, err := copyPath(dataDir, id)
 	if err != nil {
 		return err
@@ -169,7 +171,7 @@ func AppendCopy(dataDir string, id CopyID, entries []MirrorRecord) error {
 
 // ReadCopy returns the stored entries whose number is above after.
 // A missing copy is an empty result and is not created.
-func ReadCopy(dataDir string, id CopyID, after uint64, maxEntries int, maxBodyBytes int) ([]MirrorRecord, uint64, error) {
+func ReadCopy(dataDir string, id CopyID, log string, after uint64, maxEntries int, maxBodyBytes int) ([]MirrorRecord, uint64, error) {
 	path, err := copyPath(dataDir, id)
 	if err != nil {
 		return nil, 0, err

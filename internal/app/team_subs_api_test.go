@@ -540,7 +540,7 @@ func TestSubListRevivesSameGeneration(t *testing.T) {
 	sub.SeenMirror = 1
 	seedSub(t, dir, sub)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	if err := team.AppendCopy(dir, id, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1}`)}}); err != nil {
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1}`)}}); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
@@ -1534,7 +1534,7 @@ func TestSubReadFetchesCopiesAndProjects(t *testing.T) {
 		}
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	stored, last, err := team.ReadCopy(dir, id, 0, 256, 4<<20)
+	stored, last, err := team.ReadCopy(dir, id, team.MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 8 || len(stored) != 8 {
 		t.Fatalf("copy last = %d count = %d err = %v", last, len(stored), err)
 	}
@@ -1620,7 +1620,7 @@ func TestSubReadEndedUsesCopyWithoutServer(t *testing.T) {
 	h, dir := readSurface(t, func(http.ResponseWriter, *http.Request) { hits++ })
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	entry := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"x"}`)}
-	if err := team.AppendCopy(dir, id, []team.MirrorRecord{entry}); err != nil {
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{entry}); err != nil {
 		t.Fatal(err)
 	}
 	subs := loadSubFile(t, dir)
@@ -1679,7 +1679,7 @@ func TestSubReadConcurrentStoresOnce(t *testing.T) {
 		}
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	entries, last, err := team.ReadCopy(dir, id, 0, 256, 4<<20)
+	entries, last, err := team.ReadCopy(dir, id, team.MirrorLog, 0, 256, 4<<20)
 	if err != nil || last != 1 || len(entries) != 1 {
 		t.Fatalf("copy last %d entries %d err %v", last, len(entries), err)
 	}
@@ -1772,7 +1772,7 @@ func TestSubReadIgnoresMalformedBodyFields(t *testing.T) {
 		t.Fatalf("read = %+v", got)
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	entries, _, err := team.ReadCopy(dir, id, 0, 256, 4<<20)
+	entries, _, err := team.ReadCopy(dir, id, team.MirrorLog, 0, 256, 4<<20)
 	if err != nil || len(entries) != 4 {
 		t.Fatalf("entries = %d err %v", len(entries), err)
 	}
@@ -2066,7 +2066,7 @@ func TestSubReadNextTracksUnknownEntries(t *testing.T) {
 			for i, body := range tc.bodies {
 				entries = append(entries, team.MirrorRecord{Seq: uint64(i + 1), Key: fmt.Sprintf("k%d", i+1), Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(body)})
 			}
-			if err := team.AppendCopy(dir, id, entries); err != nil {
+			if err := team.AppendCopy(dir, id, team.MirrorLog, entries); err != nil {
 				t.Fatal(err)
 			}
 			got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath()+tc.after, ""))
@@ -2165,7 +2165,7 @@ func TestSubBranchSeenNeverShrinksOrRewrites(t *testing.T) {
 	for i := 1; i <= 5; i++ {
 		recs = append(recs, team.MirrorRecord{Seq: uint64(i), Key: fmt.Sprintf("k%d", i), Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{}`)})
 	}
-	if err := team.AppendCopy(dir, id, recs); err != nil {
+	if err := team.AppendCopy(dir, id, team.MirrorLog, recs); err != nil {
 		t.Fatal(err)
 	}
 	if r := doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":5}`); r.Code != 204 {
@@ -2270,7 +2270,7 @@ func TestSubBranchStorageFullReturnsExistingEntries(t *testing.T) {
 		_, _ = io.WriteString(w, subPage(subGen, 2, false, subRecord(2, `{"v":1,"t":"user","text":"y"}`)))
 	})
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	if err := team.AppendCopy(dir, id, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"x"}`)}}); err != nil {
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"x"}`)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_global_limit_bytes":1,"storage_min_free_bytes":0}`), 0o600); err != nil {
@@ -2411,7 +2411,7 @@ func TestSubLiveForgottenServerReadsCopyWithoutAnyRequest(t *testing.T) {
 	joinLab(t, dir, teamServerID, srv.URL)
 	seedSub(t, dir, baseSub())
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	if err := team.AppendCopy(dir, id, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"x"}`)}}); err != nil {
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"x"}`)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := team.Remove(dir, teamServerID); err != nil {
@@ -2546,7 +2546,7 @@ func (s *subRemoveScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func seedRemovalCopy(t *testing.T, dir string, id team.CopyID) string {
 	t.Helper()
 	record := team.MirrorRecord{Seq: 1, Key: "k1", Author: id.Owner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{}`)}
-	if err := team.AppendCopy(dir, id, []team.MirrorRecord{record}); err != nil {
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
 		t.Fatal("cannot seed synthetic copy")
 	}
 	return filepath.Join(dir, team.CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "mirror.jsonl")
