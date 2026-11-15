@@ -1319,3 +1319,56 @@ func TestSubListSkipsInvalidIdentitiesAlongsideValidChannels(t *testing.T) {
 		t.Fatalf("copies stat = %v", err)
 	}
 }
+
+func TestSubListSaveFailureReportsUnavailable(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1))}
+	h, dir, _ := subSurface(t, script)
+	asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
+	rec := doTeam(h, http.MethodGet, "/api/team/subscriptions", "")
+	assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+	assertNoSubsFile(t, dir)
+}
+
+func TestSubListUnauthorizedKeepsEndedSubscription(t *testing.T) {
+	script := &subScript{channelsStatus: http.StatusUnauthorized}
+	h, dir, _ := subSurface(t, script)
+	sub := baseSub()
+	sub.State = "ended"
+	seedSub(t, dir, sub)
+	got, _ := readSubList(t, h)
+	if mustFindSub(t, got, subOwner, subChat, subGen).State != "ended" || got.Servers[0].Delivery != "refused" {
+		t.Fatalf("list = %+v", got)
+	}
+}
+
+func TestSubListRereadOfDamagedServersIsAnError(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/channels" {
+			close(entered)
+			<-release
+			_, _ = io.WriteString(w, `{"channels":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(letGo)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- doTeam(h, http.MethodGet, "/api/team/subscriptions", "") }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the list did not reach the team server")
+	}
+	if err := os.WriteFile(filepath.Join(dir, team.File), []byte("nope\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	letGo()
+	assertAPIError(t, recvTeam(t, done, "subscriptions"), http.StatusInternalServerError, "store_unavailable")
+}

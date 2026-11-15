@@ -33,6 +33,8 @@ type teamHandler struct {
 	// removeShare replaces the share-file delete. Nil uses the real one.
 	// A test sets it when the second write of one request has to fail.
 	removeShare func(dataDir, uid string) error
+	// saveSubs replaces subscription persistence in tests.
+	saveSubs func(string, []team.Subscription) error
 }
 
 func newTeamHandler(dataDir string, now func() time.Time, client *team.Client) http.Handler {
