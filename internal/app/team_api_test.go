@@ -2022,3 +2022,74 @@ func TestTeamRenameRouteDocumented(t *testing.T) {
 		}
 	}
 }
+
+func TestTeamRenameSeatAtomicIOFailures(t *testing.T) {
+	for _, which := range []string{"open", "write", "rename"} {
+		t.Run(which, func(t *testing.T) {
+			h, dir := testTeamSurface(t, team.NewClient())
+			entry := labEntry(teamServerID, "http://relay.example", teamToken)
+			seedTeam(t, dir, entry)
+			before, err := os.ReadFile(filepath.Join(dir, team.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			th := asTeamHandler(t, h)
+			seam, ok := any(th).(interface {
+				setSeatIO(func(string) (*os.File, error), func(string, string) error)
+			})
+			if !ok {
+				t.Fatal("seat file error seam is missing")
+			}
+			seam.setSeatIO(func(dir string) (*os.File, error) {
+				if which == "open" {
+					return nil, errors.New("synthetic open failure")
+				}
+				f, err := os.CreateTemp(dir, ".team-test-*.tmp")
+				if err == nil && which == "write" {
+					_ = f.Close()
+				}
+				return f, err
+			}, func(from, to string) error {
+				if which == "rename" {
+					return errors.New("synthetic rename failure")
+				}
+				return os.Rename(from, to)
+			})
+			if _, err := th.saveSeatName(entry, "Synthetic"); err == nil {
+				t.Fatal("save unexpectedly succeeded")
+			}
+			after, err := os.ReadFile(filepath.Join(dir, team.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("failed save changed the old file")
+			}
+			files, err := filepath.Glob(filepath.Join(dir, ".team-test-*.tmp"))
+			if err != nil || len(files) != 0 {
+				t.Fatal("temporary file remained")
+			}
+		})
+	}
+}
+
+func TestTeamRenameSeatRejectsChangedServerIdentity(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	other := labEntry(teamOtherID, "http://other.example", strings.Repeat("ab", 32))
+	seedTeam(t, dir, other)
+	entry := labEntry(teamServerID, "http://relay.example", teamToken)
+	seedTeam(t, dir, entry)
+	th := asTeamHandler(t, h)
+	for _, old := range []team.Entry{other, entry} {
+		changed := old
+		changed.Token = strings.Repeat("cd", 32)
+		if _, err := th.saveSeatName(changed, "Synthetic"); !errors.Is(err, team.ErrNotFound) {
+			t.Fatal("changed token was accepted")
+		}
+		changed = old
+		changed.URL = "http://changed.example"
+		if _, err := th.saveSeatName(changed, "Synthetic"); !errors.Is(err, team.ErrNotFound) {
+			t.Fatal("changed address was accepted")
+		}
+	}
+}
