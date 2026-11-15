@@ -1418,3 +1418,14 @@ func TestChannelCallsMapAStaleGeneration(t *testing.T) {
 		t.Fatalf("requests = %d", len(*got))
 	}
 }
+
+func TestChannelsSubscriptionListSkipsInvalidIdentities(t *testing.T) {
+	body := `{"channels":[` + guestChannel(chOwner, chChat, "read", 1, 0) + `,` + guestChannel("bad", chChat, "read", 1, 0) + `]}`
+	srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		_, _ = io.WriteString(w, body)
+	})
+	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken, true)
+	if err != nil || len(list) != 1 || list[0].Owner != chOwner {
+		t.Fatalf("list = %+v, err = %v", list, err)
+	}
+}
