@@ -36,8 +36,8 @@ type Subscription struct {
 	State        string `json:"state"`
 	MirrorLast   uint64 `json:"mirror_last"`
 	SeenMirror   uint64 `json:"seen_mirror"`
-	CommentsLast uint64 `json:"comments_last,omitempty"`
-	SeenComments uint64 `json:"seen_comments,omitempty"`
+	CommentsLast uint64 `json:"comments_last"`
+	SeenComments uint64 `json:"seen_comments"`
 	FirstSeen    string `json:"first_seen"`
 }
 
@@ -58,18 +58,20 @@ type subsFile struct {
 // subWire keeps fields whose zero value is valid as pointers, so a missing
 // or null value is damage and an empty name or a zero count is not.
 type subWire struct {
-	Server     string  `json:"server"`
-	Owner      string  `json:"owner"`
-	Chat       string  `json:"chat"`
-	Generation string  `json:"generation"`
-	ServerName string  `json:"server_name"`
-	OwnerName  *string `json:"owner_name"`
-	Title      *string `json:"title"`
-	Access     string  `json:"access"`
-	State      string  `json:"state"`
-	MirrorLast *uint64 `json:"mirror_last"`
-	SeenMirror *uint64 `json:"seen_mirror"`
-	FirstSeen  string  `json:"first_seen"`
+	Server       string  `json:"server"`
+	Owner        string  `json:"owner"`
+	Chat         string  `json:"chat"`
+	Generation   string  `json:"generation"`
+	ServerName   string  `json:"server_name"`
+	OwnerName    *string `json:"owner_name"`
+	Title        *string `json:"title"`
+	Access       string  `json:"access"`
+	State        string  `json:"state"`
+	MirrorLast   *uint64 `json:"mirror_last"`
+	SeenMirror   *uint64 `json:"seen_mirror"`
+	CommentsLast *uint64 `json:"comments_last"`
+	SeenComments *uint64 `json:"seen_comments"`
+	FirstSeen    string  `json:"first_seen"`
 }
 
 type subID struct {
@@ -132,7 +134,10 @@ func parseSubs(raw []byte) ([]Subscription, error) {
 	if err := dec.Decode(&extra); err != io.EOF {
 		return nil, ErrSubsDamaged
 	}
-	if doc.V != 1 || doc.Subscriptions == nil {
+	if doc.V != 1 && doc.V != 2 {
+		return nil, ErrSubsDamaged
+	}
+	if doc.Subscriptions == nil {
 		return nil, ErrSubsDamaged
 	}
 	if len(*doc.Subscriptions) > maxSubs {
@@ -141,7 +146,7 @@ func parseSubs(raw []byte) ([]Subscription, error) {
 	out := make([]Subscription, 0, len(*doc.Subscriptions))
 	seen := make(map[subID]struct{}, len(*doc.Subscriptions))
 	for _, w := range *doc.Subscriptions {
-		s, ok := subFromWire(w)
+		s, ok := subFromWire(w, doc.V)
 		if !ok {
 			return nil, ErrSubsDamaged
 		}
@@ -155,7 +160,7 @@ func parseSubs(raw []byte) ([]Subscription, error) {
 	return out, nil
 }
 
-func subFromWire(w subWire) (Subscription, bool) {
+func subFromWire(w subWire, version int) (Subscription, bool) {
 	if w.OwnerName == nil || w.Title == nil || w.MirrorLast == nil || w.SeenMirror == nil {
 		return Subscription{}, false
 	}
@@ -165,6 +170,13 @@ func subFromWire(w subWire) (Subscription, bool) {
 		Access: w.Access, State: w.State,
 		MirrorLast: *w.MirrorLast, SeenMirror: *w.SeenMirror,
 		FirstSeen: w.FirstSeen,
+	}
+	if version == 2 {
+		if w.CommentsLast == nil || w.SeenComments == nil {
+			return Subscription{}, false
+		}
+		s.CommentsLast = *w.CommentsLast
+		s.SeenComments = *w.SeenComments
 	}
 	if !validSub(s) {
 		return Subscription{}, false
@@ -197,7 +209,7 @@ func validSub(s Subscription) bool {
 	if !utf8.ValidString(s.ServerName) || !validName(s.ServerName) || !validOwnerName(s.OwnerName) || !validChannelTitle(s.Title) {
 		return false
 	}
-	if s.Access != "read" && s.Access != "write" {
+	if s.Access != "read" && s.Access != "write" && s.Access != "owner" {
 		return false
 	}
 	if s.State != "live" && s.State != "ended" {
@@ -216,7 +228,7 @@ func validOwnerName(name string) bool {
 }
 
 func writeSubs(dir string, subs []Subscription) error {
-	body, err := marshalSubs(subsFile{V: 1, Subscriptions: subs})
+	body, err := marshalSubs(subsFile{V: 2, Subscriptions: subs})
 	if err != nil {
 		return err
 	}
