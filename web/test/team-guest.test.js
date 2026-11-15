@@ -953,3 +953,26 @@ test("only a live owner hides the remove button", async () => {
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); assert.equal(f.get("sv_remove").hidden, true);
   pending.resolve(readAnswer([], 0, false, ended)); await f.feature.settled(); assert.equal(f.get("sv_remove").hidden, false);
 });
+
+test("a late send after close updates only its stored draft", async () => {
+  for (const success of [true, false]) {
+    const pending = deferred(), view = { ...base, access:"write" }; let random = 0;
+    const posts = [];
+    const f = viewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list([view]);
+      if (opts?.method === "POST") { posts.push(JSON.parse(opts.body)); if (posts.length === 1) return pending.promise; throw new Error("not json"); }
+      return readAnswer([], 0, false, view);
+    }, undefined, n => { random++; return new Uint8Array(n).fill(random); });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    setGuestDraft(f, "synthetic"); f.click("sv_send"); f.click("sv_back");
+    if (success) pending.resolve({ seq:1 }); else pending.reject(new Error("not json"));
+    await f.feature.settled(); assert.equal(f.get("sharedview").hidden, true);
+    f.click("cardlist", f.item); await f.feature.settled();
+    assert.ok(f.get("sv_text").value === (success ? "" : "synthetic"));
+    if (!success) {
+      f.click("sv_send"); await f.feature.settled();
+      assert.equal(posts[0].key, posts[1].key); assert.equal(random, 1);
+      assert.equal(f.get("sv_note").textContent, "That did not work. Your message is still here.");
+    }
+  }
+});
