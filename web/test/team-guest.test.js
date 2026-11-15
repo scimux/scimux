@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { jsonResponse } from "./s2-helpers.js";
+import { decodeResponse } from "../js/api.js";
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML } from "../js/team-guest.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, unread: false, first_seen: "1" };
@@ -394,3 +396,19 @@ test("browser-normalized HTML does not rewrite an unchanged shared list", async 
  * A newer list request cannot overtake an older one: tick refuses a second load
  * while loading, and destroy drops the pending response.
  */
+
+test("load more cannot issue requests after the gate turns off", async () => {
+  let lists = 0, reads = 0;
+  const f = viewFixture(async path => {
+    if (path === "/api/team/subscriptions") {
+      lists++;
+      if (lists === 1) return list([base]);
+      return decodeResponse(jsonResponse('{"error":"not_found"}', { status: 404, etag: "" }));
+    }
+    if (path.endsWith("/seen")) return "";
+    reads++; return readAnswer([], 0, true);
+  });
+  f.feature.tick(); await f.feature.settled(); f.setTime(9000); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(reads, 40); f.setTime(10000); f.feature.tick(); await f.feature.settled();
+  const before = reads; f.click("sv_more"); await f.feature.settled(); assert.equal(reads, before);
+});
