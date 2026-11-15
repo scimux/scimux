@@ -91,9 +91,27 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 	}
 	rest, ok := strings.CutPrefix(r.URL.Path, "/api/team/subscriptions/")
 	parts := strings.Split(rest, "/")
-	if !ok || (len(parts) != 4 && (len(parts) != 5 || (parts[4] != "seen" && parts[4] != "comments"))) || !subHex(parts[0], 32) || !subHex(parts[1], 32) || !subHex(parts[2], 16) || !subHex(parts[3], 16) {
+	if !ok {
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return
+	}
+	if len(parts) != 4 {
+		if len(parts) != 5 {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		switch parts[4] {
+		case "seen", "comments":
+		default:
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
+	}
+	for i, size := range []int{32, 32, 16, 16} {
+		if !subHex(parts[i], size) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
 	}
 	id := team.CopyID{Server: parts[0], Owner: parts[1], Chat: parts[2], Generation: parts[3]}
 	if len(parts) == 4 {
@@ -112,16 +130,16 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	if len(parts) == 5 && r.Method == http.MethodGet {
+	if len(parts) == 5 {
 		if parts[4] == "comments" {
-			h.readSubscriptionLog(w, r, id, true)
-			return
-		}
-	}
-	if len(parts) == 5 && r.Method == http.MethodPost {
-		if parts[4] == "comments" {
-			h.postComment(w, r, id)
-			return
+			switch r.Method {
+			case http.MethodGet:
+				h.readSubscriptionLog(w, r, id, true)
+				return
+			case http.MethodPost:
+				h.postComment(w, r, id)
+				return
+			}
 		}
 	}
 	writeTeamError(w, http.StatusNotFound, "not_found")
@@ -895,8 +913,8 @@ func projectSubRecord(record team.MirrorRecord) (map[string]any, int, bool) {
 
 func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
 	var req struct {
-		Mirror   *uint64 `json:"mirror"`
-		Comments *uint64 `json:"comments"`
+		Mirror   json.RawMessage `json:"mirror"`
+		Comments json.RawMessage `json:"comments"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	dec := json.NewDecoder(r.Body)
@@ -914,6 +932,31 @@ func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id
 		writeTeamError(w, 400, "bad_request")
 		return
 	}
+	var mirror, comments *uint64
+	if req.Mirror != nil {
+		if bytes.Equal(bytes.TrimSpace(req.Mirror), []byte("null")) {
+			writeTeamError(w, 400, "bad_request")
+			return
+		}
+		var value uint64
+		if json.Unmarshal(req.Mirror, &value) != nil {
+			writeTeamError(w, 400, "bad_request")
+			return
+		}
+		mirror = &value
+	}
+	if req.Comments != nil {
+		if bytes.Equal(bytes.TrimSpace(req.Comments), []byte("null")) {
+			writeTeamError(w, 400, "bad_request")
+			return
+		}
+		var value uint64
+		if json.Unmarshal(req.Comments, &value) != nil {
+			writeTeamError(w, 400, "bad_request")
+			return
+		}
+		comments = &value
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	subs, err := team.LoadSubs(h.dataDir)
@@ -924,13 +967,13 @@ func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id
 	for i := range subs {
 		if sameCopy(subs[i], id) {
 			changed := false
-			if req.Mirror != nil {
+			if mirror != nil {
 				_, last, err := team.ReadCopy(h.dataDir, id, team.MirrorLog, ^uint64(0), 256, 4<<20)
 				if err != nil {
 					writeTeamError(w, 500, "store_unavailable")
 					return
 				}
-				value := *req.Mirror
+				value := *mirror
 				if value > last {
 					value = last
 				}
@@ -939,13 +982,13 @@ func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id
 					changed = true
 				}
 			}
-			if req.Comments != nil {
+			if comments != nil {
 				_, last, err := team.ReadCopy(h.dataDir, id, team.CommentsLog, ^uint64(0), 256, 4<<20)
 				if err != nil {
 					writeTeamError(w, 500, "store_unavailable")
 					return
 				}
-				value := *req.Comments
+				value := *comments
 				if value > last {
 					value = last
 				}
