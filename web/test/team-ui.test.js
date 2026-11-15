@@ -678,3 +678,29 @@ test("server name cancel, escape and failure retain the right state", async () =
   teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Other"); assert.deepEqual(teamNameKey(ui, "Escape"), { stopped: true, prevented: true });
   assert.equal(teamNameField(ui), null); assert.equal(focusedNode, teamNameAction(ui, relay.id, "name-edit")); assert.equal(puts, 1);
 });
+
+test("late seat rename follows a rebuilt row and is dropped if it is gone", async () => {
+  for (const exists of [true, false]) {
+    const pending = deferred(); let loads = 0, done = false;
+    const ui = harness(call => {
+      if (call.path === "/api/team/servers") { loads++; return { servers: loads === 2 && !exists ? [] : [relay] }; }
+      if (call.method === "PUT") return pending.promise;
+      return { status: "connected" };
+    });
+    await ui.section.refresh(); await ui.section.settled();
+    teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Synthetic"); teamNameAction(ui, relay.id, "name-save").click();
+    const refresh = ui.section.refresh().then(() => { done = true; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    try {
+      assert.equal(done, true, "refresh must finish while save is pending");
+      if (exists) assert.equal(teamNameField(ui).value, "Synthetic");
+      else assert.match(ui.servers.innerHTML, /No server joined/);
+    } finally { pending.resolve({ ...relay, seat_name: "Synthetic" }); await refresh; await ui.section.settled(); }
+    if (exists) assert.match(ui.servers.innerHTML, /Your name: Synthetic/);
+    else {
+      assert.match(ui.servers.innerHTML, /No server joined/);
+      await ui.section.refresh(); await ui.section.settled();
+      assert.match(ui.servers.innerHTML, /Your name: Ada/); assert.equal(teamNameField(ui), null);
+    }
+  }
+});
