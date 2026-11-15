@@ -704,3 +704,31 @@ test("late seat rename follows a rebuilt row and is dropped if it is gone", asyn
     }
   }
 });
+
+test("name edit ignores stale, unrelated and busy actions", async () => {
+  const pending = deferred();
+  const ui = harness(call => call.path === "/api/team/servers" ? { servers: [relay, other] } : call.method === "PUT" ? pending.promise : { status: "connected" });
+  await ui.section.refresh(); await ui.section.settled();
+  const click = (act, id) => { for (const fn of ui.servers.listeners.get("click") || []) fn({ target: { dataset: { act, id }, parentElement: null } }); };
+  const fire = (type, target, key) => { for (const fn of ui.servers.listeners.get(type) || []) fn({ target, key, preventDefault() {}, stopPropagation() {} }); };
+  click("name-cancel", relay.id); click("name-save", relay.id); click("name-edit", "missing");
+  fire("input", { dataset: {} }); fire("keydown", { dataset: {} }, "Escape");
+  teamNameAction(ui, relay.id, "name-edit").click();
+  fire("input", { dataset: {} }); fire("keydown", { dataset: {} }, "Escape"); teamNameKey(ui, "Enter");
+  click("name-save", other.id); teamNameInput(ui, "Synthetic"); teamNameAction(ui, relay.id, "name-save").click();
+  click("name-edit", other.id); click("name-cancel", relay.id); assert.ok(teamNameField(ui));
+  pending.resolve({ ...relay, seat_name: "Synthetic" }); await ui.section.settled();
+});
+
+test("a failed late name save for a removed server is dropped", async () => {
+  const pending = deferred(); let loads = 0;
+  const ui = harness(call => {
+    if (call.path === "/api/team/servers") return { servers: ++loads === 1 ? [relay] : [] };
+    if (call.method === "PUT") return pending.promise;
+    return { status: "connected" };
+  });
+  await ui.section.refresh(); await ui.section.settled();
+  teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Synthetic"); teamNameAction(ui, relay.id, "name-save").click();
+  await ui.section.refresh(); pending.reject(apiError("refused", 502)); await ui.section.settled();
+  assert.match(ui.servers.innerHTML, /No server joined/); assert.equal(ui.note.textContent, "");
+});
