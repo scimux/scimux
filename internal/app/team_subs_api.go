@@ -28,6 +28,8 @@ const (
 type subAsk struct {
 	channels  time.Time
 	seats     time.Time
+	roster    time.Time
+	names     map[string]string
 	delivery  string
 	truncated bool
 }
@@ -88,7 +90,7 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 	}
 	rest, ok := strings.CutPrefix(r.URL.Path, "/api/team/subscriptions/")
 	parts := strings.Split(rest, "/")
-	if !ok || (len(parts) != 4 && (len(parts) != 5 || parts[4] != "seen")) || !subHex(parts[0], 32) || !subHex(parts[1], 32) || !subHex(parts[2], 16) || !subHex(parts[3], 16) {
+	if !ok || (len(parts) != 4 && (len(parts) != 5 || (parts[4] != "seen" && parts[4] != "comments"))) || !subHex(parts[0], 32) || !subHex(parts[1], 32) || !subHex(parts[2], 16) || !subHex(parts[3], 16) {
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -104,8 +106,16 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if len(parts) == 5 && r.Method == http.MethodPut {
-		h.seeSubscription(w, r, id)
-		return
+		if parts[4] == "seen" {
+			h.seeSubscription(w, r, id)
+			return
+		}
+	}
+	if len(parts) == 5 && r.Method == http.MethodGet {
+		if parts[4] == "comments" {
+			h.readSubscriptionLog(w, r, id, true)
+			return
+		}
 	}
 	writeTeamError(w, http.StatusNotFound, "not_found")
 }
@@ -216,7 +226,15 @@ func (h *teamHandler) askChannels(ctx context.Context, entry team.Entry) subOutc
 }
 
 func (h *teamHandler) askSeats(ctx context.Context, entry team.Entry) seatOutcome {
+	h.mu.Lock()
+	ask := h.subAsks[entry.ID]
+	ask.roster = h.now().UTC()
+	h.subAsks[entry.ID] = ask
+	h.mu.Unlock()
 	seats, err := h.client.Seats(ctx, entry.URL, entry.Token)
+	if err == nil {
+		h.storeRoster(entry.ID, seats)
+	}
 	return seatOutcome{id: entry.ID, entry: entry, seats: seats, err: err}
 }
 
@@ -653,6 +671,10 @@ func (h *teamHandler) endSubscription(id team.CopyID, whole bool) error {
 }
 
 func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
+	h.readSubscriptionLog(w, r, id, false)
+}
+
+func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request, id team.CopyID, comments bool) {
 	var after uint64
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
@@ -681,7 +703,11 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 		writeTeamError(w, 404, "not_found")
 		return
 	}
-	_, last, err := team.ReadCopy(h.dataDir, id, team.MirrorLog, ^uint64(0), 256, 4<<20)
+	log := team.MirrorLog
+	if comments {
+		log = team.CommentsLog
+	}
+	_, last, err := team.ReadCopy(h.dataDir, id, log, ^uint64(0), 256, 4<<20)
 	if err != nil {
 		writeTeamError(w, 500, "copy_damaged")
 		return
@@ -694,7 +720,11 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 		if err == nil {
 			for pageNo := 0; pageNo < 8; pageNo++ {
 				var page team.MirrorPage
-				page, err = h.client.ReadMirror(r.Context(), server.URL, server.Token, id.Owner, id.Chat, last)
+				if comments {
+					page, err = h.client.ReadComments(r.Context(), server.URL, server.Token, id.Owner, id.Chat, last)
+				} else {
+					page, err = h.client.ReadMirror(r.Context(), server.URL, server.Token, id.Owner, id.Chat, last)
+				}
 				if err != nil {
 					break
 				}
@@ -707,7 +737,7 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 					sub.State = "ended"
 					break
 				}
-				err = team.AppendCopy(h.dataDir, id, team.MirrorLog, page.Entries)
+				err = team.AppendCopy(h.dataDir, id, log, page.Entries)
 				if err != nil {
 					break
 				}
@@ -762,9 +792,13 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	records, last, err := team.ReadCopy(h.dataDir, id, team.MirrorLog, after, 256, 4<<20)
+	records, last, err := team.ReadCopy(h.dataDir, id, log, after, 256, 4<<20)
 	if err != nil {
 		writeTeamError(w, 500, "copy_damaged")
+		return
+	}
+	if comments {
+		h.answerComments(w, r, id, server, joined, records, last, after, stopped, full)
 		return
 	}
 	var out subscriptionReadResponse
@@ -966,4 +1000,160 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	h.removedSubs[id] = h.now().UTC()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type commentReadResponse struct {
+	Entries []map[string]any  `json:"entries"`
+	Names   map[string]string `json:"names"`
+	Last    uint64            `json:"last"`
+	Next    uint64            `json:"next"`
+	More    bool              `json:"more"`
+}
+
+func (h *teamHandler) answerComments(w http.ResponseWriter, r *http.Request, id team.CopyID, server team.Entry, joined bool, records []team.MirrorRecord, last, after uint64, stopped, full bool) {
+	inst, err := identity.LoadInstallation(h.dataDir)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "identity_unavailable")
+		return
+	}
+	out := commentReadResponse{Entries: []map[string]any{}, Last: last, Next: after}
+	if out.Next > last {
+		out.Next = last
+	}
+	textBytes := 0
+	authors := make(map[string]bool)
+	for _, record := range records {
+		entry, size, ok := projectCommentRecord(record, string(inst))
+		if !ok {
+			out.Next = record.Seq
+			continue
+		}
+		if textBytes+size > 4<<20 {
+			out.More = true
+			break
+		}
+		out.Entries = append(out.Entries, entry)
+		out.Next = record.Seq
+		textBytes += size
+		authors[record.Author] = true
+	}
+	if stopped {
+		out.More = true
+	}
+	if out.Next < last {
+		out.More = true
+	}
+	if full {
+		if len(records) == 0 {
+			writeTeamError(w, http.StatusInsufficientStorage, "storage_full")
+			return
+		}
+	}
+	out.Names = h.commentNames(r.Context(), id.Server, server, joined, string(inst), authors)
+	writeJSONStatus(w, http.StatusOK, out)
+}
+
+func projectCommentRecord(record team.MirrorRecord, inst string) (map[string]any, int, bool) {
+	var body struct {
+		Version *int    `json:"v"`
+		Type    *string `json:"t"`
+		Text    *string `json:"text"`
+		Anchor  *uint64 `json:"anchor"`
+	}
+	if json.Unmarshal(record.Body, &body) != nil {
+		return nil, 0, false
+	}
+	if body.Version == nil {
+		return nil, 0, false
+	}
+	if *body.Version != 1 {
+		return nil, 0, false
+	}
+	if body.Type == nil {
+		return nil, 0, false
+	}
+	if *body.Type != "comment" {
+		return nil, 0, false
+	}
+	if body.Text == nil {
+		return nil, 0, false
+	}
+	if *body.Text == "" {
+		return nil, 0, false
+	}
+	if body.Anchor == nil {
+		return nil, 0, false
+	}
+	return map[string]any{"seq": record.Seq, "at": record.At, "author": record.Author, "mine": record.Author == inst, "text": *body.Text, "anchor": *body.Anchor}, len(*body.Text), true
+}
+
+func (h *teamHandler) storeRoster(server string, seats []team.Seat) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ask := h.subAsks[server]
+	if ask.names == nil {
+		ask.names = make(map[string]string)
+	}
+	for _, seat := range seats {
+		ask.names[seat.ID] = seat.Name
+	}
+	h.subAsks[server] = ask
+}
+
+func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string, authors map[string]bool) map[string]string {
+	h.mu.Lock()
+	if h.subAsks == nil {
+		h.subAsks = make(map[string]subAsk)
+	}
+	ask := h.subAsks[id]
+	missing := false
+	for author := range authors {
+		if joined {
+			if author == inst {
+				continue
+			}
+		}
+		if _, ok := ask.names[author]; !ok {
+			missing = true
+		}
+	}
+	due := false
+	if joined {
+		if missing {
+			if ask.roster.IsZero() {
+				due = true
+			} else if h.now().UTC().Sub(ask.roster) > 60*time.Second {
+				due = true
+			}
+		}
+	}
+	if due {
+		ask.roster = h.now().UTC()
+		h.subAsks[id] = ask
+	}
+	h.mu.Unlock()
+	if due {
+		if h.confirmed(ctx, server) == nil {
+			seats, err := h.client.Seats(ctx, server.URL, server.Token)
+			if err == nil {
+				h.storeRoster(id, seats)
+			}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ask = h.subAsks[id]
+	names := make(map[string]string)
+	for author := range authors {
+		if joined {
+			if author == inst {
+				names[author] = server.SeatName
+				continue
+			}
+		}
+		if name, ok := ask.names[author]; ok {
+			names[author] = name
+		}
+	}
+	return names
 }
