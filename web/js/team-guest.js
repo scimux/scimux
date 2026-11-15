@@ -59,7 +59,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   let answer = { subscriptions: [], servers: [], truncated: false };
   let loading = false;
   let lastLoad = null;
-  let generation = 0;
+  let hasAnswer = false;
   const pending = new Set();
   const collapsed = new Set();
   let rendered = "";
@@ -126,20 +126,22 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     }
     return true;
   }
-  async function load(gen) {
+  async function load() {
     try {
       const next = await api(LIST);
       if (destroyed) return;
-      if (gen !== generation) return;
-      const changed = JSON.stringify(next) !== JSON.stringify(answer);
+      let changed = JSON.stringify(next) !== JSON.stringify(answer);
+      if (!hasAnswer) {
+        if (!next.subscriptions.length) changed = false;
+      }
+      hasAnswer = true;
       answer = next;
       if (changed) invalidateCards();
     } catch (error) {
       if (destroyed) return;
-      if (gen !== generation) return;
       if (error.status === 404) off = true;
     } finally {
-      if (gen === generation) loading = false;
+      loading = false;
     }
   }
   function tick() {
@@ -159,8 +161,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     }
     lastLoad = time;
     loading = true;
-    generation++;
-    track(load(generation));
+    track(load());
   }
   function click(event) {
     const group = event.target.closest("[data-group]");
@@ -320,7 +321,6 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     readGeneration++;
     bound = false;
     destroyed = true;
-    generation++;
   }
   async function settled() {
     while (pending.size) await Promise.all([...pending]);
