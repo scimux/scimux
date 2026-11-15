@@ -2207,3 +2207,14 @@ test("shared bookmark source line names its writer and chat", () => {
   assert.match(html({ who: "<A", from: "<B" }), /&amp;lt;A · &amp;lt;B/);
   assert.match(html({}), /<div class="when">TIME<\/div>/);
 });
+
+test("old send-to roles keep their original draft with or without provenance", () => {
+  for (const role of ["assistant", "user", ""]) for (const prov of [undefined, { synthetic: true }]) {
+    const ctx = createFeature({ nodes: sendtoNodes });
+    ctx.feature.openSendTo({ text: "synthetic", role, prov });
+    const target = el("button", { dataset: { fwd: "ok" } });
+    target.closest = sel => sel === "[data-fwd]" ? target : null;
+    ctx.roots.sendtoList.onclick({ target });
+    assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "ok"), discloseAgentOutput("synthetic", role));
+  }
+});

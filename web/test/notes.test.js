@@ -3790,3 +3790,20 @@ test("note reference sends its frozen shared writer and provenance", async () =>
   ctx.roots.wssections.dispatch("click", { target: btn });
   assert.equal(calls[0].who, "Ann"); assert.equal(calls[0].prov, true); assert.equal(calls[0].role, "person");
 });
+
+test("placing a shared person's bookmark freezes its source details", async () => {
+  const bookmark = { t: "1", text: "synthetic", role: "person", who: "Ann", from: "Chat", prov: true };
+  const ctx = createFeature({ notes: [{ id: "n1", title: "N", order: 0 }], docs: { n1: { id: "n1", title: "N", sections: [{ id: "s1", title: "S", body: "", order: 0, references: [] }] } }, bookmarks: [bookmark] });
+  ctx.feature.bind(); ctx.feature.open(); await settle(); await openNote(ctx, "n1"); ctx.feature.startPlacement(bookmark);
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.appendChild(el("div", { className: "wssecbody" }));
+  const add = el("button", { dataset: { addhere: "" } });
+  add.closest = sel => sel === "[data-addhere]" ? add : sel === ".wssec" ? sec : null;
+  ctx.roots.wssections.dispatch("click", { target: add }); await settle();
+  const post = ctx.apiLog.find(x => x.method === "POST" && x.url.includes("/references"));
+  assert.ok(post); const payload = JSON.parse(post.body);
+  assert.equal(payload.snapshot.role, "person"); assert.equal(payload.snapshot.speaker, "Ann");
+  assert.equal(payload.snapshot.station, "Chat"); assert.equal(payload.snapshot.prov, true);
+  ctx.setBookmarks([]); await openNote(ctx, "n1"); await settle();
+  assert.equal(ctx.docs.n1.sections[0].references[0].snapshot.speaker, "Ann");
+});
