@@ -6717,7 +6717,7 @@ function foldAgents(n, segment = 0, uid = "log-1", textAt = null){
 
 async function renderFolded({
   turns, decisions, uid = "log-1", state = null, deps = {}, histSegs,
-  prior = 0, echo = true,
+  prior = 0, echo = true, chatConditional,
 } = {}){
   const store = foldMemory(state ? foldRecord(uid, state) : {});
   const chatPayload = {
@@ -6734,6 +6734,7 @@ async function renderFolded({
   const ctx = makeFeature({
     histSegs,
     chatPayload,
+    chatConditional,
     deps: {
       fmtWhen: t => "T(" + t + ")",
       bubbleTitle: (role, time) => role + "|" + time,
@@ -8102,4 +8103,256 @@ test("a poll after a fold action does not move focus", async () => {
   assert.equal(focus.doc.activeElement, held);
   assert.equal(focus.log.length, calls);
   ctx.feature.destroy();
+});
+
+/* A real browser drops focus to body when innerHTML removes the focused
+ * control. These helpers model that removal and document membership. */
+function foldFocusPage(){
+  const focus = foldFocusDoc();
+  const body = el("body");
+  const composer = el("textarea");
+  const live = new Set([body, composer, focus.elsewhere]);
+  const transcript = new Set();
+  focus.doc.body = body;
+  focus.doc.contains = node => live.has(node);
+  return { ...focus, body, composer, live, transcript };
+}
+
+function installRemovingFoldFocus(msgs, focus, top){
+  let html = msgs.innerHTML;
+  Object.defineProperty(msgs, "innerHTML", {
+    configurable: true,
+    get(){ return html; },
+    set(v){
+      if (focus.transcript.has(focus.doc.activeElement)){
+        focus.live.delete(focus.doc.activeElement);
+        focus.transcript.delete(focus.doc.activeElement);
+        focus.doc.activeElement = focus.body;
+      }
+      for (const old of focus.transcript) focus.live.delete(old);
+      focus.transcript.clear();
+      html = String(v);
+      msgs.children.length = 0;
+      const controls = [];
+      const btnRe = /data-fold="(open|close)" data-foldkey="([^"]+)"/g;
+      let m;
+      while ((m = btnRe.exec(html))){
+        const kind = m[1];
+        const key = m[2];
+        const btn = el("button", {
+          className: "foldtoggle",
+          dataset: { fold: kind, foldkey: key },
+        });
+        btn.offsetTop = top;
+        btn.focus = opts => {
+          focus.log.push({ role: "fold", kind, key, opts, node: btn });
+          focus.doc.activeElement = btn;
+        };
+        const row = el("div", { className: "foldrow" });
+        row.appendChild(btn);
+        msgs.appendChild(row);
+        controls.push(btn);
+        focus.transcript.add(btn);
+      }
+      msgs._foldControls = controls;
+      for (const control of controls) focus.live.add(control);
+      if (!focus.doc.contains(focus.doc.activeElement)) focus.doc.activeElement = focus.body;
+    },
+  });
+  msgs.innerHTML = msgs.innerHTML;
+}
+
+function deferred(){
+  let resolve;
+  const promise = new Promise(r => { resolve = r; });
+  return { promise, resolve };
+}
+
+test("a poll rebuild uses pending fold focus before the action refresh resolves", async () => {
+  const focus = foldFocusPage();
+  const actionResponse = deferred();
+  const turns = twoRangeTurns();
+  const payload = {
+    turns, live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+  };
+  let overlap = false;
+  let overlappingCalls = 0;
+  const { ctx } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    chatConditional(){
+      if (!overlap) return Promise.resolve({ status: 200, data: payload });
+      overlappingCalls++;
+      if (overlappingCalls === 1) return actionResponse.promise;
+      return Promise.resolve({ status: 200, data: payload });
+    },
+    deps: { ...twoRangeDeps(), document: focus.doc },
+  });
+  ctx.feature.bind();
+  installRemovingFoldFocus(ctx.roots.msgs, focus, 800);
+  const show = ctx.roots.msgs._foldControls.find(btn =>
+    btn.dataset.fold === "open" && btn.dataset.foldkey === "0/6");
+  focus.live.add(show);
+  focus.doc.activeElement = show;
+  overlap = true;
+  firstListener(ctx.roots.msgs, "click")({ target: show });
+  await Promise.resolve();
+  turns.push(foldBubble("assistant", 9, "poll-arrived"));
+  payload.turns = turns;
+  await ctx.feature.render();
+  assert.equal(focus.doc.activeElement.dataset?.foldkey, "0/6");
+  assert.equal(focus.log.length, 1);
+  actionResponse.resolve({ status: 200, data: payload });
+  await foldSettle();
+  assert.equal(focus.log.length, 1, "the target is consumed by only one rebuild");
+  ctx.feature.destroy();
+});
+
+test("a skipped fold render keeps its focus target for a later rebuild", async () => {
+  const focus = foldFocusPage();
+  const actionResponse = deferred();
+  const turns = twoRangeTurns();
+  const payload = {
+    turns, live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+  };
+  let overlap = false;
+  let overlappingCalls = 0;
+  const { ctx } = await renderFolded({
+    turns,
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    chatConditional(){
+      if (!overlap) return Promise.resolve({ status: 200, data: payload });
+      overlappingCalls++;
+      return overlappingCalls === 1
+        ? actionResponse.promise
+        : Promise.resolve({ status: 200, data: payload });
+    },
+    deps: { ...twoRangeDeps(), document: focus.doc },
+  });
+  ctx.feature.bind();
+  installRemovingFoldFocus(ctx.roots.msgs, focus, 800);
+  const show = ctx.roots.msgs._foldControls.find(btn =>
+    btn.dataset.fold === "open" && btn.dataset.foldkey === "0/6");
+  focus.live.add(show);
+  focus.doc.activeElement = show;
+  overlap = true;
+  firstListener(ctx.roots.msgs, "click")({ target: show });
+  await Promise.resolve();
+  actionResponse.resolve({ status: 304 });
+  await foldSettle();
+  assert.equal(focus.log.length, 0, "a 304 does not use the pending target");
+  turns.push(foldBubble("assistant", 9, "later-poll"));
+  payload.turns = turns;
+  await ctx.feature.render();
+  assert.equal(focus.log.length, 1, "the next rebuilding poll uses the target");
+  assert.equal(focus.doc.activeElement.dataset?.foldkey, "0/6");
+  ctx.feature.destroy();
+});
+
+test("a fold answer leaves focus in the composer when the user moved there", async () => {
+  const focus = foldFocusPage();
+  const response = deferred();
+  let hold = false;
+  const { ctx } = await renderFolded({
+    turns: twoRangeTurns(),
+    state: { all: false, turns: ["0/2"], open: [] },
+    echo: false,
+    chatConditional(path, etag, calls){
+      if (hold && calls.length > 1) return response.promise;
+      return Promise.resolve({ status: 200, data: {
+        turns: twoRangeTurns(), live: "quiet", delivery: "ok", source: "tmux",
+        chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      } });
+    },
+    deps: { ...twoRangeDeps(), document: focus.doc },
+  });
+  ctx.feature.bind();
+  installRemovingFoldFocus(ctx.roots.msgs, focus, 800);
+  const show = ctx.roots.msgs._foldControls.find(btn => btn.dataset.fold === "open");
+  focus.live.add(show);
+  focus.doc.activeElement = show;
+  hold = true;
+  firstListener(ctx.roots.msgs, "click")({ target: show });
+  focus.doc.activeElement = focus.composer;
+  response.resolve({ status: 200, data: {
+    turns: twoRangeTurns(), live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+  } });
+  await foldSettle();
+  assert.equal(focus.doc.activeElement, focus.composer);
+  assert.equal(focus.log.length, 0);
+  ctx.feature.destroy();
+});
+
+test("a late fold answer preserves focus on another connected button", async () => {
+  const focus = foldFocusPage();
+  const response = deferred();
+  let hold = false;
+  const payload = {
+    turns: twoRangeTurns(), live: "quiet", delivery: "ok", source: "tmux",
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+  };
+  const { ctx } = await renderFolded({
+    turns: payload.turns,
+    state: { all: false, turns: ["0/2"], open: [] }, echo: false,
+    chatConditional(path, etag, calls){
+      if (hold && calls.length > 1) return response.promise;
+      return Promise.resolve({ status: 200, data: payload });
+    },
+    deps: { ...twoRangeDeps(), document: focus.doc },
+  });
+  ctx.feature.bind();
+  installRemovingFoldFocus(ctx.roots.msgs, focus, 800);
+  const show = ctx.roots.msgs._foldControls.find(btn => btn.dataset.fold === "open");
+  focus.live.add(show);
+  focus.doc.activeElement = show;
+  hold = true;
+  firstListener(ctx.roots.msgs, "click")({ target: show });
+  focus.doc.activeElement = focus.elsewhere;
+  response.resolve({ status: 200, data: payload });
+  await foldSettle();
+  assert.equal(focus.doc.activeElement, focus.elsewhere);
+  assert.equal(focus.log.length, 0);
+  ctx.feature.destroy();
+});
+
+test("a fold answer restores focus from body or a removed transcript element", async t => {
+  for (const startAt of ["body", "removed"]){
+    await t.test(startAt, async () => {
+      const focus = foldFocusPage();
+      const response = deferred();
+      let hold = false;
+      const payload = {
+        turns: twoRangeTurns(), live: "quiet", delivery: "ok", source: "tmux",
+        chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+      };
+      const { ctx } = await renderFolded({
+        turns: payload.turns,
+        state: { all: false, turns: ["0/2"], open: [] }, echo: false,
+        chatConditional(path, etag, calls){
+          if (hold && calls.length > 1) return response.promise;
+          return Promise.resolve({ status: 200, data: payload });
+        },
+        deps: { ...twoRangeDeps(), document: focus.doc },
+      });
+      ctx.feature.bind();
+      installRemovingFoldFocus(ctx.roots.msgs, focus, 800);
+      const show = ctx.roots.msgs._foldControls.find(btn => btn.dataset.fold === "open");
+      focus.live.add(show);
+      focus.doc.activeElement = show;
+      hold = true;
+      firstListener(ctx.roots.msgs, "click")({ target: show });
+      if (startAt === "removed") focus.doc.activeElement = show;
+      else focus.doc.activeElement = focus.body;
+      response.resolve({ status: 200, data: payload });
+      await foldSettle();
+      assert.equal(focus.log.length, 1);
+      assert.equal(focus.doc.activeElement.dataset?.foldkey, "0/3");
+      ctx.feature.destroy();
+    });
+  }
 });
