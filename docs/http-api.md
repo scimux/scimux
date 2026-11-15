@@ -1519,9 +1519,11 @@ the answer is `204`.
 `200` with `{"subscriptions":[<view>],"servers":[{"id","delivery"}],"truncated":false}`.
 A view contains `server`, `server_name`, `owner`, `owner_name`, `chat`,
 `generation`, `title`, `access`, `state`, `mirror_last`, `seen_mirror`,
-`unread` and `first_seen`. Views are ordered by server, owner, chat and first
-sighting. Access is `read` or `write`; state is `live` or `ended`; unread
-means the subscription is live and `mirror_last` exceeds `seen_mirror`. `truncated` says the 4096-entry
+`comments_last`, `seen_comments`, `unread` and `first_seen`. Views are ordered by server, owner, chat and first
+sighting. Access is `read`, `write` or `owner`; state is `live` or `ended`.
+Unread means the subscription is live and comments are unseen, or, for a
+guest, mirror entries are unseen. The owner's own mirror entries do not count.
+`truncated` says the 4096-entry
 limit prevented a new subscription from being stored. Delivery is `ok`,
 `offline`, `refused` or `changed` as in the share view, and starts at `ok`.
 Channels whose owner, chat or generation is not fixed-length lowercase hex
@@ -1555,10 +1557,29 @@ unavailable state, `500` `copy_damaged` for a damaged copy, and `507`
 `storage_full` when the storage budget refuses an append and the copy has no
 entry after `after`.
 
+`GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments?after=N`
+fetches and reads the comments copy under the same paging, retention and error
+rules as the mirror. It answers `{"entries":[{"seq","at","author","mine",
+"text","anchor"}],"names":{},"last":N,"next":N,"more":false}`. Names are
+cached per server in memory, and an unknown author's name may trigger a roster
+refresh at most once per 60 seconds. Unknown comment shapes remain in the copy
+but are skipped in the answer.
+
+`POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments`
+takes `{"text":"...","anchor":N,"key":"<16 lowercase hex>"}`, at most
+64 KiB, without unknown fields, and requires CSRF. Text must be valid UTF-8,
+nonblank, and at most 16,384 bytes. The anchor cannot exceed the last copied
+mirror number. A successful or duplicate append answers `200 {"seq":N}`;
+messages are not queued or copied by the post. Errors are `400 bad_request`,
+`404 not_found`, `403 read_only`, `409 not_active`, `500 store_unavailable`,
+`500 copy_damaged`, `502 refused`, `502 unreachable`, `502 bad_server`,
+`507 server_full`, and `413 too_large`.
+
 `PUT /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/seen`
-takes `{"mirror":N}` with no unknown fields and at most 1 KiB, and requires
-the CSRF header. It records the greater of the old seen position and `N`,
-capped at the highest copied sequence, without contacting a server. Success
+takes `{"mirror":N}`, `{"comments":N}`, or both, with no unknown fields
+and at most 1 KiB, and requires the CSRF header. It records the greater of
+each old seen position and `N`, capped at that log's highest copied sequence,
+without contacting a server. Success
 is `204`; errors are `404` `not_found`, `400` `bad_request`, and `500`
 `store_unavailable`.
 
@@ -1567,11 +1588,11 @@ one subscription and its saved copy. For a live subscription on a joined
 server, it first confirms that server's identity and leaves the channel;
 ended or unjoined subscriptions need no server request. Success is `204`.
 Errors are `404` `not_found` for an invalid identity or unknown subscription,
-`502` `unreachable` for an unreachable server, `502` `bad_server` for another
+`409` `own_share` for a live owner subscription, `502` `unreachable` for an unreachable server, `502` `bad_server` for another
 server failure, and `500` `store_unavailable` for a local storage failure.
 A failed local save can leave the entry without its copy, so it can be retried.
 
-Only the subscription list and read routes ask a team server for chats on
+The subscription list, read and comment-post routes ask a team server on
 behalf of this seat; no background subscription fetch is performed.
 
 Any other method or path under `/api/team` is `404` `not_found`.

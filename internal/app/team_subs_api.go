@@ -895,12 +895,17 @@ func projectSubRecord(record team.MirrorRecord) (map[string]any, int, bool) {
 
 func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
 	var req struct {
-		Mirror *uint64 `json:"mirror"`
+		Mirror   *uint64 `json:"mirror"`
+		Comments *uint64 `json:"comments"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	if dec.Decode(&req) != nil || req.Mirror == nil {
+	if dec.Decode(&req) != nil {
+		writeTeamError(w, 400, "bad_request")
+		return
+	}
+	if req.Mirror == nil && req.Comments == nil {
 		writeTeamError(w, 400, "bad_request")
 		return
 	}
@@ -918,17 +923,38 @@ func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id
 	}
 	for i := range subs {
 		if sameCopy(subs[i], id) {
-			_, last, err := team.ReadCopy(h.dataDir, id, team.MirrorLog, ^uint64(0), 256, 4<<20)
-			if err != nil {
-				writeTeamError(w, 500, "store_unavailable")
-				return
+			changed := false
+			if req.Mirror != nil {
+				_, last, err := team.ReadCopy(h.dataDir, id, team.MirrorLog, ^uint64(0), 256, 4<<20)
+				if err != nil {
+					writeTeamError(w, 500, "store_unavailable")
+					return
+				}
+				value := *req.Mirror
+				if value > last {
+					value = last
+				}
+				if value > subs[i].SeenMirror {
+					subs[i].SeenMirror = value
+					changed = true
+				}
 			}
-			value := *req.Mirror
-			if value > last {
-				value = last
+			if req.Comments != nil {
+				_, last, err := team.ReadCopy(h.dataDir, id, team.CommentsLog, ^uint64(0), 256, 4<<20)
+				if err != nil {
+					writeTeamError(w, 500, "store_unavailable")
+					return
+				}
+				value := *req.Comments
+				if value > last {
+					value = last
+				}
+				if value > subs[i].SeenComments {
+					subs[i].SeenComments = value
+					changed = true
+				}
 			}
-			if value > subs[i].SeenMirror {
-				subs[i].SeenMirror = value
+			if changed {
 				if h.saveSubscriptionState(subs) != nil {
 					writeTeamError(w, 500, "store_unavailable")
 					return
@@ -960,6 +986,12 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 	if !found {
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return
+	}
+	if sub.Access == "owner" {
+		if sub.State == "live" {
+			writeTeamError(w, http.StatusConflict, "own_share")
+			return
+		}
 	}
 	if sub.State == "live" {
 		if joined {

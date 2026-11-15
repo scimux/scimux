@@ -49,11 +49,12 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   It holds no chat content and no token. Only the muxer reads and writes
   it. With the gate off it is neither read nor written.
 - **Guest subscription state is metadata.** `team-subs.json` holds the identities,
-  names, access, state and read positions of subscriptions, with no chat content
+  names, access, state and mirror and comment counters and read positions, with no chat content
   or token. Removing a shared chat deletes its subscription entry. Only the
   muxer writes it; with the team gate off it is neither read nor written.
 - **Guest copies are retained received history.** `team-copies/` holds received
-  entries of other people's chats unchanged and append-only, including after
+  mirror and `comments.jsonl` entries, including for this seat's own shared chats,
+  unchanged and append-only, including after
   sharing ends. Removing a shared chat deletes its copy, and a cut-off last
   line is removed during repair. Copies count toward total storage usage and
   belong to no node.
