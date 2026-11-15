@@ -3282,6 +3282,48 @@ func TestSubCommentsReadPageAndBudgetLimits(t *testing.T) {
 	})
 }
 
+func TestSubCommentsKnownAuthorRefresh(t *testing.T) {
+	for _, access := range []string{"owner", "read"} {
+		t.Run(access, func(t *testing.T) {
+			roster := 0
+			name := "Bob"
+			h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/seats" {
+					roster++
+					_, _ = io.WriteString(w, seatsOf(subOwner, name))
+					return
+				}
+				if r.URL.Query().Get("after") == "0" {
+					_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+					return
+				}
+				_, _ = io.WriteString(w, subPage(subGen, 1, false))
+			})
+			subs := loadSubFile(t, dir)
+			subs[0].Access = access
+			if err := team.SaveSubs(dir, subs); err != nil {
+				t.Fatal("cannot save subscription")
+			}
+			clock := holdClock(t, h)
+			first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+			if first.Names[subOwner] != "Bob" || roster != 1 {
+				t.Fatal("initial roster not cached")
+			}
+			name = "Bobby"
+			*clock = clock.Add(60 * time.Second)
+			second := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+			if second.Names[subOwner] != "Bob" || roster != 1 {
+				t.Fatal("roster refreshed too early")
+			}
+			*clock = clock.Add(time.Second)
+			third := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+			if third.Names[subOwner] != "Bobby" || roster != 2 {
+				t.Fatal("known author was not refreshed")
+			}
+		})
+	}
+}
+
 func TestSubCommentsRosterFailureAndRefreshWindow(t *testing.T) {
 	var roster int
 	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
