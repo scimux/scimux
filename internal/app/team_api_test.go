@@ -1065,7 +1065,7 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 		"team.json",
 		"credentials",
 		"Only the muxer reads and writes it",
-		"explicit join or forget",
+		"explicit join, forget, or changing",
 		"damaged file is never overwritten",
 		"gate off it is neither read nor written",
 	} {
