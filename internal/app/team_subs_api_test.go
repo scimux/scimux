@@ -3108,3 +3108,12 @@ func TestSubListUpdatesOwnerNameAndCommentCount(t *testing.T) {
 		t.Error("owner update was lost")
 	}
 }
+
+func TestSubListRosterDoesNotReplaceOwnSeatName(t *testing.T) {
+	s := baseSub()
+	s.Access, s.OwnerName = "owner", "Own"
+	changed := applySeatNames([]team.Subscription{s}, teamServerID, []team.Seat{{ID: s.Owner, Name: "Other"}})
+	if changed {
+		t.Error("roster changed owner name")
+	}
+}
