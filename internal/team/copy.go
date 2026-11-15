@@ -135,11 +135,11 @@ type copyLine struct {
 // AppendCopy stores the entries that continue the copy.
 // A repeated suffix, a gap, a damaged copy, or a refused reservation stores nothing.
 func AppendCopy(dataDir string, id CopyID, log string, entries []MirrorRecord) error {
-	path, err := copyPath(dataDir, id)
+	path, err := copyLogPath(dataDir, id, log)
 	if err != nil {
 		return err
 	}
-	unlock := lockCopy(path)
+	unlock := lockCopy(filepath.Dir(path))
 	defer unlock()
 	m := metaFor(path)
 	if err := m.sync(path); err != nil {
@@ -172,11 +172,11 @@ func AppendCopy(dataDir string, id CopyID, log string, entries []MirrorRecord) e
 // ReadCopy returns the stored entries whose number is above after.
 // A missing copy is an empty result and is not created.
 func ReadCopy(dataDir string, id CopyID, log string, after uint64, maxEntries int, maxBodyBytes int) ([]MirrorRecord, uint64, error) {
-	path, err := copyPath(dataDir, id)
+	path, err := copyLogPath(dataDir, id, log)
 	if err != nil {
 		return nil, 0, err
 	}
-	unlock := lockCopy(path)
+	unlock := lockCopy(filepath.Dir(path))
 	defer unlock()
 	m := metaFor(path)
 	if err := m.sync(path); err != nil {
@@ -237,6 +237,26 @@ func copyPath(dataDir string, id CopyID) (string, error) {
 		return "", ErrCopyPath
 	}
 	return filepath.Join(dataDir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, mirrorFile), nil
+}
+
+func copyLogPath(dataDir string, id CopyID, log string) (string, error) {
+	path, err := copyPath(dataDir, id)
+	if err != nil {
+		return "", err
+	}
+	switch log {
+	case MirrorLog:
+		return path, nil
+	case CommentsLog:
+		return filepath.Join(filepath.Dir(path), "comments.jsonl"), nil
+	default:
+		return "", ErrCopyPath
+	}
+}
+
+func clearCopyMetas(path string) {
+	copyMetas.Delete(path)
+	copyMetas.Delete(filepath.Join(filepath.Dir(path), "comments.jsonl"))
 }
 
 func (m *copyMeta) sync(path string) error {
@@ -429,12 +449,12 @@ func RemoveCopy(dataDir string, id CopyID) error {
 	if err != nil {
 		return err
 	}
-	unlock := lockCopy(path)
+	unlock := lockCopy(filepath.Dir(path))
 	defer unlock()
 	data, err := copyOps.openRoot(dataDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			copyMetas.Delete(path)
+			clearCopyMetas(path)
 			return nil
 		}
 		return err
@@ -443,7 +463,7 @@ func RemoveCopy(dataDir string, id CopyID) error {
 	root, err := copyOps.openChild(data, CopiesDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			copyMetas.Delete(path)
+			clearCopyMetas(path)
 			return nil
 		}
 		return err
@@ -467,7 +487,7 @@ func RemoveCopy(dataDir string, id CopyID) error {
 	if err := copyOps.removeAll(root, name); err != nil {
 		return err
 	}
-	copyMetas.Delete(path)
+	clearCopyMetas(path)
 	for name = filepath.Dir(name); name != "."; name = filepath.Dir(name) {
 		if err := copyOps.remove(root, name); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
