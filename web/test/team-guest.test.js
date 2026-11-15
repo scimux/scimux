@@ -13,7 +13,7 @@ function fixture(api) {
   let time = 0, invalidations = 0;
   const listeners = new Map();
   const el = { innerHTML: "", addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); }, querySelector() { return null; }, contains() { return false; } };
-  const doc = { activeElement: null, querySelector(sel) { if (sel === "#cardlist") return el; return null; } };
+  const doc = { activeElement: null, querySelector(sel) { if (sel === "#cardlist") return el; return { addEventListener() {}, removeEventListener() {} }; } };
   const feature = createGuestFeature({ api, doc, now: () => time, invalidateCards: () => invalidations++ });
   return { feature, el, doc, listeners, setTime(n) { time = n; }, invalidations: () => invalidations };
 }
@@ -161,7 +161,7 @@ test("shared entries render all kinds and escape untrusted content", () => {
   assert.match(guestEntryHTML(e("user", { omitted: "too_large" }), ""), /Unknown person.*This message was too large to share/);
   assert.match(guestEntryHTML(e("assistant", { omitted: "too_large" }), "Owner"), /Agent.*This message was too large to share/);
   assert.match(guestEntryHTML(e("assistant", { agent: '<&"', text: '```\n<&"\n```\nscimux-asset:abc' }), "Owner"), /&lt;&amp;&quot;/);
-  assert.doesNotMatch(guestEntryHTML(e("assistant", { text: "scimux-asset:abc" }), "Owner"), /scimux-asset:/);
+  assert.doesNotMatch(guestEntryHTML(e("assistant", { text: "[asset](scimux-asset:abc)" }), "Owner"), /scimux-asset:/);
 });
 
 test("open loads pages, updates the header and closes to the item", async () => {
