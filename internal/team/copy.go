@@ -245,7 +245,7 @@ func (m *copyMeta) scan(path string) error {
 		return err
 	}
 	r := bufio.NewReaderSize(io.NewSectionReader(copyReaderAt{f}, 0, info.Size()), 4096)
-	m.ready = true
+	m.ready = false
 	m.damaged = false
 	m.offsets = nil
 	m.last = 0
@@ -271,6 +271,7 @@ func (m *copyMeta) scan(path string) error {
 		off += int64(len(line))
 		m.last = seq
 	}
+	m.ready = true
 	return nil
 }
 
