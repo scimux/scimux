@@ -70,12 +70,24 @@ func encodeChannelBody(v any) ([]byte, error) {
 
 // ReadComments reads a page of the comments log.
 func (c *Client) ReadComments(ctx context.Context, baseURL, token, owner, chat string, after uint64) (MirrorPage, error) {
-	return MirrorPage{}, ErrProtocol
+	return c.readLog(ctx, baseURL, token, owner, chat, "/comments", after)
 }
 
 // AppendComment appends one comment.
 func (c *Client) AppendComment(ctx context.Context, baseURL, token, owner, chat, generation, key string, body json.RawMessage) (uint64, error) {
-	return 0, ErrProtocol
+	entries := []MirrorEntry{{Key: key, Body: body}}
+	_, last, results, err := c.appendLog(ctx, baseURL, token, owner, chat, generation, "/comments", entries)
+	if err != nil {
+		return 0, err
+	}
+	seq := results[0].Seq
+	if seq == 0 {
+		return 0, ErrProtocol
+	}
+	if seq > uint64(last) {
+		return 0, ErrProtocol
+	}
+	return seq, nil
 }
 
 // Seats is GET /v1/seats. The answer may be up to 1 MiB.
@@ -171,29 +183,34 @@ func (c *Client) SetMembers(ctx context.Context, baseURL, token, owner, chat str
 // AppendMirror is POST /v1/channels/{owner}/{chat}/mirror.
 // generation is the channel the entries were prepared for.
 func (c *Client) AppendMirror(ctx context.Context, baseURL, token, owner, chat, generation string, entries []MirrorEntry) (string, int64, error) {
-	path, err := channelPath(owner, chat, "/mirror")
+	gen, last, _, err := c.appendLog(ctx, baseURL, token, owner, chat, generation, "/mirror", entries)
+	return gen, last, err
+}
+
+func (c *Client) appendLog(ctx context.Context, baseURL, token, owner, chat, generation, log string, entries []MirrorEntry) (string, int64, []appendResult, error) {
+	path, err := channelPath(owner, chat, log)
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	if !validHex(generation, 16) {
-		return "", 0, ErrProtocol
+		return "", 0, nil, ErrProtocol
 	}
 	if err := validMirrorEntries(entries); err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	body, err := marshalChannelBody(struct {
 		Generation string        `json:"generation"`
 		Entries    []MirrorEntry `json:"entries"`
 	}{Generation: generation, Entries: entries})
 	if err != nil {
-		return "", 0, ErrProtocol
+		return "", 0, nil, ErrProtocol
 	}
 	status, raw, err := c.doAuthed(ctx, http.MethodPost, baseURL, path, token, body, maxResponseBody)
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	if status != http.StatusOK {
-		return "", 0, mapChannelStatus(status)
+		return "", 0, nil, mapChannelStatus(status)
 	}
 	return parseAppend(raw, entries)
 }
@@ -250,6 +267,8 @@ func mapChannelStatus(status int) error {
 	switch status {
 	case http.StatusUnauthorized:
 		return ErrUnauthorized
+	case http.StatusForbidden:
+		return ErrForbidden
 	case http.StatusNotFound:
 		return ErrNoChannel
 	case http.StatusRequestEntityTooLarge:
@@ -357,24 +376,24 @@ type appendResult struct {
 	Duplicate bool   `json:"duplicate"`
 }
 
-func parseAppend(raw []byte, entries []MirrorEntry) (string, int64, error) {
+func parseAppend(raw []byte, entries []MirrorEntry) (string, int64, []appendResult, error) {
 	var doc struct {
 		Generation string          `json:"generation"`
 		Results    *[]appendResult `json:"results"`
 		Last       *int64          `json:"last"`
 	}
 	if err := decodeJSON(raw, &doc); err != nil {
-		return "", 0, ErrProtocol
+		return "", 0, nil, ErrProtocol
 	}
 	if !validHex(doc.Generation, 16) || doc.Results == nil || doc.Last == nil || *doc.Last < 0 || len(*doc.Results) != len(entries) {
-		return "", 0, ErrProtocol
+		return "", 0, nil, ErrProtocol
 	}
 	for i, res := range *doc.Results {
 		if !validEntryKey(res.Key) || res.Key != entries[i].Key {
-			return "", 0, ErrProtocol
+			return "", 0, nil, ErrProtocol
 		}
 	}
-	return doc.Generation, *doc.Last, nil
+	return doc.Generation, *doc.Last, *doc.Results, nil
 }
 
 // Channel is one channel the caller can see.
@@ -425,7 +444,11 @@ func (c *Client) Channels(ctx context.Context, baseURL, token string, skipInvali
 
 // ReadMirror is GET /v1/channels/{owner}/{chat}/mirror?after=.
 func (c *Client) ReadMirror(ctx context.Context, baseURL, token, owner, chat string, after uint64) (MirrorPage, error) {
-	path, err := channelPath(owner, chat, "/mirror")
+	return c.readLog(ctx, baseURL, token, owner, chat, "/mirror", after)
+}
+
+func (c *Client) readLog(ctx context.Context, baseURL, token, owner, chat, log string, after uint64) (MirrorPage, error) {
+	path, err := channelPath(owner, chat, log)
 	if err != nil {
 		return MirrorPage{}, err
 	}
