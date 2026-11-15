@@ -213,6 +213,10 @@ func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Tim
 	if err != nil {
 		return nil
 	}
+	known := make(map[team.CopyID]bool, len(subs))
+	for _, sub := range subs {
+		known[team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}] = true
+	}
 	subs, _, _ = mergeSubs(subs, entries, outcomes, inst, now)
 	joined := entryMap(entries)
 	due := []team.Entry{}
@@ -223,7 +227,14 @@ func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Tim
 		if _, ok := joined[outcome.entry.ID]; !ok {
 			continue
 		}
-		if needsSeats(subs, outcome.entry.ID, h.subAsks[outcome.entry.ID], now) {
+		newUnnamed := false
+		for _, sub := range subs {
+			if sub.Server == outcome.entry.ID && sub.OwnerName == "" && !known[team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}] {
+				newUnnamed = true
+				break
+			}
+		}
+		if newUnnamed || needsSeats(subs, outcome.entry.ID, h.subAsks[outcome.entry.ID], now) {
 			h.rememberSeats(outcome.entry.ID, now)
 			due = append(due, outcome.entry)
 		}
@@ -405,9 +416,16 @@ func applyChannels(subs []team.Subscription, outcome subOutcome, inst string, no
 			truncated = true
 			continue
 		}
+		ownerName := ""
+		for _, prior := range subs {
+			if prior.Server == id && prior.Owner == channel.Owner && prior.OwnerName != "" {
+				ownerName = prior.OwnerName
+				break
+			}
+		}
 		subs = append(subs, team.Subscription{
 			Server: id, Owner: channel.Owner, Chat: channel.Chat, Generation: channel.Generation,
-			ServerName: outcome.entry.Name, OwnerName: "", Title: channel.Title, Access: channel.Access,
+			ServerName: outcome.entry.Name, OwnerName: ownerName, Title: channel.Title, Access: channel.Access,
 			State: "live", MirrorLast: channel.MirrorLast, SeenMirror: 0,
 			FirstSeen: now.Format(time.RFC3339),
 		})
@@ -488,7 +506,7 @@ func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.
 		views = append(views, subscriptionView{
 			Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName,
 			Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State,
-			MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, Unread: sub.MirrorLast > sub.SeenMirror,
+			MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, Unread: sub.State == "live" && sub.MirrorLast > sub.SeenMirror,
 			FirstSeen: sub.FirstSeen,
 		})
 	}
@@ -675,7 +693,7 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	var out subscriptionReadResponse
-	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, Unread: sub.MirrorLast > sub.SeenMirror, FirstSeen: sub.FirstSeen}
+	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, Unread: sub.State == "live" && sub.MirrorLast > sub.SeenMirror, FirstSeen: sub.FirstSeen}
 	out.View.Delivery = delivery
 	out.Last = last
 	out.Entries = []map[string]any{}
