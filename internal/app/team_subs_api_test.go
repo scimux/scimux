@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2376,5 +2377,51 @@ func TestSubBranchGenerationReplacementStaysWithinIdentity(t *testing.T) {
 				t.Fatalf("unrelated identity changed: %+v, changed %t", got, changed)
 			}
 		})
+	}
+}
+
+func TestSubMoreWhenFetchLimitReachedAtCopyEnd(t *testing.T) {
+	var pages int
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		after, err := strconv.Atoi(r.URL.Query().Get("after"))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 9, true, subRecord(after+1, `{"v":1,"t":"user","text":"x"}`)))
+	})
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath()+"?after=8", ""))
+	if pages != 8 || got.Last != 8 || got.Next != 8 || len(got.Entries) != 0 || !got.More {
+		t.Fatalf("pages %d last %d next %d entries %d more %t", pages, got.Last, got.Next, len(got.Entries), got.More)
+	}
+}
+
+func TestSubLiveForgottenServerReadsCopyWithoutAnyRequest(t *testing.T) {
+	var serverHits, transportHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	client := team.NewClient()
+	transport := srv.Client().Transport
+	client.Transport = teamRoundTrip(func(r *http.Request) (*http.Response, error) { transportHits.Add(1); return transport.RoundTrip(r) })
+	h, dir := testTeamSurface(t, client)
+	joinLab(t, dir, teamServerID, srv.URL)
+	seedSub(t, dir, baseSub())
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	if err := team.AppendCopy(dir, id, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"x"}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := team.Remove(dir, teamServerID); err != nil {
+		t.Fatal(err)
+	}
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if got.View.State != "live" || got.View.Delivery != "ok" || got.Last != 1 || len(got.Entries) != 1 || got.Entries[0]["seq"] != float64(1) {
+		t.Fatalf("view %+v last %d entries %d", got.View, got.Last, len(got.Entries))
+	}
+	if serverHits.Load() != 0 || transportHits.Load() != 0 {
+		t.Fatalf("server hits %d transport hits %d", serverHits.Load(), transportHits.Load())
 	}
 }

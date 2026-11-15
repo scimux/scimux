@@ -936,3 +936,40 @@ func TestCopyBranchShortReadWithoutError(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyShortValidPrefixWithoutErrorIsDamaged(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fresh), func(t *testing.T) {
+			dir, id := t.TempDir(), sampleCopyID()
+			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
+				t.Fatal(err)
+			}
+			if fresh {
+				copyMetas.Delete(copyPathOf(dir, id))
+			}
+			snapshotCopy(t)
+			real := copyOps.readAt
+			calls := 0
+			copyOps.readAt = func(f *os.File, p []byte, off int64) (int, error) {
+				calls++
+				if calls == 1 {
+					if len(p) < 2 {
+						t.Fatal("read too small")
+					}
+					n, err := real(f, p[:len(p)-1], off)
+					if err != nil {
+						t.Fatalf("prefix read: %v", err)
+					}
+					return n, nil
+				}
+				return real(f, p, off)
+			}
+			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+				t.Fatalf("error = %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("read calls = %d", calls)
+			}
+		})
+	}
+}
