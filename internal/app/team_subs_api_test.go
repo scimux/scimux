@@ -2082,6 +2082,10 @@ func TestSubBranchInvalidPathPartsNeverReadState(t *testing.T) {
 	if err := os.WriteFile(path, []byte("damaged"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	serverPath := filepath.Join(dir, team.File)
+	if err := os.WriteFile(serverPath, []byte("damaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	good := []string{teamServerID, subOwner, subChat, subGen}
 	for i := range good {
 		for _, method := range []string{http.MethodGet, http.MethodPut} {
@@ -2099,6 +2103,10 @@ func TestSubBranchInvalidPathPartsNeverReadState(t *testing.T) {
 	raw, err := os.ReadFile(path)
 	if err != nil || string(raw) != "damaged" {
 		t.Fatal("invalid path changed state")
+	}
+	raw, err = os.ReadFile(serverPath)
+	if err != nil || string(raw) != "damaged" {
+		t.Fatal("invalid path changed server state")
 	}
 }
 
