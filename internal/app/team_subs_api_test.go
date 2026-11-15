@@ -2453,3 +2453,32 @@ func TestProjectSubRecordUserProvenance(t *testing.T) {
 		})
 	}
 }
+
+func TestSubReadProjectsOmittedUser(t *testing.T) {
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, subPage(subGen, 1, false,
+			subRecord(1, `{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","omitted":"too_large"}`)))
+	})
+	body := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if len(body.Entries) != 1 {
+		t.Fatalf("entries = %+v", body.Entries)
+	}
+	entry := body.Entries[0]
+	if entry["omitted"] != "too_large" {
+		t.Errorf("omitted = %v", entry["omitted"])
+	}
+	if _, present := entry["text"]; present {
+		t.Errorf("unexpected text = %v", entry["text"])
+	}
+}
+
+func TestProjectSubRecordUserOmittedType(t *testing.T) {
+	for _, kind := range []string{"user", "assistant"} {
+		t.Run(kind, func(t *testing.T) {
+			r := team.MirrorRecord{Seq: 1, Body: json.RawMessage(`{"v":1,"t":"` + kind + `","omitted":42}`)}
+			if _, _, ok := projectSubRecord(r); ok {
+				t.Fatal("non-string omitted accepted")
+			}
+		})
+	}
+}
