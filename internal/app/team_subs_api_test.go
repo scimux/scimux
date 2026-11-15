@@ -2350,3 +2350,31 @@ func TestSubBranchTruncationPersistsAcrossServers(t *testing.T) {
 		t.Fatal("later server cleared truncation")
 	}
 }
+
+func TestSubBranchGenerationReplacementStaysWithinIdentity(t *testing.T) {
+	for _, field := range []string{"server", "owner", "chat"} {
+		t.Run(field, func(t *testing.T) {
+			a, b := baseSub(), baseSub()
+			b.Generation = subGenB
+			switch field {
+			case "server":
+				b.Server = teamOtherID
+			case "owner":
+				b.Owner = subOwnerB
+			case "chat":
+				b.Chat = subChatB
+			}
+			channel := func(s team.Subscription) team.Channel {
+				return team.Channel{Owner: s.Owner, Chat: s.Chat, Generation: s.Generation, Title: s.Title, Access: s.Access, MirrorLast: s.MirrorLast}
+			}
+			outcome := subOutcome{entry: team.Entry{ID: teamServerID, Name: "Lab One"}, channels: []team.Channel{channel(a)}}
+			if b.Server == teamServerID {
+				outcome.channels = append(outcome.channels, channel(b))
+			}
+			got, changed, truncated := applyChannels([]team.Subscription{a, b}, outcome, strings.Repeat("f", 32), fixedTeamClock()(), false)
+			if changed || truncated || len(got) != 2 || got[0].State != "live" || got[1].State != "live" {
+				t.Fatalf("unrelated identity changed: %+v, changed %t", got, changed)
+			}
+		})
+	}
+}
