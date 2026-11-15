@@ -1954,3 +1954,14 @@ func TestSubReadRejectsMalformedEscapesInAfter(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	assertAPIError(t, rec, 400, "bad_request")
 }
+
+func TestSubReadIgnoresNullTypedFields(t *testing.T) {
+	items := []string{subRecord(1, `{"v":1,"t":"user","text":null}`), subRecord(2, `{"v":1,"t":"assistant","prov":null}`)}
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, subPage(subGen, 2, false, items...))
+	})
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if len(got.Entries) != 0 || got.Last != 2 {
+		t.Fatalf("read = %+v", got)
+	}
+}
