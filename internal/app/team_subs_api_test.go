@@ -2272,3 +2272,23 @@ func TestSubBranchStorageFullReturnsExistingEntries(t *testing.T) {
 		t.Fatalf("read = %+v", got)
 	}
 }
+
+func TestSubBranchUnknownValidIdentityParts(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	seedSub(t, dir, baseSub())
+	good := []string{teamServerID, subOwner, subChat, subGen}
+	other := []string{teamOtherID, subOwnerB, subChatB, subGenB}
+	for i := range good {
+		for _, method := range []string{http.MethodGet, http.MethodPut} {
+			t.Run(fmt.Sprintf("part%d_%s", i, method), func(t *testing.T) {
+				parts := append([]string(nil), good...)
+				parts[i] = other[i]
+				path := "/api/team/subscriptions/" + strings.Join(parts, "/")
+				if method == http.MethodPut {
+					path += "/seen"
+				}
+				assertAPIError(t, doTeam(h, method, path, `{"mirror":1}`), 404, "not_found")
+			})
+		}
+	}
+}
