@@ -1590,3 +1590,135 @@ func TestSubReadValidationAndSeen(t *testing.T) {
 	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"x", ""), http.StatusNotFound, "not_found")
 	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"x/seen", `{"mirror":1}`), http.StatusNotFound, "not_found")
 }
+
+func TestSubReadEndedUsesCopyWithoutServer(t *testing.T) {
+	var hits int
+	h, dir := readSurface(t, func(http.ResponseWriter, *http.Request) { hits++ })
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	entry := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"x"}`)}
+	if err := team.AppendCopy(dir, id, []team.MirrorRecord{entry}); err != nil {
+		t.Fatal(err)
+	}
+	subs := loadSubFile(t, dir)
+	subs[0].State = "ended"
+	if err := team.SaveSubs(dir, subs); err != nil {
+		t.Fatal(err)
+	}
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if hits != 0 || len(got.Entries) != 1 || got.Last != 1 || got.View.State != "ended" {
+		t.Fatalf("read = %+v, hits = %d", got, hits)
+	}
+}
+
+func TestSubReadOfflineAndDamagedCopy(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		c, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			panic(err)
+		}
+		_ = c.Close()
+	})
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if got.View.Delivery != "offline" || got.View.State != "live" {
+		t.Fatalf("read = %+v", got)
+	}
+	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "copy_damaged")
+}
+
+func TestSubReadConcurrentStoresOnce(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("after") == "0" {
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"x"}`)))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1, false))
+	})
+	var wg sync.WaitGroup
+	results := make(chan *httptest.ResponseRecorder, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); results <- doTeam(h, http.MethodGet, subReadPath(), "") }()
+	}
+	wg.Wait()
+	close(results)
+	for rec := range results {
+		got := decodeSubRead(t, rec)
+		if got.Last != 1 || len(got.Entries) != 1 {
+			t.Fatalf("read = %+v", got)
+		}
+	}
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	entries, last, err := team.ReadCopy(dir, id, 0)
+	if err != nil || last != 1 || len(entries) != 1 {
+		t.Fatalf("copy last %d entries %d err %v", last, len(entries), err)
+	}
+}
+
+func TestSubReadRefusesBadEntries(t *testing.T) {
+	cases := []string{
+		strings.Replace(subRecord(1, `{}`), `"key":"k1"`, `"key":"!"`, 1),
+		strings.Replace(subRecord(1, `{}`), `2026-11-14T09:30:00.000Z`, `yesterday`, 1),
+		subRecord(1, `"`+strings.Repeat("x", 4<<20)+`"`),
+	}
+	for i, item := range cases {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, subPage(subGen, 1, false, item))
+			})
+			got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+			if got.View.Delivery != "changed" || got.View.State != "live" || got.Last != 0 {
+				t.Fatalf("read = %+v", got)
+			}
+			if _, err := os.Stat(filepath.Join(dir, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("copy stat = %v", err)
+			}
+		})
+	}
+}
+
+func TestSubReadStorageBudgetAndTextLimit(t *testing.T) {
+	t.Run("full", func(t *testing.T) {
+		h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"user","text":"x"}`)))
+		})
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_global_limit_bytes":1,"storage_min_free_bytes":0}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 507, "storage_full")
+	})
+	t.Run("text", func(t *testing.T) {
+		text := strings.Repeat("x", 3<<20)
+		item := `{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"` + text + `"}`
+		h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, subPage(subGen, 2, false, subRecord(1, item), subRecord(2, item)))
+		})
+		got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+		if len(got.Entries) != 1 || got.Last != 2 || !got.More {
+			t.Fatalf("entries = %d last = %d more = %v", len(got.Entries), got.Last, got.More)
+		}
+	})
+}
+
+func TestSubReadUnknownServerAndStoreFailures(t *testing.T) {
+	h, dir := readSurface(t, func(http.ResponseWriter, *http.Request) { t.Fatal("forgotten server contacted") })
+	if err := team.Remove(dir, teamServerID); err != nil {
+		t.Fatal(err)
+	}
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if got.Last != 0 {
+		t.Fatalf("read = %+v", got)
+	}
+	assertAPIError(t, doTeam(h, http.MethodGet, strings.Replace(subReadPath(), subOwner, subOwnerB, 1), ""), 404, "not_found")
+	if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "store_unavailable")
+	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1}`), 500, "store_unavailable")
+}
