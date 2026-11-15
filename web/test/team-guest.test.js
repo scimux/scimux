@@ -575,3 +575,27 @@ test("removal controls do nothing when no view is open", async () => {
  * | condition | test for each half |
  * | none | Wave 4c adds no &&, ||, or ?: condition. |
  */
+
+test("a failed follow read keeps the armed removal warning", async () => {
+  let reads = 0;
+  const f = viewFixture(async path => {
+    if (path === "/api/team/subscriptions") return list([base]);
+    reads++;
+    if (reads === 2) throw new Error('{"error":"copy_damaged"}');
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  f.click("sv_remove"); f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(reads, 2);
+  assert.equal(f.get("sv_remove").textContent, "Confirm remove");
+  assert.equal(f.get("sv_note").textContent, "This leaves the chat and deletes the saved copy from this computer.");
+});
+
+test("unarmed dialog clicks and escape without an open view do nothing", async () => {
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  f.click("sharedview", f.get("sv_body")); assert.equal(f.get("sv_remove").textContent, "Remove from my list");
+  f.click("sv_back"); let stopped = false;
+  f.get("sharedview").listeners.get("keydown")({ key: "Escape", stopPropagation() { stopped = true; } });
+  assert.equal(stopped, true); assert.equal(f.get("sharedview").hidden, true);
+});
