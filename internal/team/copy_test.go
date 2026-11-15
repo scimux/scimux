@@ -428,7 +428,7 @@ func TestCopyTamperRescans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Write([]byte("x")); err != nil {
+	if _, err := f.Write([]byte("x\n")); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
