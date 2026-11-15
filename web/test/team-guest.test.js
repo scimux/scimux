@@ -1166,3 +1166,19 @@ test("comment author classification holds for guests and owners", () => {
     assert.equal(guestModule.guestCapture({ ...message, mine: true }, { ...base, access }, {}).role, "user");
   }
 });
+
+test("composer shortcuts cannot send again while a message is in flight", async () => {
+  const pending = deferred(), view = { ...base, access: "write" }; let posts = 0, prevented = 0;
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    if (opts?.method === "POST") { posts++; return pending.promise; }
+    return readAnswer([], 0, false, view);
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  setGuestDraft(f, "synthetic"); f.click("sv_send");
+  const key = f.get("sv_text").listeners.get("keydown");
+  key({ key: "Enter", ctrlKey: true, preventDefault() { prevented++; } });
+  key({ key: "Enter", metaKey: true, preventDefault() { prevented++; } });
+  assert.equal(posts, 1); assert.equal(prevented, 2);
+  pending.resolve({ seq: 1 }); await f.feature.settled();
+});
