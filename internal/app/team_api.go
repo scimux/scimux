@@ -35,6 +35,9 @@ type teamHandler struct {
 	removeShare func(dataDir, uid string) error
 	// saveSubs replaces subscription persistence in tests.
 	saveSubs func(string, []team.Subscription) error
+	// subAsks is the last channels ask, the last seats ask, and the delivery
+	// word for one server in this process. It is not stored in the state file.
+	subAsks map[string]subAsk
 }
 
 func newTeamHandler(dataDir string, now func() time.Time, client *team.Client) http.Handler {

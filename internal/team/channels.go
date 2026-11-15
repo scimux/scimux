@@ -404,7 +404,8 @@ func (c *Client) Channels(ctx context.Context, baseURL, token string, skipInvali
 	if status != http.StatusOK {
 		return nil, mapChannelStatus(status)
 	}
-	list, err := parseChannels(raw)
+	skip := len(skipInvalidIDs) > 0 && skipInvalidIDs[0]
+	list, err := parseChannels(raw, skip)
 	if err != nil {
 		return nil, ErrProtocol
 	}
@@ -454,7 +455,7 @@ func (c *Client) withAfter(after uint64) *Client {
 	return &clone
 }
 
-func parseChannels(raw []byte) ([]Channel, error) {
+func parseChannels(raw []byte, skipInvalidIDs bool) ([]Channel, error) {
 	if !utf8.Valid(raw) {
 		return nil, ErrProtocol
 	}
@@ -466,6 +467,16 @@ func parseChannels(raw []byte) ([]Channel, error) {
 	}
 	out := make([]Channel, 0, len(*doc.Channels))
 	for _, one := range *doc.Channels {
+		if skipInvalidIDs {
+			var id struct {
+				Owner      string `json:"owner"`
+				Chat       string `json:"chat"`
+				Generation string `json:"generation"`
+			}
+			if json.Unmarshal(one, &id) == nil && (!validHex(id.Owner, 32) || !validHex(id.Chat, 16) || !validHex(id.Generation, 16)) {
+				continue
+			}
+		}
 		ch, err := parseListedChannel(one)
 		if err != nil {
 			return nil, err
