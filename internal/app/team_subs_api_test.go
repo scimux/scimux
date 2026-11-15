@@ -1498,7 +1498,7 @@ func TestSubReadFetchesCopiesAndProjects(t *testing.T) {
 	})
 	first := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
 	second := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
-	if first.Last != 8 || first.More || len(first.Entries) != 5 || first.View.Delivery != "ok" || !first.View.Unread {
+	if first.Last != 8 || !first.More || len(first.Entries) != 5 || first.View.Delivery != "ok" || !first.View.Unread {
 		t.Fatalf("first = %+v", first)
 	}
 	if !reflect.DeepEqual(first.Entries, second.Entries) || second.Last != 8 || strings.Join(queries, ",") != "after=0,after=8" {
