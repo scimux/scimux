@@ -43,9 +43,9 @@ test("list polling throttles, ignores equal answers and retains the last list on
   assert.equal(f.invalidations(), 0); assert.equal(f.feature.tab.tabHTML(false), ""); assert.equal(f.feature.tab.render(f.el), false);
   f.setTime(9999); f.feature.tick(); assert.equal(calls, 1);
   f.setTime(10000); f.feature.tick(); await f.feature.settled(); assert.equal(f.invalidations(), 1);
-  assert.match(f.feature.tab.tabHTML(false), /Shared with me/); assert.doesNotMatch(f.feature.tab.tabHTML(false), /tabbadge/);
+  assert.match(f.feature.tab.tabHTML(false), /Shared/); assert.doesNotMatch(f.feature.tab.tabHTML(false), /tabbadge/);
   f.setTime(20000); f.feature.tick(); await f.feature.settled(); assert.equal(f.invalidations(), 1);
-  f.setTime(30000); f.feature.tick(); await f.feature.settled(); assert.equal(f.invalidations(), 1); assert.match(f.feature.tab.tabHTML(false), /Shared with me/);
+  f.setTime(30000); f.feature.tick(); await f.feature.settled(); assert.equal(f.invalidations(), 1); assert.match(f.feature.tab.tabHTML(false), /Shared/);
   f.setTime(40000); f.feature.tick(); f.setTime(60000); f.feature.tick(); assert.equal(calls, 5);
   pending.resolve(list([base, { ...base, chat: "two", unread: true }, { ...base, chat: "three", unread: true }])); await f.feature.settled();
   assert.equal(f.invalidations(), 2); assert.match(f.feature.tab.tabHTML(true), /class="on"/); assert.match(f.feature.tab.tabHTML(false), /aria-label="2 unread">2/);
@@ -453,7 +453,7 @@ test("removal blocks duplicate deletes and read runs, then focuses the remaining
   f.setTime(5000); f.feature.tick(); assert.equal(reads, 1); assert.equal(deletes, 1);
   pending.resolve(""); await f.feature.settled();
   assert.equal(f.get("sharedview").hidden, true); assert.equal(f.doc.activeElement, f.get("cardtabs"));
-  assert.equal(f.invalidations(), before + 1); assert.match(f.feature.tab.tabHTML(false), /Shared with me/);
+  assert.equal(f.invalidations(), before + 1); assert.match(f.feature.tab.tabHTML(false), /Shared/);
   f.feature.tab.render(f.get("cardlist")); assert.equal(f.get("cardlist").innerHTML.includes('data-sub="s/o/c/g"'), false);
 });
 
@@ -644,4 +644,25 @@ test("shared follow scrolls at 80 pixels but not 81", async () => {
     if (distance === 80) assert.equal(body.scrollTop, body.scrollHeight);
     if (distance === 81) assert.equal(body.scrollTop, before);
   }
+});
+
+test("owner groups lead shared groups by server name and id", () => {
+  const mineA = { ...base, server: "a", server_name: "Lab", owner: "own-a", owner_name: "Self", access: "owner" };
+  const mineB = { ...base, server: "b", server_name: "lab", owner: "own-b", owner_name: "Self", access: "owner" };
+  const guest = { ...base, server: "g", server_name: "A", owner_name: "Aaron" };
+  const groups = guestGroups([guest, mineB, mineA, { ...mineA, owner: "own-again", chat: "two" }], [{ id: "a", delivery: "offline" }, { id: "b", delivery: "refused" }]);
+  assert.equal(groups.length, 3);
+  assert.match(groups[0].label, /^Mine · Lab · offline$/);
+  assert.match(groups[1].label, /^Mine · lab · access ended$/);
+  assert.equal(groups[0].items.length, 2);
+  assert.equal(groups[2].ownerName, "Aaron");
+});
+
+test("owner items describe active and ended sharing", async () => {
+  const owned = { ...base, access: "owner" };
+  const f = fixture(async () => list([owned, { ...owned, chat: "ended", state: "ended" }]));
+  f.feature.tick(); await f.feature.settled(); f.feature.tab.render(f.el);
+  assert.match(f.feature.tab.tabHTML(false), />Shared</);
+  assert.match(f.el.innerHTML, /Shared by you/);
+  assert.match(f.el.innerHTML, /Sharing ended/);
 });
