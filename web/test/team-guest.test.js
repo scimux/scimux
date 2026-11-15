@@ -309,3 +309,41 @@ test("empty header fields use their fallbacks", async () => {
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
   assert.equal(f.get("sv_title").textContent, "Untitled chat"); assert.equal(f.get("sv_from").textContent, "From Unknown person · Server");
 });
+
+test("an initial empty list does not invalidate cards even with server status", async () => {
+  const f = fixture(async () => list([], [{ id: "s", delivery: "offline" }], true));
+  f.feature.tick(); await f.feature.settled(); assert.equal(f.invalidations(), 0); assert.equal(f.feature.tab.tabHTML(false), "");
+});
+
+test("unrelated clicks and keys, and repeated binding, have no effect", async () => {
+  let calls = 0;
+  const f = viewFixture(async () => { calls++; return list([base]); });
+  f.feature.bind();
+  f.click("cardlist", { closest() { return null; } });
+  f.click("sv_back"); f.click("sv_more");
+  let stopped = false; f.get("sharedview").listeners.get("keydown")({ key: "Enter", stopPropagation() { stopped = true; } });
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(stopped, false); assert.equal(calls, 1);
+});
+
+test("destroy drops pending read and list errors", async () => {
+  const read = deferred();
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return read.promise; });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); f.feature.destroy(); read.resolve(readAnswer([{ t: "user", text: "late", seq: 1 }], 1)); await f.feature.settled();
+  assert.doesNotMatch(f.get("sv_body").innerHTML, /late/);
+  const pending = deferred(), g = fixture(() => pending.promise);
+  g.feature.tick(); g.feature.destroy(); pending.reject(Object.assign(new Error("off"), { status: 404 })); await g.feature.settled(); assert.equal(g.invalidations(), 0);
+});
+
+test("a partial read mark keeps a newer live entry unread", async () => {
+  const view = { ...base, unread: true, mirror_last: 3 };
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([view]); if (path.endsWith("/seen")) return ""; return readAnswer([{ t: "user", seq: 1, text: "x" }], 1, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); assert.match(f.feature.tab.tabHTML(false), /1 unread/);
+});
+
+test("load more does not overlap a read or retry a missing chat", async () => {
+  const pending = deferred(); let reads = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); reads++; return pending.promise; });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); f.click("sv_more"); assert.equal(reads, 1);
+  pending.reject(new Error('{"error":"not_found"}')); await f.feature.settled(); f.click("sv_more"); assert.equal(reads, 1);
+});
