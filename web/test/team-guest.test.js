@@ -412,3 +412,9 @@ test("load more cannot issue requests after the gate turns off", async () => {
   assert.equal(reads, 40); f.setTime(10000); f.feature.tick(); await f.feature.settled();
   const before = reads; f.click("sv_more"); await f.feature.settled(); assert.equal(reads, before);
 });
+
+test("an omitted field displays the omission message even when empty", () => {
+  for (const kind of ["user", "assistant"]) {
+    assert.match(guestEntryHTML({ t: kind, seq: 1, omitted: "" }, "Owner"), /This message was too large to share\./);
+  }
+});
