@@ -3861,3 +3861,16 @@ func TestSubSeenDamagedCommentsDoesNotSaveMirror(t *testing.T) {
 		t.Error("partial read marks were saved")
 	}
 }
+
+func TestSubRouteRejectsWrongPrefixAndCommentMethods(t *testing.T) {
+	h, _ := testTeamSurface(t, team.NewClient())
+	th := asTeamHandler(t, h)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/", nil)
+	req.URL.Path = teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
+	rec := httptest.NewRecorder()
+	th.serveSubscriptions(rec, req)
+	assertAPIError(t, rec, 404, "not_found")
+	for _, tc := range []struct{ method, suffix string }{{http.MethodPut, "comments"}, {http.MethodDelete, "comments"}, {http.MethodGet, "seen"}, {http.MethodPost, "seen"}, {http.MethodGet, "other"}} {
+		assertAPIError(t, doTeam(h, tc.method, subReadPath()+"/"+tc.suffix, ""), 404, "not_found")
+	}
+}
