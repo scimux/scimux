@@ -231,6 +231,24 @@
   </div>
 </div>
 
+
+<div id="sharedview" hidden role="dialog" aria-modal="true" aria-labelledby="sv_title">
+  <div id="sv_scrim"></div>
+  <div id="sv_panel">
+    <div id="sv_head">
+      <button id="sv_back">&#8249; Shared with me</button>
+      <div class="phtext">
+        <div id="sv_title"></div>
+        <div id="sv_from"></div>
+        <div id="sv_state"></div>
+      </div>
+    </div>
+    <div id="sv_body" role="log" aria-label="Shared chat" tabindex="0"></div>
+    <button id="sv_more" hidden>Load more</button>
+    <div id="sv_note" role="status"></div>
+  </div>
+</div>
+
 <!-- Notes workspace (sheets): a singleton synthesis surface, mounted once and
      OUTSIDE every polled render region, so the section editors are never rebuilt
      from a poll (invariant). Three zones on iPad/desktop
