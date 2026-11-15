@@ -1296,3 +1296,22 @@ func TestSubListDeliveryWhileFirstAskIsPending(t *testing.T) {
 	}
 	_ = recvTeam(t, done, "subscriptions")
 }
+
+func TestSubListSkipsInvalidIdentitiesAlongsideValidChannels(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(
+		guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1),
+		guestChannel("bad", subChatB, "Synthetic title", subGen, "read", 1),
+		guestChannel(subOwnerB, subChatB, "Synthetic title", "bad", "read", 1),
+	), seatsBody: seatsOf(subOwner, "Ada")}
+	h, dir, _ := subSurface(t, script)
+	got, _ := readSubList(t, h)
+	if len(got.Subscriptions) != 1 || mustFindSub(t, got, subOwner, subChat, subGen).State != "live" || *got.Truncated {
+		t.Fatalf("list = %+v", got)
+	}
+	if len(loadSubFile(t, dir)) != 1 {
+		t.Fatal("invalid identities were stored")
+	}
+	if _, err := os.Stat(filepath.Join(dir, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("copies stat = %v", err)
+	}
+}
