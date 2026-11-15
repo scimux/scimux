@@ -335,7 +335,7 @@ body.map-full #layersbtn { display: inline-flex; }
 #sharedview #sv_back { min-height: 44px; }
 #sharedview #sv_title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #sharedview #sv_from, #sharedview #sv_state { font-size: 12px; color: var(--dim); }
-#sharedview #sv_body { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 14px; }
+#sharedview #sv_body { overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 10px 14px; display: flex; flex-direction: column; gap: 12px; }
 #sharedview #sv_body .gwho { color: var(--dim); font-size: 12px; font-weight: 600; }
 #sharedview #sv_more { min-height: 44px; }
 #sharedview #sv_more[hidden] { display: none; }
