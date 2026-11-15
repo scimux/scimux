@@ -1377,3 +1377,13 @@ test("a changed local name updates existing message labels on the next answer", 
   people["s/a"] = 'Second <&"'; assert.equal(label.textContent, "First");
   f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(label.textContent, 'Second <&"');
 });
+
+test("non-Escape keys leave the shared name editor open", async () => {
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([{ t: "user", seq: 1, text: "x" }], 1), undefined, undefined,
+    { people: () => ({}), uiMutate() {}, bookmarks: () => [], openSendTo() {} });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const bubble = sharedRenameBubble(1, f); f.click("sharedview", bubble.bubble); sharedNameAction(f, "rename");
+  const row = bubble.turn.nextElementSibling, field = row.querySelector("[data-grename]"); field.closest = () => null;
+  let prevented = false; f.get("sharedview").listeners.get("keydown")({ key: "Enter", target: field, preventDefault() { prevented = true; } });
+  assert.equal(prevented, false); assert.equal(row.querySelector("[data-grename]"), field);
+});

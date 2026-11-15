@@ -2168,3 +2168,28 @@ func TestTeamRenameSeatRequiresCSRF(t *testing.T) {
 		t.Fatalf("without CSRF status = %d", rec.Code)
 	}
 }
+
+func TestTeamRenameSeatRequestSizeBoundary(t *testing.T) {
+	client, hits := scriptedClient(struct {
+		helloStatus int
+		helloBody   string
+		helloErr    bool
+		nextStatus  int
+		nextBody    string
+		nextErr     bool
+	}{helloStatus: 200, helloBody: helloJSON(teamServerID, "Lab relay"), nextStatus: 200})
+	h, dir := testTeamSurface(t, client)
+	seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+	body := `{"name":"Synthetic"}`
+	path := "/api/team/servers/" + teamServerID + "/seat"
+	atLimit := body + strings.Repeat(" ", 1024-len(body))
+	if rec := doTeam(h, http.MethodPut, path, atLimit); rec.Code != http.StatusOK {
+		t.Fatalf("at limit status = %d", rec.Code)
+	}
+	before := len(*hits)
+	rec := doTeam(h, http.MethodPut, path, atLimit+" ")
+	assertAPIError(t, rec, http.StatusBadRequest, "bad_request")
+	if len(*hits) != before {
+		t.Fatal("oversized request reached server")
+	}
+}
