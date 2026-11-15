@@ -597,7 +597,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     $("sv_body").innerHTML = "";
     let focus = null;
     if (tabHTML(false)) focus = $("cardtabs").querySelector('[data-tab="shared"]');
-    if (!focus) focus = $("cardlist");
+    if (!focus) focus = $("cardtabs").querySelector('[data-tab="current"]');
     focus.focus();
   }
   function bind() {
