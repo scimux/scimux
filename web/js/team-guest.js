@@ -138,7 +138,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     let out = '<div class="glist">';
     for (const group of guestGroups(answer.subscriptions, answer.servers, knownPeople)) {
       const hidden = collapsed.has(group.key);
-      out += `<button class="ghead" data-group="${esc(group.key)}" aria-expanded="${!hidden}">${esc(group.label)}</button>`;
+      let seat = "";
+      if (!group.mine) seat = ` data-seat="${esc(group.owner)}"`;
+      out += `<button class="ghead" data-group="${esc(group.key)}"${seat} aria-expanded="${!hidden}">${esc(group.label)}</button>`;
       if (hidden) continue;
       for (const item of group.items) {
         let title = item.title;
@@ -261,6 +263,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!title) title = "Untitled chat";
     let owner = guestName(view.server, view.owner, view.owner_name, knownPeople);
     $("sv_title").textContent = title;
+    if (view.access === "owner") delete $("sv_from").dataset.seat;
+    else $("sv_from").dataset.seat = view.owner;
     $("sv_from").textContent = (view.access === "owner" ? "Your chat" : "From " + owner) + " · " + view.server_name;
     $("sv_state").textContent = guestStateText(view);
   }
