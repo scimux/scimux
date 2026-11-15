@@ -3964,3 +3964,71 @@ func TestSubCommentsGateOffDoesNothing(t *testing.T) {
 		t.Error("gate-off comment route touched copies")
 	}
 }
+
+func TestSubCommentsReadMirrorErrorCases(t *testing.T) {
+	t.Run("gap is refused", func(t *testing.T) {
+		h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, subPage(subGen, 2, false, subRecord(2, `{}`)))
+		})
+		got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+		if got.Last != 0 || len(got.Entries) != 0 {
+			t.Error("out-of-order page was stored")
+		}
+		if loadSubFile(t, dir)[0].State != "live" {
+			t.Error("gap ended subscription")
+		}
+	})
+	t.Run("offline keeps existing copy", func(t *testing.T) {
+		h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+		})
+		id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+		record := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"comment","text":"synthetic","anchor":0}`)}
+		if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{record}); err != nil {
+			t.Fatal("cannot seed comments")
+		}
+		got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+		if got.Last != 1 || len(got.Entries) != 1 {
+			t.Error("offline read lost saved comment")
+		}
+	})
+	t.Run("ending save fails", func(t *testing.T) {
+		h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, subPage(subGenB, 0, false)) })
+		asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""), 500, "store_unavailable")
+	})
+	t.Run("state changes during fetch", func(t *testing.T) {
+		var dir string
+		h, data := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("bad"), 0o600); err != nil {
+				t.Error("cannot damage state")
+			}
+			_, _ = io.WriteString(w, subPage(subGen, 0, false))
+		})
+		dir = data
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""), 500, "store_unavailable")
+	})
+	t.Run("copy damaged during fetch", func(t *testing.T) {
+		var dir string
+		h, data := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "comments.jsonl")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Error("cannot create copy")
+			}
+			if err := os.WriteFile(path, []byte("bad\n"), 0o600); err != nil {
+				t.Error("cannot damage copy")
+			}
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{}`)))
+		})
+		dir = data
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""), 500, "copy_damaged")
+	})
+}
+
+func TestSubCommentsReadAfterValidation(t *testing.T) {
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, subPage(subGen, 0, false)) })
+	for _, query := range []string{"after=", "after=-1", "after=1&after=2", "after=%zz", "after=18446744073709551616"} {
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments?"+query, ""), 400, "bad_request")
+	}
+}
