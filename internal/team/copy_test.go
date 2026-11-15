@@ -693,7 +693,7 @@ func TestCopyConcurrentAppendStoresOnce(t *testing.T) {
 	}
 }
 
-func TestCopySameLengthDamageIsNotAppendedWithoutReading(t *testing.T) {
+func TestCopySameLengthDamageIsDetectedByFreshIndex(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
 	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
 		t.Fatal(err)
@@ -704,11 +704,37 @@ func TestCopySameLengthDamageIsNotAppendedWithoutReading(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Discard this process's cached index to model opening the copy after restart.
+	copyMetas.Delete(path)
+	if _, _, err := ReadCopy(dir, id, 0); !errors.Is(err, ErrCopyDamaged) {
+		t.Fatalf("read error = %v", err)
+	}
 	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("append error = %v", err)
 	}
 	if !bytes.Equal(raw, readCopyFile(t, dir, id)) {
-		t.Fatal("damaged copy was appended")
+		t.Fatal("damaged copy was changed")
+	}
+}
+
+func TestCopySizeChangeMakesWarmIndexRescan(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	path := copyPathOf(dir, id)
+	raw := append(readCopyFile(t, dir, id), '!')
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadCopy(dir, id, 0); !errors.Is(err, ErrCopyDamaged) {
+		t.Fatalf("read error = %v", err)
+	}
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
+		t.Fatalf("append error = %v", err)
+	}
+	if !bytes.Equal(raw, readCopyFile(t, dir, id)) {
+		t.Fatal("damaged copy was changed")
 	}
 }
 
