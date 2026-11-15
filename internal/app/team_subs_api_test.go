@@ -1722,3 +1722,55 @@ func TestSubReadUnknownServerAndStoreFailures(t *testing.T) {
 	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "store_unavailable")
 	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1}`), 500, "store_unavailable")
 }
+
+func TestSubReadAdditionalValidation(t *testing.T) {
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, subPage(subGen, 0, false)) })
+	for _, query := range []string{"?after=", "?after=1&after=2"} {
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+query, ""), 400, "bad_request")
+	}
+	for _, path := range []string{strings.Replace(subReadPath(), subOwner, strings.Repeat("z", 32), 1), subReadPath() + "/other"} {
+		assertAPIError(t, doTeam(h, http.MethodGet, path, ""), 404, "not_found")
+	}
+	assertAPIError(t, doTeam(h, http.MethodPost, subReadPath(), ""), 404, "not_found")
+	assertAPIError(t, doTeam(h, http.MethodPut, strings.Replace(subReadPath(), subOwner, subOwnerB, 1)+"/seen", `{"mirror":1}`), 404, "not_found")
+}
+
+func TestSubReadIgnoresMalformedBodyFields(t *testing.T) {
+	var items []string
+	for i, body := range []string{`null`, `{"v":1,"t":"assistant","prov":"wrong"}`, `{"v":1,"t":"user","text":42}`, `{"v":1,"t":false}`} {
+		items = append(items, subRecord(i+1, body))
+	}
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, subPage(subGen, 4, false, items...))
+	})
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if len(got.Entries) != 0 || got.Last != 4 {
+		t.Fatalf("read = %+v", got)
+	}
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	entries, _, err := team.ReadCopy(dir, id, 0)
+	if err != nil || len(entries) != 4 {
+		t.Fatalf("entries = %d err %v", len(entries), err)
+	}
+}
+
+func TestSubSeenDamagedCopyAndSaveFailure(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"user","text":"x"}`)))
+	})
+	decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
+	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1}`), 500, "store_unavailable")
+	asTeamHandler(t, h).saveSubs = nil
+	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
+	if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1}`), 500, "store_unavailable")
+}
+
+func TestSubReadEndingSaveFailure(t *testing.T) {
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) })
+	asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "store_unavailable")
+}
