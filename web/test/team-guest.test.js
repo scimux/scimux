@@ -1330,6 +1330,19 @@ test("comments refresh can introduce a local-name change", async () => {
   assert.equal(f.invalidations(), before + 1); assert.equal(f.get("sv_from").textContent, "From Second · Server");
 });
 
+test("incremental comments rename an earlier message in the open view", async () => {
+  let reads = 0;
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(),
+    async () => ++reads === 1 ? commentsAnswer([{ seq: 1, anchor: 0, author: "a", text: "synthetic" }], 1, false, { a: "Bob" }) : commentsAnswer([], 1, false, { a: "Bobby" }));
+  const label = { dataset: { seat: "a" }, textContent: "Bob" };
+  f.get("sv_body").querySelectorAll = sel => sel === "[data-seat]" ? [label] : [];
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.match(f.get("sv_body").innerHTML, /Bob/);
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(label.textContent, "Bobby");
+  assert.equal(f.get("sharedview").hidden, false);
+});
+
 test("rename actions ignore closed, missing and non-person rows", async () => {
   const view = { ...base, access: "owner" };
   const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([view]) : readAnswer([{ t: "user", seq: 1, text: "x" }], 1, false, view), undefined, undefined,

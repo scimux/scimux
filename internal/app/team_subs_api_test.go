@@ -3324,6 +3324,59 @@ func TestSubCommentsKnownAuthorRefresh(t *testing.T) {
 	}
 }
 
+func TestSubCommentsIncrementalNamesRefresh(t *testing.T) {
+	roster := 0
+	name := "Bob"
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			roster++
+			_, _ = io.WriteString(w, seatsOf(subOwner, name))
+			return
+		}
+		if r.URL.Query().Get("after") == "0" {
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1, false))
+	})
+	clock := holdClock(t, h)
+	first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if first.Names[subOwner] != "Bob" || roster != 1 {
+		t.Fatal("initial name missing")
+	}
+	name = "Bobby"
+	*clock = clock.Add(61 * time.Second)
+	next := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments?after=1", ""))
+	if len(next.Entries) != 0 || next.Names[subOwner] != "Bobby" || roster != 2 {
+		t.Fatal("incremental read did not return refreshed name")
+	}
+}
+
+func TestSubCommentsEmptyReadReturnsRosterAndOwnName(t *testing.T) {
+	roster := 0
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			roster++
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Bob", subOwnerB, "Cy"))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 0, false))
+	})
+	inst := installationOf(t, dir)
+	servers, err := team.Load(dir)
+	if err != nil {
+		t.Fatal("server state unavailable")
+	}
+	got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if len(got.Entries) != 0 || got.Names[subOwner] != "Bob" || got.Names[subOwnerB] != "Cy" || got.Names[inst] != servers[0].SeatName || roster != 1 {
+		t.Fatal("empty read omitted roster or own name")
+	}
+	_ = decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if roster != 1 {
+		t.Fatal("empty read made an extra roster call")
+	}
+}
+
 func TestSubCommentsRosterFailureAndRefreshWindow(t *testing.T) {
 	var roster int
 	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
