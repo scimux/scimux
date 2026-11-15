@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -39,6 +40,7 @@ var (
 	ErrQuota           = errors.New("team: quota reached")
 	ErrTooLarge        = errors.New("team: too large")
 	ErrStaleGeneration = errors.New("team: stale generation")
+	ErrForbidden       = fmt.Errorf("team: forbidden: %w", ErrProtocol)
 )
 
 const maxSeatsBody = 1 << 20
@@ -64,6 +66,16 @@ func encodeChannelBody(v any) ([]byte, error) {
 	// Structs of strings, slices, and raw JSON encode. The error cannot occur.
 	_ = enc.Encode(v)
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// ReadComments reads a page of the comments log.
+func (c *Client) ReadComments(ctx context.Context, baseURL, token, owner, chat string, after uint64) (MirrorPage, error) {
+	return MirrorPage{}, ErrProtocol
+}
+
+// AppendComment appends one comment.
+func (c *Client) AppendComment(ctx context.Context, baseURL, token, owner, chat, generation, key string, body json.RawMessage) (uint64, error) {
+	return 0, ErrProtocol
 }
 
 // Seats is GET /v1/seats. The answer may be up to 1 MiB.

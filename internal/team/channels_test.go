@@ -1515,3 +1515,130 @@ func TestLeaveChannelRejectsBadPathWithoutRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestCommentsClientReadsAndAppends(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		t.Run(fmt.Sprint(duplicate), func(t *testing.T) {
+			calls := 0
+			c := &Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Path != "/v1/channels/"+chOwner+"/"+chChat+"/comments" {
+					t.Error("wrong comments path")
+				}
+				if r.Method == http.MethodGet {
+					if r.URL.RawQuery != "after=7" {
+						t.Error("wrong comments query")
+					}
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"generation":"` + chGen + `","entries":[],"last":7,"more":false}`)), Header: make(http.Header)}, nil
+				}
+				body, _ := io.ReadAll(r.Body)
+				if string(body) != `{"generation":"`+chGen+`","entries":[{"key":"c/0123456789abcdef","body":{"v":1}}]}` {
+					t.Error("wrong comments append body")
+				}
+				answer := fmt.Sprintf(`{"generation":"%s","results":[{"key":"c/0123456789abcdef","seq":3,"duplicate":%t}],"last":8}`, chGen, duplicate)
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(answer)), Header: make(http.Header)}, nil
+			})}
+			page, err := c.ReadComments(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, 7)
+			if err != nil || page.Last != 7 {
+				t.Error("comments page rejected")
+			}
+			seq, err := c.AppendComment(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, chGen, "c/0123456789abcdef", json.RawMessage(`{"v":1}`))
+			if err != nil || seq != 3 {
+				t.Error("comment result rejected")
+			}
+			if calls != 2 {
+				t.Errorf("calls = %d", calls)
+			}
+		})
+	}
+}
+
+func TestCommentsClientStatusAndValidation(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{
+		{401, ErrUnauthorized}, {403, ErrForbidden}, {404, ErrNoChannel}, {409, ErrStaleGeneration},
+		{413, ErrTooLarge}, {422, ErrUnknownMember}, {507, ErrQuota}, {500, ErrProtocol},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			c := &Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+			})}
+			_, readErr := c.ReadComments(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, 0)
+			_, appendErr := c.AppendComment(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, chGen, "c/key", json.RawMessage(`{}`))
+			if !errors.Is(readErr, tc.want) || !errors.Is(appendErr, tc.want) {
+				t.Error("wrong comments status")
+			}
+		})
+	}
+	t.Run("bad input sends nothing", func(t *testing.T) {
+		calls := 0
+		c := &Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("network") })}
+		if _, err := c.ReadComments(context.Background(), "http://127.0.0.1", chToken, "bad", chChat, 0); !errors.Is(err, ErrProtocol) {
+			t.Error("bad read path accepted")
+		}
+		for _, tc := range []struct {
+			owner, chat, generation, key string
+			body                         json.RawMessage
+		}{
+			{"bad", chChat, chGen, "c/key", json.RawMessage(`{}`)}, {chOwner, "!", chGen, "c/key", json.RawMessage(`{}`)},
+			{chOwner, chChat, "bad", "c/key", json.RawMessage(`{}`)}, {chOwner, chChat, chGen, "!", json.RawMessage(`{}`)},
+			{chOwner, chChat, chGen, "c/key", json.RawMessage(`{`)},
+		} {
+			if _, err := c.AppendComment(context.Background(), "http://127.0.0.1", chToken, tc.owner, tc.chat, tc.generation, tc.key, tc.body); !errors.Is(err, ErrProtocol) {
+				t.Error("bad append accepted")
+			}
+		}
+		if calls != 0 {
+			t.Errorf("invalid inputs sent %d requests", calls)
+		}
+	})
+}
+
+func TestChannelForbiddenIsProtocolForExistingCallers(t *testing.T) {
+	c := &Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 403, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+	for _, name := range channelNames() {
+		err := runChannel(c, context.Background(), "http://127.0.0.1", name)
+		if !errors.Is(err, ErrForbidden) || !errors.Is(err, ErrProtocol) {
+			t.Errorf("%s did not retain protocol error", name)
+		}
+	}
+	_, channelsErr := c.Channels(context.Background(), "http://127.0.0.1", chToken, false)
+	_, mirrorErr := c.ReadMirror(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, 0)
+	leaveErr := c.LeaveChannel(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat)
+	for _, err := range []error{channelsErr, mirrorErr, leaveErr} {
+		if !errors.Is(err, ErrForbidden) || !errors.Is(err, ErrProtocol) {
+			t.Error("existing caller did not retain protocol error")
+		}
+	}
+}
+
+func TestCommentsClientRejectsBadRepliesAndTransport(t *testing.T) {
+	for _, answer := range []string{
+		`{}`, `{"generation":"` + chGen + `","results":[],"last":0}`,
+		`{"generation":"` + chGen + `","results":[{"key":"wrong","seq":1,"duplicate":false}],"last":1}`,
+		`{"generation":"` + chGen + `","results":[{"key":"c/key","seq":0,"duplicate":false}],"last":1}`,
+		`{"generation":"` + chGen + `","results":[{"key":"c/key","duplicate":false}],"last":1}`,
+		`{"generation":"` + chGen + `","results":[{"key":"c/key","seq":1,"duplicate":false}],"last":0}`,
+	} {
+		c := &Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(answer)), Header: make(http.Header)}, nil
+		})}
+		if _, err := c.AppendComment(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, chGen, "c/key", json.RawMessage(`{}`)); !errors.Is(err, ErrProtocol) {
+			t.Error("bad append reply accepted")
+		}
+		if _, err := c.ReadComments(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, 0); !errors.Is(err, ErrProtocol) {
+			t.Error("bad read reply accepted")
+		}
+	}
+	c := &Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("synthetic transport error") })}
+	if _, err := c.ReadComments(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, 0); !errors.Is(err, ErrUnreachable) {
+		t.Error("read transport error not mapped")
+	}
+	if _, err := c.AppendComment(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, chGen, "c/key", json.RawMessage(`{}`)); !errors.Is(err, ErrUnreachable) {
+		t.Error("append transport error not mapped")
+	}
+}
