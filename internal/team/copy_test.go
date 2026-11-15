@@ -883,3 +883,33 @@ func TestCopyScanOpenAndStatFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyFailedIndexScanDoesNotCachePartialIndex(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	records := make([]MirrorRecord, 100)
+	for i := range records {
+		records[i] = copyRec(uint64(i+1), `{"text":"`+strings.Repeat("x", 100)+`"}`)
+	}
+	if err := AppendCopy(dir, id, records); err != nil {
+		t.Fatal(err)
+	}
+	path := copyPathOf(dir, id)
+	copyMetas.Delete(path)
+	snapshotCopy(t)
+	real := copyOps.readAt
+	boom := errors.New("synthetic read failure")
+	copyOps.readAt = func(f *os.File, p []byte, off int64) (int, error) {
+		if off >= 4096 {
+			return 0, boom
+		}
+		return real(f, p, off)
+	}
+	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, boom) {
+		t.Fatalf("first scan error = %v", err)
+	}
+	copyOps.readAt = real
+	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil || last != 100 || len(got) != 100 {
+		t.Fatalf("retry last %d count %d err %v", last, len(got), err)
+	}
+}
