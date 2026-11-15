@@ -50,11 +50,13 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   it. With the gate off it is neither read nor written.
 - **Guest subscription state is metadata.** `team-subs.json` holds the identities,
   names, access, state and read positions of subscriptions, with no chat content
-  or token. Only the muxer writes it; with the team gate off it is neither read
-  nor written.
+  or token. Removing a shared chat deletes its subscription entry. Only the
+  muxer writes it; with the team gate off it is neither read nor written.
 - **Guest copies are retained received history.** `team-copies/` holds received
   entries of other people's chats unchanged and append-only, including after
-  sharing ends. Copies count toward total storage usage and belong to no node.
+  sharing ends. Removing a shared chat deletes its copy, and a cut-off last
+  line is removed during repair. Copies count toward total storage usage and
+  belong to no node.
   They are never sent anywhere or logged; with the team gate off they are
   neither read nor written.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth

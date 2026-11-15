@@ -277,8 +277,21 @@ func (m *copyMeta) scan(path string) error {
 		line, err := r.ReadBytes('\n')
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				m.damaged = true
-				return ErrCopyDamaged
+				if len(line) == 0 {
+					m.damaged = true
+					return ErrCopyDamaged
+				}
+				writer, openErr := copyOps.open(path, os.O_WRONLY, 0)
+				if openErr != nil {
+					return openErr
+				}
+				truncateErr := copyOps.truncate(writer, off)
+				_ = writer.Close()
+				if truncateErr != nil {
+					return truncateErr
+				}
+				m.size = off
+				break
 			}
 			return err
 		}
