@@ -1397,3 +1397,21 @@ func TestCopyRepairFailuresLeaveUnindexedFile(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyScanEmptyUnexpectedEOFIsDamage(t *testing.T) {
+	snapshotCopy(t)
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("initial append failed")
+	}
+	path := copyPathOf(dir, id)
+	before := readCopyFile(t, dir, id)
+	copyMetas.Delete(path)
+	copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 0, io.EOF }
+	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+		t.Error("unexpected empty read was accepted")
+	}
+	if !bytes.Equal(before, readCopyFile(t, dir, id)) {
+		t.Error("unexpected empty read changed the file")
+	}
+}
