@@ -3117,3 +3117,209 @@ func TestSubListRosterDoesNotReplaceOwnSeatName(t *testing.T) {
 		t.Error("roster changed owner name")
 	}
 }
+
+type commentsReadBody struct {
+	Entries []struct {
+		Seq    uint64 `json:"seq"`
+		Author string `json:"author"`
+		Mine   bool   `json:"mine"`
+		Text   string `json:"text"`
+		Anchor uint64 `json:"anchor"`
+	} `json:"entries"`
+	Names map[string]string `json:"names"`
+	Last  uint64            `json:"last"`
+	Next  uint64            `json:"next"`
+	More  bool              `json:"more"`
+}
+
+func decodeCommentsRead(t *testing.T, rec *httptest.ResponseRecorder) commentsReadBody {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("comments status = %d", rec.Code)
+	}
+	var body commentsReadBody
+	if json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+		t.Fatal("invalid comments response")
+	}
+	return body
+}
+
+func TestSubCommentsReadProjectionAndNames(t *testing.T) {
+	var rosterCalls atomic.Int32
+	var ownID string
+	bodies := []string{
+		`{"v":1,"t":"comment","text":"synthetic","anchor":4}`,
+		`{"v":1,"t":"comment","text":"","anchor":1}`,
+		`{"v":1,"t":"comment","anchor":1}`,
+		`{"v":1,"t":"comment","text":1,"anchor":1}`,
+		`{"v":1,"t":"comment","text":"synthetic"}`,
+		`{"v":1,"t":"comment","text":"synthetic","anchor":-1}`,
+		`{"v":1,"t":"other","text":"synthetic","anchor":1}`,
+		`{"v":2,"t":"comment","text":"synthetic","anchor":1}`,
+		`{"t":"comment","text":"synthetic","anchor":1}`,
+		`{"v":1,"text":"synthetic","anchor":1}`,
+		`{"v":1,"t":"comment","text":null,"anchor":1}`,
+		`{"v":1,"t":"comment","text":"synthetic","anchor":null}`,
+		`{"v":1,"t":"comment","text":"synthetic","anchor":2}`,
+	}
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/seats":
+			rosterCalls.Add(1)
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			if r.URL.Query().Get("after") != "0" {
+				_, _ = io.WriteString(w, subPage(subGen, len(bodies), false))
+				return
+			}
+			entries := make([]string, 0, len(bodies))
+			for i, body := range bodies {
+				record := subRecord(i+1, body)
+				if i == len(bodies)-1 {
+					record = strings.Replace(record, subOwner, ownID, 1)
+				}
+				entries = append(entries, record)
+			}
+			_, _ = io.WriteString(w, subPage(subGen, len(bodies), false, entries...))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	ownID = installationOf(t, dir)
+	servers, err := team.Load(dir)
+	if err != nil {
+		t.Fatal("server state unavailable")
+	}
+	first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if first.Last != uint64(len(bodies)) || first.Next != first.Last || first.More || len(first.Entries) != 2 {
+		t.Fatal("projection or cursor incorrect")
+	}
+	if first.Entries[0].Mine || !first.Entries[1].Mine || first.Entries[0].Anchor != 4 {
+		t.Error("projected fields incorrect")
+	}
+	if first.Names[subOwner] != "Ada" || first.Names[ownID] != servers[0].SeatName {
+		t.Error("author names incorrect")
+	}
+	if rosterCalls.Load() != 1 {
+		t.Error("unexpected roster call count")
+	}
+	second := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if len(second.Entries) != 2 || rosterCalls.Load() != 1 {
+		t.Error("cached names or comments were not reused")
+	}
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	_, last, err := team.ReadCopy(dir, id, team.CommentsLog, 0, 256, 4<<20)
+	if err != nil || last != uint64(len(bodies)) {
+		t.Error("comments copy did not retain skipped entries")
+	}
+}
+
+func TestSubCommentsReadOutcomesAndValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		page   string
+		state  string
+	}{
+		{"generation", 200, subPage(subGenB, 0, false), "ended"},
+		{"missing", 404, "", "ended"},
+		{"unauthorized", 401, "", "ended"},
+		{"bad page", 200, "bad", "live"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.page)
+			})
+			got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+			if got.Last != 0 || len(got.Entries) != 0 {
+				t.Error("unexpected comments")
+			}
+			if subs := loadSubFile(t, dir); subs[0].State != tc.state {
+				t.Error("wrong subscription state")
+			}
+		})
+	}
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, subPage(subGen, 0, false)) })
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments?after=-1", ""), 400, "bad_request")
+	assertAPIError(t, doTeam(h, http.MethodGet, strings.Replace(subReadPath(), subOwner, subOwnerB, 1)+"/comments", ""), 404, "not_found")
+	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "comments.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal("cannot create copy")
+	}
+	if err := os.WriteFile(path, []byte("broken\n"), 0o600); err != nil {
+		t.Fatal("cannot damage copy")
+	}
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""), 500, "copy_damaged")
+}
+
+func TestSubCommentsReadPageAndBudgetLimits(t *testing.T) {
+	t.Run("pages", func(t *testing.T) {
+		calls := 0
+		h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/seats" {
+				_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+				return
+			}
+			calls++
+			after, _ := strconv.Atoi(r.URL.Query().Get("after"))
+			_, _ = io.WriteString(w, subPage(subGen, 20, true, subRecord(after+1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+		})
+		got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+		if calls != 8 || got.Last != 8 || got.Next != 8 || !got.More {
+			t.Error("page limit not enforced")
+		}
+	})
+	t.Run("budget", func(t *testing.T) {
+		h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+		})
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_global_limit_bytes":1,"storage_min_free_bytes":0}`), 0o600); err != nil {
+			t.Fatal("cannot set budget")
+		}
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""), 507, "storage_full")
+	})
+}
+
+func TestSubCommentsRosterFailureAndRefreshWindow(t *testing.T) {
+	var roster int
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			roster++
+			if roster == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+			return
+		}
+		if r.URL.Query().Get("after") == "0" {
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1, false))
+	})
+	clock := holdClock(t, h)
+	first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if _, ok := first.Names[subOwner]; ok || roster != 1 {
+		t.Fatal("failed roster was used")
+	}
+	*clock = clock.Add(60 * time.Second)
+	second := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if _, ok := second.Names[subOwner]; ok || roster != 1 {
+		t.Fatal("roster retried too early")
+	}
+	*clock = clock.Add(time.Second)
+	third := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if third.Names[subOwner] != "Ada" || roster != 2 {
+		t.Fatal("roster did not refresh")
+	}
+	if err := team.Remove(dir, teamServerID); err != nil {
+		t.Fatal("cannot forget server")
+	}
+	*clock = clock.Add(61 * time.Second)
+	_ = decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if roster != 2 {
+		t.Error("unjoined server was contacted")
+	}
+}
