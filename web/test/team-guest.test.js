@@ -1314,3 +1314,8 @@ test("rename escape cancels and only other people's bubbles offer it", async () 
   assert.equal(prevented, true); assert.equal(stopped, true); assert.equal(f.get("sharedview").hidden, false); assert.deepEqual(ops, []);
   assert.equal(f.doc.activeElement, row.querySelector('[data-gact="rename"]'));
 });
+
+test("shared name editor uses a bounded, styled input", () => {
+  const css = readFileSync(new URL("../css/layout.css", import.meta.url), "utf8");
+  assert.match(css, /#sharedview[^{}]*\[data-grename\]\s*\{[^}]*font:\s*inherit/);
+});
