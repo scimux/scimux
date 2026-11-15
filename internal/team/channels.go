@@ -615,3 +615,8 @@ func parseMirrorRecord(raw json.RawMessage) (MirrorRecord, error) {
 		Body: append(json.RawMessage(nil), doc.Body...),
 	}, nil
 }
+
+// LeaveChannel removes the caller from the channel's membership.
+func (c *Client) LeaveChannel(ctx context.Context, baseURL, token, owner, chat string) error {
+	return ErrProtocol
+}

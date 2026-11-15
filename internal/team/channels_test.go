@@ -1445,3 +1445,73 @@ func TestSubscriptionChannelsRejectMalformedListedItem(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestLeaveChannelStatusAndRequest(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{
+		{http.StatusNoContent, nil},
+		{http.StatusUnauthorized, ErrUnauthorized},
+		{http.StatusNotFound, ErrNoChannel},
+		{http.StatusRequestEntityTooLarge, ErrTooLarge},
+		{http.StatusUnprocessableEntity, ErrUnknownMember},
+		{http.StatusInsufficientStorage, ErrQuota},
+		{http.StatusConflict, ErrStaleGeneration},
+		{http.StatusInternalServerError, ErrProtocol},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			calls := 0
+			c := &Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.Method != http.MethodDelete {
+					t.Error("wrong request method")
+				}
+				if r.URL.Path != "/v1/channels/"+chOwner+"/"+chChat+"/membership" {
+					t.Error("wrong request path")
+				}
+				if r.Header.Get("Authorization") != "Bearer "+chToken {
+					t.Error("missing authorization")
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+			})}
+			err := c.LeaveChannel(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat)
+			if !errors.Is(err, tc.want) {
+				t.Error("wrong mapped status")
+			}
+			if calls != 1 {
+				t.Errorf("request count = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestLeaveChannelTransportFailure(t *testing.T) {
+	calls := 0
+	c := &Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("synthetic transport failure")
+	})}
+	if err := c.LeaveChannel(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat); !errors.Is(err, ErrUnreachable) {
+		t.Error("transport failure was not unreachable")
+	}
+	if calls != 1 {
+		t.Errorf("request count = %d, want 1", calls)
+	}
+}
+
+func TestLeaveChannelRejectsBadPathWithoutRequest(t *testing.T) {
+	for _, tc := range []struct{ owner, chat string }{{"bad", chChat}, {chOwner, "bad/chat"}} {
+		calls := 0
+		c := &Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return nil, errors.New("unexpected request")
+		})}
+		if err := c.LeaveChannel(context.Background(), "http://127.0.0.1", chToken, tc.owner, tc.chat); !errors.Is(err, ErrProtocol) {
+			t.Error("invalid path was not refused")
+		}
+		if calls != 0 {
+			t.Errorf("request count = %d, want 0", calls)
+		}
+	}
+}
