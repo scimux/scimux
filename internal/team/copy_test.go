@@ -1546,3 +1546,46 @@ func TestCopyLogReservationOnBothFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyRepairRetainsIndexWithoutRescanning(t *testing.T) {
+	for _, log := range []string{MirrorLog, CommentsLog} {
+		t.Run(log, func(t *testing.T) {
+			snapshotCopy(t)
+			dir, id := t.TempDir(), sampleCopyID()
+			if err := AppendCopy(dir, id, log, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
+				t.Fatal("cannot seed copy")
+			}
+			path, err := copyLogPath(dir, id, log)
+			if err != nil {
+				t.Fatal("cannot select copy")
+			}
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+			if err != nil {
+				t.Fatal("cannot open copy")
+			}
+			if _, err := f.WriteString(`{"seq":3`); err != nil {
+				t.Fatal("cannot write synthetic tear")
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal("cannot close copy")
+			}
+			copyMetas.Delete(path)
+			reads := 0
+			realRead := copyOps.readAt
+			copyOps.readAt = func(f *os.File, p []byte, off int64) (int, error) { reads++; return realRead(f, p, off) }
+			if _, last, err := ReadCopy(dir, id, log, ^uint64(0), 256, 4<<20); err != nil || last != 2 {
+				t.Fatal("repair failed")
+			}
+			if reads == 0 {
+				t.Fatal("repair did not scan")
+			}
+			reads = 0
+			if _, last, err := ReadCopy(dir, id, log, ^uint64(0), 256, 4<<20); err != nil || last != 2 {
+				t.Fatal("second read failed")
+			}
+			if reads != 0 {
+				t.Error("second read rescanned the repaired copy")
+			}
+		})
+	}
+}
