@@ -37,6 +37,8 @@ const ERRORS = [
   ["nope", "That did not work. Try again."],
 ];
 
+let focusedNode = null;
+
 function deferred() {
   let done = false;
   let resolve;
@@ -92,6 +94,7 @@ function makeEl(tag) {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type).add(fn);
     },
+    focus() { focusedNode = node; },
     removeEventListener(type, fn) {
       listeners.get(type)?.delete(fn);
     },
@@ -136,6 +139,7 @@ function listenersOf(node, type) {
 
 function parseHTML(html) {
   const out = [];
+  html = html.replace(/<input\b([^>]*)>/g, "<input$1></input>");
   const re = /<([a-zA-Z0-9]+)([^>]*)>([\s\S]*?)<\/\1>/g;
   let match;
   while ((match = re.exec(html))) out.push(buildEl(match[1], match[2], match[3]));
@@ -152,6 +156,10 @@ function buildEl(tag, attrs, inner) {
   if (state) node.dataset.state = state[1];
   const act = /data-act="([^"]*)"/.exec(attrs);
   if (act) node.dataset.act = act[1];
+  if (/data-name-input/.test(attrs)) node.dataset.nameInput = "";
+  const value = /value="([^"]*)"/.exec(attrs);
+  if (value) node.value = value[1].replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+  if (/\sdisabled(?:\s|$)/.test(attrs)) node.disabled = true;
   node.innerHTML = inner;
   return node;
 }
@@ -166,6 +174,7 @@ function matches(node, sel) {
   const act = /^\[data-act="([^"]*)"\]$/.exec(sel);
   if (act) return node.dataset.act === act[1];
   if (sel === "[data-act]") return Boolean(node.dataset.act);
+  if (sel === "[data-name-input]") return node.dataset.nameInput !== undefined;
   return false;
 }
 
@@ -305,7 +314,7 @@ test("rows stay in answer order, escape markup, and show the host or the whole a
   assert.match(html, /A&amp;B/);
   assert.doesNotMatch(html, /Ada <b>/);
   assert.match(html, /relay\.example/);
-  assert.match(html, /as /);
+  assert.match(html, /Your name: A&amp;B/);
   assert.equal(find(servers, (n) => n.dataset.state === marked.id).textContent, "checking");
   assert.equal(find(servers, (n) => n.dataset.act === "leave" && n.dataset.id === marked.id).textContent, "Leave");
   find(servers, (n) => n.classList.contains("teamname")).click();
@@ -621,4 +630,51 @@ test("missing slots do nothing", async () => {
   await section.settled();
   section.destroy();
   assert.deepEqual(calls, []);
+});
+
+function teamNameAction(ui, id, act) {
+  return find(ui.servers, node => node.dataset.act === act && node.dataset.id === id);
+}
+function teamNameField(ui) { return find(ui.servers, node => node.dataset.nameInput !== undefined); }
+function teamNameInput(ui, text) {
+  const field = teamNameField(ui); assert.ok(field); field.value = text;
+  for (const fn of ui.servers.listeners.get("input") || []) fn({ target: field });
+  return field;
+}
+function teamNameKey(ui, key) {
+  const field = teamNameField(ui); let stopped = false, prevented = false;
+  for (const fn of ui.servers.listeners.get("keydown") || []) fn({ target: field, key, stopPropagation() { stopped = true; }, preventDefault() { prevented = true; } });
+  return { stopped, prevented };
+}
+
+test("server name edit saves once, survives refresh and restores focus", async () => {
+  const pending = deferred(); let count = 0;
+  const ui = harness(call => {
+    if (call.path === "/api/team/servers") return { servers: [relay, other] };
+    if (call.method === "PUT") { count++; return pending.promise; }
+    return { status: "connected" };
+  });
+  await ui.section.refresh(); await ui.section.settled();
+  assert.match(ui.servers.innerHTML, /Your name: Ada/); assert.match(ui.servers.innerHTML, /Your name: Bea/);
+  teamNameAction(ui, relay.id, "name-edit").click();
+  assert.equal(teamNameField(ui).value, "Ada"); teamNameInput(ui, "Synthetic <&\"");
+  await ui.section.refresh(); await ui.section.settled(); assert.equal(teamNameField(ui).value, "Synthetic <&\"");
+  teamNameAction(ui, relay.id, "name-save").click();
+  assert.equal(count, 1); assert.equal(teamNameAction(ui, relay.id, "name-save").disabled, true); assert.equal(teamNameAction(ui, relay.id, "name-cancel").disabled, true);
+  teamNameAction(ui, relay.id, "name-save").click(); assert.equal(count, 1);
+  const sent = ui.calls.find(call => call.method === "PUT"); assert.equal(sent.path, "/api/team/servers/" + relay.id + "/seat"); assert.deepEqual(JSON.parse(sent.body), { name: "Synthetic <&\"" });
+  pending.resolve({ ...relay, seat_name: "Synthetic <&\"" }); await ui.section.settled();
+  assert.match(ui.servers.innerHTML, /Your name: Synthetic &lt;&amp;&quot;/); assert.equal(focusedNode, teamNameAction(ui, relay.id, "name-edit"));
+});
+
+test("server name cancel, escape and failure retain the right state", async () => {
+  let puts = 0;
+  const ui = harness(call => { if (call.path === "/api/team/servers") return { servers: [relay] }; if (call.method === "PUT") { puts++; throw apiError("name_refused", 422); } return { status: "connected" }; });
+  await ui.section.refresh(); await ui.section.settled();
+  assert.equal(teamErrorText("name_refused"), "The server did not accept that name.");
+  teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Synthetic"); teamNameAction(ui, relay.id, "name-save").click(); await ui.section.settled();
+  assert.equal(puts, 1); assert.equal(teamNameField(ui).value, "Synthetic"); assert.equal(ui.note.textContent, "The server did not accept that name.");
+  teamNameAction(ui, relay.id, "name-cancel").click(); assert.equal(teamNameField(ui), null); assert.equal(focusedNode, teamNameAction(ui, relay.id, "name-edit"));
+  teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Other"); assert.deepEqual(teamNameKey(ui, "Escape"), { stopped: true, prevented: true });
+  assert.equal(teamNameField(ui), null); assert.equal(focusedNode, teamNameAction(ui, relay.id, "name-edit")); assert.equal(puts, 1);
 });
