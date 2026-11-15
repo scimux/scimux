@@ -849,3 +849,37 @@ func TestCopyInitialScanUsesPiecesAndFindsBoundaryDamage(t *testing.T) {
 		t.Fatalf("boundary error %v", err)
 	}
 }
+
+func TestCopyScanOpenAndStatFailures(t *testing.T) {
+	for _, mode := range []string{"open", "stat"} {
+		t.Run(mode, func(t *testing.T) {
+			dir, id := t.TempDir(), sampleCopyID()
+			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{}`)}); err != nil {
+				t.Fatal(err)
+			}
+			path := copyPathOf(dir, id)
+			copyMetas.Delete(path)
+			snapshotCopy(t)
+			real := copyOps.open
+			boom := errors.New("synthetic open failure")
+			copyOps.open = func(path string, flag int, perm os.FileMode) (*os.File, error) {
+				if mode == "open" {
+					return nil, boom
+				}
+				f, err := real(path, flag, perm)
+				if err != nil {
+					return nil, err
+				}
+				_ = f.Close()
+				return f, nil
+			}
+			_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
+			if err == nil {
+				t.Fatal("scan accepted failed open or stat")
+			}
+			if mode == "open" && !errors.Is(err, boom) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
