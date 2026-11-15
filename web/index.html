@@ -236,7 +236,7 @@
   <div id="sv_scrim"></div>
   <div id="sv_panel">
     <div id="sv_head">
-      <button id="sv_back">&#8249; Shared with me</button>
+      <button id="sv_back">&#8249; Shared</button>
       <div class="phtext">
         <div id="sv_title"></div>
         <div id="sv_from"></div>
@@ -246,6 +246,12 @@
     </div>
     <div id="sv_body" role="log" aria-label="Shared chat" tabindex="0"></div>
     <button id="sv_more" hidden>Load more</button>
+    <div id="sv_compose" hidden>
+      <label class="sr-only" for="sv_text">Message to people</label>
+      <textarea id="sv_text" rows="2" placeholder="Message to people" aria-describedby="sv_hint"></textarea>
+      <button id="sv_send">Send</button>
+      <div id="sv_hint">People in this chat see this. The agent does not.</div>
+    </div>
     <div id="sv_note" role="status"></div>
   </div>
 </div>
