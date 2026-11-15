@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as guestModule from "../js/team-guest.js";
 import { jsonResponse } from "./s2-helpers.js";
 import { decodeResponse } from "../js/api.js";
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
@@ -147,6 +148,24 @@ function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, l
 }
 
 const readAnswer = (entries = [], next = 0, more = false, over = {}) => ({ view: { ...base, delivery: "ok", ...over }, entries, last: next, next, more });
+
+test("shared capture retains author, provenance and address", () => {
+  const capture = guestModule.guestCapture;
+  assert.equal(typeof capture, "function");
+  const address = { server: "s", owner: "o", chat: "c", generation: "g", log: "mirror", seq: 1 };
+  const entry = { t: "user", seq: 1, text: "hello [asset](scimux-asset:abc)", time: "time", prov: true };
+  assert.deepEqual(capture(entry, base, {}), { text: "hello asset", role: "person", who: "Owner", seat: "o", prov: true, from: "Chat", turnTime: "time", team: address });
+  assert.deepEqual(capture(entry, { ...base, access: "owner" }, {}), { text: "hello asset", role: "user", prov: true, from: "Chat", turnTime: "time", team: address });
+  assert.deepEqual(capture({ t: "assistant", seq: 1, text: "answer", agent: "Agent", time: "time" }, base, {}), { text: "answer", role: "assistant", agent: "Agent", from: "Chat", turnTime: "time", team: address });
+  assert.deepEqual(capture({ t: "assistant", seq: 1, text: "answer" }, { ...base, title: "" }, {}), { text: "answer", role: "assistant", from: "Untitled chat", turnTime: undefined, team: address });
+  assert.equal(capture({ ...entry, prov: false }, { ...base, owner_name: "" }, {}).who, "Unknown person");
+  const comment = { seq: 2, text: "message", at: "then", author: "seat", mine: false };
+  const commentAddress = { ...address, log: "comments", seq: 2 };
+  assert.deepEqual(capture(comment, base, { seat: "Writer" }), { text: "message", role: "person", who: "Writer", seat: "seat", from: "Chat", turnTime: "then", team: commentAddress });
+  assert.equal(capture(comment, base, {}).who, "Unknown person");
+  assert.deepEqual(capture({ ...comment, mine: true }, { ...base, access: "owner" }, {}), { text: "message", role: "user", from: "Chat", turnTime: "then", team: commentAddress });
+  for (const invalid of [{ t: "start", text: "x" }, { t: "source", text: "x" }, { t: "other", text: "x" }, { t: "user", omitted: "too_large" }, { t: "user" }, { t: "user", text: "" }]) assert.equal(capture(invalid, base, {}), null);
+});
 
 test("shared header describes each delivery and access state", () => {
   for (const [v, text] of [
