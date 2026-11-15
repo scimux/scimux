@@ -347,3 +347,28 @@ test("load more does not overlap a read or retry a missing chat", async () => {
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); f.click("sv_more"); assert.equal(reads, 1);
   pending.reject(new Error('{"error":"not_found"}')); await f.feature.settled(); f.click("sv_more"); assert.equal(reads, 1);
 });
+
+test("gate turning off during a read hides the tab and sends no read mark", async () => {
+  const read = deferred(); let lists = 0, puts = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") { lists++; if (lists === 1) return list([base]); throw Object.assign(new Error("off"), { status: 404 }); } if (path.endsWith("/seen")) { puts++; return ""; } return read.promise; });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item);
+  const before = f.invalidations(); f.setTime(10000); f.feature.tick();
+  await Promise.resolve(); await Promise.resolve(); read.resolve(readAnswer([{ t: "user", seq: 1, text: "x" }], 1)); await f.feature.settled();
+  assert.equal(puts, 0); assert.equal(f.feature.tab.tabHTML(false), ""); assert.equal(f.invalidations(), before + 1);
+});
+
+test("late read errors and late seen responses do not update a closed view", async () => {
+  const read = deferred();
+  const a = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return read.promise; });
+  a.feature.tick(); await a.feature.settled(); a.click("cardlist", a.item); a.click("sv_back"); read.reject(new Error('{"error":"copy_damaged"}')); await a.feature.settled(); assert.equal(a.get("sv_note").textContent, "");
+  const seen = deferred();
+  const b = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([{ ...base, unread: true }]); if (path.endsWith("/seen")) return seen.promise; return readAnswer([], 1); });
+  b.feature.tick(); await b.feature.settled(); b.click("cardlist", b.item); await Promise.resolve(); b.click("sv_back"); seen.resolve(""); await b.feature.settled(); assert.match(b.feature.tab.tabHTML(false), /1 unread/);
+});
+
+test("a completed read mark tolerates its subscription disappearing", async () => {
+  const seen = deferred(); let lists = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") { lists++; if (lists === 1) return list([base]); return list(); } if (path.endsWith("/seen")) return seen.promise; return readAnswer([], 1); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await Promise.resolve(); f.setTime(10000); f.feature.tick(); await Promise.resolve(); await Promise.resolve(); seen.resolve(""); await f.feature.settled();
+  assert.equal(f.feature.tab.tabHTML(false), "");
+});
