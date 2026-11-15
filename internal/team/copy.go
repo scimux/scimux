@@ -1,6 +1,7 @@
 package team
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -166,21 +167,45 @@ func ReadCopy(dataDir string, id CopyID, after uint64, maxEntries int, maxBodyBy
 		return nil, 0, err
 	}
 	defer f.Close()
-	buf := make([]byte, m.size-off)
-	n, err := copyOps.readAt(f, buf, off)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, 0, err
-	}
-	if int64(n) != m.size-off {
-		m.damaged = true
-		return nil, 0, ErrCopyDamaged
-	}
-	entries, err := parseTail(buf[:n], (after/copyStride)*copyStride+1, after)
-	if err != nil {
-		m.damaged = true
-		return nil, 0, err
+	r := bufio.NewReaderSize(io.NewSectionReader(copyReaderAt{f}, off, m.size-off), 4096)
+	seq := (after/copyStride)*copyStride + 1
+	entries := []MirrorRecord{}
+	bodyBytes := 0
+	for seq <= m.last {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				m.damaged = true
+				return nil, 0, ErrCopyDamaged
+			}
+			return nil, 0, err
+		}
+		rec, ok := acceptLine(line[:len(line)-1], seq)
+		if !ok {
+			m.damaged = true
+			return nil, 0, ErrCopyDamaged
+		}
+		seq++
+		if rec.Seq <= after {
+			continue
+		}
+		entries = append(entries, rec)
+		bodyBytes += len(rec.Body)
+		if len(entries) >= maxEntries || bodyBytes > maxBodyBytes {
+			break
+		}
 	}
 	return entries, m.last, nil
+}
+
+type copyReaderAt struct{ f *os.File }
+
+func (r copyReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := copyOps.readAt(r.f, p, off)
+	if n < len(p) && err == nil {
+		return n, ErrCopyDamaged
+	}
+	return n, err
 }
 
 func copyPath(dataDir string, id CopyID) (string, error) {
@@ -210,40 +235,42 @@ func (m *copyMeta) sync(path string) error {
 }
 
 func (m *copyMeta) scan(path string) error {
-	raw, err := os.ReadFile(path)
+	f, err := copyOps.open(path, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	r := bufio.NewReaderSize(io.NewSectionReader(copyReaderAt{f}, 0, info.Size()), 4096)
 	m.ready = true
 	m.damaged = false
 	m.offsets = nil
 	m.last = 0
-	m.size = int64(len(raw))
-	if len(raw) == 0 {
-		return nil
-	}
-	if raw[len(raw)-1] != '\n' {
-		m.damaged = true
-		return ErrCopyDamaged
-	}
-	rest := raw
-	var seq uint64
+	m.size = info.Size()
 	var off int64
-	for len(rest) > 0 {
-		i := bytes.IndexByte(rest, '\n')
-		seq++
-		if _, ok := acceptLine(rest[:i], seq); !ok {
+	for off < m.size {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				m.damaged = true
+				return ErrCopyDamaged
+			}
+			return err
+		}
+		seq := m.last + 1
+		if _, ok := acceptLine(line[:len(line)-1], seq); !ok {
 			m.damaged = true
 			return ErrCopyDamaged
 		}
 		if (seq-1)%copyStride == 0 {
 			m.offsets = append(m.offsets, off)
 		}
-		off += int64(i + 1)
+		off += int64(len(line))
 		m.last = seq
-		rest = rest[i+1:]
 	}
-	m.size = off
 	return nil
 }
 
@@ -325,27 +352,6 @@ func ensureCopyDirs(dir string) error {
 			return nil
 		}
 	}
-}
-
-func parseTail(buf []byte, seq, after uint64) ([]MirrorRecord, error) {
-	out := []MirrorRecord{}
-	rest := buf
-	for len(rest) > 0 {
-		i := bytes.IndexByte(rest, '\n')
-		if i < 0 {
-			return nil, ErrCopyDamaged
-		}
-		rec, ok := acceptLine(rest[:i], seq)
-		if !ok {
-			return nil, ErrCopyDamaged
-		}
-		if rec.Seq > after {
-			out = append(out, rec)
-		}
-		seq++
-		rest = rest[i+1:]
-	}
-	return out, nil
 }
 
 func acceptLine(line []byte, expect uint64) (MirrorRecord, bool) {
