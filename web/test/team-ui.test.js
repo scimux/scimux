@@ -771,3 +771,18 @@ test("an older list reply cannot undo a successful seat rename", async () => {
   listing.resolve({ servers: [relay] }); await refreshing; await ui.section.settled();
   assert.match(ui.servers.innerHTML, /Your name: Synthetic/);
 });
+
+test("successive seat name changes use the newest result", async () => {
+  let seat = "Ada", puts = 0;
+  const ui = harness(call => {
+    if (call.path === "/api/team/servers") return { servers: [{ ...relay, seat_name: seat }] };
+    if (call.method === "PUT") { puts++; seat = JSON.parse(call.body).name; return { ...relay, seat_name: seat }; }
+    return { status: "connected" };
+  });
+  await ui.section.refresh(); await ui.section.settled();
+  for (const name of ["First", "Second"]) {
+    teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, name); teamNameAction(ui, relay.id, "name-save").click(); await ui.section.settled();
+    assert.match(ui.servers.innerHTML, new RegExp("Your name: " + name));
+  }
+  assert.equal(puts, 2); await ui.section.refresh(); await ui.section.settled(); assert.match(ui.servers.innerHTML, /Your name: Second/);
+});
