@@ -732,3 +732,27 @@ test("a failed late name save for a removed server is dropped", async () => {
   await ui.section.refresh(); pending.reject(apiError("refused", 502)); await ui.section.settled();
   assert.match(ui.servers.innerHTML, /No server joined/); assert.equal(ui.note.textContent, "");
 });
+
+test("seat name errors keep the typed field for every route error", async () => {
+  for (const code of ["bad_request", "not_found", "unreachable", "refused", "name_refused", "bad_server", "store_unavailable"]) {
+    const ui = harness(call => { if (call.path === "/api/team/servers") return { servers: [relay] }; if (call.method === "PUT") throw apiError(code, 500); return { status: "connected" }; });
+    await ui.section.refresh(); await ui.section.settled();
+    teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Synthetic"); teamNameAction(ui, relay.id, "name-save").click(); await ui.section.settled();
+    assert.equal(teamNameField(ui).value, "Synthetic", code); assert.equal(ui.note.textContent, teamErrorText(code), code);
+    assert.equal(teamNameAction(ui, relay.id, "name-save").disabled, false, code);
+  }
+});
+
+test("a late seat name answer can find a row restored during the request", async () => {
+  const pending = deferred(); let loads = 0;
+  const ui = harness(call => {
+    if (call.path === "/api/team/servers") return { servers: ++loads === 2 ? [] : [relay] };
+    if (call.method === "PUT") return pending.promise;
+    return { status: "connected" };
+  });
+  await ui.section.refresh(); await ui.section.settled();
+  teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Synthetic"); teamNameAction(ui, relay.id, "name-save").click();
+  await ui.section.refresh(); await ui.section.refresh();
+  pending.resolve({ ...relay, seat_name: "Synthetic" }); await ui.section.settled();
+  assert.match(ui.servers.innerHTML, /Your name: Synthetic/); assert.equal(teamNameField(ui), null);
+});
