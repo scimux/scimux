@@ -1254,3 +1254,16 @@ func TestRemoveCopyRejectsNonDirectoryRoot(t *testing.T) {
 		t.Error("copy was removed")
 	}
 }
+
+func TestRemoveCopyWithMissingParents(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := os.Mkdir(filepath.Join(dir, CopiesDir), 0o700); err != nil {
+		t.Fatal("cannot create copy root")
+	}
+	if err := RemoveCopy(dir, id); err != nil {
+		t.Error("missing parents must succeed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); err != nil {
+		t.Error("copy root was lost")
+	}
+}
