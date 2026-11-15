@@ -255,6 +255,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         }
         node.textContent = name;
       }
+      if (open.row) open.row.capture = guestCapture(open.row.entry, open.view, open.names, knownPeople);
     }
     return changed;
   }
@@ -299,6 +300,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (focus) focus.focus();
   }
   function keydown(event) {
+    if (event.key === "Escape" && event.target?.dataset?.grename !== undefined) {
+      event.preventDefault(); event.stopPropagation(); restoreNameRow(); return;
+    }
     if (event.key === "Enter" || event.key === " ") {
       if (!event.target) return;
       const bubble = event.target.closest(".bubble");
@@ -581,12 +585,51 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       open.row = null;
       if (previous.turn === turn) return;
     }
-    turn.insertAdjacentHTML("afterend", '<div class="bubactions" data-gactions><button data-gact="bookmark">bookmark</button><button data-gact="sendto">send to&#8230;</button></div>');
-    open.row = { turn, capture };
+    turn.insertAdjacentHTML("afterend", '<div class="bubactions" data-gactions>' + actionButtons(capture) + '</div>');
+    open.row = { turn, capture, entry, renaming: false };
+  }
+  function actionButtons(capture) {
+    let buttons = '<button data-gact="bookmark">bookmark</button><button data-gact="sendto">send to&#8230;</button>';
+    if (capture.role === "person") buttons += '<button data-gact="rename">rename person</button>';
+    return buttons;
+  }
+  function restoreNameRow() {
+    if (!open) return;
+    if (!open.row) return;
+    if (!open.row.renaming) return;
+    const row = open.row.turn.nextElementSibling;
+    open.row.renaming = false;
+    row.innerHTML = actionButtons(open.row.capture);
+    row.querySelector('[data-gact="rename"]').focus();
+  }
+  function editPerson() {
+    if (open.row.capture.role !== "person") return;
+    const row = open.row.turn.nextElementSibling;
+    open.row.renaming = true;
+    row.innerHTML = '<input data-grename maxlength="64" aria-label="Name for this person" value="' + esc(open.row.capture.who) + '">' +
+      '<button data-gact="name-save">Save</button><button data-gact="name-use">Use their name</button>';
+    row.querySelector("[data-grename]").focus();
+  }
+  function savePerson(useServerName) {
+    if (!open.row.renaming) return;
+    const row = open.row.turn.nextElementSibling;
+    const entry = open.row.entry;
+    const seat = open.row.capture.seat;
+    let serverName = open.names[seat];
+    if (entry.t === "user") serverName = open.view.owner_name;
+    let name = row.querySelector("[data-grename]").value.trim();
+    if (useServerName || name === serverName) name = "";
+    uiMutate({ k: "person-name", key: open.view.server + "/" + seat, name });
+    refreshPeople();
+    invalidateCards();
+    restoreNameRow();
   }
   function runAction(action) {
     if (!open.row) return;
     const capture = open.row.capture;
+    if (action === "rename") { editPerson(); return; }
+    if (action === "name-save") { savePerson(false); return; }
+    if (action === "name-use") { savePerson(true); return; }
     if (action === "bookmark") {
       const keys = ["server", "owner", "chat", "generation", "log", "seq"];
       const duplicate = bookmarks().some(item => item.team && keys.every(key => item.team[key] === capture.team[key]));
