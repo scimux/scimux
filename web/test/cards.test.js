@@ -1961,3 +1961,9 @@ test("shared cards title has no waiting prefix when nobody is waiting", () => {
   f.feature.render();
   assert.equal(f.doc.title, "scimux");
 });
+
+test("archived tab active class follows the selected tab", () => {
+  const args = { laneFilter: "", currentCount: 0, archivedCount: 0, pinnedCount: 0 };
+  assert.match(cardTabsHTML({ ...args, cardTab: "archived" }), /data-tab="archived" class="on"/);
+  assert.match(cardTabsHTML({ ...args, cardTab: "current" }), /data-tab="archived" class=""/);
+});
