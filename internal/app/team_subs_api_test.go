@@ -1259,3 +1259,40 @@ func TestSubListRereadOfADamagedFileIsAnError(t *testing.T) {
 		t.Fatalf("file = %q err %v", raw, err)
 	}
 }
+
+func TestSubListDeliveryWhileFirstAskIsPending(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+		case "/v1/channels":
+			once.Do(func() { close(entered) })
+			<-release
+			_, _ = io.WriteString(w, `{"channels":[]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- doTeam(h, http.MethodGet, "/api/team/subscriptions", "") }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the list did not reach the team server")
+	}
+	got, _ := readSubList(t, h)
+	letGo()
+	if len(got.Servers) != 1 || got.Servers[0].Delivery != "ok" {
+		t.Fatalf("servers while the first ask is pending = %+v", got.Servers)
+	}
+	_ = recvTeam(t, done, "subscriptions")
+}
