@@ -222,6 +222,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   }
   function more() { startRead(); }
   function startRead() {
+    if (off) return;
     if (!open) return;
     if (open.busy) return;
     if (open.failed) return;
