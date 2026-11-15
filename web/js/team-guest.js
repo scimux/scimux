@@ -192,7 +192,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       hasAnswer = true;
       answer = next;
-      if (refreshPeople()) changed = true;
+      if (refreshPeople() && next.subscriptions.length) changed = true;
       if (changed) invalidateCards();
     } catch (error) {
       if (destroyed) return;
