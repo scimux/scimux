@@ -779,15 +779,15 @@ func TestSubListOwnerNames(t *testing.T) {
 	script.seatsBody = seatsOf(subOwner, "Ada", subOwnerB, "Bea", subOwnerC, "Ada")
 	script.mu.Unlock()
 	second, _ := readSubList(t, h)
-	if mustFindSub(t, second, subOwnerC, subChatC, subGen).OwnerName != "Ada" {
+	if mustFindSub(t, second, subOwnerC, subChatC, subGen).OwnerName != "" {
 		t.Fatalf("new name = %+v", second.Subscriptions)
 	}
-	if countSubPath(script.snapshot(), "/v1/seats") != 2 {
+	if countSubPath(script.snapshot(), "/v1/seats") != 1 {
 		t.Fatalf("seats asks = %+v", script.snapshot())
 	}
 	*clock = clock.Add(10 * time.Minute)
 	script.mu.Lock()
-	script.seatsBody = seatsOf(subOwner, "Bea")
+	script.seatsBody = seatsOf(subOwner, "Bea", subOwnerC, "Ada")
 	script.mu.Unlock()
 	third, _ := readSubList(t, h)
 	if mustFindSub(t, third, subOwner, subChat, subGen).OwnerName != "Bea" {
@@ -799,7 +799,7 @@ func TestSubListOwnerNames(t *testing.T) {
 	if mustFindSub(t, third, subOwnerC, subChatC, subGen).OwnerName != "Ada" {
 		t.Fatalf("owner missing from the later roster = %+v", third.Subscriptions)
 	}
-	if countSubPath(script.snapshot(), "/v1/seats") != 3 {
+	if countSubPath(script.snapshot(), "/v1/seats") != 2 {
 		t.Fatalf("seats asks = %+v", script.snapshot())
 	}
 }
@@ -1915,5 +1915,33 @@ func TestTeamOtherRoutesDoNotListChannels(t *testing.T) {
 		if path == "GET /v1/channels" {
 			t.Fatal("other routes listed channels")
 		}
+	}
+}
+
+func TestSubListRosterAttemptThrottledRegardlessOfOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		ownerName string
+	}{{"failed with name", 500, "Ada"}, {"failed without name", 500, ""}, {"missing owner", 200, ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 2)), seatsStatus: tc.status}
+			h, dir, _ := subSurface(t, script)
+			sub := baseSub()
+			sub.OwnerName = tc.ownerName
+			seedSub(t, dir, sub)
+			clock := holdClock(t, h)
+			readSubList(t, h)
+			*clock = clock.Add(11 * time.Second)
+			readSubList(t, h)
+			if n := countSubPath(script.snapshot(), "/v1/seats"); n != 1 {
+				t.Fatalf("roster calls before ten minutes = %d", n)
+			}
+			*clock = clock.Add(10 * time.Minute)
+			readSubList(t, h)
+			if n := countSubPath(script.snapshot(), "/v1/seats"); n != 2 {
+				t.Fatalf("roster calls after ten minutes = %d", n)
+			}
+		})
 	}
 }
