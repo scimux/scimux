@@ -139,7 +139,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       if (changed) invalidateCards();
     } catch (error) {
       if (destroyed) return;
-      if (error.status === 404) off = true;
+      if (error.status === 404) {
+        off = true;
+        readGeneration++;
+        if (answer.subscriptions.length) invalidateCards();
+      }
     } finally {
       loading = false;
     }
@@ -260,7 +264,6 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
         morePages = result.more;
         if (!morePages) break;
       }
-      if (!currentRead(current, gen)) return;
       if (first) {
         if (!hasEntries) {
           body.innerHTML = '<div class="previewtrunc">Nothing has been shared yet.</div>';
