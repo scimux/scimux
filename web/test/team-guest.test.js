@@ -914,3 +914,25 @@ test("editing a reopened draft after a late success creates a fresh draft", asyn
   f.click("cardlist", f.item); pending.resolve({ seq:1 }); await f.feature.settled(); setGuestDraft(f, "second");
   f.click("sv_back"); f.click("cardlist", f.item); await f.feature.settled(); assert.ok(f.get("sv_text").value === "second");
 });
+
+test("a send starts a fresh read even when an earlier read is pending", async () => {
+  const pending = deferred(), view = { ...base, access:"write" }; let reads = 0;
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    if (opts?.method === "POST") return { seq:1 };
+    reads++; if (reads === 1) return pending.promise;
+    return readAnswer([], 0, false, view);
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); setGuestDraft(f, "synthetic"); f.click("sv_send");
+  await Promise.resolve(); await Promise.resolve();
+  const observed = reads; pending.resolve(readAnswer([], 0, false, view)); await f.feature.settled();
+  assert.equal(observed, 2);
+});
+
+test("an over-limit draft keeps its warning when a read fails", async () => {
+  const view = { ...base, access:"write" }; let reads = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([view]); reads++; if (reads > 1) throw new Error('{"error":"unreachable"}'); return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  setGuestDraft(f, "x".repeat(16385)); f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(f.get("sv_note").textContent, "That message is too long.");
+});
