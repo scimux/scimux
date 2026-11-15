@@ -90,6 +90,12 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id := team.CopyID{Server: parts[0], Owner: parts[1], Chat: parts[2], Generation: parts[3]}
+	if len(parts) == 4 {
+		if r.Method == http.MethodDelete {
+			h.removeSubscription(w, r, id)
+			return
+		}
+	}
 	if len(parts) == 4 && r.Method == http.MethodGet {
 		h.readSubscription(w, r, id)
 		return
@@ -831,4 +837,11 @@ func (h *teamHandler) saveSubscriptionState(subs []team.Subscription) error {
 		return h.saveSubs(h.dataDir, subs)
 	}
 	return team.SaveSubs(h.dataDir, subs)
+}
+
+// removeSubscriptionCopy is a filesystem seam for removal tests.
+var removeSubscriptionCopy = team.RemoveCopy
+
+func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
+	writeTeamError(w, http.StatusNotFound, "not_found")
 }

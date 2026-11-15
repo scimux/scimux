@@ -1650,7 +1650,7 @@ func TestSubReadOfflineAndDamagedCopy(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("broken\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "copy_damaged")
@@ -1787,7 +1787,7 @@ func TestSubSeenDamagedCopyAndSaveFailure(t *testing.T) {
 	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1}`), 500, "store_unavailable")
 	asTeamHandler(t, h).saveSubs = nil
 	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
-	if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("broken\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1}`), 500, "store_unavailable")
@@ -1844,7 +1844,7 @@ func TestSubReadCopyDamagedDuringFetch(t *testing.T) {
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Error(err)
 				}
-				if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+				if err := os.WriteFile(path, []byte("broken\n"), 0o600); err != nil {
 					t.Error(err)
 				}
 				w.WriteHeader(status)
@@ -2480,5 +2480,405 @@ func TestProjectSubRecordUserOmittedType(t *testing.T) {
 				t.Fatal("non-string omitted accepted")
 			}
 		})
+	}
+}
+
+type subRemoveScript struct {
+	helloStatus int
+	helloID     string
+	leaveStatus int
+	drop        string
+	helloCalls  atomic.Int64
+	leaveCalls  atomic.Int64
+}
+
+func (s *subRemoveScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/hello" {
+		s.helloCalls.Add(1)
+		if s.drop == "hello" {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		status := s.helloStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			id := s.helloID
+			if id == "" {
+				id = teamServerID
+			}
+			_, _ = io.WriteString(w, helloJSON(id, "Synthetic"))
+		}
+		return
+	}
+	if r.URL.Path == "/v1/channels/"+subOwner+"/"+subChat+"/membership" {
+		s.leaveCalls.Add(1)
+		if s.drop == "leave" {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+teamToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		status := s.leaveStatus
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		w.WriteHeader(status)
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func seedRemovalCopy(t *testing.T, dir string, id team.CopyID) string {
+	t.Helper()
+	record := team.MirrorRecord{Seq: 1, Key: "k1", Author: id.Owner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{}`)}
+	if err := team.AppendCopy(dir, id, []team.MirrorRecord{record}); err != nil {
+		t.Fatal("cannot seed synthetic copy")
+	}
+	return filepath.Join(dir, team.CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "mirror.jsonl")
+}
+
+func TestSubRemoveLiveAndServerOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		helloStatus int
+		helloID     string
+		leaveStatus int
+		drop        string
+		want        int
+		code        string
+		leaveCalls  int64
+		removed     bool
+	}{
+		{"success", 0, "", 204, "", 204, "", 1, true},
+		{"missing channel", 0, "", 404, "", 204, "", 1, true},
+		{"unauthorized", 0, "", 401, "", 204, "", 1, true},
+		{"hello offline", 0, "", 0, "hello", 502, "unreachable", 0, false},
+		{"hello mismatch", 0, teamOtherID, 0, "", 502, "bad_server", 0, false},
+		{"hello protocol", 500, "", 0, "", 502, "bad_server", 0, false},
+		{"leave offline", 0, "", 0, "leave", 502, "unreachable", 1, false},
+		{"leave protocol", 0, "", 500, "", 502, "bad_server", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := &subRemoveScript{helloStatus: tc.helloStatus, helloID: tc.helloID, leaveStatus: tc.leaveStatus, drop: tc.drop}
+			srv := httptest.NewServer(script)
+			t.Cleanup(srv.Close)
+			h, dir := testTeamSurface(t, clientFor(srv))
+			joinLab(t, dir, teamServerID, srv.URL)
+			seedSub(t, dir, baseSub())
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			path := seedRemovalCopy(t, dir, id)
+			rec := doTeam(h, http.MethodDelete, subReadPath(), "")
+			if rec.Code != tc.want {
+				t.Errorf("status = %d, want %d", rec.Code, tc.want)
+			}
+			if tc.code != "" {
+				assertAPIError(t, rec, tc.want, tc.code)
+			}
+			if script.helloCalls.Load() != 1 {
+				t.Error("wrong hello request count")
+			}
+			if script.leaveCalls.Load() != tc.leaveCalls {
+				t.Error("wrong leave request count")
+			}
+			subs := loadSubFile(t, dir)
+			_, err := os.Stat(path)
+			if tc.removed {
+				if len(subs) != 0 {
+					t.Error("subscription remains")
+				}
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Error("copy remains")
+				}
+			} else {
+				if len(subs) != 1 {
+					t.Error("subscription was removed")
+				}
+				if err != nil {
+					t.Error("copy was removed")
+				}
+			}
+		})
+	}
+}
+
+func TestSubRemoveEndedAndUnjoinedDoNotCallServer(t *testing.T) {
+	for _, mode := range []string{"ended", "unjoined"} {
+		t.Run(mode, func(t *testing.T) {
+			script := &subRemoveScript{}
+			srv := httptest.NewServer(script)
+			t.Cleanup(srv.Close)
+			h, dir := testTeamSurface(t, clientFor(srv))
+			joinLab(t, dir, teamServerID, srv.URL)
+			sub := baseSub()
+			if mode == "ended" {
+				sub.State = "ended"
+			}
+			seedSub(t, dir, sub)
+			if mode == "unjoined" {
+				if err := team.Remove(dir, teamServerID); err != nil {
+					t.Fatal("cannot forget synthetic server")
+				}
+			}
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			path := seedRemovalCopy(t, dir, id)
+			if rec := doTeam(h, http.MethodDelete, subReadPath(), ""); rec.Code != http.StatusNoContent {
+				t.Errorf("status = %d", rec.Code)
+			}
+			if script.helloCalls.Load() != 0 {
+				t.Error("unexpected hello")
+			}
+			if script.leaveCalls.Load() != 0 {
+				t.Error("unexpected leave")
+			}
+			if len(loadSubFile(t, dir)) != 0 {
+				t.Error("subscription remains")
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Error("copy remains")
+			}
+		})
+	}
+}
+
+func TestSubRemoveRejectsUnknownAndMalformedIdentities(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	seedSub(t, dir, baseSub())
+	parts := []string{teamServerID, subOwner, subChat, subGen}
+	for i := range parts {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			bad := append([]string(nil), parts...)
+			bad[i] = "bad"
+			assertAPIError(t, doTeam(h, http.MethodDelete, "/api/team/subscriptions/"+strings.Join(bad, "/"), ""), 404, "not_found")
+		})
+	}
+	other := []string{teamOtherID, subOwnerB, subChatB, subGenB}
+	for i := range parts {
+		unknown := append([]string(nil), parts...)
+		unknown[i] = other[i]
+		assertAPIError(t, doTeam(h, http.MethodDelete, "/api/team/subscriptions/"+strings.Join(unknown, "/"), ""), 404, "not_found")
+	}
+	if len(loadSubFile(t, dir)) != 1 {
+		t.Error("unknown request changed subscriptions")
+	}
+}
+
+func TestSubRemoveRequiresCSRF(t *testing.T) {
+	cmd, data, _, _ := startTeamCommand(t, true, true)
+	seedSub(t, data, baseSub())
+	core, err := newCoreMux(cmd.application)
+	if err != nil {
+		t.Fatal("cannot create core mux")
+	}
+	web, err := newWebBackend(webBackendConfig{Web: webFS, Core: core, RequestPolicy: cmd.application.requestPolicy})
+	if err != nil {
+		t.Fatal("cannot create web boundary")
+	}
+	req := httptest.NewRequest(http.MethodDelete, "http://127.0.0.1"+subReadPath(), nil)
+	req.Host = "127.0.0.1"
+	rec := httptest.NewRecorder()
+	web.local.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("without CSRF = %d", rec.Code)
+	}
+	if len(loadSubFile(t, data)) != 1 {
+		t.Error("request without CSRF removed subscription")
+	}
+}
+
+func TestSubRemoveStoreFailuresKeepSubscription(t *testing.T) {
+	for _, mode := range []string{"lookup", "copy", "reload", "save"} {
+		t.Run(mode, func(t *testing.T) {
+			h, dir := testTeamSurface(t, team.NewClient())
+			sub := baseSub()
+			sub.State = "ended"
+			seedSub(t, dir, sub)
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			path := seedRemovalCopy(t, dir, id)
+			previous := removeSubscriptionCopy
+			t.Cleanup(func() { removeSubscriptionCopy = previous })
+			switch mode {
+			case "lookup":
+				if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("broken"), 0o600); err != nil {
+					t.Fatal("cannot damage synthetic store")
+				}
+			case "copy":
+				removeSubscriptionCopy = func(string, team.CopyID) error { return errors.New("synthetic remove failure") }
+			case "reload":
+				removeSubscriptionCopy = func(data string, copyID team.CopyID) error {
+					if err := previous(data, copyID); err != nil {
+						return err
+					}
+					return os.WriteFile(filepath.Join(data, team.SubsFile), []byte("broken"), 0o600)
+				}
+			case "save":
+				asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic save failure") }
+			}
+			assertAPIError(t, doTeam(h, http.MethodDelete, subReadPath(), ""), 500, "store_unavailable")
+			if mode == "copy" {
+				if _, err := os.Stat(path); err != nil {
+					t.Error("copy was lost on remove failure")
+				}
+			}
+			if mode == "save" {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Error("copy remains after save failure")
+				}
+				if len(loadSubFile(t, dir)) != 1 {
+					t.Error("entry was lost on save failure")
+				}
+			}
+		})
+	}
+}
+
+func TestSubRemovePreservesOtherServer(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	first := baseSub()
+	first.State = "ended"
+	second := first
+	second.Server = teamOtherID
+	second.Chat = subChatB
+	seedSub(t, dir, first)
+	seedSub(t, dir, second)
+	id1 := team.CopyID{Server: first.Server, Owner: first.Owner, Chat: first.Chat, Generation: first.Generation}
+	id2 := team.CopyID{Server: second.Server, Owner: second.Owner, Chat: second.Chat, Generation: second.Generation}
+	path1, path2 := seedRemovalCopy(t, dir, id1), seedRemovalCopy(t, dir, id2)
+	if rec := doTeam(h, http.MethodDelete, subReadPath(), ""); rec.Code != http.StatusNoContent {
+		t.Errorf("status = %d", rec.Code)
+	}
+	if _, err := os.Stat(path1); !errors.Is(err, os.ErrNotExist) {
+		t.Error("first copy remains")
+	}
+	if _, err := os.Stat(path2); err != nil {
+		t.Error("other copy was lost")
+	}
+	subs := loadSubFile(t, dir)
+	if len(subs) != 1 {
+		t.Fatal("wrong subscription count")
+	}
+	if subs[0].Server != teamOtherID {
+		t.Error("other server subscription was lost")
+	}
+}
+
+func TestSubReadRacingRemovalDoesNotRestoreCopy(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mirrorOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Synthetic"))
+		case "/v1/channels/" + subOwner + "/" + subChat + "/mirror":
+			mirrorOnce.Do(func() { close(entered) })
+			<-release
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{}`)))
+		case "/v1/channels/" + subOwner + "/" + subChat + "/membership":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	seedSub(t, dir, baseSub())
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- doTeam(h, http.MethodGet, subReadPath(), "") }()
+	<-entered
+	removed := doTeam(h, http.MethodDelete, subReadPath(), "")
+	close(release)
+	read := <-done
+	if removed.Code != http.StatusNoContent {
+		t.Errorf("remove status = %d", removed.Code)
+	}
+	assertAPIError(t, read, http.StatusNotFound, "not_found")
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	path := filepath.Join(dir, team.CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "mirror.jsonl")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Error("read restored the removed copy")
+	}
+	if len(loadSubFile(t, dir)) != 0 {
+		t.Error("subscription was restored")
+	}
+}
+
+func TestSubReadRechecksDamagedSubscriptionStore(t *testing.T) {
+	var dir string
+	h, data := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("broken"), 0o600); err != nil {
+			t.Error("cannot damage synthetic store")
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{}`)))
+	})
+	dir = data
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "store_unavailable")
+}
+
+func TestSubRemoveNetworkCallsHoldNoHandlerLock(t *testing.T) {
+	var handler *teamHandler
+	var held, earlyAuth atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handler.mu.TryLock() {
+			handler.mu.Unlock()
+		} else {
+			held.Store(true)
+		}
+		if r.URL.Path == "/v1/hello" {
+			if r.Header.Get("Authorization") != "" {
+				earlyAuth.Store(true)
+			}
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Synthetic"))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+teamToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	handler = asTeamHandler(t, h)
+	joinLab(t, dir, teamServerID, srv.URL)
+	seedSub(t, dir, baseSub())
+	if rec := doTeam(h, http.MethodDelete, subReadPath(), ""); rec.Code != http.StatusNoContent {
+		t.Errorf("status = %d", rec.Code)
+	}
+	if held.Load() {
+		t.Error("network request held the handler lock")
+	}
+	if earlyAuth.Load() {
+		t.Error("hello carried authorization")
+	}
+}
+
+func TestSubRemoveGateOffDoesNothing(t *testing.T) {
+	cmd, data, _, _ := startTeamCommand(t, false, true)
+	core, err := newCoreMux(cmd.application)
+	if err != nil {
+		t.Fatal("cannot create core mux")
+	}
+	if got, want := recordedText(core, http.MethodDelete, subReadPath()), recordedText(core, http.MethodDelete, "/api/not-a-route"); got != want {
+		t.Error("gate-off route did not match the unknown route")
+	}
+	assertNoTeamFile(t, data)
+	assertNoSubsFile(t, data)
+	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Error("gate-off route touched copies")
 	}
 }
