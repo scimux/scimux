@@ -3784,8 +3784,10 @@ func TestSubSeenBothLogsCapsAndWritesOnce(t *testing.T) {
 			t.Error("seen counters or write count incorrect")
 		}
 	}
-	for _, body := range []string{`{}`, `{"comments":null}`, `{"comments":-1}`, `{"comments":1,"extra":2}`, `{"comments":1} {}`} {
-		assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", body), 400, "bad_request")
+	for i, body := range []string{`{}`, `{"comments":null}`, `{"mirror":null,"comments":1}`, `{"mirror":1,"comments":null}`, `{"comments":-1}`, `{"comments":1,"extra":2}`, `{"comments":1} {}`} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", body), 400, "bad_request")
+		})
 	}
 }
 
