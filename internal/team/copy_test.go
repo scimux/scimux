@@ -215,6 +215,9 @@ func TestCopyDamageIsLeftUntouched(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if strings.HasSuffix(tc.body, `\n`) {
+				tc.body = strings.TrimSuffix(tc.body, `\n`) + "\n"
+			}
 			dir := t.TempDir()
 			id := sampleCopyID()
 			path := copyPathOf(dir, id)
