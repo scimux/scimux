@@ -1810,3 +1810,99 @@ func TestTeamStatusAndLeaveShareTheSettingsBoundary(t *testing.T) {
 	}
 	assertNoSecrets(t, leaveRec.Body.String(), "", teamToken)
 }
+
+func TestTeamRenameSeatRoute(t *testing.T) {
+	cases := []struct {
+		name       string
+		helloBody  string
+		helloErr   bool
+		nextStatus int
+		nextErr    bool
+		status     int
+		code       string
+		hits       int
+	}{
+		{"success", helloJSON(teamServerID, "Lab relay"), false, 200, false, 200, "", 2},
+		{"hello offline", "", true, 200, false, 502, "unreachable", 1},
+		{"hello bad", `{}`, false, 200, false, 502, "bad_server", 1},
+		{"other server", helloJSON(teamOtherID, "Lab relay"), false, 200, false, 502, "bad_server", 1},
+		{"rename offline", helloJSON(teamServerID, "Lab relay"), false, 200, true, 502, "unreachable", 2},
+		{"refused", helloJSON(teamServerID, "Lab relay"), false, 401, false, 502, "refused", 2},
+		{"bad name", helloJSON(teamServerID, "Lab relay"), false, 400, false, 422, "name_refused", 2},
+		{"rejected name", helloJSON(teamServerID, "Lab relay"), false, 422, false, 422, "name_refused", 2},
+		{"bad server", helloJSON(teamServerID, "Lab relay"), false, 500, false, 502, "bad_server", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, hits := scriptedClient(struct {
+				helloStatus int
+				helloBody   string
+				helloErr    bool
+				nextStatus  int
+				nextBody    string
+				nextErr     bool
+			}{
+				helloStatus: 200, helloBody: tc.helloBody, helloErr: tc.helloErr, nextStatus: tc.nextStatus, nextErr: tc.nextErr,
+			})
+			h, dir := testTeamSurface(t, client)
+			seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+			rec := doTeam(h, http.MethodPut, "/api/team/servers/"+teamServerID+"/seat", `{"name":"Synthetic"}`)
+			if tc.code != "" {
+				assertAPIError(t, rec, tc.status, tc.code)
+			} else if rec.Code != tc.status {
+				t.Fatalf("status = %d", rec.Code)
+			}
+			if len(*hits) != tc.hits {
+				t.Fatalf("request count = %d", len(*hits))
+			}
+			if tc.hits == 2 {
+				if (*hits)[0].auth != "" || (*hits)[1].auth != "Bearer "+teamToken {
+					t.Fatal("wrong request authentication")
+				}
+				if (*hits)[1].method != http.MethodPut || (*hits)[1].path != "/v1/seat" || (*hits)[1].body != `{"name":"Synthetic"}` {
+					t.Fatal("wrong rename request")
+				}
+			}
+			stored, err := team.Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "Ada"
+			if tc.status == 200 {
+				want = "Synthetic"
+			}
+			if len(stored) != 1 || stored[0].SeatName != want {
+				t.Fatal("wrong stored seat name")
+			}
+			if tc.status == 200 {
+				var got teamServerView
+				if json.Unmarshal(rec.Body.Bytes(), &got) != nil || got.ID != teamServerID || got.SeatName != want {
+					t.Fatal("wrong server view")
+				}
+				assertNoSecrets(t, rec.Body.String(), "", teamToken)
+			}
+		})
+	}
+}
+
+func TestTeamRenameSeatRejectsInvalidInput(t *testing.T) {
+	client, hits := scriptedClient(struct {
+		helloStatus int
+		helloBody   string
+		helloErr    bool
+		nextStatus  int
+		nextBody    string
+		nextErr     bool
+	}{})
+	h, dir := testTeamSurface(t, client)
+	seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+	path := "/api/team/servers/" + teamServerID + "/seat"
+	for _, body := range []string{"", `{}`, `{"name":""}`, `{"name":" X"}`, `{"name":"X "}`, `{"name":"X\n"}`, `{"name":1}`, `{"name":"X","extra":true}`, `{"name":"X"}{}`, `{"name":"` + strings.Repeat("x", 65) + `"}`, `{"name":"` + strings.Repeat("x", 1024) + `"}`} {
+		rec := doTeam(h, http.MethodPut, path, body)
+		assertAPIError(t, rec, http.StatusBadRequest, "bad_request")
+	}
+	assertAPIError(t, doTeam(h, http.MethodPut, "/api/team/servers/"+teamOtherID+"/seat", `{"name":"Synthetic"}`), http.StatusNotFound, "not_found")
+	if len(*hits) != 0 {
+		t.Fatal("invalid input reached the server")
+	}
+}
