@@ -112,7 +112,7 @@ test("render avoids needless writes and restores list focus after rebuilding", a
   old.dataset = { group: "s/o" }; value = ""; f.feature.tab.render(f.el); assert.equal(focused, 2);
 });
 
-function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, last: 0, next: 0, more: false }), randomBytes = n => new Uint8Array(n)) {
+function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, last: 0, next: 0, more: false }), randomBytes = n => new Uint8Array(n), extra = {}) {
   let time = 0, invalidations = 0;
   const elements = new Map();
   const doc = { activeElement: null, querySelector(sel) { return elements.get(sel); } };
@@ -137,7 +137,7 @@ function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, l
     if (path.includes("/comments?")) return commentsApi(path, opts);
     return api(path, opts);
   };
-  const feature = createGuestFeature({ api: routed, doc, now: () => time, invalidateCards: () => invalidations++, randomBytes });
+  const feature = createGuestFeature({ api: routed, doc, now: () => time, invalidateCards: () => invalidations++, randomBytes, ...extra });
   const get = id => elements.get("#" + id);
   const click = (id, target = get(id)) => get(id).listeners.get("click")({ target });
   const item = { dataset: { sub: guestKey(base) }, closest(sel) { if (sel === "[data-sub]") return this; return null; }, focus() { doc.activeElement = item; } };
@@ -1019,3 +1019,41 @@ test("a late send after close updates only its stored draft", async () => {
  * | !morePages && !moreComments | empty view, paging cap and load more (mirror); comment paging has its own forty-page cap (comments) |
  * Mutating either half was caught by the corresponding test.
  */
+
+test("capturable shared bubbles are keyboard reachable", () => {
+  assert.match(guestEntryHTML({ t: "user", seq: 1, text: "x" }, "Owner"), /class="bubble"[^>]*tabindex="0"/);
+  assert.doesNotMatch(guestEntryHTML({ t: "user", seq: 1, omitted: "too_large" }, "Owner"), /tabindex/);
+  assert.doesNotMatch(guestEntryHTML({ t: "start", seq: 1 }, "Owner"), /tabindex/);
+  assert.match(guestMessageHTML({ seq: 2, anchor: 1, text: "x", at: "", author: "a" }, {}), /class="bubble"[^>]*tabindex="0"/);
+});
+
+function sharedActionBubble(seq) {
+  const turn = { dataset: { seq: String(seq) }, nextElementSibling: null };
+  const bubble = { closest(sel) {
+    if (sel === ".bubble") return bubble;
+    if (sel === "[data-seq], [data-cseq]") return turn;
+    return null;
+  } };
+  turn.insertAdjacentHTML = (_where, html) => {
+    turn.rowHTML = html;
+    turn.nextElementSibling = { dataset: { gactions: "" }, remove() { turn.nextElementSibling = null; } };
+  };
+  return { turn, bubble };
+}
+
+test("shared actions open, close, move, bookmark and send", async () => {
+  const stored = [], ops = [], sends = [];
+  const entries = [{ t: "user", seq: 1, text: "one", time: "then" }, { t: "assistant", seq: 2, text: "two", agent: "A", time: "then" }];
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(entries, 2), undefined, undefined,
+    { bookmarks: () => stored, uiMutate: op => { ops.push(op); stored.push(op.bookmark); }, openSendTo: opts => sends.push(opts) });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const first = sharedActionBubble(1), second = sharedActionBubble(2);
+  const click = target => f.click("sharedview", target);
+  click(first.bubble); assert.match(first.turn.rowHTML, /data-gactions/); assert.ok(first.turn.nextElementSibling);
+  click(first.bubble); assert.equal(first.turn.nextElementSibling, null);
+  click(first.bubble); click(second.bubble); assert.equal(first.turn.nextElementSibling, null); assert.ok(second.turn.nextElementSibling);
+  const action = name => ({ dataset: { gact: name }, closest(sel) { return sel === "[data-gact]" ? this : null; } });
+  click(action("bookmark")); assert.equal(ops.length, 1); assert.equal(ops[0].bookmark.role, "assistant"); assert.equal(ops[0].bookmark.t, new Date(0).toISOString()); assert.equal(f.get("sv_note").textContent, "Bookmarked.");
+  click(action("bookmark")); assert.equal(ops.length, 1); assert.equal(f.get("sv_note").textContent, "Already bookmarked.");
+  click(action("sendto")); assert.equal(f.get("sharedview").hidden, true); assert.deepEqual(sends, [{ text: "two", exceptId: "", title: "Send to…", role: "assistant", who: undefined, prov: undefined, source: null }]);
+});
