@@ -2194,3 +2194,22 @@ func TestTeamRenameSeatRequestSizeBoundary(t *testing.T) {
 		t.Fatal("oversized request reached server")
 	}
 }
+
+func TestTeamRenameSeatRejectsOtherMethods(t *testing.T) {
+	client, hits := scriptedClient(struct {
+		helloStatus int
+		helloBody   string
+		helloErr    bool
+		nextStatus  int
+		nextBody    string
+		nextErr     bool
+	}{})
+	h, dir := testTeamSurface(t, client)
+	seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+		assertAPIError(t, doTeam(h, method, "/api/team/servers/"+teamServerID+"/seat", ""), http.StatusNotFound, "not_found")
+	}
+	if len(*hits) != 0 {
+		t.Fatal("wrong method reached server")
+	}
+}
