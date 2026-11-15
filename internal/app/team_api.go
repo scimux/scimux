@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +92,8 @@ func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.leave(w, r, id)
 	case action == "seats":
 		h.seats(w, r, id)
+	case action == "seat" && r.Method == http.MethodPut:
+		h.renameSeat(w, r, id)
 	default:
 		writeTeamError(w, http.StatusNotFound, "not_found")
 	}
@@ -103,10 +107,96 @@ func splitTeamServerPath(path string) (id, action string, ok bool) {
 		return "", "", false
 	}
 	id, action, hasAction := strings.Cut(rest, "/")
-	if strings.Contains(action, "/") || (hasAction && action != "status" && action != "leave" && action != "seats") {
+	if strings.Contains(action, "/") || (hasAction && action != "status" && action != "leave" && action != "seats" && action != "seat") {
 		return "", "", false
 	}
 	return id, action, true
+}
+
+func (h *teamHandler) renameSeat(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	if decodeTeamJoin(w, r, &req) != nil || !validTeamSeatName(req.Name) {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	entry, ok := h.beginServer(w, id)
+	if !ok {
+		return
+	}
+	hello, err := h.client.Hello(r.Context(), entry.URL)
+	if err != nil {
+		if errors.Is(err, team.ErrUnreachable) {
+			writeTeamError(w, http.StatusBadGateway, "unreachable")
+			return
+		}
+		writeTeamError(w, http.StatusBadGateway, "bad_server")
+		return
+	}
+	if hello.ID != entry.ID {
+		writeTeamError(w, http.StatusBadGateway, "bad_server")
+		return
+	}
+	if err := h.client.Rename(r.Context(), entry.URL, entry.Token, req.Name); err != nil {
+		switch {
+		case errors.Is(err, team.ErrUnreachable):
+			writeTeamError(w, http.StatusBadGateway, "unreachable")
+		case errors.Is(err, team.ErrUnauthorized):
+			writeTeamError(w, http.StatusBadGateway, "refused")
+		case errors.Is(err, team.ErrRejected):
+			writeTeamError(w, http.StatusUnprocessableEntity, "name_refused")
+		default:
+			writeTeamError(w, http.StatusBadGateway, "bad_server")
+		}
+		return
+	}
+	updated, err := h.saveSeatName(entry, req.Name)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	writeJSONStatus(w, http.StatusOK, teamViews([]team.Entry{updated})[0])
+}
+
+func (h *teamHandler) saveSeatName(original team.Entry, name string) (team.Entry, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	entries, err := team.Load(h.dataDir)
+	if err != nil {
+		return team.Entry{}, err
+	}
+	for i := range entries {
+		if entries[i].ID != original.ID {
+			continue
+		}
+		if entries[i].Token != original.Token || entries[i].URL != original.URL {
+			return team.Entry{}, team.ErrNotFound
+		}
+		entries[i].SeatName = name
+		body, _ := json.Marshal(struct {
+			V       int          `json:"v"`
+			Servers []team.Entry `json:"servers"`
+		}{V: 1, Servers: entries})
+		f, err := os.CreateTemp(h.dataDir, ".team-*.tmp")
+		if err != nil {
+			return team.Entry{}, err
+		}
+		tmp := f.Name()
+		defer os.Remove(tmp)
+		_, writeErr := f.Write(append(body, '\n'))
+		syncErr := f.Sync()
+		closeErr := f.Close()
+		if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+			return team.Entry{}, err
+		}
+		if err := os.Rename(tmp, filepath.Join(h.dataDir, team.File)); err != nil {
+			return team.Entry{}, err
+		}
+		return entries[i], nil
+	}
+	return team.Entry{}, team.ErrNotFound
 }
 
 func (h *teamHandler) list(w http.ResponseWriter) {
