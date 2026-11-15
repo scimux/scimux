@@ -3946,3 +3946,21 @@ func TestSubCommentsRosterRefusesChangedServer(t *testing.T) {
 | comments_last missing || seen_comments missing | TestSubsVersionTwoNeedsBothValidCounters: each missing field |
 | access != read && != write && != owner | TestSubsRoundTripKeepsFieldsAndMode: read and write; TestSubsVersionTwoAndLegacyMigration: owner |
 */
+
+func TestSubCommentsGateOffDoesNothing(t *testing.T) {
+	cmd, data, _, _ := startTeamCommand(t, false, true)
+	core, err := newCoreMux(cmd.application)
+	if err != nil {
+		t.Fatal("cannot create core mux")
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		if got, want := recordedText(core, method, subReadPath()+"/comments"), recordedText(core, method, "/api/not-a-route"); got != want {
+			t.Error("gate-off comment route differs from unknown route")
+		}
+	}
+	assertNoTeamFile(t, data)
+	assertNoSubsFile(t, data)
+	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Error("gate-off comment route touched copies")
+	}
+}
