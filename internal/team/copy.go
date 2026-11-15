@@ -45,6 +45,7 @@ var (
 
 // copyIO is the filesystem seam. Tests replace individual functions.
 type copyIO struct {
+	truncate  func(*os.File, int64) error
 	openRoot  func(string) (*os.Root, error)
 	openChild func(*os.Root, string) (*os.Root, error)
 	lstat     func(*os.Root, string) (os.FileInfo, error)
@@ -60,6 +61,7 @@ type copyIO struct {
 }
 
 var copyOps = copyIO{
+	truncate:  func(f *os.File, size int64) error { return f.Truncate(size) },
 	openRoot:  os.OpenRoot,
 	openChild: func(root *os.Root, name string) (*os.Root, error) { return root.OpenRoot(name) },
 	lstat:     func(root *os.Root, name string) (os.FileInfo, error) { return root.Lstat(name) },

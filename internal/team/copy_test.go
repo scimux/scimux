@@ -193,7 +193,6 @@ func TestCopyDamageIsLeftUntouched(t *testing.T) {
 		name string
 		body string
 	}{
-		{"unfinished", good},
 		{"not json", "nope\n"},
 		{"empty line", "\n"},
 		{"unknown field", `{"seq":1,"key":"k-1","author":"` + author + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1},"token":"` + secret + `"}\n`},
@@ -211,7 +210,6 @@ func TestCopyDamageIsLeftUntouched(t *testing.T) {
 		{"gap", good + "\n" + strings.Replace(good, `"seq":1`, `"seq":3`, 1) + "\n"},
 		{"duplicate", good + "\n" + good + "\n"},
 		{"second bad", good + "\nnope\n"},
-		{"cut second", good + "\n{\"seq\":2"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -723,22 +721,27 @@ func TestCopySameLengthDamageIsDetectedByFreshIndex(t *testing.T) {
 
 func TestCopySizeChangeMakesWarmIndexRescan(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
-		t.Fatal(err)
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("initial append failed")
 	}
 	path := copyPathOf(dir, id)
-	raw := append(readCopyFile(t, dir, id), '!')
+	before := readCopyFile(t, dir, id)
+	raw := append(append([]byte(nil), before...), '!')
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatal(err)
+		t.Fatal("cannot write synthetic tear")
 	}
-	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
-		t.Fatalf("read error = %v", err)
+	_, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil {
+		t.Fatal("warm rescan did not repair tear")
 	}
-	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
-		t.Fatalf("append error = %v", err)
+	if last != 1 {
+		t.Error("warm rescan lost a complete entry")
 	}
-	if !bytes.Equal(raw, readCopyFile(t, dir, id)) {
-		t.Fatal("damaged copy was changed")
+	if !bytes.Equal(before, readCopyFile(t, dir, id)) {
+		t.Error("repair did not preserve complete lines")
+	}
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, "")}); err != nil {
+		t.Error("append after repair failed")
 	}
 }
 
@@ -1265,5 +1268,132 @@ func TestRemoveCopyWithMissingParents(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); err != nil {
 		t.Error("copy root was lost")
+	}
+}
+
+func TestCopyRepairsTornLastLineAndContinues(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, ""), copyRec(2, "")}); err != nil {
+		t.Fatal("initial append failed")
+	}
+	path := copyPathOf(dir, id)
+	before := readCopyFile(t, dir, id)
+	torn := append(append([]byte(nil), before...), []byte(`{"seq":3`)...)
+	if err := os.WriteFile(path, torn, 0o600); err != nil {
+		t.Fatal("cannot write synthetic tear")
+	}
+	copyMetas.Delete(path)
+	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil {
+		t.Fatal("repair failed")
+	}
+	if last != 2 {
+		t.Error("wrong last entry after repair")
+	}
+	if len(got) != 2 {
+		t.Error("complete entries were not retained")
+	}
+	if !bytes.Equal(readCopyFile(t, dir, id), before) {
+		t.Error("repair did not preserve complete lines")
+	}
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(3, "")}); err != nil {
+		t.Fatal("append after repair failed")
+	}
+	_, last, err = ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil {
+		t.Fatal("cannot read continued copy")
+	}
+	if last != 3 {
+		t.Error("append did not continue after repair")
+	}
+}
+
+func TestCopyRepairsOnlyTornLineToEmpty(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	path := copyPathOf(dir, id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal("cannot create copy directory")
+	}
+	if err := os.WriteFile(path, []byte(`{"seq":1`), 0o600); err != nil {
+		t.Fatal("cannot write synthetic tear")
+	}
+	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil {
+		t.Fatal("repair failed")
+	}
+	if last != 0 {
+		t.Error("last must be zero")
+	}
+	if len(got) != 0 {
+		t.Error("empty repair returned an entry")
+	}
+	if len(readCopyFile(t, dir, id)) != 0 {
+		t.Error("torn file was not emptied")
+	}
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Error("append to repaired copy failed")
+	}
+}
+
+func TestCopyBadCompleteLineBeforeTearIsUnchanged(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	path := copyPathOf(dir, id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal("cannot create copy directory")
+	}
+	raw := []byte("invalid\npartial")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal("cannot write synthetic damage")
+	}
+	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+		t.Error("bad complete line was accepted")
+	}
+	if !bytes.Equal(readCopyFile(t, dir, id), raw) {
+		t.Error("damaged file was changed")
+	}
+}
+
+func TestCopyRepairFailuresLeaveUnindexedFile(t *testing.T) {
+	for _, part := range []string{"open", "truncate"} {
+		t.Run(part, func(t *testing.T) {
+			snapshotCopy(t)
+			dir, id := t.TempDir(), sampleCopyID()
+			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+				t.Fatal("initial append failed")
+			}
+			path := copyPathOf(dir, id)
+			raw := append(readCopyFile(t, dir, id), '!')
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal("cannot write synthetic tear")
+			}
+			copyMetas.Delete(path)
+			boom := errors.New("synthetic repair failure")
+			realOpen := copyOps.open
+			realTruncate := copyOps.truncate
+			if part == "open" {
+				copyOps.open = func(name string, flags int, mode os.FileMode) (*os.File, error) {
+					if flags == os.O_WRONLY {
+						return nil, boom
+					}
+					return realOpen(name, flags, mode)
+				}
+			} else {
+				copyOps.truncate = func(*os.File, int64) error { return boom }
+			}
+			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, boom) {
+				t.Error("repair failure not returned")
+			}
+			if metaFor(path).ready {
+				t.Error("failed repair cached an index")
+			}
+			if !bytes.Equal(readCopyFile(t, dir, id), raw) {
+				t.Error("failed repair changed the file")
+			}
+			copyOps.open = realOpen
+			copyOps.truncate = realTruncate
+			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); err != nil {
+				t.Error("retry after repair failure failed")
+			}
+		})
 	}
 }
