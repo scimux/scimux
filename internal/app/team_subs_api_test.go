@@ -3323,3 +3323,67 @@ func TestSubCommentsRosterFailureAndRefreshWindow(t *testing.T) {
 		t.Error("unjoined server was contacted")
 	}
 }
+
+func TestSubCommentsReadBoundsAndMissingIdentity(t *testing.T) {
+	t.Run("identity", func(t *testing.T) {
+		h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, subPage(subGen, 0, false)) })
+		if err := os.Remove(filepath.Join(dir, "installation.json")); err != nil {
+			t.Fatal("cannot remove synthetic identity")
+		}
+		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""), 500, "identity_unavailable")
+	})
+	t.Run("entry limit and after", func(t *testing.T) {
+		h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/seats" {
+				t.Error("ended subscription fetched comments")
+				return
+			}
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+		})
+		subs := loadSubFile(t, dir)
+		subs[0].State = "ended"
+		if err := team.SaveSubs(dir, subs); err != nil {
+			t.Fatal("cannot save state")
+		}
+		id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+		entries := make([]team.MirrorRecord, 257)
+		for i := range entries {
+			entries[i] = team.MirrorRecord{Seq: uint64(i + 1), Key: fmt.Sprintf("k%d", i+1), Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"comment","text":"synthetic","anchor":0}`)}
+		}
+		if err := team.AppendCopy(dir, id, team.CommentsLog, entries); err != nil {
+			t.Fatal("cannot seed comments")
+		}
+		first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+		if len(first.Entries) != 256 || first.Next != 256 || first.Last != 257 || !first.More {
+			t.Error("entry limit incorrect")
+		}
+		past := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments?after=999", ""))
+		if len(past.Entries) != 0 || past.Next != 257 || past.More {
+			t.Error("after was not capped")
+		}
+	})
+	t.Run("text limit", func(t *testing.T) {
+		h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/seats" {
+				t.Error("ended subscription fetched comments")
+				return
+			}
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+		})
+		subs := loadSubFile(t, dir)
+		subs[0].State = "ended"
+		if err := team.SaveSubs(dir, subs); err != nil {
+			t.Fatal("cannot save state")
+		}
+		id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+		body, _ := json.Marshal(map[string]any{"v": 1, "t": "comment", "text": strings.Repeat("x", 3<<20), "anchor": 0})
+		records := []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: body}, {Seq: 2, Key: "k2", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: body}}
+		if err := team.AppendCopy(dir, id, team.CommentsLog, records); err != nil {
+			t.Fatal("cannot seed comments")
+		}
+		got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+		if len(got.Entries) != 1 || got.Next != 1 || got.Last != 2 || !got.More {
+			t.Error("text limit incorrect")
+		}
+	})
+}
