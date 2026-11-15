@@ -38,7 +38,7 @@ func channelNames() []string {
 func runChannel(c *Client, ctx context.Context, base, name string) error {
 	switch name {
 	case "seats":
-		_, err := c.Seats(ctx, base, chToken)
+		_, err := c.Seats(ctx, base, chToken, false)
 		return err
 	case "put":
 		_, _, err := c.PutChannel(ctx, base, chToken, chOwner, chChat, chTitle)
@@ -218,7 +218,7 @@ func TestChannelCallsReportCreatedOrderAndLast(t *testing.T) {
 	if err != nil || created || gen != chGen {
 		t.Fatalf("update gen = %q created = %v err = %v", gen, created, err)
 	}
-	seats, err := c.Seats(context.Background(), srv.URL, chToken)
+	seats, err := c.Seats(context.Background(), srv.URL, chToken, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		}
 	}
 	check("seats", seats, http.StatusOK, func(c *Client, base string) error {
-		_, err := c.Seats(context.Background(), base, chToken)
+		_, err := c.Seats(context.Background(), base, chToken, false)
 		return err
 	})
 	check("put", channels, http.StatusCreated, func(c *Client, base string) error {
@@ -419,7 +419,7 @@ func TestChannelCallsRejectAnOversizedAnswer(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, wide)
 	})
-	seats, err := clientOn(srv).Seats(context.Background(), srv.URL, chToken)
+	seats, err := clientOn(srv).Seats(context.Background(), srv.URL, chToken, false)
 	if err != nil || len(seats) != 2000 || seats[0].Name != "Ada" || seats[1999].ID != fmt.Sprintf("%032x", 2000) {
 		t.Fatalf("seats = %d err = %v", len(seats), err)
 	}
@@ -911,7 +911,7 @@ func TestChannelsListsTheThreeAccessValues(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, body)
 	})
-	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -944,7 +944,7 @@ func TestChannelsListsNothing(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"channels":[]}`)
 	})
-	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken, false)
 	if err != nil || list == nil || len(list) != 0 {
 		t.Fatalf("list = %#v err = %v", list, err)
 	}
@@ -1029,7 +1029,7 @@ func TestGuestCallsMapEveryStatus(t *testing.T) {
 				_, _ = io.WriteString(w, secretEcho())
 			})
 			c := clientOn(srv)
-			_, err := c.Channels(context.Background(), srv.URL, chToken)
+			_, err := c.Channels(context.Background(), srv.URL, chToken, false)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("channels error = %v, want %v", err, tc.want)
 			}
@@ -1084,7 +1084,7 @@ func TestGuestCallsRejectWhatIsNotTheProtocol(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, body)
 		})
-		_, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+		_, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken, false)
 		if !errors.Is(err, ErrProtocol) {
 			t.Fatalf("list %d error = %v body %s", i, err, body)
 		}
@@ -1103,7 +1103,7 @@ func TestGuestCallsRejectWhatIsNotTheProtocol(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, body)
 		})
-		list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken)
+		list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken, false)
 		if err != nil || len(list) != 1 || list[0].Access != "owner" {
 			t.Fatalf("ok %d list = %+v err = %v", i, list, err)
 		}
@@ -1242,7 +1242,7 @@ func TestGuestCallsKeepTheTokenInTheHeader(t *testing.T) {
 		}
 	})
 	c := clientOn(srv)
-	if _, err := c.Channels(context.Background(), srv.URL, chToken); err != nil {
+	if _, err := c.Channels(context.Background(), srv.URL, chToken, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 11); err != nil {
@@ -1259,7 +1259,7 @@ func TestGuestCallsReportUnreachable(t *testing.T) {
 	srv.Close()
 	c := NewClient()
 	c.timeout = time.Second
-	_, err := c.Channels(context.Background(), base, chToken)
+	_, err := c.Channels(context.Background(), base, chToken, false)
 	if !errors.Is(err, ErrUnreachable) {
 		t.Fatalf("channels error = %v", err)
 	}
@@ -1278,7 +1278,7 @@ func TestGuestCallsReportUnreachable(t *testing.T) {
 	}
 	assertNoChannelSecrets(t, err)
 	c.Transport = failTrip{}
-	_, err = c.Channels(context.Background(), "http://relay.example", chToken)
+	_, err = c.Channels(context.Background(), "http://relay.example", chToken, false)
 	if !errors.Is(err, ErrUnreachable) {
 		t.Fatalf("read error = %v", err)
 	}
@@ -1316,7 +1316,7 @@ func TestGuestCallsRejectABadBase(t *testing.T) {
 	c := NewClient()
 	c.timeout = time.Second
 	for _, base := range []string{"http://[", "/relative", "ftp://relay.example/join", "http://ada:secret@relay.example"} {
-		_, err := c.Channels(context.Background(), base, chToken)
+		_, err := c.Channels(context.Background(), base, chToken, false)
 		if !errors.Is(err, ErrProtocol) {
 			t.Fatalf("channels %s error = %v", base, err)
 		}
@@ -1367,7 +1367,7 @@ func TestGuestCallsLeaveNoConnectionOpen(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 	c := NewClient()
-	if _, err := c.Channels(context.Background(), srv.URL, chToken); err != nil {
+	if _, err := c.Channels(context.Background(), srv.URL, chToken, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 0); err != nil {
