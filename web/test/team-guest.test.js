@@ -976,3 +976,9 @@ test("a late send after close updates only its stored draft", async () => {
     }
   }
 });
+
+/* Wave 5b condition table:
+ * | condition | test for each half |
+ * | !morePages && !moreComments | empty view, paging cap and load more (mirror); comment paging has its own forty-page cap (comments) |
+ * Mutating either half was caught by the corresponding test.
+ */
