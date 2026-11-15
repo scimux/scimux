@@ -7,7 +7,13 @@ export function guestKey(view) {
   return [view.server, view.owner, view.chat, view.generation].join("/");
 }
 
-export function guestCapture(entry, view, names) {
+export function guestName(server, seat, serverName, people = {}) {
+  const local = people?.[server + "/" + seat];
+  if (typeof local === "string" && local) return local;
+  return serverName || "Unknown person";
+}
+
+export function guestCapture(entry, view, names, people = {}) {
   if (entry.omitted !== undefined) return null;
   if (!entry.text) return null;
   const comment = entry.t === undefined;
@@ -25,10 +31,10 @@ export function guestCapture(entry, view, names) {
   }
   if (role === "person") {
     if (comment) {
-      capture.who = names[entry.author] || "Unknown person";
+      capture.who = guestName(view.server, entry.author, names[entry.author], people);
       capture.seat = entry.author;
     } else {
-      capture.who = view.owner_name || "Unknown person";
+      capture.who = guestName(view.server, view.owner, view.owner_name, people);
       capture.seat = view.owner;
     }
   }
@@ -43,15 +49,14 @@ function compare(a, b) {
   return a.localeCompare(b, undefined, { sensitivity: "base" });
 }
 
-export function guestGroups(subs, servers) {
+export function guestGroups(subs, servers, people = {}) {
   const groups = new Map();
   for (const view of subs) {
     const mine = view.access === "owner";
     let key = view.server + "/" + view.owner;
     if (mine) key = view.server + "/@mine";
     if (!groups.has(key)) {
-      let ownerName = view.owner_name;
-      if (!ownerName) ownerName = "Unknown person";
+      let ownerName = guestName(view.server, view.owner, view.owner_name, people);
       let label = ownerName + " · " + view.server_name;
       if (mine) label = "Mine · " + view.server_name;
       const server = servers.find(item => item.id === view.server);
@@ -97,7 +102,7 @@ export function guestGroups(subs, servers) {
   return result;
 }
 
-export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo }) {
+export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, people = () => ({}) }) {
   let off = false;
   let destroyed = false;
   let answer = { subscriptions: [], servers: [], truncated: false };
@@ -113,6 +118,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   let bound = false;
   let open = null;
   let readGeneration = 0;
+  let knownPeople = {};
 
   function track(promise) {
     pending.add(promise);
@@ -130,7 +136,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function html() {
     let out = '<div class="glist">';
-    for (const group of guestGroups(answer.subscriptions, answer.servers)) {
+    for (const group of guestGroups(answer.subscriptions, answer.servers, knownPeople)) {
       const hidden = collapsed.has(group.key);
       out += `<button class="ghead" data-group="${esc(group.key)}" aria-expanded="${!hidden}">${esc(group.label)}</button>`;
       if (hidden) continue;
@@ -184,6 +190,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       hasAnswer = true;
       answer = next;
+      if (refreshPeople()) changed = true;
       if (changed) invalidateCards();
     } catch (error) {
       if (destroyed) return;
@@ -230,11 +237,29 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (view) openView(view);
   }
   const $ = id => doc.querySelector("#" + id);
+  function refreshPeople() {
+    const next = { ...people() };
+    const changed = JSON.stringify(next) !== JSON.stringify(knownPeople);
+    knownPeople = next;
+    if (open) {
+      header(open.view);
+      for (const node of $("sv_body").querySelectorAll("[data-seat]")) {
+        let serverName = open.names[node.dataset.seat];
+        if (node.dataset.prompt !== undefined) serverName = open.view.owner_name;
+        let name = guestName(open.view.server, node.dataset.seat, serverName, knownPeople);
+        if (node.dataset.prompt !== undefined) {
+          name += " · prompt";
+          if (node.dataset.prov === "true") name += " · includes forwarded AI text";
+        }
+        node.textContent = name;
+      }
+    }
+    return changed;
+  }
   function header(view) {
     let title = view.title;
     if (!title) title = "Untitled chat";
-    let owner = view.owner_name;
-    if (!owner) owner = "Unknown person";
+    let owner = guestName(view.server, view.owner, view.owner_name, knownPeople);
     $("sv_title").textContent = title;
     $("sv_from").textContent = (view.access === "owner" ? "Your chat" : "From " + owner) + " · " + view.server_name;
     $("sv_state").textContent = guestStateText(view);
@@ -328,6 +353,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         const result = await api(LIST + "/" + current.key + "?after=" + current.next);
         if (!currentRead(current, gen)) return;
         current.view = result.view;
+        if (refreshPeople()) invalidateCards();
         header(result.view);
         updateCompose(current);
         if (!current.removeNote) {
@@ -336,7 +362,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (current.first) { body.innerHTML = ""; current.first = false; }
         for (const entry of result.entries) {
           current.entries.set("mirror/" + entry.seq, entry);
-          const rendered = guestEntryHTML(entry, result.view.owner_name);
+          const rendered = guestEntryHTML(entry, result.view.owner_name, result.view.server, result.view.owner, knownPeople, result.view.access);
           if (rendered) {
             if (current.empty) { body.innerHTML = ""; current.empty = false; }
             insertOrdered(body, rendered, [entry.seq, 0, 0]);
@@ -352,6 +378,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         const result = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext);
         if (!currentRead(current, gen)) return;
         Object.assign(current.names, result.names);
+        if (refreshPeople()) invalidateCards();
         messages.push(...result.entries);
         current.cnext = result.next;
         moreComments = result.more;
@@ -360,7 +387,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       for (const message of messages) {
         current.entries.set("comments/" + message.seq, message);
         if (current.empty) { body.innerHTML = ""; current.empty = false; }
-        insertOrdered(body, guestMessageHTML(message, current.names), [message.anchor, 1, message.seq]);
+        insertOrdered(body, guestMessageHTML(message, current.names, current.view.server, knownPeople), [message.anchor, 1, message.seq]);
         hasEntries = true;
       }
       if (first) {
@@ -542,7 +569,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (turn.dataset.cseq !== undefined) key = "comments/" + turn.dataset.cseq;
     const entry = open.entries.get(key);
     if (!entry) return;
-    const capture = guestCapture(entry, open.view, open.names);
+    const capture = guestCapture(entry, open.view, open.names, knownPeople);
     if (!capture) return;
     const previous = open.row;
     if (previous) {
@@ -654,11 +681,10 @@ export function guestErrorText(code) {
   if (code === "storage_full") return "This computer's storage is full. Free some space to load more.";
   return "That did not work. It will be tried again.";
 }
-export function guestMessageHTML(entry, names) {
+export function guestMessageHTML(entry, names, server = "", people = {}) {
   let cls = "turn assistant gmsg";
-  let who = names[entry.author];
-  if (!who) who = "Unknown person";
-  let name = `<div class="gwho">${esc(who)}</div>`;
+  let who = guestName(server, entry.author, names[entry.author], people);
+  let name = `<div class="gwho" data-seat="${esc(entry.author)}">${esc(who)}</div>`;
   if (entry.mine) { cls = "turn user gmsg"; name = ""; }
   let tab = "";
   if (entry.text) tab = ' tabindex="0"';
@@ -667,7 +693,7 @@ export function guestMessageHTML(entry, names) {
 export function guestHexKey(bytes) {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }
-export function guestEntryHTML(entry, ownerName) {
+export function guestEntryHTML(entry, ownerName, server = "", seat = "", people = {}, access = "") {
   let line = "";
   if (entry.t === "start") {
     line = "Shared with its history.";
@@ -678,7 +704,12 @@ export function guestEntryHTML(entry, ownerName) {
   } else if (entry.t === "user" || entry.t === "assistant") {
     let who = ownerName;
     if (!who) who = "Unknown person";
+    let seatAttrs = "";
     if (entry.t === "user") {
+      if (access !== "owner") {
+        who = guestName(server, seat, ownerName, people);
+        seatAttrs = ` data-seat="${esc(seat)}" data-prompt="1" data-prov="${entry.prov === true}"`;
+      }
       who += " · prompt";
       if (entry.prov === true) who += " · includes forwarded AI text";
     } else {
@@ -689,7 +720,7 @@ export function guestEntryHTML(entry, ownerName) {
     if (entry.omitted === undefined) content = md(stripAssetRefs(entry.text));
     let tab = "";
     if (entry.omitted === undefined) { if (entry.text) tab = ' tabindex="0"'; }
-    return `<div class="turn assistant" data-seq="${esc(entry.seq)}"><div class="bubble" title="${esc(bubbleTitle(entry.t, entry.time))}"${tab}><div class="gwho">${esc(who)}</div>${content}</div></div>`;
+    return `<div class="turn assistant" data-seq="${esc(entry.seq)}"><div class="bubble" title="${esc(bubbleTitle(entry.t, entry.time))}"${tab}><div class="gwho"${seatAttrs}>${esc(who)}</div>${content}</div></div>`;
   } else return "";
   return `<div class="previewtrunc" data-seq="${esc(entry.seq)}">${line}</div>`;
 }
