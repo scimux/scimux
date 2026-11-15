@@ -807,3 +807,15 @@ test("person-name rejects malformed keys and overly long names", () => {
   const uppercase = "A".repeat(32) + "/" + "B".repeat(32);
   applyOp(doc, { k: "person-name", key: uppercase, name: "Upper" }); assert.equal(doc.people[uppercase], "Upper");
 });
+
+test("other operations leave absent people absent", () => {
+  const ops = [
+    { k: "arch", id: "a" }, { k: "unarch", id: "a" },
+    { k: "bookmark-add", bookmark: { t: "1" } }, { k: "bookmark-del", t: "1" },
+    { k: "forward-link-add", link: { id: "1" } }, { k: "pin", id: "a" }, { k: "unpin", id: "a" },
+    { k: "pin-order", pinned: [] }, { k: "groups", groups: [] }, { k: "lanes", lanes: [] }, { k: "other" },
+  ];
+  for (const op of ops) {
+    const doc = {}; applyOp(doc, op); assert.equal(Object.hasOwn(doc, "people"), false, op.k);
+  }
+});
