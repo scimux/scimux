@@ -709,7 +709,7 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 			out.Next = record.Seq
 			continue
 		}
-		if len(out.Entries) >= 256 || textBytes+size > 4<<20 {
+		if textBytes+size > 4<<20 {
 			out.More = true
 			break
 		}
