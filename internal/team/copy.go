@@ -473,9 +473,6 @@ func RemoveCopy(dataDir string, id CopyID) error {
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() {
-		return ErrCopyPath
-	}
 	opened, err := copyOps.stat(root, ".")
 	if err != nil {
 		return err
