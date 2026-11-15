@@ -897,3 +897,20 @@ test("late send answers keep another view and update only their own draft", asyn
     assert.ok(f.get("sv_text").value === (success ? "" : "first")); assert.equal(posts, 1); assert.equal(random, 1);
   }
 });
+
+test("composer ignores closed, empty, duplicate and unrelated keys", async () => {
+  const pending = deferred(), view = { ...base, access:"write" }; let posts = 0;
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") { posts++; return pending.promise; } return readAnswer([], 0, false, view); });
+  const input = f.get("sv_text").listeners.get("input"), key = f.get("sv_text").listeners.get("keydown");
+  assert.ok(input && key, "missing composer listeners"); input({ target:f.get("sv_text") }); key({ key:"a" }); f.click("sv_send");
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_send"); assert.equal(posts, 0);
+  setGuestDraft(f, "synthetic"); f.click("sv_send"); f.click("sv_send"); assert.equal(posts, 1); pending.resolve({ seq:1 }); await f.feature.settled();
+});
+
+test("editing a reopened draft after a late success creates a fresh draft", async () => {
+  const pending = deferred(), view = { ...base, access:"write" };
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") return pending.promise; return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); setGuestDraft(f, "first"); f.click("sv_send");
+  f.click("cardlist", f.item); pending.resolve({ seq:1 }); await f.feature.settled(); setGuestDraft(f, "second");
+  f.click("sv_back"); f.click("cardlist", f.item); await f.feature.settled(); assert.ok(f.get("sv_text").value === "second");
+});
