@@ -60,10 +60,17 @@ func writeSubsRaw(t *testing.T, dir string, body []byte) {
 
 func subsDocument(t *testing.T, subs []Subscription) []byte {
 	t.Helper()
+	items := make([]map[string]any, 0, len(subs))
+	for _, sub := range subs {
+		obj := subObject(sub)
+		delete(obj, "comments_last")
+		delete(obj, "seen_comments")
+		items = append(items, obj)
+	}
 	raw, err := json.Marshal(struct {
-		V             int            `json:"v"`
-		Subscriptions []Subscription `json:"subscriptions"`
-	}{V: 1, Subscriptions: subs})
+		V             int              `json:"v"`
+		Subscriptions []map[string]any `json:"subscriptions"`
+	}{V: 1, Subscriptions: items})
 	if err != nil {
 		t.Fatal(err)
 	}
