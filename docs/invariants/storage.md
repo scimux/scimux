@@ -41,7 +41,7 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   a new ID on the next start.
 - **Joined team servers are credentials.** `team.json` holds the token of
   each server this seat has joined. Only the muxer reads and writes it, and
-  a write happens only from an explicit join or forget.
+  a write happens only from an explicit join, forget, or changing this seat's own name on a server.
   A damaged file is never overwritten.
   With the gate off it is neither read nor written.
 - **Shared chats name a server and who may read them.** `team-shares.json`

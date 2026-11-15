@@ -154,6 +154,10 @@ func (h *teamHandler) renameSeat(w http.ResponseWriter, r *http.Request, id stri
 	}
 	updated, err := h.saveSeatName(entry, req.Name)
 	if err != nil {
+		if errors.Is(err, team.ErrNotFound) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
