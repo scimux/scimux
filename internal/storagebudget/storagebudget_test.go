@@ -167,3 +167,22 @@ func TestReferenceMediaCountsGloballyButNeverAsNodeUsage(t *testing.T) {
 		t.Fatalf("reference media acquired node charge: %#v", status.Nodes)
 	}
 }
+
+func TestTeamCopiesCountGloballyButNeverAsNodeUsage(t *testing.T) {
+	data := t.TempDir()
+	server := strings.Repeat("a", 32)
+	owner := strings.Repeat("b", 32)
+	chat := strings.Repeat("c", 16)
+	generation := strings.Repeat("d", 16)
+	writeManaged(t, filepath.Join(data, "team-copies", server, owner, chat, generation, "mirror.jsonl"), "1234567")
+	status, err := Inspect(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.UsedBytes != 7 {
+		t.Fatalf("global team copy bytes = %d, want 7", status.UsedBytes)
+	}
+	if len(status.Nodes) != 0 {
+		t.Fatalf("team copy acquired node charge: %#v", status.Nodes)
+	}
+}
