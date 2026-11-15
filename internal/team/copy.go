@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/scimux/scimux/internal/storagebudget"
@@ -94,7 +95,6 @@ func marshalCopyLine(v any) ([]byte, error) {
 
 // copyMeta is the index of one copy in this process.
 type copyMeta struct {
-	mu      sync.Mutex
 	ready   bool
 	damaged bool
 	last    uint64
@@ -103,6 +103,14 @@ type copyMeta struct {
 }
 
 var copyMetas sync.Map
+var copyLocks sync.Map
+
+func lockCopy(path string) func() {
+	value, _ := copyLocks.LoadOrStore(path, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 func metaFor(path string) *copyMeta {
 	if v, ok := copyMetas.Load(path); ok {
@@ -127,9 +135,9 @@ func AppendCopy(dataDir string, id CopyID, entries []MirrorRecord) error {
 	if err != nil {
 		return err
 	}
+	unlock := lockCopy(path)
+	defer unlock()
 	m := metaFor(path)
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err := m.sync(path); err != nil {
 		return err
 	}
@@ -164,9 +172,9 @@ func ReadCopy(dataDir string, id CopyID, after uint64, maxEntries int, maxBodyBy
 	if err != nil {
 		return nil, 0, err
 	}
+	unlock := lockCopy(path)
+	defer unlock()
 	m := metaFor(path)
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if err := m.sync(path); err != nil {
 		return nil, 0, err
 	}
@@ -398,5 +406,61 @@ func parseCopyLine(line []byte) (MirrorRecord, bool) {
 	}, true
 }
 
-// RemoveCopy removes a guest copy.
-func RemoveCopy(dataDir string, id CopyID) error { return ErrCopyPath }
+// RemoveCopy removes one guest copy and its empty parent directories.
+func RemoveCopy(dataDir string, id CopyID) error {
+	path, err := copyPath(dataDir, id)
+	if err != nil {
+		return err
+	}
+	unlock := lockCopy(path)
+	defer unlock()
+	data, err := copyOps.openRoot(dataDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			copyMetas.Delete(path)
+			return nil
+		}
+		return err
+	}
+	defer data.Close()
+	root, err := copyOps.openChild(data, CopiesDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			copyMetas.Delete(path)
+			return nil
+		}
+		return err
+	}
+	defer root.Close()
+	info, err := copyOps.lstat(data, CopiesDir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return ErrCopyPath
+	}
+	opened, err := copyOps.stat(root, ".")
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) {
+		return ErrCopyPath
+	}
+	name := filepath.Join(id.Server, id.Owner, id.Chat, id.Generation)
+	if err := copyOps.removeAll(root, name); err != nil {
+		return err
+	}
+	copyMetas.Delete(path)
+	for name = filepath.Dir(name); name != "."; name = filepath.Dir(name) {
+		if err := copyOps.remove(root, name); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if errors.Is(err, syscall.ENOTEMPTY) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
+}
