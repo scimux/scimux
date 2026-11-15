@@ -1385,6 +1385,21 @@ stored server.
 An id that is not in the server file is `404` `not_found`. A server file
 that cannot be read, including a damaged one, is `500` `store_unavailable`.
 
+### Change this seat's name
+
+`PUT /api/team/servers/{id}/seat` takes `{"name":"..."}`, at most 1 KiB,
+with no unknown fields, and requires CSRF. The name follows the join name
+rules. The seat confirms the server identity before sending its token and the
+new name. Success is `200` with the server object from the list, including the
+updated `seat_name`.
+
+Errors are `400 bad_request` for a bad body or name, `404 not_found` when the
+server is not joined, `502 unreachable` when it cannot be reached, `502 refused`
+when the token is refused, `422 name_refused` when the server rejects the name,
+`502 bad_server` for an identity or protocol error, and `500 store_unavailable`
+when local state cannot be saved. If the server accepts the change but saving
+fails, the names differ until the next successful change.
+
 ### Leave
 
 `POST /api/team/servers/{id}/leave` takes no body. Success is `204` when

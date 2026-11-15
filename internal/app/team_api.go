@@ -183,6 +183,9 @@ func (h *teamHandler) saveSeatName(original team.Entry, name string) (team.Entry
 			V       int          `json:"v"`
 			Servers []team.Entry `json:"servers"`
 		}{V: 1, Servers: entries})
+		if len(body)+1 > 64<<10 {
+			return team.Entry{}, team.ErrDamaged
+		}
 		f, err := os.CreateTemp(h.dataDir, ".team-*.tmp")
 		if err != nil {
 			return team.Entry{}, err
