@@ -55,6 +55,7 @@ export function createSharingSection({ api, doc }) {
   let leaving = false;
   let busyRemove = false;
   let nameEdit = null;
+  const nameVersions = new Map();
   let generation = 0;
   let chain = Promise.resolve();
   const inflight = new Set();
@@ -77,6 +78,7 @@ export function createSharingSection({ api, doc }) {
 
   async function load() {
     let body;
+    const beforeNames = new Map(nameVersions);
     try {
       body = await api("/api/team/servers");
     } catch {
@@ -88,7 +90,13 @@ export function createSharingSection({ api, doc }) {
     armed = "";
     removeFor = "";
     rowMessage.clear();
-    rows = body.servers;
+    rows = body.servers.map(server => {
+      if (nameVersions.get(server.id) !== beforeNames.get(server.id)) {
+        const prior = byId.get(server.id);
+        if (prior) return { ...server, seat_name: prior.seat_name };
+      }
+      return server;
+    });
     byId = new Map();
     states = new Map();
     for (const server of rows) byId.set(server.id, server);
@@ -311,6 +319,7 @@ export function createSharingSection({ api, doc }) {
       if (byId.has(edit.id)) {
         rows = rows.map(item => item.id === edit.id ? server : item);
         byId.set(edit.id, server);
+        nameVersions.set(edit.id, (nameVersions.get(edit.id) || 0) + 1);
         if (nameEdit === edit) nameEdit = null;
         render(); focusName(edit.id);
       }
