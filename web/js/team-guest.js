@@ -65,7 +65,7 @@ export function guestGroups(subs, servers) {
   return result;
 }
 
-export function createGuestFeature({ api, doc, now, invalidateCards }) {
+export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes }) {
   let off = false;
   let destroyed = false;
   let answer = { subscriptions: [], servers: [], truncated: false };
@@ -74,6 +74,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   let hasAnswer = false;
   const pending = new Set();
   const collapsed = new Set();
+  const drafts = new Map();
   let rendered = "";
   let renderedDOM = "";
   let listEl = null;
@@ -208,13 +209,18 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   }
   function openView(view) {
     readGeneration++;
-    open = { key: guestKey(view), view, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false };
+    const key = guestKey(view);
+    let draft = drafts.get(key);
+    if (!draft) { draft = { text: "", key: "", keyText: "", sending: false }; drafts.set(key, draft); }
+    open = { key, view, draft, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false, sendNote: false };
     header(view);
     $("sv_body").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("sv_note").textContent = "";
     $("sv_remove").textContent = "Remove from my list";
     $("sv_remove").disabled = false;
     $("sv_more").hidden = true;
+    $("sv_text").value = draft.text;
+    updateCompose(open);
     $("sharedview").hidden = false;
     $("sv_back").focus();
     startRead();
@@ -280,7 +286,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
         if (!currentRead(current, gen)) return;
         current.view = result.view;
         header(result.view);
-        if (!current.removeNote) $("sv_note").textContent = "";
+        updateCompose(current);
+        if (!current.removeNote) {
+          if (!current.sendNote) $("sv_note").textContent = "";
+        }
         if (current.first) { body.innerHTML = ""; current.first = false; }
         for (const entry of result.entries) {
           const rendered = guestEntryHTML(entry, result.view.owner_name);
@@ -336,7 +345,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       if (!currentRead(current, gen)) return;
       let code = "";
       try { code = JSON.parse(error.message).error; } catch {}
-      if (!current.removeNote) $("sv_note").textContent = guestErrorText(code);
+      if (!current.removeNote) {
+        if (!current.sendNote) $("sv_note").textContent = guestErrorText(code);
+      }
       if (code === "not_found") current.failed = true;
     } finally {
       if (currentRead(current, gen)) current.busy = false;
@@ -362,6 +373,86 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       }
       if (JSON.stringify(view) !== before) invalidateCards();
     } catch {}
+  }
+  function updateCompose(current) {
+    let visible = false;
+    if (current.view.state === "live") {
+      if (current.view.access === "write") visible = true;
+      if (current.view.access === "owner") visible = true;
+    }
+    $("sv_compose").hidden = !visible;
+    const text = $("sv_text").value;
+    const tooLong = new TextEncoder().encode(text).length > 16384;
+    let disabled = current.draft.sending;
+    if (!text.trim()) disabled = true;
+    if (tooLong) disabled = true;
+    $("sv_send").disabled = disabled;
+    if (tooLong) {
+      current.sendNote = true;
+      $("sv_note").textContent = "That message is too long.";
+    }
+  }
+  function draftInput() {
+    if (!open) return;
+    const text = $("sv_text").value;
+    let draft = drafts.get(open.key);
+    if (!draft) { draft = { text: "", key: "", keyText: "", sending: false }; drafts.set(open.key, draft); open.draft = draft; }
+    draft.text = text;
+    if (text !== draft.keyText) draft.key = "";
+    if (open.sendNote) { open.sendNote = false; $("sv_note").textContent = ""; }
+    updateCompose(open);
+  }
+  function draftKeydown(event) {
+    if (event.key !== "Enter") return;
+    if (event.ctrlKey) { event.preventDefault(); sendClick(); return; }
+    if (event.metaKey) { event.preventDefault(); sendClick(); }
+  }
+  function sendClick() {
+    if (!open) return;
+    const current = open;
+    if (current.draft.sending) return;
+    updateCompose(current);
+    if ($("sv_send").disabled) return;
+    const draft = current.draft;
+    const text = $("sv_text").value;
+    if (!draft.key) { draft.key = guestHexKey(randomBytes(8)); draft.keyText = text; }
+    draft.sending = true;
+    updateCompose(current);
+    track(sendComment(current, draft, text));
+  }
+  async function sendComment(current, draft, text) {
+    try {
+      await api(LIST + "/" + current.key + "/comments", { method: "POST", body: JSON.stringify({ text, anchor: current.next, key: draft.key }) });
+    } catch (error) {
+      draft.sending = false;
+      if (open !== current) return;
+      let code = "";
+      try { code = JSON.parse(error.message).error; } catch {}
+      let note = "That did not work. Your message is still here.";
+      if (code === "read_only") note = "You can only view this chat.";
+      if (code === "not_active") note = "Sharing of this chat has ended.";
+      if (code === "unreachable") note = "The server could not be reached. Your message is still here.";
+      if (code === "refused") note = "The server ended this computer's access.";
+      if (code === "server_full") note = "The server has no room for more messages.";
+      if (code === "too_large") note = "That message is too long.";
+      current.sendNote = true;
+      $("sv_note").textContent = note;
+      updateCompose(current);
+      $("sv_text").focus();
+      return;
+    }
+    draft.sending = false;
+    if (drafts.get(current.key) === draft) drafts.delete(current.key);
+    if (open !== current) return;
+    current.draft = { text: "", key: "", keyText: "", sending: false };
+    drafts.set(current.key, current.draft);
+    $("sv_text").value = "";
+    current.sendNote = false;
+    $("sv_note").textContent = "";
+    updateCompose(current);
+    $("sv_text").focus();
+    if (current.busy) { current.busy = false; readGeneration++; }
+    startRead();
   }
   function disarm(current) {
     current.armed = false;
@@ -432,6 +523,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     doc.querySelector("#sharedview").addEventListener("keydown", keydown);
     doc.querySelector("#sharedview").addEventListener("click", sharedClick);
     doc.querySelector("#sv_remove").addEventListener("click", removeClick);
+    doc.querySelector("#sv_text").addEventListener("input", draftInput);
+    doc.querySelector("#sv_text").addEventListener("keydown", draftKeydown);
+    doc.querySelector("#sv_send").addEventListener("click", sendClick);
   }
   function destroy() {
     if (bound) {
@@ -442,6 +536,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       doc.querySelector("#sharedview").removeEventListener("keydown", keydown);
       doc.querySelector("#sharedview").removeEventListener("click", sharedClick);
       doc.querySelector("#sv_remove").removeEventListener("click", removeClick);
+      doc.querySelector("#sv_text").removeEventListener("input", draftInput);
+      doc.querySelector("#sv_text").removeEventListener("keydown", draftKeydown);
+      doc.querySelector("#sv_send").removeEventListener("click", sendClick);
     }
     open = null;
     readGeneration++;
@@ -478,7 +575,7 @@ export function guestMessageHTML(entry, names) {
   return `<div class="${cls}" data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"><div class="bubble" title="${esc(entry.at)}">${name}${md(entry.text)}</div></div>`;
 }
 export function guestHexKey(bytes) {
-  return "";
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 export function guestEntryHTML(entry, ownerName) {
   let line = "";
