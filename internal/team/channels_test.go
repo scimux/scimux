@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1427,5 +1428,11 @@ func TestChannelsSubscriptionListSkipsInvalidIdentities(t *testing.T) {
 	list, err := clientOn(srv).Channels(context.Background(), srv.URL, chToken, true)
 	if err != nil || len(list) != 1 || list[0].Owner != chOwner {
 		t.Fatalf("list = %+v, err = %v", list, err)
+	}
+}
+
+func TestChannelsUsesExplicitSubscriptionMode(t *testing.T) {
+	if reflect.TypeOf((*Client).Channels).IsVariadic() {
+		t.Fatal("channel mode must be explicit")
 	}
 }
