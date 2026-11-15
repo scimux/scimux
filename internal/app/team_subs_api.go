@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -571,7 +572,12 @@ func (h *teamHandler) endSubscription(id team.CopyID, whole bool) error {
 
 func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
 	var after uint64
-	vals, exists := r.URL.Query()["after"]
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeTeamError(w, 400, "bad_request")
+		return
+	}
+	vals, exists := query["after"]
 	if exists {
 		if len(vals) != 1 || vals[0] == "" {
 			writeTeamError(w, 400, "bad_request")
