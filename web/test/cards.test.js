@@ -1899,7 +1899,7 @@ test("longpress: title starts title edit; card toggles actionCard", () => {
   assert.equal(h.state.actionCard, "");
 });
 
-function sharedCardsFixture(sharedTab, initialTab = "current", nodes = []) {
+function sharedCardsFixture(sharedTab, initialTab = "current", nodes = [], pinned = []) {
   let tab = initialTab, sig = "", tabsHTML = "", tabWrites = 0, listHTML = "", listWrites = 0;
   const handlers = {};
   const tabs = { get innerHTML() { return tabsHTML; }, set innerHTML(v) { tabsHTML = v; tabWrites++; }, querySelectorAll: () => [], addEventListener(type, fn) { handlers[type] = fn; }, removeEventListener() {} };
@@ -1908,7 +1908,7 @@ function sharedCardsFixture(sharedTab, initialTab = "current", nodes = []) {
   const feature = createCardsFeature({ roots: { tabs, list }, document: doc, sharedTab,
     nodes: () => nodes, cardTab: () => tab, setCardTab: v => { tab = v; },
     cardsSig: () => sig, setCardsSig: v => { sig = v; },
-    pinned: () => [], archived: () => [], expanded: () => new Set(),
+    pinned: () => pinned, archived: () => [], expanded: () => new Set(),
     setInterval: () => 0, clearInterval: () => {}, longpress: () => () => {} });
   return { feature, handlers, doc, tabs, list, setTab(v) { tab = v; }, tab: () => tab, sig: () => sig, tabWrites: () => tabWrites, listWrites: () => listWrites };
 }
@@ -1920,12 +1920,20 @@ test("cardTabsHTML appends an optional shared tab", () => {
 });
 
 test("empty shared tab preserves existing tab and list HTML", () => {
+  const nodes = [{ id: "pinned-node", title: "Synthetic", live: "active" }];
+  const pinned = ["pinned-node"];
   for (const tab of ["current", "pinned", "archived"]) {
-    const a = sharedCardsFixture(undefined, tab);
-    const b = sharedCardsFixture({ tabHTML: () => "", render: () => false }, tab);
+    const a = sharedCardsFixture(undefined, tab, nodes, pinned);
+    const b = sharedCardsFixture({ tabHTML: () => "", render: () => false }, tab, nodes, pinned);
     a.feature.render(); b.feature.render();
+    assert.equal(a.tab(), tab);
+    assert.equal(b.tab(), tab);
     assert.equal(a.tabs.innerHTML, b.tabs.innerHTML);
     assert.equal(a.list.innerHTML, b.list.innerHTML);
+    if (tab === "pinned") {
+      assert.ok(a.tabs.innerHTML.includes('data-tab="pinned"'));
+      assert.ok(a.list.innerHTML.includes('id="card-pinned-node"'));
+    }
   }
 });
 
@@ -1966,4 +1974,28 @@ test("archived tab active class follows the selected tab", () => {
   const args = { laneFilter: "", currentCount: 0, archivedCount: 0, pinnedCount: 0 };
   assert.match(cardTabsHTML({ ...args, cardTab: "archived" }), /data-tab="archived" class="on"/);
   assert.match(cardTabsHTML({ ...args, cardTab: "current" }), /data-tab="archived" class=""/);
+});
+
+
+test("shared cards clear the prior signature before returning to current", () => {
+  const nodes = [{ id: "node-1", title: "Synthetic", live: "active" }];
+  const shared = { tabHTML: () => '<button data-tab="shared">Shared with me</button>', render(list) { list.innerHTML = '<div class="glist"></div>'; return true; } };
+  const f = sharedCardsFixture(shared, "current", nodes);
+  f.feature.render();
+  const original = f.list.innerHTML;
+  assert.ok(original.includes('id="card-node-1"'));
+  assert.notEqual(f.sig(), "");
+  f.setTab("shared"); f.feature.render();
+  assert.equal(f.list.innerHTML, '<div class="glist"></div>');
+  f.setTab("current"); f.feature.render();
+  assert.equal(f.list.innerHTML, original);
+});
+
+test("shared tab receives the active state for current and shared", () => {
+  const activeValues = [];
+  const shared = { tabHTML(active) { activeValues.push(active); return '<button data-tab="shared">Shared with me</button>'; }, render() { return true; } };
+  const f = sharedCardsFixture(shared);
+  f.feature.render();
+  f.setTab("shared"); f.feature.render();
+  assert.deepEqual(activeValues, [false, true]);
 });

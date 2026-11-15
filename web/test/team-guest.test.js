@@ -599,3 +599,49 @@ test("unarmed dialog clicks and escape without an open view do nothing", async (
   f.get("sharedview").listeners.get("keydown")({ key: "Escape", stopPropagation() { stopped = true; } });
   assert.equal(stopped, true); assert.equal(f.get("sharedview").hidden, true);
 });
+
+test("collapsed shared groups hide their items and expand again", async () => {
+  const second = { ...base, owner: "other", chat: "d" };
+  const f = fixture(async () => list([base, second]));
+  f.feature.bind(); f.feature.tick(); await f.feature.settled(); f.feature.tab.render(f.el);
+  const firstKey = 'data-sub="s/o/c/g"';
+  const secondKey = 'data-sub="s/other/d/g"';
+  assert.equal(f.el.innerHTML.includes(firstKey), true); assert.equal(f.el.innerHTML.includes(secondKey), true);
+  const group = { dataset: { group: "s/o" }, closest(sel) { if (sel === "[data-group]") return this; return null; } };
+  f.listeners.get("click")({ target: group });
+  assert.equal(f.el.innerHTML.includes(firstKey), false); assert.equal(f.el.innerHTML.includes(secondKey), true);
+  f.listeners.get("click")({ target: group });
+  assert.equal(f.el.innerHTML.includes(firstKey), true); assert.equal(f.el.innerHTML.includes(secondKey), true);
+});
+
+test("first shared read without unread entries scrolls to the end", async () => {
+  const view = { ...base, seen_mirror: 3, mirror_last: 3 };
+  const f = viewFixture(async path => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    return readAnswer([{ t: "user", seq: 1, text: "" }], 1, false, view);
+  });
+  const body = f.get("sv_body"); let scrolls = 0;
+  body.querySelector = () => ({ scrollIntoView() { scrolls++; } });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(body.scrollTop, body.scrollHeight); assert.equal(scrolls, 0);
+});
+
+test("shared follow scrolls at 80 pixels but not 81", async () => {
+  for (const distance of [80, 81]) {
+    let reads = 0;
+    const f = viewFixture(async path => {
+      if (path === "/api/team/subscriptions") return list([base]);
+      if (path.endsWith("/seen")) return "";
+      reads++;
+      if (reads === 1) return readAnswer();
+      return readAnswer([{ t: "user", seq: 1, text: "" }], 1);
+    });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    const body = f.get("sv_body");
+    body.scrollTop = body.scrollHeight - body.clientHeight - distance;
+    const before = body.scrollTop;
+    f.setTime(5000); f.feature.tick(); await f.feature.settled();
+    if (distance === 80) assert.equal(body.scrollTop, body.scrollHeight);
+    if (distance === 81) assert.equal(body.scrollTop, before);
+  }
+});
