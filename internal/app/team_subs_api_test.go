@@ -1945,3 +1945,12 @@ func TestSubListRosterAttemptThrottledRegardlessOfOutcome(t *testing.T) {
 		})
 	}
 }
+
+func TestSubReadRejectsMalformedEscapesInAfter(t *testing.T) {
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) { t.Error("malformed query contacted server") })
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1"+subReadPath(), nil)
+	req.URL.RawQuery = "after=%zz"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assertAPIError(t, rec, 400, "bad_request")
+}
