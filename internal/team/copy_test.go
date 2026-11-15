@@ -1231,3 +1231,26 @@ func TestRemoveCopyMissingDataDirectory(t *testing.T) {
 		t.Error("missing data directory must succeed")
 	}
 }
+
+func TestRemoveCopyRejectsNonDirectoryRoot(t *testing.T) {
+	snapshotCopy(t)
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("initial append failed")
+	}
+	marker := filepath.Join(t.TempDir(), "marker")
+	if err := os.WriteFile(marker, []byte("synthetic"), 0o600); err != nil {
+		t.Fatal("cannot create marker")
+	}
+	info, err := os.Stat(marker)
+	if err != nil {
+		t.Fatal("cannot stat marker")
+	}
+	copyOps.lstat = func(*os.Root, string) (os.FileInfo, error) { return info, nil }
+	if err := RemoveCopy(dir, id); !errors.Is(err, ErrCopyPath) {
+		t.Error("non-directory root was not refused")
+	}
+	if _, err := os.Stat(copyPathOf(dir, id)); err != nil {
+		t.Error("copy was removed")
+	}
+}
