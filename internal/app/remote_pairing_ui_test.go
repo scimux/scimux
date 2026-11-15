@@ -285,9 +285,14 @@ func TestShareSheetSlotsAndConstruction(t *testing.T) {
 
 func TestSharedViewSlotsAndConstruction(t *testing.T) {
 	html := readWebFile(t, "web/index.html")
-	for _, id := range []string{"sharedview", "sv_scrim", "sv_panel", "sv_head", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note", "sv_remove"} {
+	for _, id := range []string{"sharedview", "sv_scrim", "sv_panel", "sv_head", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note", "sv_remove", "sv_compose", "sv_text", "sv_send", "sv_hint"} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html has no id=%q", id)
+		}
+	}
+	for _, fragment := range []string{`for="sv_text"`, `aria-describedby="sv_hint"`, `placeholder="Message to people"`, `People in this chat see this. The agent does not.`, `&#8249; Shared</button>`} {
+		if !strings.Contains(html, fragment) {
+			t.Error("shared composer markup is incomplete")
 		}
 	}
 	if !strings.Contains(readWebFile(t, "web/js/app.js"), "createGuestFeature") {
