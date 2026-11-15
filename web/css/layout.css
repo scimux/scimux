@@ -340,3 +340,5 @@ body.map-full #layersbtn { display: inline-flex; }
 #sharedview #sv_more { min-height: 44px; }
 #sharedview #sv_more[hidden] { display: none; }
 #sharedview #sv_note { flex: none; padding: 8px 16px; border-top: 1px solid var(--hairline); font-size: 11px; color: var(--dim); }
+
+#sharedview #sv_remove { min-height: 44px; padding: 6px 10px; border: 1px solid var(--hairline); border-radius: 8px; }

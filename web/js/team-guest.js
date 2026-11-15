@@ -195,10 +195,12 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   }
   function openView(view) {
     readGeneration++;
-    open = { key: guestKey(view), view, next: 0, first: true, seenAtOpen: view.seen_mirror, seen: view.seen_mirror, lastRead: 0, busy: false, failed: false, empty: false };
+    open = { key: guestKey(view), view, next: 0, first: true, seenAtOpen: view.seen_mirror, seen: view.seen_mirror, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false };
     header(view);
     $("sv_body").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("sv_note").textContent = "";
+    $("sv_remove").textContent = "Remove from my list";
+    $("sv_remove").disabled = false;
     $("sv_more").hidden = true;
     $("sharedview").hidden = false;
     $("sv_back").focus();
@@ -218,6 +220,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   function keydown(event) {
     if (event.key !== "Escape") return;
     event.stopPropagation();
+    if (open) {
+      if (open.armed) { disarm(open); return; }
+    }
     close();
   }
   function more() { startRead(); }
@@ -225,6 +230,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     if (off) return;
     if (!open) return;
     if (open.busy) return;
+    if (open.removing) return;
     if (open.failed) return;
     const current = open;
     current.busy = true;
@@ -250,7 +256,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
         if (!currentRead(current, gen)) return;
         current.view = result.view;
         header(result.view);
-        $("sv_note").textContent = "";
+        if (!current.removeNote) $("sv_note").textContent = "";
         if (current.first) { body.innerHTML = ""; current.first = false; }
         for (const entry of result.entries) {
           const rendered = guestEntryHTML(entry, result.view.owner_name);
@@ -283,7 +289,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       if (!currentRead(current, gen)) return;
       let code = "";
       try { code = JSON.parse(error.message).error; } catch {}
-      $("sv_note").textContent = guestErrorText(code);
+      if (!current.removeNote) $("sv_note").textContent = guestErrorText(code);
       if (code === "not_found") current.failed = true;
     } finally {
       if (currentRead(current, gen)) current.busy = false;
@@ -306,8 +312,65 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       if (JSON.stringify(view) !== before) invalidateCards();
     } catch {}
   }
-  function removeClick() {}
-  function sharedClick() {}
+  function disarm(current) {
+    current.armed = false;
+    current.removeNote = false;
+    $("sv_remove").textContent = "Remove from my list";
+    $("sv_note").textContent = "";
+  }
+  function removeClick() {
+    if (!open) return;
+    if (open.removing) return;
+    if (!open.armed) {
+      open.armed = true;
+      open.removeNote = true;
+      $("sv_remove").textContent = "Confirm remove";
+      $("sv_note").textContent = "This leaves the chat and deletes the saved copy from this computer.";
+      return;
+    }
+    const current = open;
+    current.armed = false;
+    current.removing = true;
+    $("sv_remove").disabled = true;
+    track(remove(current));
+  }
+  function sharedClick(event) {
+    if (!open) return;
+    if (event.target === $("sv_remove")) return;
+    if (open.armed) disarm(open);
+  }
+  async function remove(current) {
+    try {
+      await api(LIST + "/" + current.key, { method: "DELETE" });
+    } catch (error) {
+      if (error.status !== 404) {
+        if (open !== current) return;
+        current.removing = false;
+        current.armed = false;
+        current.removeNote = true;
+        $("sv_remove").disabled = false;
+        $("sv_remove").textContent = "Remove from my list";
+        let code = "";
+        try { code = JSON.parse(error.message).error; } catch {}
+        let text = "That did not work. Try again.";
+        if (code === "unreachable") text = "The server could not be reached. Try again later.";
+        $("sv_note").textContent = text;
+        return;
+      }
+    }
+    if (destroyed) return;
+    answer.subscriptions = answer.subscriptions.filter(view => guestKey(view) !== current.key);
+    invalidateCards();
+    if (open !== current) return;
+    open = null;
+    readGeneration++;
+    $("sharedview").hidden = true;
+    $("sv_body").innerHTML = "";
+    let focus = null;
+    if (tabHTML(false)) focus = $("cardtabs").querySelector('[data-tab="shared"]');
+    if (!focus) focus = $("cardlist");
+    focus.focus();
+  }
   function bind() {
     if (bound) return;
     bound = true;
