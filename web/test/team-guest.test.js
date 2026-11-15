@@ -272,3 +272,40 @@ test("destroy removes all guest listeners and prevents later requests", async ()
   for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sharedview"]) assert.equal(f.get(id).listeners.size, 0);
   f.feature.tick(); await f.feature.settled(); assert.equal(calls, 0);
 });
+
+test("following an initially empty chat replaces the empty message", async () => {
+  let reads = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("/seen")) return ""; reads++; if (reads === 1) return readAnswer(); return readAnswer([{ t: "user", seq: 1, text: "new entry" }], 1); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); assert.match(f.get("sv_body").innerHTML, /Nothing has been shared yet/);
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.match(f.get("sv_body").innerHTML, /new entry/); assert.doesNotMatch(f.get("sv_body").innerHTML, /Nothing has been shared yet/);
+});
+
+test("first unread is scrolled into view and later appends respect scroll position", async () => {
+  let reads = 0, scrolls = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("/seen")) return ""; reads++; return readAnswer([{ t: "user", seq: reads, text: "entry" }], reads); });
+  const body = f.get("sv_body"); body.querySelector = () => ({ scrollIntoView(opts) { assert.deepEqual(opts, { block: "start" }); scrolls++; } });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); assert.equal(scrolls, 1);
+  body.scrollTop = 0; f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(body.scrollTop, 0);
+  body.scrollTop = 750; f.setTime(10000); f.feature.tick(); await f.feature.settled(); assert.equal(body.scrollTop, body.scrollHeight);
+});
+
+test("list sorting handles reversed states and writing access", async () => {
+  const groups = guestGroups([{ ...base, state: "live" }, { ...base, chat: "ended", state: "ended" }], []);
+  assert.deepEqual(groups[0].items.map(v => v.state), ["live", "ended"]);
+  const f = fixture(async () => list([{ ...base, access: "write" }]));
+  f.feature.tick(); await f.feature.settled(); f.feature.tab.render(f.el); assert.match(f.el.innerHTML, /Can comment/);
+});
+
+test("destroy drops an in-flight list answer", async () => {
+  const pending = deferred(); const f = fixture(() => pending.promise);
+  f.feature.tick(); f.feature.destroy(); pending.resolve(list([base])); await f.feature.settled();
+  assert.equal(f.invalidations(), 0); assert.equal(f.feature.tab.tabHTML(false), "");
+});
+
+test("empty header fields use their fallbacks", async () => {
+  const view = { ...base, title: "", owner_name: "" };
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([view]); return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(f.get("sv_title").textContent, "Untitled chat"); assert.equal(f.get("sv_from").textContent, "From Unknown person · Server");
+});
