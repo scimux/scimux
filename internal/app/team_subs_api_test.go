@@ -1851,3 +1851,9 @@ func TestSubReadChangedHelloSendsNoCredential(t *testing.T) {
 		t.Fatalf("delivery = %s auth = %t", got.View.Delivery, authed)
 	}
 }
+
+func TestSubReadReplacedGenerationSaveFailure(t *testing.T) {
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, subPage(subGenB, 0, false)) })
+	asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "store_unavailable")
+}
