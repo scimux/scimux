@@ -1188,25 +1188,12 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 		h.subAsks = make(map[string]subAsk)
 	}
 	ask := h.subAsks[id]
-	missing := false
-	for author := range authors {
-		if joined {
-			if author == inst {
-				continue
-			}
-		}
-		if _, ok := ask.names[author]; !ok {
-			missing = true
-		}
-	}
 	due := false
 	if joined {
-		if missing {
-			if ask.roster.IsZero() {
-				due = true
-			} else if h.now().UTC().Sub(ask.roster) > 60*time.Second {
-				due = true
-			}
+		if ask.roster.IsZero() {
+			due = true
+		} else if h.now().UTC().Sub(ask.roster) > 60*time.Second {
+			due = true
 		}
 	}
 	if due {

@@ -1576,8 +1576,9 @@ entry after `after`.
 fetches and reads the comments copy under the same paging, retention and error
 rules as the mirror. It answers `{"entries":[{"seq","at","author","mine",
 "text","anchor"}],"names":{},"last":N,"next":N,"more":false}`. Names are
-cached per server in memory, and an unknown author's name may trigger a roster
-refresh at most once per 60 seconds. Unknown comment shapes remain in the copy
+cached per server in memory, and the roster is read again at most once per 60
+seconds while comments are read, so a known author's new name shows within
+about a minute. Unknown comment shapes remain in the copy
 but are skipped in the answer.
 
 `POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments`
