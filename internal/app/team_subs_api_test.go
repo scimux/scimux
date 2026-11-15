@@ -1372,3 +1372,51 @@ func TestSubListRereadOfDamagedServersIsAnError(t *testing.T) {
 	letGo()
 	assertAPIError(t, recvTeam(t, done, "subscriptions"), http.StatusInternalServerError, "store_unavailable")
 }
+
+func TestSubListForgetsServerDuringRosterRequest(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+		case "/v1/channels":
+			_, _ = io.WriteString(w, channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1)))
+		case "/v1/seats":
+			close(entered)
+			<-release
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(letGo)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- doTeam(h, http.MethodGet, "/api/team/subscriptions", "") }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the list did not reach the roster")
+	}
+	if err := team.Remove(dir, teamServerID); err != nil {
+		t.Fatal(err)
+	}
+	letGo()
+	rec := recvTeam(t, done, "subscriptions")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+	}
+	var got subListBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Servers) != 0 || len(got.Subscriptions) != 0 {
+		t.Fatalf("list = %+v", got)
+	}
+	assertNoSubsFile(t, dir)
+}
