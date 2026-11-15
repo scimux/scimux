@@ -1857,3 +1857,63 @@ func TestSubReadReplacedGenerationSaveFailure(t *testing.T) {
 	asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
 	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "store_unavailable")
 }
+
+func TestSubSeenRequiresCSRF(t *testing.T) {
+	cmd, data, _, _ := startTeamCommand(t, true, true)
+	seedSub(t, data, baseSub())
+	core, err := newCoreMux(cmd.application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, err := newWebBackend(webBackendConfig{Web: webFS, Core: core, RequestPolicy: cmd.application.requestPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "http://127.0.0.1"+subReadPath()+"/seen", strings.NewReader(`{"mirror":1}`))
+	req.Host = "127.0.0.1"
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	web.local.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("without CSRF = %d", rec.Code)
+	}
+}
+
+func TestSubSeenDoesNotContactServer(t *testing.T) {
+	var hits int
+	h, _ := readSurface(t, func(http.ResponseWriter, *http.Request) { hits++ })
+	rec := doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1}`)
+	if rec.Code != http.StatusNoContent || hits != 0 {
+		t.Fatalf("seen = %d, hits = %d", rec.Code, hits)
+	}
+}
+
+func TestTeamOtherRoutesDoNotListChannels(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.URL.Path == "/v1/hello" {
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+			return
+		}
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, `{"seats":[]}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	for _, path := range []string{"/api/team/servers", "/api/team/shares", "/api/team/servers/" + teamServerID + "/seats"} {
+		rec := doTeam(h, http.MethodGet, path, "")
+		if rec.Code != 200 {
+			t.Fatalf("%s = %d", path, rec.Code)
+		}
+	}
+	for _, path := range paths {
+		if path == "GET /v1/channels" {
+			t.Fatal("other routes listed channels")
+		}
+	}
+}
