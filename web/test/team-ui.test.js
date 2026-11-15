@@ -756,3 +756,18 @@ test("a late seat name answer can find a row restored during the request", async
   pending.resolve({ ...relay, seat_name: "Synthetic" }); await ui.section.settled();
   assert.match(ui.servers.innerHTML, /Your name: Synthetic/); assert.equal(teamNameField(ui), null);
 });
+
+test("an older list reply cannot undo a successful seat rename", async () => {
+  const saving = deferred(), listing = deferred(); let loads = 0;
+  const ui = harness(call => {
+    if (call.path === "/api/team/servers") return ++loads === 1 ? { servers: [relay] } : listing.promise;
+    if (call.method === "PUT") return saving.promise;
+    return { status: "connected" };
+  });
+  await ui.section.refresh(); await ui.section.settled();
+  teamNameAction(ui, relay.id, "name-edit").click(); teamNameInput(ui, "Synthetic"); teamNameAction(ui, relay.id, "name-save").click();
+  const refreshing = ui.section.refresh(); await Promise.resolve(); await Promise.resolve();
+  saving.resolve({ ...relay, seat_name: "Synthetic" }); await Promise.resolve(); await Promise.resolve();
+  listing.resolve({ servers: [relay] }); await refreshing; await ui.section.settled();
+  assert.match(ui.servers.innerHTML, /Your name: Synthetic/);
+});
