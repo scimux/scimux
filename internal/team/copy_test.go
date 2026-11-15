@@ -692,3 +692,22 @@ func TestCopyConcurrentAppendStoresOnce(t *testing.T) {
 		t.Fatalf("lines = %d", bytes.Count(raw, []byte("\n")))
 	}
 }
+
+func TestCopySameLengthDamageIsNotAppendedWithoutReading(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{"v":1}`)}); err != nil {
+		t.Fatal(err)
+	}
+	path := copyPathOf(dir, id)
+	raw := readCopyFile(t, dir, id)
+	raw[0] = '!'
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
+		t.Fatalf("append error = %v", err)
+	}
+	if !bytes.Equal(raw, readCopyFile(t, dir, id)) {
+		t.Fatal("damaged copy was appended")
+	}
+}
