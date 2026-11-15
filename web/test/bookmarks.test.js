@@ -2197,3 +2197,13 @@ test("a bookmark taken from a chat turn records whose turn it was", () => {
   assert.match(appSrc, /bookmark\.role\s*=/,
     "station bookmark stamps the turn's role");
 });
+
+test("shared bookmark source line names its writer and chat", () => {
+  const esc = s => String(s).replaceAll("<", "&lt;").replaceAll("&", "&amp;");
+  const html = nt => bookmarkListHTML({ list: [{ t: "T", text: "x", ...nt }], bookmarkTab: "GENERAL", esc, fmtWhen: () => "TIME" });
+  assert.match(html({ who: "Ann" }), /TIME · Ann/);
+  assert.match(html({ from: "Chat" }), /TIME · Chat/);
+  assert.match(html({ who: "Ann", from: "Chat" }), /TIME · Ann · Chat/);
+  assert.match(html({ who: "<A", from: "<B" }), /&amp;lt;A · &amp;lt;B/);
+  assert.match(html({}), /<div class="when">TIME<\/div>/);
+});

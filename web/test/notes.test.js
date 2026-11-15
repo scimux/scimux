@@ -3756,3 +3756,15 @@ test("the workspace's two send-to callers pass the frozen transcript role", () =
   assert.match(notesSrc, /role:\s*\(ref\.snapshot && ref\.snapshot\.role\)/,
     "a reference's send-to passes its frozen role even when speaker is an agent name");
 });
+
+test("shared bookmark source and snapshot preserve the person", () => {
+  const html = nt => inboxItemHTML({ t: "T", text: "x", ...nt }, "color", { fmtWhen: () => "TIME" });
+  assert.match(html({ who: "Ann" }), /TIME · Ann/);
+  assert.match(html({ from: "Chat" }), /TIME · Chat/);
+  assert.match(html({ who: "Ann", from: "Chat" }), /TIME · Ann · Chat/);
+  assert.match(html({ who: "<A", from: "<B" }), /&lt;A · &lt;B/);
+  assert.match(html({}), /<div class="wsiwhen">TIME<\/div>/);
+  const snap = buildBookmarkSnapshot({ t: "T", text: "x", role: "person", who: "Ann", from: "Chat", prov: true });
+  assert.equal(snap.speaker, "Ann"); assert.equal(snap.station, "Chat"); assert.equal(snap.role, "person"); assert.equal(snap.prov, true);
+  assert.equal(buildBookmarkSnapshot({ role: "person" }).speaker, "another person");
+});
