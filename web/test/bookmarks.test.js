@@ -64,6 +64,19 @@ test("send-to quotes a shared person's text", () => {
   assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "ok"), "[Written by A, includes AI-generated text, quoted from a shared chat — not written by me:]\n\nsynthetic");
 });
 
+test("bookmark pane sends the shared writer and provenance", () => {
+  const ctx = createFeature({ bookmarks: [{ t: "shared", text: "synthetic", role: "person", who: "A", prov: true }] });
+  ctx.feature.bind(); ctx.feature.setOpen(true);
+  const card = el("div", { dataset: { t: "shared" } });
+  const button = el("button", { dataset: { bmact: "sendto" } });
+  button.closest = sel => sel === "[data-bmact]" ? button : sel === ".bookmark" ? card : null;
+  ctx.roots.bookmarkspane.dispatch("click", { target: button });
+  const target = el("button", { dataset: { fwd: "n2" } });
+  target.closest = sel => sel === "[data-fwd]" ? target : null;
+  ctx.roots.sendtoList.onclick({ target });
+  assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "n2"), "[Written by A, includes AI-generated text, quoted from a shared chat — not written by me:]\n\nsynthetic");
+});
+
 /* ---------- module shape ---------- */
 test("bookmarks.js exports factory and pure helpers; no later-feature imports", () => {
   assert.match(bookmarksSrc, /export function createBookmarksFeature/);
