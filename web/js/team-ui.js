@@ -92,6 +92,7 @@ export function createSharingSection({ api, doc }) {
     byId = new Map();
     states = new Map();
     for (const server of rows) byId.set(server.id, server);
+    if (nameEdit && !byId.has(nameEdit.id)) nameEdit = null;
     $("#m_sharing").hidden = false;
     render();
     for (const server of rows) trackStatus(generation, server.id);
@@ -268,6 +269,7 @@ export function createSharingSection({ api, doc }) {
     if (button) button.focus();
   }
   function onNameEdit(id) {
+    if (nameEdit && nameEdit.busy) return;
     const server = byId.get(id);
     if (!server) return;
     nameEdit = { id, text: server.seat_name, busy: false };
@@ -299,7 +301,9 @@ export function createSharingSection({ api, doc }) {
     const edit = nameEdit;
     edit.busy = true; render();
     const pending = api("/api/team/servers/" + id + "/seat", { method: "PUT", body: JSON.stringify({ name: edit.text }) });
-    enqueue(() => finishName(edit, pending));
+    const work = finishName(edit, pending);
+    inflight.add(work);
+    work.finally(() => inflight.delete(work));
   }
   async function finishName(edit, pending) {
     try {
