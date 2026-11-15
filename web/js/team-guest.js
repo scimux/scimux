@@ -204,7 +204,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     let owner = view.owner_name;
     if (!owner) owner = "Unknown person";
     $("sv_title").textContent = title;
-    $("sv_from").textContent = "From " + owner + " · " + view.server_name;
+    $("sv_from").textContent = (view.access === "owner" ? "Your chat" : "From " + owner) + " · " + view.server_name;
     $("sv_state").textContent = guestStateText(view);
   }
   function openView(view) {
@@ -559,6 +559,7 @@ export function guestStateText(view) {
   if (view.delivery === "changed") return "Not the same server · saved copy";
   let text = "Can view";
   if (view.access === "write") text = "Can comment";
+  if (view.access === "owner") text = "Shared by you";
   if (view.delivery === "offline") text += " · offline, showing the saved copy";
   return text;
 }
