@@ -200,7 +200,7 @@ test("late read after closing is dropped and escape closes", async () => {
 test("read failures show fixed notes and a later success clears them", async () => {
   for (const [code, expected] of [["not_found", "This chat is no longer in your list."], ["copy_damaged", "The saved copy of this chat is damaged and cannot be shown."], ["storage_full", "This computer's storage is full. Free some space to load more."], ["bad-json", "That did not work. It will be tried again."]]) {
     let reads = 0;
-    const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); reads++; if (reads === 1) throw new Error(code === "bad-json" ? "not json" : JSON.stringify({ error: code })); return readAnswer(); });
+    const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); reads++; if (reads === 1) { if (code === "bad-json") throw new Error("not json"); throw new Error(JSON.stringify({ error: code })); } return readAnswer(); });
     f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); assert.equal(f.get("sv_note").textContent, expected);
     if (code !== "not_found") { f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(f.get("sv_note").textContent, ""); }
   }
@@ -389,8 +389,6 @@ test("browser-normalized HTML does not rewrite an unchanged shared list", async 
  * tab active class follows the selected tab: archived and current.
  * cards waiting prefix conditional | shared cards path keeps the list (one waiting),
  * shared cards title has no waiting prefix when nobody is waiting (zero waiting).
- * guest test error-body conditional | read failures show fixed notes: bad-json and
- * copy_damaged/storage_full/not_found.
  * A newer list request cannot overtake an older one: tick refuses a second load
  * while loading, and destroy drops the pending response.
  */
