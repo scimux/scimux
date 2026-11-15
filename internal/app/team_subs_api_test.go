@@ -3495,6 +3495,9 @@ func TestSubCommentPostServerOutcomes(t *testing.T) {
 			sub := baseSub()
 			sub.Access = "write"
 			seedSub(t, dir, sub)
+			other := sub
+			other.Chat = subChatB
+			seedSub(t, dir, other)
 			rec := doTeam(h, http.MethodPost, subReadPath()+"/comments", `{"text":" `+marker+` ","anchor":0,"key":"0123456789abcdef"}`)
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d", rec.Code)
@@ -3514,6 +3517,14 @@ func TestSubCommentPostServerOutcomes(t *testing.T) {
 			}
 			if subs := loadSubFile(t, dir); subs[0].State != tc.state {
 				t.Error("wrong final state")
+			}
+			subs := loadSubFile(t, dir)
+			otherState := "live"
+			if tc.status == 401 {
+				otherState = "ended"
+			}
+			if subs[1].State != otherState {
+				t.Error("other subscription state incorrect")
 			}
 			if bytes.Contains(rec.Body.Bytes(), []byte(marker)) || bytes.Contains(logs.Bytes(), []byte(marker)) {
 				t.Error("message leaked")
@@ -3535,6 +3546,7 @@ func TestSubCommentPostValidationAndInactive(t *testing.T) {
 	path := subReadPath() + "/comments"
 	for _, body := range []string{
 		`{}`, `{"text":"","anchor":0,"key":"0123456789abcdef"}`, `{"text":" \n ","anchor":0,"key":"0123456789abcdef"}`,
+		`{"text":"x","key":"0123456789abcdef"}`, `{"text":"x","anchor":0}`,
 		`{"text":"x","anchor":0,"key":"0123456789abcdeF"}`, `{"text":"x","anchor":0,"key":"0123"}`,
 		`{"text":"x","anchor":-1,"key":"0123456789abcdef"}`, `{"text":"x","anchor":1,"key":"0123456789abcdef"}`,
 		`{"text":"x","anchor":0,"key":"0123456789abcdef","extra":1}`, `{"text":"x","anchor":0,"key":"0123456789abcdef"} {}`,
@@ -3602,6 +3614,7 @@ func TestSubCommentPostHelloAndSaveFailures(t *testing.T) {
 		{"hello offline", "", true, 200, 502, "unreachable"},
 		{"append offline", teamServerID, false, -1, 502, "unreachable"},
 		{"state save", teamServerID, false, 409, 500, "store_unavailable"},
+		{"unauthorized save", teamServerID, false, 401, 500, "store_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -3629,7 +3642,7 @@ func TestSubCommentPostHelloAndSaveFailures(t *testing.T) {
 			s := baseSub()
 			s.Access = "write"
 			seedSub(t, dir, s)
-			if tc.name == "state save" {
+			if strings.HasSuffix(tc.name, "save") {
 				asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
 			}
 			rec := doTeam(h, http.MethodPost, subReadPath()+"/comments", `{"text":"synthetic","anchor":0,"key":"0123456789abcdef"}`)
@@ -3668,5 +3681,66 @@ func TestSubCommentPostAnchorAndOwner(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Error("owner post not sent")
+	}
+}
+
+func TestSubCommentPostLocalFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		damage func(*testing.T, string)
+		code   string
+	}{
+		{"state", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("bad"), 0o600); err != nil {
+				t.Fatal("cannot damage state")
+			}
+		}, "store_unavailable"},
+		{"copy", func(t *testing.T, dir string) {
+			path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal("cannot create copy")
+			}
+			if err := os.WriteFile(path, []byte("bad\n"), 0o600); err != nil {
+				t.Fatal("cannot damage copy")
+			}
+		}, "copy_damaged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, dir := readSurface(t, func(http.ResponseWriter, *http.Request) { t.Error("local failure contacted server") })
+			subs := loadSubFile(t, dir)
+			subs[0].Access = "write"
+			if err := team.SaveSubs(dir, subs); err != nil {
+				t.Fatal("cannot save state")
+			}
+			tc.damage(t, dir)
+			assertAPIError(t, doTeam(h, http.MethodPost, subReadPath()+"/comments", `{"text":"synthetic","anchor":0,"key":"0123456789abcdef"}`), 500, tc.code)
+		})
+	}
+}
+
+func TestSubCommentPostNetworkCallsHoldNoLock(t *testing.T) {
+	var handler *teamHandler
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !handler.mu.TryLock() {
+			t.Error("network request held handler lock")
+			w.WriteHeader(500)
+			return
+		}
+		handler.mu.Unlock()
+		if r.URL.Path == "/v1/hello" {
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Synthetic"))
+			return
+		}
+		_, _ = io.WriteString(w, `{"generation":"`+subGen+`","results":[{"key":"c/0123456789abcdef","seq":1,"duplicate":false}],"last":1}`)
+	}))
+	defer srv.Close()
+	h, dir := testTeamSurface(t, clientFor(srv))
+	handler = asTeamHandler(t, h)
+	joinLab(t, dir, teamServerID, srv.URL)
+	s := baseSub()
+	s.Access = "write"
+	seedSub(t, dir, s)
+	if rec := doTeam(h, http.MethodPost, subReadPath()+"/comments", `{"text":"synthetic","anchor":0,"key":"0123456789abcdef"}`); rec.Code != 200 {
+		t.Errorf("status = %d", rec.Code)
 	}
 }
