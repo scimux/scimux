@@ -2093,3 +2093,78 @@ func TestTeamRenameSeatRejectsChangedServerIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestTeamRenameSeatDoesNotHoldFileLockAcrossCalls(t *testing.T) {
+	for _, path := range []string{"/v1/hello", "/v1/seat"} {
+		t.Run(path, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			client := team.NewClient()
+			client.Transport = teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == path {
+					once.Do(func() { close(entered) })
+					<-release
+				}
+				body := "{}"
+				if r.URL.Path == "/v1/hello" {
+					body = helloJSON(teamServerID, "Lab relay")
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: r}, nil
+			})
+			h, dir := testTeamSurface(t, client)
+			seedTeam(t, dir, labEntry(teamServerID, "http://relay.example", teamToken))
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				done <- doTeam(h, http.MethodPut, "/api/team/servers/"+teamServerID+"/seat", `{"name":"Synthetic"}`)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				close(release)
+				t.Fatal("server call did not start")
+			}
+			listed := make(chan *httptest.ResponseRecorder, 1)
+			go func() { listed <- doTeam(h, http.MethodGet, "/api/team/servers", "") }()
+			select {
+			case rec := <-listed:
+				if rec.Code != http.StatusOK {
+					t.Error("list failed")
+				}
+			case <-time.After(3 * time.Second):
+				t.Error("list blocked on network call")
+			}
+			close(release)
+			rec := recvTeam(t, done, "rename")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("rename status = %d", rec.Code)
+			}
+			info, err := os.Stat(filepath.Join(dir, team.File))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0600 {
+				t.Fatal("team file mode is not private")
+			}
+		})
+	}
+}
+
+func TestTeamRenameSeatRequiresCSRF(t *testing.T) {
+	cmd, _, _, _ := startTeamCommand(t, true, true)
+	core, err := newCoreMux(cmd.application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, err := newWebBackend(webBackendConfig{Web: webFS, Core: core, RequestPolicy: cmd.application.requestPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "http://127.0.0.1/api/team/servers/"+teamServerID+"/seat", strings.NewReader(`{"name":"Synthetic"}`))
+	request.Host = "127.0.0.1"
+	request.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	web.local.ServeHTTP(rec, request)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("without CSRF status = %d", rec.Code)
+	}
+}
