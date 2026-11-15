@@ -3098,3 +3098,13 @@ func TestSubListUnreadIncludesCommentsByAccess(t *testing.T) {
 		})
 	}
 }
+
+func TestSubListUpdatesOwnerNameAndCommentCount(t *testing.T) {
+	s := baseSub()
+	s.Access, s.OwnerName = "owner", "Old"
+	outcome := subOutcome{entry: team.Entry{ID: teamServerID, SeatName: "New"}, channels: []team.Channel{{Owner: s.Owner, Chat: s.Chat, Generation: s.Generation, Title: s.Title, Access: "owner", MirrorLast: s.MirrorLast, CommentsLast: 4}}}
+	got, changed, _ := applyChannels([]team.Subscription{s}, outcome, s.Owner, fixedTeamClock()(), false)
+	if !changed || len(got) != 1 || got[0].OwnerName != "New" || got[0].CommentsLast != 4 || got[0].State != "live" {
+		t.Error("owner update was lost")
+	}
+}
