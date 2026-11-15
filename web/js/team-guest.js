@@ -7,6 +7,38 @@ export function guestKey(view) {
   return [view.server, view.owner, view.chat, view.generation].join("/");
 }
 
+export function guestCapture(entry, view, names) {
+  if (entry.omitted !== undefined) return null;
+  if (!entry.text) return null;
+  const comment = entry.t === undefined;
+  if (!comment) {
+    if (entry.t !== "user" && entry.t !== "assistant") return null;
+  }
+  let role = "user";
+  if (entry.t === "assistant") role = "assistant";
+  else if (comment) {
+    if (!entry.mine) role = "person";
+  } else if (view.access !== "owner") role = "person";
+  const capture = { text: stripAssetRefs(entry.text), role };
+  if (role === "assistant") {
+    if (entry.agent) capture.agent = entry.agent;
+  }
+  if (role === "person") {
+    if (comment) {
+      capture.who = names[entry.author] || "Unknown person";
+      capture.seat = entry.author;
+    } else {
+      capture.who = view.owner_name || "Unknown person";
+      capture.seat = view.owner;
+    }
+  }
+  if (entry.prov === true) capture.prov = true;
+  capture.from = view.title || "Untitled chat";
+  capture.turnTime = comment ? entry.at : entry.time;
+  capture.team = { server: view.server, owner: view.owner, chat: view.chat, generation: view.generation, log: comment ? "comments" : "mirror", seq: entry.seq };
+  return capture;
+}
+
 function compare(a, b) {
   return a.localeCompare(b, undefined, { sensitivity: "base" });
 }
