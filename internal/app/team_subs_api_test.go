@@ -801,10 +801,10 @@ func TestSubListOwnerNames(t *testing.T) {
 	script.seatsBody = seatsOf(subOwner, "Ada", subOwnerB, "Bea", subOwnerC, "Ada")
 	script.mu.Unlock()
 	second, _ := readSubList(t, h)
-	if mustFindSub(t, second, subOwnerC, subChatC, subGen).OwnerName != "" {
+	if mustFindSub(t, second, subOwnerC, subChatC, subGen).OwnerName != "Ada" {
 		t.Fatalf("new name = %+v", second.Subscriptions)
 	}
-	if countSubPath(script.snapshot(), "/v1/seats") != 1 {
+	if countSubPath(script.snapshot(), "/v1/seats") != 2 {
 		t.Fatalf("seats asks = %+v", script.snapshot())
 	}
 	*clock = clock.Add(10 * time.Minute)
@@ -821,7 +821,7 @@ func TestSubListOwnerNames(t *testing.T) {
 	if mustFindSub(t, third, subOwnerC, subChatC, subGen).OwnerName != "Ada" {
 		t.Fatalf("owner missing from the later roster = %+v", third.Subscriptions)
 	}
-	if countSubPath(script.snapshot(), "/v1/seats") != 2 {
+	if countSubPath(script.snapshot(), "/v1/seats") != 3 {
 		t.Fatalf("seats asks = %+v", script.snapshot())
 	}
 }
@@ -1985,5 +1985,57 @@ func TestSubReadIgnoresNullTypedFields(t *testing.T) {
 	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
 	if len(got.Entries) != 0 || got.Last != 2 {
 		t.Fatalf("read = %+v", got)
+	}
+}
+
+func TestSubEndedIsNeverUnread(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	sub := baseSub()
+	sub.State = "ended"
+	sub.MirrorLast = 7
+	seedSub(t, dir, sub)
+	list, _ := readSubList(t, h)
+	if s := mustFindSub(t, list, subOwner, subChat, subGen); s.Unread {
+		t.Fatalf("ended list = %+v", s)
+	}
+	view := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if view.View.Unread {
+		t.Fatalf("ended view = %+v", view.View)
+	}
+}
+func TestSubNewGenerationCopiesOwnerName(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1)), seatsBody: seatsOf(subOwner, "Ada")}
+	h, _, _ := subSurface(t, script)
+	clock := holdClock(t, h)
+	readSubList(t, h)
+	*clock = clock.Add(10 * time.Second)
+	script.mu.Lock()
+	script.channelsBody = channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGenB, "read", 0))
+	script.mu.Unlock()
+	got, _ := readSubList(t, h)
+	if s := mustFindSub(t, got, subOwner, subChat, subGenB); s.OwnerName != "Ada" {
+		t.Fatalf("new generation = %+v", s)
+	}
+	if n := countSubPath(script.snapshot(), "/v1/seats"); n != 1 {
+		t.Fatalf("roster calls = %d", n)
+	}
+}
+func TestSubNewMissingOwnerAsksRosterOnlyOnce(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1)), seatsBody: seatsOf(subOwner, "Ada")}
+	h, _, _ := subSurface(t, script)
+	clock := holdClock(t, h)
+	readSubList(t, h)
+	*clock = clock.Add(10 * time.Second)
+	script.mu.Lock()
+	script.channelsBody = channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1), guestChannel(subOwnerB, subChatB, "Synthetic title", subGen, "read", 1))
+	script.mu.Unlock()
+	got, _ := readSubList(t, h)
+	if s := mustFindSub(t, got, subOwnerB, subChatB, subGen); s.OwnerName != "" {
+		t.Fatalf("unknown owner = %+v", s)
+	}
+	*clock = clock.Add(10 * time.Second)
+	readSubList(t, h)
+	if n := countSubPath(script.snapshot(), "/v1/seats"); n != 2 {
+		t.Fatalf("roster calls = %d", n)
 	}
 }
