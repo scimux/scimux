@@ -2425,3 +2425,31 @@ func TestSubLiveForgottenServerReadsCopyWithoutAnyRequest(t *testing.T) {
 		t.Fatalf("server hits %d transport hits %d", serverHits.Load(), transportHits.Load())
 	}
 }
+
+func TestProjectSubRecordUserProvenance(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+		valid bool
+		want  any
+	}{
+		{"true", `,"prov":true`, true, true},
+		{"false", `,"prov":false`, true, false},
+		{"absent", ``, true, nil},
+		{"null", `,"prov":null`, false, nil},
+		{"wrong type", `,"prov":"yes"`, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := team.MirrorRecord{Seq: 1, Body: json.RawMessage(`{"v":1,"t":"user","text":"synthetic"` + tc.field + `}`)}
+			got, _, ok := projectSubRecord(r)
+			if ok != tc.valid {
+				t.Fatalf("valid = %v, want %v", ok, tc.valid)
+			}
+			if ok {
+				if got["prov"] != tc.want {
+					t.Fatalf("prov = %v, want %v", got["prov"], tc.want)
+				}
+			}
+		})
+	}
+}
