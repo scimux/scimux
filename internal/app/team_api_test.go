@@ -144,6 +144,7 @@ func assertTeamPathsMatchUnknown(t *testing.T, h http.Handler) {
 			"/api/team/servers/" + teamServerID + "/status",
 			"/api/team/servers/" + teamServerID + "/leave",
 			"/api/team/servers/" + teamServerID + "/seats",
+			"/api/team/servers/" + teamServerID + "/seat",
 			"/api/team/shares",
 			"/api/team/shares/",
 			"/api/team/shares/chat",
