@@ -97,7 +97,7 @@ export function guestGroups(subs, servers) {
   return result;
 }
 
-export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes }) {
+export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo }) {
   let off = false;
   let destroyed = false;
   let answer = { subscriptions: [], servers: [], truncated: false };
@@ -244,7 +244,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const key = guestKey(view);
     let draft = drafts.get(key);
     if (!draft) { draft = { text: "", key: "", keyText: "", sending: false }; drafts.set(key, draft); }
-    open = { key, view, draft, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false, sendNote: false };
+    open = { key, view, draft, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), action: null, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false, sendNote: false };
     header(view);
     $("sv_body").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("sv_note").textContent = "";
@@ -257,18 +257,28 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     $("sv_back").focus();
     startRead();
   }
-  function close() {
+  function close(restoreFocus = true) {
     if (!open) return;
     const key = open.key;
     open = null;
     readGeneration++;
     $("sharedview").hidden = true;
     $("sv_body").innerHTML = "";
+    if (!restoreFocus) return;
     let focus = $("cardlist").querySelector(`[data-sub="${key}"]`);
     if (!focus) focus = $("cardtabs").querySelector('[data-tab="shared"]');
     if (focus) focus.focus();
   }
   function keydown(event) {
+    if (event.key === "Enter" || event.key === " ") {
+      if (!event.target) return;
+      const bubble = event.target.closest(".bubble");
+      if (bubble === event.target) {
+        event.preventDefault();
+        toggleAction(bubble);
+      }
+      return;
+    }
     if (event.key !== "Escape") return;
     event.stopPropagation();
     if (open) {
@@ -296,6 +306,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function insertOrdered(body, html, key) {
     for (const element of body.children) {
+      if (element.dataset.gactions !== undefined) continue;
       let other = [Number(element.dataset.seq), 0, 0];
       if (element.dataset.cseq !== undefined) other = [Number(element.dataset.anchor), 1, Number(element.dataset.cseq)];
       for (let i = 0; i < key.length; i++) {
@@ -324,6 +335,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         }
         if (current.first) { body.innerHTML = ""; current.first = false; }
         for (const entry of result.entries) {
+          current.entries.set("mirror/" + entry.seq, entry);
           const rendered = guestEntryHTML(entry, result.view.owner_name);
           if (rendered) {
             if (current.empty) { body.innerHTML = ""; current.empty = false; }
@@ -346,6 +358,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (!moreComments) break;
       }
       for (const message of messages) {
+        current.entries.set("comments/" + message.seq, message);
         if (current.empty) { body.innerHTML = ""; current.empty = false; }
         insertOrdered(body, guestMessageHTML(message, current.names), [message.anchor, 1, message.seq]);
         hasEntries = true;
@@ -514,6 +527,46 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!open) return;
     if (event.target === $("sv_remove")) return;
     if (open.armed) disarm(open);
+    if (!event.target.closest) return;
+    const action = event.target.closest("[data-gact]");
+    if (action) { runAction(action.dataset.gact); return; }
+    if (event.target.closest("a")) return;
+    const bubble = event.target.closest(".bubble");
+    if (bubble) toggleAction(bubble);
+  }
+  function toggleAction(bubble) {
+    if (!open) return;
+    const turn = bubble.closest("[data-seq], [data-cseq]");
+    if (!turn) return;
+    let key = "mirror/" + turn.dataset.seq;
+    if (turn.dataset.cseq !== undefined) key = "comments/" + turn.dataset.cseq;
+    const entry = open.entries.get(key);
+    if (!entry) return;
+    const capture = guestCapture(entry, open.view, open.names);
+    if (!capture) return;
+    const previous = open.action;
+    if (previous) {
+      previous.turn.nextElementSibling.remove();
+      open.action = null;
+      if (previous.turn === turn) return;
+    }
+    turn.insertAdjacentHTML("afterend", '<div class="bubactions" data-gactions><button data-gact="bookmark">bookmark</button><button data-gact="sendto">send to&#8230;</button></div>');
+    open.action = { turn, capture };
+  }
+  function runAction(action) {
+    if (!open.action) return;
+    const capture = open.action.capture;
+    if (action === "bookmark") {
+      const keys = ["server", "owner", "chat", "generation", "log", "seq"];
+      const duplicate = bookmarks().some(item => item.team && keys.every(key => item.team[key] === capture.team[key]));
+      if (duplicate) { $("sv_note").textContent = "Already bookmarked."; return; }
+      uiMutate({ k: "bookmark-add", bookmark: { t: new Date(now()).toISOString(), ...capture } });
+      $("sv_note").textContent = "Bookmarked.";
+    }
+    if (action === "sendto") {
+      close(false);
+      openSendTo({ text: capture.text, exceptId: "", title: "Send to…", role: capture.role, who: capture.who, prov: capture.prov, source: null });
+    }
   }
   async function remove(current) {
     try {
@@ -607,7 +660,9 @@ export function guestMessageHTML(entry, names) {
   if (!who) who = "Unknown person";
   let name = `<div class="gwho">${esc(who)}</div>`;
   if (entry.mine) { cls = "turn user gmsg"; name = ""; }
-  return `<div class="${cls}" data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"><div class="bubble" title="${esc(entry.at)}">${name}${md(entry.text)}</div></div>`;
+  let tab = "";
+  if (entry.text) tab = ' tabindex="0"';
+  return `<div class="${cls}" data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"><div class="bubble" title="${esc(entry.at)}"${tab}>${name}${md(entry.text)}</div></div>`;
 }
 export function guestHexKey(bytes) {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -632,7 +687,9 @@ export function guestEntryHTML(entry, ownerName) {
     }
     let content = "This message was too large to share.";
     if (entry.omitted === undefined) content = md(stripAssetRefs(entry.text));
-    return `<div class="turn assistant" data-seq="${esc(entry.seq)}"><div class="bubble" title="${esc(bubbleTitle(entry.t, entry.time))}"><div class="gwho">${esc(who)}</div>${content}</div></div>`;
+    let tab = "";
+    if (entry.omitted === undefined) { if (entry.text) tab = ' tabindex="0"'; }
+    return `<div class="turn assistant" data-seq="${esc(entry.seq)}"><div class="bubble" title="${esc(bubbleTitle(entry.t, entry.time))}"${tab}><div class="gwho">${esc(who)}</div>${content}</div></div>`;
   } else return "";
   return `<div class="previewtrunc" data-seq="${esc(entry.seq)}">${line}</div>`;
 }
