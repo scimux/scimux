@@ -1562,6 +1562,15 @@ capped at the highest copied sequence, without contacting a server. Success
 is `204`; errors are `404` `not_found`, `400` `bad_request`, and `500`
 `store_unavailable`.
 
+`DELETE /api/team/subscriptions/{server}/{owner}/{chat}/{generation}` removes
+one subscription and its saved copy. For a live subscription on a joined
+server, it first confirms that server's identity and leaves the channel;
+ended or unjoined subscriptions need no server request. Success is `204`.
+Errors are `404` `not_found` for an invalid identity or unknown subscription,
+`502` `unreachable` for an unreachable server, `502` `bad_server` for another
+server failure, and `500` `store_unavailable` for a local storage failure.
+A failed local save can leave the entry without its copy, so it can be retried.
+
 Only the subscription list and read routes ask a team server for chats on
 behalf of this seat; no background subscription fetch is performed.
 

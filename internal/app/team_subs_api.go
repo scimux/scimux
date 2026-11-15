@@ -694,6 +694,16 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 	}
+	_, _, stillFound, _, err := h.lookupSubscription(id)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	if !stillFound {
+		_ = removeSubscriptionCopy(h.dataDir, id)
+		writeTeamError(w, http.StatusNotFound, "not_found")
+		return
+	}
 	records, last, err := team.ReadCopy(h.dataDir, id, after, 256, 4<<20)
 	if err != nil {
 		writeTeamError(w, 500, "copy_damaged")
@@ -843,5 +853,55 @@ func (h *teamHandler) saveSubscriptionState(subs []team.Subscription) error {
 var removeSubscriptionCopy = team.RemoveCopy
 
 func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
-	writeTeamError(w, http.StatusNotFound, "not_found")
+	sub, server, found, joined, err := h.lookupSubscription(id)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	if !found {
+		writeTeamError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if sub.State == "live" {
+		if joined {
+			err = h.confirmed(r.Context(), server)
+			if err == nil {
+				err = h.client.LeaveChannel(r.Context(), server.URL, server.Token, id.Owner, id.Chat)
+			}
+			if err != nil {
+				if !errors.Is(err, team.ErrNoChannel) {
+					if !errors.Is(err, team.ErrUnauthorized) {
+						if errors.Is(err, team.ErrUnreachable) {
+							writeTeamError(w, http.StatusBadGateway, "unreachable")
+						} else {
+							writeTeamError(w, http.StatusBadGateway, "bad_server")
+						}
+						return
+					}
+				}
+			}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := removeSubscriptionCopy(h.dataDir, id); err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	subs, err := team.LoadSubs(h.dataDir)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	idx := subIndex(subs, id.Server, subKey{owner: id.Owner, chat: id.Chat, gen: id.Generation})
+	if idx < 0 {
+		writeTeamError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	subs = append(subs[:idx], subs[idx+1:]...)
+	if err := h.saveSubscriptionState(subs); err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
