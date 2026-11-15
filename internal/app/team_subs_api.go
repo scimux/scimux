@@ -740,7 +740,7 @@ func projectSubRecord(record team.MirrorRecord) (map[string]any, int, bool) {
 	case "start":
 		fields = []string{"scope", "time"}
 	case "user":
-		fields = []string{"time", "text", "prov"}
+		fields = []string{"time", "text", "prov", "omitted"}
 	case "assistant":
 		fields = []string{"time", "text", "agent", "prov", "omitted"}
 	case "source":
