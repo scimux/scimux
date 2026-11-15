@@ -760,3 +760,21 @@ test("read marks include only advanced logs and use owner unread rules", async (
     if (tc.body) assert.equal(f.feature.tab.tabHTML(false).includes("unread"), tc.unread);
   }
 });
+
+test("following an empty view replaces it with a new comment", async () => {
+  let calls = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("/seen")) return ""; return readAnswer(); }, async () => { calls++; if (calls === 1) return commentsAnswer(); return commentsAnswer([{ seq:1, anchor:0, author:"a", text:"x" }], 1); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.ok(f.get("sv_body").innerHTML.includes("Nothing has been shared yet."));
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.ok(f.get("sv_body").innerHTML.includes('data-cseq="1"'));
+  assert.ok(!f.get("sv_body").innerHTML.includes("Nothing has been shared yet."));
+});
+
+test("late combined seen answer does not mark a closed view", async () => {
+  const seen = deferred(), started = deferred();
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([{ ...base, unread:true }]); if (path.endsWith("/seen")) { started.resolve(); return seen.promise; } return readAnswer([], 1); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await started.promise;
+  f.click("sv_back"); seen.resolve(""); await f.feature.settled();
+  assert.ok(f.feature.tab.tabHTML(false).includes("1 unread"));
+});
