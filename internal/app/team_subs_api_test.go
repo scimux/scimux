@@ -2882,3 +2882,29 @@ func TestSubRemoveGateOffDoesNothing(t *testing.T) {
 		t.Error("gate-off route touched copies")
 	}
 }
+
+func TestSubRemoveEntryVanishedDuringCopyRemoval(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	sub := baseSub()
+	sub.State = "ended"
+	seedSub(t, dir, sub)
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	seedRemovalCopy(t, dir, id)
+	previous := removeSubscriptionCopy
+	t.Cleanup(func() { removeSubscriptionCopy = previous })
+	calls := 0
+	removeSubscriptionCopy = func(data string, copyID team.CopyID) error {
+		calls++
+		if err := previous(data, copyID); err != nil {
+			return err
+		}
+		return team.SaveSubs(data, nil)
+	}
+	assertAPIError(t, doTeam(h, http.MethodDelete, subReadPath(), ""), 404, "not_found")
+	if calls != 1 {
+		t.Error("copy removal was not attempted")
+	}
+	if len(loadSubFile(t, dir)) != 0 {
+		t.Error("subscription was restored")
+	}
+}
