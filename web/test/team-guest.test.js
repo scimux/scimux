@@ -1183,3 +1183,35 @@ test("composer shortcuts cannot send again while a message is in flight", async 
   assert.equal(posts, 1); assert.equal(prevented, 2);
   pending.resolve({ seq: 1 }); await f.feature.settled();
 });
+
+test("guestName selects local, server and unknown names", () => {
+  const guestName = guestModule.guestName;
+  assert.equal(typeof guestName, "function");
+  assert.equal(guestName("s", "a", "Server", { "s/a": "Local" }), "Local");
+  assert.equal(guestName("s", "a", "Server", { "s/a": "" }), "Server");
+  assert.equal(guestName("s", "a", "Server", { "s/a": 4 }), "Server");
+  assert.equal(guestName("s", "a", "", {}), "Unknown person");
+  assert.equal(guestName("s", "a", "Server", undefined), "Server");
+});
+
+test("shared labels and capture use local names without renaming own entries", () => {
+  const people = { "s/o": "Local owner", "s/a": "Local writer" };
+  const prompt = { t: "user", seq: 1, text: "x" }, message = { seq: 2, anchor: 1, text: "y", author: "a", mine: false };
+  assert.match(guestModule.guestGroups([base], [], people)[0].label, /Local owner/);
+  assert.match(guestModule.guestGroups([{ ...base, access: "owner" }], [], people)[0].label, /^Mine/);
+  assert.match(guestModule.guestEntryHTML(prompt, "Owner", "s", "o", people, "read"), /data-seat="o"[^>]*>Local owner/);
+  assert.doesNotMatch(guestModule.guestEntryHTML(prompt, "Owner", "s", "o", people, "owner"), /Local owner/);
+  assert.match(guestModule.guestMessageHTML(message, { a: "Writer" }, "s", people), /data-seat="a"[^>]*>Local writer/);
+  assert.doesNotMatch(guestModule.guestMessageHTML({ ...message, mine: true }, { a: "Writer" }, "s", people), /Local writer/);
+  assert.equal(guestModule.guestCapture(prompt, base, {}, people).who, "Local owner");
+  assert.equal(guestModule.guestCapture(message, base, { a: "Writer" }, people).who, "Local writer");
+  assert.equal(guestModule.guestCapture(prompt, { ...base, access: "owner" }, {}, people).role, "user");
+});
+
+test("shared header and groups use the current local owner name", async () => {
+  const people = { "s/o": "Local owner" };
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(), undefined, undefined, { people: () => people });
+  f.feature.tick(); await f.feature.settled(); f.feature.tab.render(f.get("cardlist"));
+  assert.match(f.get("cardlist").innerHTML, /Local owner/);
+  f.click("cardlist", f.item); await f.feature.settled(); assert.equal(f.get("sv_from").textContent, "From Local owner · Server");
+});
