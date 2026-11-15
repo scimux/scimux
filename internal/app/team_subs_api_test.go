@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1419,4 +1421,172 @@ func TestSubListForgetsServerDuringRosterRequest(t *testing.T) {
 		t.Fatalf("list = %+v", got)
 	}
 	assertNoSubsFile(t, dir)
+}
+
+func subReadPath() string {
+	return "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
+}
+
+func subRecord(seq int, body string) string {
+	return fmt.Sprintf(`{"seq":%d,"key":"k%d","author":"%s","at":"2026-11-14T09:30:00.000Z","body":%s}`, seq, seq, subOwner, body)
+}
+
+func subPage(gen string, last int, more bool, entries ...string) string {
+	return fmt.Sprintf(`{"generation":"%s","entries":[%s],"last":%d,"more":%t}`, gen, strings.Join(entries, ","), last, more)
+}
+
+type readSubBody struct {
+	View struct {
+		subView
+		Delivery string `json:"delivery"`
+	} `json:"view"`
+	Entries []map[string]any `json:"entries"`
+	Last    uint64           `json:"last"`
+	More    bool             `json:"more"`
+}
+
+func decodeSubRead(t *testing.T, rec *httptest.ResponseRecorder) readSubBody {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rec.Code, rec.Body.String())
+	}
+	assertNoSecrets(t, rec.Body.String(), "", teamToken)
+	var body readSubBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func readSurface(t *testing.T, mirror func(http.ResponseWriter, *http.Request)) (http.Handler, string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hello" {
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Lab relay"))
+			return
+		}
+		mirror(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	seedSub(t, dir, baseSub())
+	return h, dir
+}
+
+func TestSubReadFetchesCopiesAndProjects(t *testing.T) {
+	var queries []string
+	bodies := []string{
+		`{"v":1,"t":"start","scope":"from_now","time":"2026-11-14T09:30:00.000Z"}`,
+		`{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"synthetic text"}`,
+		`{"v":1,"t":"assistant","time":"2026-11-14T09:30:00.000Z","text":"synthetic output","agent":"grok","prov":true}`,
+		`{"v":1,"t":"assistant","time":"2026-11-14T09:30:00.000Z","omitted":"too_large"}`,
+		`{"v":1,"t":"source","time":"2026-11-14T09:30:00.000Z","reason":"clear"}`,
+		`{"v":1,"t":"unknown"}`, `{"v":2,"t":"user","text":"ignored"}`, `42`,
+	}
+	var entries []string
+	for i, body := range bodies {
+		entries = append(entries, subRecord(i+1, body))
+	}
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		if r.URL.Query().Get("after") == "0" {
+			_, _ = io.WriteString(w, subPage(subGen, 8, false, entries...))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 8, false))
+	})
+	first := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	second := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if first.Last != 8 || first.More || len(first.Entries) != 5 || first.View.Delivery != "ok" || !first.View.Unread {
+		t.Fatalf("first = %+v", first)
+	}
+	if !reflect.DeepEqual(first.Entries, second.Entries) || second.Last != 8 || strings.Join(queries, ",") != "after=0,after=8" {
+		t.Fatalf("second = %+v queries = %v", second, queries)
+	}
+	for i, entry := range first.Entries {
+		if entry["seq"] != float64(i+1) || entry["key"] != nil || entry["author"] != nil {
+			t.Fatalf("entry = %+v", entry)
+		}
+	}
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	stored, last, err := team.ReadCopy(dir, id, 0)
+	if err != nil || last != 8 || len(stored) != 8 {
+		t.Fatalf("copy last = %d count = %d err = %v", last, len(stored), err)
+	}
+	for i := range stored {
+		if string(stored[i].Body) != bodies[i] {
+			t.Fatalf("body %d changed", i)
+		}
+	}
+	after := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath()+"?after=3", ""))
+	if len(after.Entries) != 2 || after.Entries[0]["seq"] != float64(4) {
+		t.Fatalf("after = %+v", after)
+	}
+}
+
+func TestSubReadPageLimitAndResultLimit(t *testing.T) {
+	var queries []string
+	h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query().Get("after"))
+		n, _ := strconv.Atoi(r.URL.Query().Get("after"))
+		entries := make([]string, 0, 64)
+		for i := n + 1; i <= n+64; i++ {
+			entries = append(entries, subRecord(i, `{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"x"}`))
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1000, true, entries...))
+	})
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if len(queries) != 8 || got.Last != 512 || len(got.Entries) != 256 || !got.More {
+		t.Fatalf("queries %v result %+v", queries, got)
+	}
+}
+
+func TestSubReadOutcomesKeepTheCopy(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		status          int
+		page            string
+		delivery, state string
+	}{
+		{"generation", 200, subPage(subGenB, 0, false), "ok", "ended"},
+		{"missing", 404, "", "ok", "ended"},
+		{"revoked", 401, "", "refused", "ended"},
+		{"bad page", 200, "bad", "changed", "live"},
+		{"gap", 200, subPage(subGen, 2, false, subRecord(2, `{"v":1,"t":"user"}`)), "changed", "live"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.page)
+			})
+			got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+			if got.View.State != tc.state || got.View.Delivery != tc.delivery || got.Last != 0 || len(got.Entries) != 0 {
+				t.Fatalf("read = %+v", got)
+			}
+		})
+	}
+}
+
+func TestSubReadValidationAndSeen(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, subPage(subGen, 2, false, subRecord(1, `{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"x"}`), subRecord(2, `{"v":1,"t":"user","time":"2026-11-14T09:30:00.000Z","text":"y"}`)))
+	})
+	decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	for _, body := range []string{`{}`, `{"mirror":-1}`, `{"mirror":1,"other":0}`, `{"mirror":1} {}`, strings.Repeat(" ", 1025)} {
+		assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", body), http.StatusBadRequest, "bad_request")
+	}
+	for _, n := range []int{1, 0, 100} {
+		rec := doTeam(h, http.MethodPut, subReadPath()+"/seen", fmt.Sprintf(`{"mirror":%d}`, n))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("seen %d = %d %s", n, rec.Code, rec.Body.String())
+		}
+	}
+	subs := loadSubFile(t, dir)
+	if subs[0].SeenMirror != 2 {
+		t.Fatalf("seen = %d", subs[0].SeenMirror)
+	}
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"?after=-1", ""), http.StatusBadRequest, "bad_request")
+	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"x", ""), http.StatusNotFound, "not_found")
+	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"x/seen", `{"mirror":1}`), http.StatusNotFound, "not_found")
 }
