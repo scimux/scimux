@@ -219,3 +219,47 @@ test("opening another chat drops the first pending answer", async () => {
   f.click("cardlist", other); old.resolve(readAnswer([{ t: "user", text: "stale", seq: 1 }], 1)); await f.feature.settled();
   assert.match(f.get("sv_body").innerHTML, /second/); assert.doesNotMatch(f.get("sv_body").innerHTML, /stale/);
 });
+
+test("following waits five seconds and never moves focus while reading", async () => {
+  let reads = 0;
+  const pending = deferred();
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("/seen")) return ""; reads++; if (reads === 2) return pending.promise; return readAnswer(); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  f.setTime(4999); f.feature.tick(); assert.equal(reads, 1);
+  const focused = f.doc.activeElement; f.setTime(5000); f.feature.tick(); assert.equal(reads, 2);
+  f.setTime(10000); f.feature.tick(); assert.equal(reads, 2); assert.equal(f.doc.activeElement, focused);
+  pending.resolve(readAnswer()); await f.feature.settled(); assert.equal(f.doc.activeElement, focused);
+});
+
+test("seen advances after successful reads and updates badge", async () => {
+  const seen = [];
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([{ ...base, unread: true }]); if (path.endsWith("/seen")) { seen.push(opts); return ""; } return readAnswer([{ t: "user", seq: 1, text: "x" }], 1); });
+  f.feature.tick(); await f.feature.settled(); const before = f.invalidations(); assert.match(f.feature.tab.tabHTML(false), /1 unread/);
+  f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(seen.length, 1); assert.equal(seen[0].method, "PUT"); assert.deepEqual(JSON.parse(seen[0].body), { mirror: 1 });
+  assert.doesNotMatch(f.feature.tab.tabHTML(false), /unread/); assert.equal(f.invalidations(), before + 1);
+  f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(seen.length, 1);
+});
+
+test("failed seen is retried after another successful run", async () => {
+  let puts = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([{ ...base, unread: true }]); if (path.endsWith("/seen")) { puts++; if (puts === 1) throw new Error("failed"); return ""; } return readAnswer([], 1); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.match(f.feature.tab.tabHTML(false), /1 unread/); assert.equal(puts, 1);
+  f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(puts, 2); assert.doesNotMatch(f.feature.tab.tabHTML(false), /unread/);
+});
+
+test("a failed read is not marked and not_found stops following", async () => {
+  let reads = 0, puts = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("/seen")) { puts++; return ""; } reads++; throw new Error('{"error":"not_found"}'); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(reads, 1); assert.equal(puts, 0);
+});
+
+test("ended subscriptions remain readable", async () => {
+  let reads = 0;
+  const ended = { ...base, state: "ended" };
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([ended]); if (path.endsWith("/seen")) return ""; reads++; return readAnswer([{ t: "user", seq: 1, text: "saved" }], 1, false, ended); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(reads, 1); assert.match(f.get("sv_body").innerHTML, /saved/); assert.equal(f.get("sv_state").textContent, "Sharing ended · saved copy");
+});
