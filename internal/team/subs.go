@@ -25,18 +25,20 @@ const (
 // Subscription is one generation of a channel this seat is a member of.
 // It holds no chat content and no token.
 type Subscription struct {
-	Server     string `json:"server"`
-	Owner      string `json:"owner"`
-	Chat       string `json:"chat"`
-	Generation string `json:"generation"`
-	ServerName string `json:"server_name"`
-	OwnerName  string `json:"owner_name"`
-	Title      string `json:"title"`
-	Access     string `json:"access"`
-	State      string `json:"state"`
-	MirrorLast uint64 `json:"mirror_last"`
-	SeenMirror uint64 `json:"seen_mirror"`
-	FirstSeen  string `json:"first_seen"`
+	Server       string `json:"server"`
+	Owner        string `json:"owner"`
+	Chat         string `json:"chat"`
+	Generation   string `json:"generation"`
+	ServerName   string `json:"server_name"`
+	OwnerName    string `json:"owner_name"`
+	Title        string `json:"title"`
+	Access       string `json:"access"`
+	State        string `json:"state"`
+	MirrorLast   uint64 `json:"mirror_last"`
+	SeenMirror   uint64 `json:"seen_mirror"`
+	CommentsLast uint64 `json:"comments_last,omitempty"`
+	SeenComments uint64 `json:"seen_comments,omitempty"`
+	FirstSeen    string `json:"first_seen"`
 }
 
 // Sentinel errors from the subscription file. None of them quote a title or a token.

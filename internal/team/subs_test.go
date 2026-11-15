@@ -317,7 +317,7 @@ func TestDamagedSubsFileIsLeftUntouched(t *testing.T) {
 		{"empty", []byte{}},
 		{"blank", []byte("\n")},
 		{"not json", []byte("nope")},
-		{"version 2", []byte(`{"v":2,"subscriptions":[]}`)},
+		{"version 3", []byte(`{"v":3,"subscriptions":[]}`)},
 		{"missing version", []byte(`{"subscriptions":[]}`)},
 		{"null version", []byte(`{"v":null,"subscriptions":[]}`)},
 		{"missing subscriptions", []byte(`{"v":1}`)},
@@ -373,7 +373,7 @@ func TestDamagedSubsFileIsLeftUntouched(t *testing.T) {
 		{"title newline", func(m map[string]any) { m["title"] = "bad\n" }},
 		{"missing access", func(m map[string]any) { delete(m, "access") }},
 		{"null access", func(m map[string]any) { m["access"] = nil }},
-		{"access owner", func(m map[string]any) { m["access"] = "owner" }},
+		{"access unknown", func(m map[string]any) { m["access"] = "observer" }},
 		{"missing state", func(m map[string]any) { delete(m, "state") }},
 		{"null state", func(m map[string]any) { m["state"] = nil }},
 		{"bad state", func(m map[string]any) { m["state"] = "paused" }},
@@ -464,7 +464,7 @@ func TestSaveSubsRejectsAnInvalidSubscription(t *testing.T) {
 		{"title newline", func(s *Subscription) { s.Title = "bad\n" }},
 		{"title utf-8", func(s *Subscription) { s.Title = "bad\xff" }},
 		{"empty access", func(s *Subscription) { s.Access = "" }},
-		{"access owner", func(s *Subscription) { s.Access = "owner" }},
+		{"access unknown", func(s *Subscription) { s.Access = "observer" }},
 		{"empty state", func(s *Subscription) { s.State = "" }},
 		{"bad state", func(s *Subscription) { s.State = "paused" }},
 		{"bad time", func(s *Subscription) { s.FirstSeen = "yesterday" }},
@@ -677,5 +677,79 @@ func TestLoadSubsOfAFileDataDirIsAnError(t *testing.T) {
 	}
 	if string(raw) != "synthetic" {
 		t.Fatalf("file = %q", raw)
+	}
+}
+
+func TestSubsVersionTwoAndLegacyMigration(t *testing.T) {
+	t.Run("legacy reads zero and saves version two", func(t *testing.T) {
+		dir := t.TempDir()
+		legacy := subsDocument(t, []Subscription{sampleSub(1)})
+		writeSubsRaw(t, dir, legacy)
+		subs, err := LoadSubs(dir)
+		if err != nil || len(subs) != 1 {
+			t.Fatal("legacy state was not read")
+		}
+		if subs[0].CommentsLast != 0 || subs[0].SeenComments != 0 {
+			t.Fatal("legacy counts were not zero")
+		}
+		if err := SaveSubs(dir, subs); err != nil {
+			t.Fatal("legacy state was not saved")
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, SubsFile))
+		if err != nil {
+			t.Fatal("saved state unavailable")
+		}
+		var doc struct {
+			V             int                          `json:"v"`
+			Subscriptions []map[string]json.RawMessage `json:"subscriptions"`
+		}
+		if json.Unmarshal(raw, &doc) != nil || doc.V != 2 || len(doc.Subscriptions) != 1 {
+			t.Fatal("save did not write version two")
+		}
+		if _, ok := doc.Subscriptions[0]["comments_last"]; !ok {
+			t.Error("missing comments_last")
+		}
+		if _, ok := doc.Subscriptions[0]["seen_comments"]; !ok {
+			t.Error("missing seen_comments")
+		}
+	})
+	t.Run("version two owner and counters", func(t *testing.T) {
+		dir := t.TempDir()
+		s := sampleSub(1)
+		s.Access, s.CommentsLast, s.SeenComments = "owner", 9, 4
+		if err := SaveSubs(dir, []Subscription{s}); err != nil {
+			t.Fatal("owner state was rejected")
+		}
+		got, err := LoadSubs(dir)
+		if err != nil || len(got) != 1 || !reflect.DeepEqual(got[0], s) {
+			t.Fatal("version two did not round trip")
+		}
+	})
+}
+
+func TestSubsVersionTwoNeedsBothValidCounters(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{"missing comments_last", func(m map[string]any) { delete(m, "comments_last") }},
+		{"missing seen_comments", func(m map[string]any) { delete(m, "seen_comments") }},
+		{"null comments_last", func(m map[string]any) { m["comments_last"] = nil }},
+		{"null seen_comments", func(m map[string]any) { m["seen_comments"] = nil }},
+		{"negative comments_last", func(m map[string]any) { m["comments_last"] = -1 }},
+		{"fractional seen_comments", func(m map[string]any) { m["seen_comments"] = 1.5 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := subObject(sampleSub(1))
+			obj["comments_last"], obj["seen_comments"] = 0, 0
+			tc.edit(obj)
+			raw, err := json.Marshal(map[string]any{"v": 2, "subscriptions": []any{obj}})
+			if err != nil {
+				t.Fatal("cannot encode state")
+			}
+			if _, err := parseSubs(raw); !errors.Is(err, ErrSubsDamaged) {
+				t.Error("damaged version two accepted")
+			}
+		})
 	}
 }
