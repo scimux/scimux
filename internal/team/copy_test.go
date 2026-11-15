@@ -973,3 +973,164 @@ func TestCopyShortValidPrefixWithoutErrorIsDamaged(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveCopyForgetsIndexAndPrunesParents(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("append failed")
+	}
+	path := copyPathOf(dir, id)
+	if err := RemoveCopy(dir, id); err != nil {
+		t.Fatal("remove failed")
+	}
+	if _, err := os.Lstat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Error("generation remains")
+	}
+	if _, ok := copyMetas.Load(path); ok {
+		t.Error("copy index remains")
+	}
+	if _, err := os.Stat(filepath.Join(dir, CopiesDir, id.Server)); !errors.Is(err, os.ErrNotExist) {
+		t.Error("empty parents remain")
+	}
+	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); err != nil {
+		t.Error("copy root was removed")
+	}
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("fresh append did not start at one")
+	}
+	_, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil {
+		t.Fatal("fresh copy cannot be read")
+	}
+	if last != 1 {
+		t.Errorf("last = %d, want 1", last)
+	}
+}
+
+func TestRemoveCopyPreservesSiblingsAndMissing(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	sibling := id
+	sibling.Generation = fmt.Sprintf("%016x", 5)
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("append failed")
+	}
+	if err := AppendCopy(dir, sibling, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("sibling append failed")
+	}
+	if err := RemoveCopy(dir, id); err != nil {
+		t.Fatal("remove failed")
+	}
+	if _, err := os.Stat(copyPathOf(dir, sibling)); err != nil {
+		t.Error("sibling was lost")
+	}
+	if err := RemoveCopy(dir, id); err != nil {
+		t.Error("missing copy must succeed")
+	}
+	if err := RemoveCopy(t.TempDir(), id); err != nil {
+		t.Error("missing root must succeed")
+	}
+}
+
+func TestRemoveCopyRejectsEachBadPathPart(t *testing.T) {
+	for _, part := range []string{"server", "owner", "chat", "generation"} {
+		t.Run(part, func(t *testing.T) {
+			dir, id := t.TempDir(), sampleCopyID()
+			switch part {
+			case "server":
+				id.Server = "../bad"
+			case "owner":
+				id.Owner = "../bad"
+			case "chat":
+				id.Chat = "../bad"
+			case "generation":
+				id.Generation = "../bad"
+			}
+			if err := RemoveCopy(dir, id); !errors.Is(err, ErrCopyPath) {
+				t.Error("bad path accepted")
+			}
+			if _, err := os.Stat(filepath.Join(dir, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
+				t.Error("bad path touched the copy root")
+			}
+		})
+	}
+}
+
+func TestRemoveCopyRemovesLinkWithoutFollowingIt(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	target := t.TempDir()
+	marker := filepath.Join(target, "marker")
+	if err := os.WriteFile(marker, []byte("synthetic"), 0o600); err != nil {
+		t.Fatal("cannot create marker")
+	}
+	generation := filepath.Dir(copyPathOf(dir, id))
+	if err := os.MkdirAll(filepath.Dir(generation), 0o700); err != nil {
+		t.Fatal("cannot create parents")
+	}
+	if err := os.Symlink(target, generation); err != nil {
+		t.Fatal("cannot create symlink")
+	}
+	if err := RemoveCopy(dir, id); err != nil {
+		t.Fatal("remove failed")
+	}
+	if _, err := os.Lstat(generation); !errors.Is(err, os.ErrNotExist) {
+		t.Error("link remains")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("link target was changed")
+	}
+}
+
+func TestRemoveCopySurfacesRemovalFailure(t *testing.T) {
+	snapshotCopy(t)
+	dir, id := t.TempDir(), sampleCopyID()
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
+		t.Fatal("append failed")
+	}
+	boom := errors.New("synthetic failure")
+	copyOps.removeAll = func(*os.Root, string) error { return boom }
+	if err := RemoveCopy(dir, id); !errors.Is(err, boom) {
+		t.Error("remove failure not returned")
+	}
+	if _, err := os.Stat(copyPathOf(dir, id)); err != nil {
+		t.Error("failed removal lost the copy")
+	}
+}
+
+func TestRemoveCopyDoesNotTraverseParentLinks(t *testing.T) {
+	for _, part := range []string{"root", "server", "owner", "chat"} {
+		t.Run(part, func(t *testing.T) {
+			dir, id := t.TempDir(), sampleCopyID()
+			target := t.TempDir()
+			link := filepath.Join(dir, CopiesDir)
+			below := filepath.Join(id.Server, id.Owner, id.Chat, id.Generation)
+			switch part {
+			case "server":
+				link = filepath.Join(link, id.Server)
+				below = filepath.Join(id.Owner, id.Chat, id.Generation)
+			case "owner":
+				link = filepath.Join(link, id.Server, id.Owner)
+				below = filepath.Join(id.Chat, id.Generation)
+			case "chat":
+				link = filepath.Join(link, id.Server, id.Owner, id.Chat)
+				below = id.Generation
+			}
+			marker := filepath.Join(target, below, "marker")
+			if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+				t.Fatal("cannot create target")
+			}
+			if err := os.WriteFile(marker, []byte("synthetic"), 0o600); err != nil {
+				t.Fatal("cannot create marker")
+			}
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal("cannot create parents")
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal("cannot create symlink")
+			}
+			_ = RemoveCopy(dir, id)
+			if _, err := os.Stat(marker); err != nil {
+				t.Error("link target was changed")
+			}
+		})
+	}
+}

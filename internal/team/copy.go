@@ -44,20 +44,22 @@ var (
 
 // copyIO is the filesystem seam. Tests replace individual functions.
 type copyIO struct {
-	readAt  func(*os.File, []byte, int64) (int, error)
-	write   func(*os.File, []byte) (int, error)
-	chmod   func(string, os.FileMode) error
-	open    func(string, int, os.FileMode) (*os.File, error)
-	mkdir   func(string, os.FileMode) error
-	marshal func(any) ([]byte, error)
+	removeAll func(*os.Root, string) error
+	readAt    func(*os.File, []byte, int64) (int, error)
+	write     func(*os.File, []byte) (int, error)
+	chmod     func(string, os.FileMode) error
+	open      func(string, int, os.FileMode) (*os.File, error)
+	mkdir     func(string, os.FileMode) error
+	marshal   func(any) ([]byte, error)
 }
 
 var copyOps = copyIO{
-	readAt: func(f *os.File, p []byte, off int64) (int, error) { return f.ReadAt(p, off) },
-	write:  func(f *os.File, p []byte) (int, error) { return f.Write(p) },
-	chmod:  os.Chmod,
-	open:   os.OpenFile,
-	mkdir:  os.MkdirAll,
+	removeAll: func(root *os.Root, name string) error { return root.RemoveAll(name) },
+	readAt:    func(f *os.File, p []byte, off int64) (int, error) { return f.ReadAt(p, off) },
+	write:     func(f *os.File, p []byte) (int, error) { return f.Write(p) },
+	chmod:     os.Chmod,
+	open:      os.OpenFile,
+	mkdir:     os.MkdirAll,
 	// encoding/json escapes < inside a raw body. The line is built so the body
 	// is copied unchanged.
 	marshal: marshalCopyLine,
@@ -385,3 +387,6 @@ func parseCopyLine(line []byte) (MirrorRecord, bool) {
 		Body: append(json.RawMessage(nil), doc.Body...),
 	}, true
 }
+
+// RemoveCopy removes a guest copy.
+func RemoveCopy(dataDir string, id CopyID) error { return ErrCopyPath }
