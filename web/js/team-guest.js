@@ -177,3 +177,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   }
   return { tick, bind, destroy, settled, tab: { tabHTML, render } };
 }
+
+export function guestStateText() { return ""; }
+export function guestErrorText() { return ""; }
+export function guestEntryHTML() { return ""; }

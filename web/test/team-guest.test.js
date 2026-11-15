@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createGuestFeature, guestGroups, guestKey } from "../js/team-guest.js";
+import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML } from "../js/team-guest.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, unread: false, first_seen: "1" };
 const list = (subscriptions = [], servers = [], truncated = false) => ({ subscriptions, servers, truncated });
@@ -107,4 +107,115 @@ test("render avoids needless writes and restores list focus after rebuilding", a
   f.feature.tab.render(f.el); f.feature.tab.render(f.el); assert.equal(writes, 1);
   value = ""; f.doc.activeElement = old; f.feature.tab.render(f.el); assert.equal(writes, 2); assert.equal(focused, 1);
   old.dataset = { group: "s/o" }; value = ""; f.feature.tab.render(f.el); assert.equal(focused, 2);
+});
+
+function viewFixture(api) {
+  let time = 0, invalidations = 0;
+  const elements = new Map();
+  const doc = { activeElement: null, querySelector(sel) { return elements.get(sel); } };
+  for (const id of ["cardlist", "cardtabs", "sharedview", "sv_scrim", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note"]) {
+    const listeners = new Map();
+    const el = { id, innerHTML: "", textContent: "", hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
+      addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
+      focus() { doc.activeElement = el; }, contains(node) { return node === el; },
+      querySelector() { return null; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
+    elements.set("#" + id, el);
+  }
+  const feature = createGuestFeature({ api, doc, now: () => time, invalidateCards: () => invalidations++ });
+  const get = id => elements.get("#" + id);
+  const click = (id, target = get(id)) => get(id).listeners.get("click")({ target });
+  const item = { dataset: { sub: guestKey(base) }, closest(sel) { if (sel === "[data-sub]") return this; return null; }, focus() { doc.activeElement = item; } };
+  get("cardlist").querySelector = () => item;
+  get("cardtabs").querySelector = () => get("cardtabs");
+  feature.bind();
+  return { feature, get, click, item, doc, setTime(v) { time = v; }, invalidations: () => invalidations };
+}
+
+const readAnswer = (entries = [], next = 0, more = false, over = {}) => ({ view: { ...base, delivery: "ok", ...over }, entries, last: next, next, more });
+
+test("shared header describes each delivery and access state", () => {
+  for (const [v, text] of [
+    [{ state: "ended" }, "Sharing ended · saved copy"],
+    [{ state: "live", delivery: "ok", access: "read" }, "Can view"],
+    [{ state: "live", delivery: "ok", access: "write" }, "Can comment"],
+    [{ state: "live", delivery: "offline", access: "read" }, "Can view · offline, showing the saved copy"],
+    [{ state: "live", delivery: "offline", access: "write" }, "Can comment · offline, showing the saved copy"],
+    [{ state: "live", delivery: "refused" }, "The server ended this computer's access · saved copy"],
+    [{ state: "live", delivery: "changed" }, "Not the same server · saved copy"],
+  ]) assert.equal(guestStateText(v), text);
+});
+
+test("read errors have safe fixed messages", () => {
+  for (const [code, text] of [["not_found", "This chat is no longer in your list."], ["copy_damaged", "The saved copy of this chat is damaged and cannot be shown."], ["storage_full", "This computer's storage is full. Free some space to load more."], ["other", "That did not work. It will be tried again."]]) assert.equal(guestErrorText(code), text);
+});
+
+test("shared entries render all kinds and escape untrusted content", () => {
+  const e = (t, extra = {}) => ({ t, seq: 1, time: "2026-01-01T00:00:00Z", ...extra });
+  assert.match(guestEntryHTML(e("start", { scope: "from_now" }), "Owner"), /Earlier messages are not shared/);
+  assert.match(guestEntryHTML(e("start"), "Owner"), /Shared with its history/);
+  assert.match(guestEntryHTML(e("source", { reason: "clear" }), "Owner"), /owner cleared/);
+  assert.match(guestEntryHTML(e("source"), "Owner"), /new session/);
+  assert.equal(guestEntryHTML(e("unknown"), "Owner"), "");
+  assert.match(guestEntryHTML(e("user", { text: '<&"', prov: true }), '<&"'), /includes forwarded AI text/);
+  assert.match(guestEntryHTML(e("user", { text: '<&"' }), '<&"'), /&lt;&amp;&quot;/);
+  assert.match(guestEntryHTML(e("user", { omitted: "too_large" }), ""), /Unknown person.*This message was too large to share/);
+  assert.match(guestEntryHTML(e("assistant", { omitted: "too_large" }), "Owner"), /Agent.*This message was too large to share/);
+  assert.match(guestEntryHTML(e("assistant", { agent: '<&"', text: '```\n<&"\n```\nscimux-asset:abc' }), "Owner"), /&lt;&amp;&quot;/);
+  assert.doesNotMatch(guestEntryHTML(e("assistant", { text: "scimux-asset:abc" }), "Owner"), /scimux-asset:/);
+});
+
+test("open loads pages, updates the header and closes to the item", async () => {
+  const paths = [];
+  const f = viewFixture(async (path) => { paths.push(path); if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("after=0")) return readAnswer([{ t: "user", seq: 1, text: "synthetic", time: "" }], 1, true); if (path.endsWith("after=1")) return readAnswer([], 2, true); if (path.endsWith("after=2")) return readAnswer([], 3); return ""; });
+  f.feature.tick(); await f.feature.settled(); paths.length = 0;
+  f.click("cardlist", f.item); assert.equal(f.doc.activeElement, f.get("sv_back")); assert.equal(f.get("sharedview").hidden, false);
+  await f.feature.settled();
+  assert.deepEqual(paths.slice(0, 3), ["/api/team/subscriptions/s/o/c/g?after=0", "/api/team/subscriptions/s/o/c/g?after=1", "/api/team/subscriptions/s/o/c/g?after=2"]);
+  assert.equal(f.get("sv_title").textContent, "Chat"); assert.equal(f.get("sv_from").textContent, "From Owner · Server"); assert.equal(f.get("sv_state").textContent, "Can view");
+  assert.match(f.get("sv_body").innerHTML, /synthetic/);
+  f.click("sv_back"); assert.equal(f.get("sharedview").hidden, true); assert.equal(f.doc.activeElement, f.item); assert.equal(f.get("sv_body").innerHTML, "");
+});
+
+test("empty view, paging cap and load more", async () => {
+  let reads = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("/seen")) return ""; reads++; if (reads === 41) return readAnswer([], 41, false); return readAnswer([], reads, true); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(reads, 40); assert.equal(f.get("sv_more").hidden, false); assert.match(f.get("sv_body").innerHTML, /Nothing has been shared yet/);
+  f.click("sv_more"); await f.feature.settled(); assert.equal(reads, 41); assert.equal(f.get("sv_more").hidden, true);
+});
+
+test("late read after closing is dropped and escape closes", async () => {
+  const pending = deferred();
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return pending.promise; });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item);
+  let stopped = false;
+  f.get("sharedview").listeners.get("keydown")({ key: "Escape", stopPropagation() { stopped = true; } });
+  assert.equal(stopped, true); assert.equal(f.get("sharedview").hidden, true);
+  pending.resolve(readAnswer([{ t: "user", text: "late", seq: 1 }], 1)); await f.feature.settled();
+  assert.equal(f.get("sv_body").innerHTML, "");
+});
+
+test("read failures show fixed notes and a later success clears them", async () => {
+  for (const [code, expected] of [["not_found", "This chat is no longer in your list."], ["copy_damaged", "The saved copy of this chat is damaged and cannot be shown."], ["storage_full", "This computer's storage is full. Free some space to load more."], ["bad-json", "That did not work. It will be tried again."]]) {
+    let reads = 0;
+    const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); reads++; if (reads === 1) throw new Error(code === "bad-json" ? "not json" : JSON.stringify({ error: code })); return readAnswer(); });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); assert.equal(f.get("sv_note").textContent, expected);
+    if (code !== "not_found") { f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(f.get("sv_note").textContent, ""); }
+  }
+});
+
+test("scrim closes and falls back to the shared tab if the item vanished", async () => {
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  f.get("cardlist").querySelector = () => null; f.click("sv_scrim");
+  assert.equal(f.get("sharedview").hidden, true); assert.equal(f.doc.activeElement, f.get("cardtabs"));
+});
+
+test("opening another chat drops the first pending answer", async () => {
+  const old = deferred(), second = { ...base, chat: "d" };
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base, second]); if (path.includes("/c/g?")) return old.promise; return readAnswer([{ t: "user", text: "second", seq: 1 }], 1, false, second); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item);
+  const other = { dataset: { sub: guestKey(second) }, closest(sel) { if (sel === "[data-sub]") return this; return null; } };
+  f.click("cardlist", other); old.resolve(readAnswer([{ t: "user", text: "stale", seq: 1 }], 1)); await f.feature.settled();
+  assert.match(f.get("sv_body").innerHTML, /second/); assert.doesNotMatch(f.get("sv_body").innerHTML, /stale/);
 });
