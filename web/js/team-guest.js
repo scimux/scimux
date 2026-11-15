@@ -208,7 +208,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   }
   function openView(view) {
     readGeneration++;
-    open = { key: guestKey(view), view, next: 0, first: true, seenAtOpen: view.seen_mirror, seen: view.seen_mirror, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false };
+    open = { key: guestKey(view), view, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false };
     header(view);
     $("sv_body").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("sv_note").textContent = "";
@@ -256,12 +256,23 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     if (open !== current) return false;
     return gen === readGeneration;
   }
+  function insertOrdered(body, html, key) {
+    for (const element of body.children) {
+      let other = [Number(element.dataset.seq), 0, 0];
+      if (element.dataset.cseq !== undefined) other = [Number(element.dataset.anchor), 1, Number(element.dataset.cseq)];
+      for (let i = 0; i < key.length; i++) {
+        if (key[i] < other[i]) { element.insertAdjacentHTML("beforebegin", html); return; }
+        if (key[i] > other[i]) break;
+      }
+    }
+    body.insertAdjacentHTML("beforeend", html);
+  }
   async function readRun(current, gen) {
     const body = $("sv_body");
     const first = current.first;
-    let unreadSeq = null;
     let hasEntries = false;
     let morePages = false;
+    let moreComments = false;
     const nearEnd = body.scrollHeight - body.scrollTop - body.clientHeight <= 80;
     try {
       for (let n = 0; n < 40; n++) {
@@ -275,29 +286,52 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
           const rendered = guestEntryHTML(entry, result.view.owner_name);
           if (rendered) {
             if (current.empty) { body.innerHTML = ""; current.empty = false; }
-            body.insertAdjacentHTML("beforeend", rendered);
+            insertOrdered(body, rendered, [entry.seq, 0, 0]);
             hasEntries = true;
-            if (unreadSeq === null) {
-              if (entry.seq > current.seenAtOpen) unreadSeq = entry.seq;
-            }
           }
         }
         current.next = result.next;
         morePages = result.more;
         if (!morePages) break;
       }
+      const messages = [];
+      for (let n = 0; n < 40; n++) {
+        const result = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext);
+        if (!currentRead(current, gen)) return;
+        Object.assign(current.names, result.names);
+        messages.push(...result.entries);
+        current.cnext = result.next;
+        moreComments = result.more;
+        if (!moreComments) break;
+      }
+      for (const message of messages) {
+        if (current.empty) { body.innerHTML = ""; current.empty = false; }
+        insertOrdered(body, guestMessageHTML(message, current.names), [message.anchor, 1, message.seq]);
+        hasEntries = true;
+      }
       if (first) {
         if (!hasEntries) {
           body.innerHTML = '<div class="previewtrunc">Nothing has been shared yet.</div>';
           current.empty = true;
         }
-        if (unreadSeq !== null) {
-          const unread = body.querySelector(`[data-seq="${unreadSeq}"]`);
+        let selector = "";
+        for (const element of body.children) {
+          if (element.dataset.seq !== undefined) {
+            if (Number(element.dataset.seq) > current.seenAtOpen) { selector = `[data-seq="${element.dataset.seq}"]`; break; }
+          } else if (element.dataset.cseq !== undefined) {
+            if (Number(element.dataset.cseq) > current.commentsAtOpen) { selector = `[data-cseq="${element.dataset.cseq}"]`; break; }
+          }
+        }
+        if (selector) {
+          const unread = body.querySelector(selector);
           if (unread) unread.scrollIntoView({ block: "start" });
         } else body.scrollTop = body.scrollHeight;
       } else if (nearEnd) body.scrollTop = body.scrollHeight;
-      $("sv_more").hidden = !morePages;
-      if (current.next > current.seen) await markSeen(current, gen);
+      $("sv_more").hidden = !morePages && !moreComments;
+      const marks = {};
+      if (current.next > current.seen) marks.mirror = current.next;
+      if (current.cnext > current.commentsSeen) marks.comments = current.cnext;
+      if (Object.keys(marks).length) await markSeen(current, gen, marks);
     } catch (error) {
       if (!currentRead(current, gen)) return;
       let code = "";
@@ -308,19 +342,23 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
       if (currentRead(current, gen)) current.busy = false;
     }
   }
-  async function markSeen(current, gen) {
-    const next = current.next;
+  async function markSeen(current, gen, marks) {
     try {
-      await api(LIST + "/" + current.key + "/seen", { method: "PUT", body: JSON.stringify({ mirror: next }) });
+      await api(LIST + "/" + current.key + "/seen", { method: "PUT", body: JSON.stringify(marks) });
       if (!currentRead(current, gen)) return;
-      current.seen = next;
+      if (marks.mirror !== undefined) current.seen = marks.mirror;
+      if (marks.comments !== undefined) current.commentsSeen = marks.comments;
       const view = answer.subscriptions.find(item => guestKey(item) === current.key);
       if (!view) return;
       const before = JSON.stringify(view);
-      view.seen_mirror = next;
+      if (marks.mirror !== undefined) view.seen_mirror = marks.mirror;
+      if (marks.comments !== undefined) view.seen_comments = marks.comments;
       view.unread = false;
       if (view.state === "live") {
-        if (view.mirror_last > next) view.unread = true;
+        if (view.comments_last > view.seen_comments) view.unread = true;
+        if (view.access !== "owner") {
+          if (view.mirror_last > view.seen_mirror) view.unread = true;
+        }
       }
       if (JSON.stringify(view) !== before) invalidateCards();
     } catch {}
@@ -432,7 +470,12 @@ export function guestErrorText(code) {
   return "That did not work. It will be tried again.";
 }
 export function guestMessageHTML(entry, names) {
-  return "";
+  let cls = "turn assistant gmsg";
+  let who = names[entry.author];
+  if (!who) who = "Unknown person";
+  let name = `<div class="gwho">${esc(who)}</div>`;
+  if (entry.mine) { cls = "turn user gmsg"; name = ""; }
+  return `<div class="${cls}" data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"><div class="bubble" title="${esc(entry.at)}">${name}${md(entry.text)}</div></div>`;
 }
 export function guestEntryHTML(entry, ownerName) {
   let line = "";
@@ -446,6 +489,7 @@ export function guestEntryHTML(entry, ownerName) {
     let who = ownerName;
     if (!who) who = "Unknown person";
     if (entry.t === "user") {
+      who += " · prompt";
       if (entry.prov === true) who += " · includes forwarded AI text";
     } else {
       who = entry.agent;
