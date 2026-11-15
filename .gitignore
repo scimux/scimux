@@ -53,3 +53,4 @@ internal/acp/muse/schema/
 
 # server runtime log (nohup ./scimux …)
 nohup.out
+internal/app/testdata/real-team-e2e-*

@@ -82,7 +82,8 @@ can exceed the platform socket-path limit and produce unrelated failures.
   `internal/acp/muse/testdata/real-*.ndjson` are captured from real CLI runs and
   are **gitignored — never commit them**: even scrubbed they are personal
   environment snapshots. Optional replay tests skip when these local files
-  are absent. Live capture tools are private maintainer utilities archived
+  are absent. `TestRealTeamE2EReplay` uses the ignored
+  `internal/app/testdata/real-team-e2e-*` recording files. Live capture tools are private maintainer utilities archived
   under `attic/scripts/`; public tests must not depend on them. Keep system
   prompts, tool/skill/path inventories, hostnames, session ids, timezone and
   secret-shaped strings out of committed fixtures.
