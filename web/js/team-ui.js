@@ -29,6 +29,7 @@ const ERROR_TEXT = {
   server_full: "The server has no free seat.",
   joined_but_not_saved: "Joined, but this computer could not save it. Ask for a new join code.",
   left_but_not_removed: "Left the server, but this computer could not remove the entry. Try again.",
+  name_refused: "The server did not accept that name.",
 };
 
 const LEAVING_NOTE = "Leaving ends everything you share on this server.";
@@ -53,6 +54,7 @@ export function createSharingSection({ api, doc }) {
   let removeFor = "";
   let leaving = false;
   let busyRemove = false;
+  let nameEdit = null;
   let generation = 0;
   let chain = Promise.resolve();
   const inflight = new Set();
@@ -117,9 +119,17 @@ export function createSharingSection({ api, doc }) {
       remove = '<p class="teamnote">' + KEEP_NOTE + "</p>" +
         '<button type="button" data-act="remove" data-id="' + id + '">Remove from this computer</button>';
     }
+    let name = '<span class="teamseat">Your name: ' + esc(server.seat_name) + '</span>' +
+      '<button type="button" data-act="name-edit" data-id="' + id + '">Change name</button>';
+    if (nameEdit && nameEdit.id === server.id) {
+      const disabled = nameEdit.busy ? ' disabled' : '';
+      name = '<input data-name-input aria-label="Your name" value="' + esc(nameEdit.text) + '">' +
+        '<button type="button" data-act="name-save" data-id="' + id + '"' + disabled + '>Save</button>' +
+        '<button type="button" data-act="name-cancel" data-id="' + id + '"' + disabled + '>Cancel</button>';
+    }
     return '<div class="teamrow">' +
       '<span class="teamname">' + esc(server.name) + "</span>" +
-      '<span class="teammeta">' + esc(hostOf(server.url)) + " as " + esc(server.seat_name) + "</span>" +
+      '<span class="teammeta">' + esc(hostOf(server.url)) + "</span>" + name +
       '<span class="teamstate" data-state="' + id + '">' + esc(state) + "</span>" +
       '<button type="button" class="' + (confirm ? "cta danger" : "cta") + '" data-act="leave" data-id="' + id + '">' +
       (confirm ? "Confirm leave" : "Leave") + "</button>" +
@@ -246,7 +256,65 @@ export function createSharingSection({ api, doc }) {
     const node = actionNode(ev.target);
     if (!node) return;
     if (node.dataset.act === "leave") onLeave(node.dataset.id);
-    else onRemove(node.dataset.id);
+    else if (node.dataset.act === "remove") onRemove(node.dataset.id);
+    else if (node.dataset.act === "name-edit") onNameEdit(node.dataset.id);
+    else if (node.dataset.act === "name-save") onNameSave(node.dataset.id);
+    else if (node.dataset.act === "name-cancel") onNameCancel();
+  }
+
+  function focusName(id) {
+    const buttons = $("#m_team_servers").querySelectorAll('[data-act="name-edit"]');
+    const button = [...buttons].find(item => item.dataset.id === id);
+    if (button) button.focus();
+  }
+  function onNameEdit(id) {
+    const server = byId.get(id);
+    if (!server) return;
+    nameEdit = { id, text: server.seat_name, busy: false };
+    setNote(""); render();
+    const field = $("#m_team_servers").querySelector("[data-name-input]");
+    if (field) field.focus();
+  }
+  function onNameInput(ev) {
+    if (!nameEdit) return;
+    if (ev.target.dataset.nameInput === undefined) return;
+    nameEdit.text = ev.target.value;
+  }
+  function onNameKey(ev) {
+    if (!nameEdit) return;
+    if (ev.target.dataset.nameInput === undefined) return;
+    if (ev.key !== "Escape") return;
+    ev.preventDefault(); ev.stopPropagation(); onNameCancel();
+  }
+  function onNameCancel() {
+    if (!nameEdit) return;
+    if (nameEdit.busy) return;
+    const id = nameEdit.id;
+    nameEdit = null; setNote(""); render(); focusName(id);
+  }
+  function onNameSave(id) {
+    if (!nameEdit) return;
+    if (nameEdit.id !== id) return;
+    if (nameEdit.busy) return;
+    const edit = nameEdit;
+    edit.busy = true; render();
+    const pending = api("/api/team/servers/" + id + "/seat", { method: "PUT", body: JSON.stringify({ name: edit.text }) });
+    enqueue(() => finishName(edit, pending));
+  }
+  async function finishName(edit, pending) {
+    try {
+      const server = await pending;
+      if (byId.has(edit.id)) {
+        rows = rows.map(item => item.id === edit.id ? server : item);
+        byId.set(edit.id, server);
+        if (nameEdit === edit) nameEdit = null;
+        render(); focusName(edit.id);
+      }
+    } catch (err) {
+      if (nameEdit === edit) {
+        edit.busy = false; setNote(teamErrorText(errorCode(err.message))); render();
+      }
+    }
   }
 
   function onLeave(id) {
@@ -320,6 +388,8 @@ export function createSharingSection({ api, doc }) {
     listen(cancel, "click", hideForm);
     listen(join, "click", onJoin);
     listen(list, "click", onListClick);
+    listen(list, "input", onNameInput);
+    listen(list, "keydown", onNameKey);
   }
 
   function destroy() {

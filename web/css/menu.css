@@ -7,3 +7,4 @@
 .popmenu button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .popmenu button.danger { color: var(--danger); }
 .popmenu .sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
+#m_team_servers [data-name-input] { font: inherit; min-width: 0; max-width: 100%; }
