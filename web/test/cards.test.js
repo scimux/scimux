@@ -1954,3 +1954,10 @@ test("clicking the shared tab selects it", () => {
   assert.equal(f.tab(), "shared");
   assert.equal(f.listWrites(), 0);
 });
+
+test("shared cards title has no waiting prefix when nobody is waiting", () => {
+  const f = sharedCardsFixture({ tabHTML: () => '<button data-tab="shared">Shared with me</button>', render: () => true }, "shared");
+  f.doc.title = "(1) scimux";
+  f.feature.render();
+  assert.equal(f.doc.title, "scimux");
+});
