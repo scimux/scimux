@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/scimux/scimux/internal/identity"
 	"github.com/scimux/scimux/internal/storagebudget"
@@ -114,6 +115,12 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 	if len(parts) == 5 && r.Method == http.MethodGet {
 		if parts[4] == "comments" {
 			h.readSubscriptionLog(w, r, id, true)
+			return
+		}
+	}
+	if len(parts) == 5 && r.Method == http.MethodPost {
+		if parts[4] == "comments" {
+			h.postComment(w, r, id)
 			return
 		}
 	}
@@ -1156,4 +1163,128 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 		}
 	}
 	return names
+}
+
+func (h *teamHandler) postComment(w http.ResponseWriter, r *http.Request, id team.CopyID) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if !utf8.Valid(raw) {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	var req struct {
+		Text   *string `json:"text"`
+		Anchor *uint64 `json:"anchor"`
+		Key    *string `json:"key"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&req) != nil {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	var extra any
+	if dec.Decode(&extra) != io.EOF {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if req.Text == nil {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if strings.TrimSpace(*req.Text) == "" {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if len(*req.Text) > 16384 {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if req.Anchor == nil {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if req.Key == nil {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if !subHex(*req.Key, 16) {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	sub, server, found, joined, err := h.lookupSubscription(id)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	if !found {
+		writeTeamError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if sub.Access == "read" {
+		writeTeamError(w, http.StatusForbidden, "read_only")
+		return
+	}
+	if sub.State != "live" {
+		writeTeamError(w, http.StatusConflict, "not_active")
+		return
+	}
+	if !joined {
+		writeTeamError(w, http.StatusConflict, "not_active")
+		return
+	}
+	_, last, err := team.ReadCopy(h.dataDir, id, team.MirrorLog, ^uint64(0), 256, 4<<20)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "copy_damaged")
+		return
+	}
+	if *req.Anchor > last {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	var body bytes.Buffer
+	enc := json.NewEncoder(&body)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(struct {
+		Version int    `json:"v"`
+		Type    string `json:"t"`
+		Text    string `json:"text"`
+		Anchor  uint64 `json:"anchor"`
+	}{1, "comment", *req.Text, *req.Anchor})
+	err = h.confirmed(r.Context(), server)
+	var seq uint64
+	if err == nil {
+		seq, err = h.client.AppendComment(r.Context(), server.URL, server.Token, id.Owner, id.Chat, id.Generation, "c/"+*req.Key, bytes.TrimSpace(body.Bytes()))
+	}
+	switch {
+	case err == nil:
+		writeJSONStatus(w, http.StatusOK, struct {
+			Seq uint64 `json:"seq"`
+		}{seq})
+	case errors.Is(err, team.ErrStaleGeneration), errors.Is(err, team.ErrNoChannel):
+		if h.endSubscription(id, false) != nil {
+			writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+			return
+		}
+		writeTeamError(w, http.StatusConflict, "not_active")
+	case errors.Is(err, team.ErrForbidden):
+		writeTeamError(w, http.StatusForbidden, "read_only")
+	case errors.Is(err, team.ErrUnauthorized):
+		if h.endSubscription(id, true) != nil {
+			writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+			return
+		}
+		writeTeamError(w, http.StatusBadGateway, "refused")
+	case errors.Is(err, team.ErrUnreachable):
+		writeTeamError(w, http.StatusBadGateway, "unreachable")
+	case errors.Is(err, team.ErrQuota):
+		writeTeamError(w, http.StatusInsufficientStorage, "server_full")
+	case errors.Is(err, team.ErrTooLarge):
+		writeTeamError(w, http.StatusRequestEntityTooLarge, "too_large")
+	default:
+		writeTeamError(w, http.StatusBadGateway, "bad_server")
+	}
 }
