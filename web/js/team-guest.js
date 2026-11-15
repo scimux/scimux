@@ -244,7 +244,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const key = guestKey(view);
     let draft = drafts.get(key);
     if (!draft) { draft = { text: "", key: "", keyText: "", sending: false }; drafts.set(key, draft); }
-    open = { key, view, draft, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), action: null, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false, sendNote: false };
+    open = { key, view, draft, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), row: null, lastRead: 0, busy: false, failed: false, empty: false, armed: false, removing: false, removeNote: false, sendNote: false };
     header(view);
     $("sv_body").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("sv_note").textContent = "";
@@ -544,18 +544,18 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!entry) return;
     const capture = guestCapture(entry, open.view, open.names);
     if (!capture) return;
-    const previous = open.action;
+    const previous = open.row;
     if (previous) {
       previous.turn.nextElementSibling.remove();
-      open.action = null;
+      open.row = null;
       if (previous.turn === turn) return;
     }
     turn.insertAdjacentHTML("afterend", '<div class="bubactions" data-gactions><button data-gact="bookmark">bookmark</button><button data-gact="sendto">send to&#8230;</button></div>');
-    open.action = { turn, capture };
+    open.row = { turn, capture };
   }
   function runAction(action) {
-    if (!open.action) return;
-    const capture = open.action.capture;
+    if (!open.row) return;
+    const capture = open.row.capture;
     if (action === "bookmark") {
       const keys = ["server", "owner", "chat", "generation", "log", "seq"];
       const duplicate = bookmarks().some(item => item.team && keys.every(key => item.team[key] === capture.team[key]));
