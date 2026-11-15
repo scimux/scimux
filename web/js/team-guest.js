@@ -431,6 +431,9 @@ export function guestErrorText(code) {
   if (code === "storage_full") return "This computer's storage is full. Free some space to load more.";
   return "That did not work. It will be tried again.";
 }
+export function guestMessageHTML(entry, names) {
+  return "";
+}
 export function guestEntryHTML(entry, ownerName) {
   let line = "";
   if (entry.t === "start") {

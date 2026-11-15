@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { jsonResponse } from "./s2-helpers.js";
 import { decodeResponse } from "../js/api.js";
-import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML } from "../js/team-guest.js";
+import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML } from "../js/team-guest.js";
 
-const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, unread: false, first_seen: "1" };
+const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
 const list = (subscriptions = [], servers = [], truncated = false) => ({ subscriptions: subscriptions.map(view => ({ ...view })), servers, truncated });
 function deferred() {
   let resolve, reject;
@@ -111,7 +111,7 @@ test("render avoids needless writes and restores list focus after rebuilding", a
   old.dataset = { group: "s/o" }; value = ""; f.feature.tab.render(f.el); assert.equal(focused, 2);
 });
 
-function viewFixture(api) {
+function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, last: 0, next: 0, more: false })) {
   let time = 0, invalidations = 0;
   const elements = new Map();
   const doc = { activeElement: null, querySelector(sel) { return elements.get(sel); } };
@@ -123,7 +123,20 @@ function viewFixture(api) {
       querySelector() { return null; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
     elements.set("#" + id, el);
   }
-  const feature = createGuestFeature({ api, doc, now: () => time, invalidateCards: () => invalidations++ });
+  const body = elements.get("#sv_body");
+  Object.defineProperty(body, "children", { get() {
+    const pieces = this.innerHTML.split(/(?=<div class="(?:turn |previewtrunc))/).filter(Boolean);
+    return pieces.map((piece, index) => {
+      const read = name => piece.match(new RegExp(`data-${name}="([^"]*)"`))?.[1];
+      return { dataset: { seq: read("seq"), cseq: read("cseq"), anchor: read("anchor") },
+        insertAdjacentHTML(_where, html) { pieces.splice(index, 0, html); body.innerHTML = pieces.join(""); } };
+    });
+  } });
+  const routed = (path, opts) => {
+    if (path.includes("/comments?")) return commentsApi(path, opts);
+    return api(path, opts);
+  };
+  const feature = createGuestFeature({ api: routed, doc, now: () => time, invalidateCards: () => invalidations++ });
   const get = id => elements.get("#" + id);
   const click = (id, target = get(id)) => get(id).listeners.get("click")({ target });
   const item = { dataset: { sub: guestKey(base) }, closest(sel) { if (sel === "[data-sub]") return this; return null; }, focus() { doc.activeElement = item; } };
@@ -668,4 +681,82 @@ test("owner items describe active and ended sharing", async () => {
   assert.match(f.feature.tab.tabHTML(false), />Shared</);
   assert.match(f.el.innerHTML, /Shared by you/);
   assert.match(f.el.innerHTML, /Sharing ended/);
+});
+
+const commentsAnswer = (entries = [], next = 0, more = false, names = {}) => ({ entries, names, last: next, next, more });
+
+test("guest messages escape text names and time and show authorship", () => {
+  const entry = { seq: 3, anchor: 1, author: "a", mine: false, at: '<&"', text: '```\n<&"\n```' };
+  const other = guestMessageHTML(entry, { a: '<&"' });
+  assert.ok(other.includes('class="turn assistant gmsg"'));
+  assert.ok(other.includes('data-cseq="3"') && other.includes('data-anchor="1"'));
+  assert.ok(other.includes("&lt;&amp;&quot;"));
+  assert.ok(other.includes("<pre><code>"));
+  assert.ok(guestMessageHTML(entry, {}).includes("Unknown person"));
+  const mine = guestMessageHTML({ ...entry, mine: true }, { a: "Name" });
+  assert.ok(mine.includes('class="turn user gmsg"'));
+  assert.ok(!mine.includes("gwho"));
+});
+
+test("guest mirror prompts name their human source", () => {
+  assert.ok(guestEntryHTML({ t:"user", seq:1, text:"x" }, "Owner").includes("Owner · prompt"));
+  assert.ok(guestEntryHTML({ t:"user", seq:1, text:"x", prov:true }, "Owner").includes("Owner · prompt · includes forwarded AI text"));
+});
+
+test("shared view merges both logs by anchor and keeps names", async () => {
+  const paths = [], puts = [];
+  const view = { ...base, mirror_last:4, comments_last:3, unread:true };
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    if (path.endsWith("/seen")) { puts.push(JSON.parse(opts.body)); return ""; }
+    paths.push(path);
+    if (path.endsWith("after=0")) return readAnswer([{ t:"user", seq:1, text:"x" }, { t:"assistant", seq:3, text:"y" }], 3, false, view);
+    return readAnswer([{ t:"assistant", seq:4, text:"z" }], 4, false, view);
+  }, async path => {
+    paths.push(path);
+    if (path.endsWith("after=0")) return commentsAnswer([{ seq:1, anchor:1, author:"a", text:"x" }, { seq:2, anchor:1, author:"b", text:"y" }], 2, true, { a:"Ada" });
+    if (path.endsWith("after=2")) return commentsAnswer([{ seq:3, anchor:4, author:"a", text:"z" }], 3, false, { b:"Bea" });
+    return commentsAnswer([], 3);
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const order = () => [...f.get("sv_body").innerHTML.matchAll(/data-(seq|cseq)="(\d+)"/g)].map(m => m[1] + m[2]);
+  assert.deepEqual(order(), ["seq1", "cseq1", "cseq2", "seq3", "cseq3"]);
+  assert.ok(f.get("sv_body").innerHTML.includes("Ada")); assert.ok(f.get("sv_body").innerHTML.includes("Bea"));
+  assert.deepEqual(puts[0], { mirror:3, comments:3 });
+  assert.ok(paths[0].endsWith("?after=0")); assert.ok(paths[1].endsWith("/comments?after=0")); assert.ok(paths[2].endsWith("/comments?after=2"));
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(order(), ["seq1", "cseq1", "cseq2", "seq3", "seq4", "cseq3"]);
+});
+
+test("comment paging has its own forty-page cap", async () => {
+  let calls = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([base]); if (path.endsWith("/seen")) return ""; return readAnswer(); }, async () => { calls++; return commentsAnswer([], calls, true); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(calls, 40); assert.equal(f.get("sv_more").hidden, false);
+});
+
+test("first unread comment scrolls into view", async () => {
+  let selector = "", scrolls = 0;
+  const view = { ...base, seen_mirror:1, seen_comments:0, comments_last:1 };
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([view]); if (path.endsWith("/seen")) return ""; return readAnswer([{ t:"user", seq:1, text:"x" }], 1, false, view); }, async () => commentsAnswer([{ seq:1, anchor:1, author:"a", text:"x" }], 1));
+  f.get("sv_body").querySelector = sel => { selector = sel; return { scrollIntoView() { scrolls++; } }; };
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(selector, '[data-cseq="1"]'); assert.equal(scrolls, 1);
+});
+
+test("read marks include only advanced logs and use owner unread rules", async () => {
+  for (const tc of [
+    { mirror:1, comments:0, body:{mirror:1}, access:"read", unread:false },
+    { mirror:0, comments:1, body:{comments:1}, access:"read", unread:false },
+    { mirror:1, comments:1, body:{mirror:1,comments:1}, access:"owner", unread:false },
+    { mirror:0, comments:0, body:null, access:"read", unread:false },
+    { mirror:1, comments:0, body:{mirror:1}, access:"read", unread:true, pendingComments:2 },
+  ]) {
+    const seen = [];
+    const view = { ...base, access:tc.access, mirror_last:tc.mirror, comments_last:tc.pendingComments || tc.comments, unread:true };
+    const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (path.endsWith("/seen")) { seen.push(JSON.parse(opts.body)); return ""; } return readAnswer([], tc.mirror, false, view); }, async () => commentsAnswer([], tc.comments));
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    assert.deepEqual(seen, tc.body ? [tc.body] : []);
+    if (tc.body) assert.equal(f.feature.tab.tabHTML(false).includes("unread"), tc.unread);
+  }
 });
