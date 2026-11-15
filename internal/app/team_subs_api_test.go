@@ -2327,3 +2327,18 @@ func TestSubBranchSkipsNonMemberAccess(t *testing.T) {
 		t.Fatalf("non-member access stored: %+v", subs)
 	}
 }
+
+func TestSubBranchTruncationPersistsAcrossServers(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	joinLab(t, dir, teamServerID, "http://127.0.0.1:1")
+	joinLab(t, dir, teamOtherID, "http://127.0.0.1:2")
+	th := asTeamHandler(t, h)
+	th.subAsks = map[string]subAsk{teamServerID: {truncated: true}, teamOtherID: {truncated: false}}
+	view, err := th.commitSubs("", nil, nil, fixedTeamClock()())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Truncated {
+		t.Fatal("later server cleared truncation")
+	}
+}
