@@ -1774,3 +1774,80 @@ func TestSubReadEndingSaveFailure(t *testing.T) {
 	asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
 	assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "store_unavailable")
 }
+
+func TestSubReadStoreChangesDuringFetch(t *testing.T) {
+	for _, damage := range []bool{false, true} {
+		t.Run(strconv.FormatBool(damage), func(t *testing.T) {
+			var dir string
+			h, d := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				if damage {
+					if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("broken"), 0o600); err != nil {
+						t.Error(err)
+					}
+				} else {
+					subs, err := team.LoadSubs(dir)
+					if err != nil {
+						t.Error(err)
+					} else {
+						subs[0].State = "ended"
+						if err := team.SaveSubs(dir, subs); err != nil {
+							t.Error(err)
+						}
+					}
+				}
+				w.WriteHeader(http.StatusNotFound)
+			})
+			dir = d
+			rec := doTeam(h, http.MethodGet, subReadPath(), "")
+			if damage {
+				assertAPIError(t, rec, 500, "store_unavailable")
+			} else {
+				got := decodeSubRead(t, rec)
+				if got.View.State != "ended" {
+					t.Fatalf("read = %+v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestSubReadCopyDamagedDuringFetch(t *testing.T) {
+	for _, status := range []int{200, 404} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var dir string
+			h, d := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Error(err)
+				}
+				if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+					t.Error(err)
+				}
+				w.WriteHeader(status)
+				if status == 200 {
+					_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{}`)))
+				}
+			})
+			dir = d
+			assertAPIError(t, doTeam(h, http.MethodGet, subReadPath(), ""), 500, "copy_damaged")
+		})
+	}
+}
+
+func TestSubReadChangedHelloSendsNoCredential(t *testing.T) {
+	var authed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			authed = true
+		}
+		_, _ = io.WriteString(w, helloJSON(teamOtherID, "Lab relay"))
+	}))
+	t.Cleanup(srv.Close)
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	seedSub(t, dir, baseSub())
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if got.View.Delivery != "changed" || authed {
+		t.Fatalf("delivery = %s auth = %t", got.View.Delivery, authed)
+	}
+}
