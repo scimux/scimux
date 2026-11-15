@@ -247,6 +247,30 @@ func (c *Client) Leave(ctx context.Context, baseURL, token string) error {
 	return nil
 }
 
+// Rename changes this seat's name on the server.
+func (c *Client) Rename(ctx context.Context, baseURL, token, name string) error {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(struct {
+		Name string `json:"name"`
+	}{Name: name})
+	status, _, err := c.doAuthed(ctx, http.MethodPut, baseURL, "/v1/seat", token, bytes.TrimRight(buf.Bytes(), "\n"), maxResponseBody)
+	if err != nil {
+		return err
+	}
+	switch status {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return ErrRejected
+	default:
+		return ErrProtocol
+	}
+}
+
 // authed performs one token call with no body. The token is placed on the
 // Authorization header and nowhere else. A connection failure or a timeout
 // is ErrUnreachable. An oversized body is ErrProtocol. The status and the
