@@ -367,7 +367,7 @@ export function guestEntryHTML(entry, ownerName) {
       if (!who) who = "Agent";
     }
     let content = "This message was too large to share.";
-    if (!entry.omitted) content = md(stripAssetRefs(entry.text));
+    if (entry.omitted === undefined) content = md(stripAssetRefs(entry.text));
     return `<div class="turn assistant" data-seq="${esc(entry.seq)}"><div class="bubble" title="${esc(bubbleTitle(entry.t, entry.time))}"><div class="gwho">${esc(who)}</div>${content}</div></div>`;
   } else return "";
   return `<div class="previewtrunc" data-seq="${esc(entry.seq)}">${line}</div>`;
