@@ -937,6 +937,10 @@ func TestSubListReportsTruncatedAtTheCap(t *testing.T) {
 	if !*got.Truncated {
 		t.Fatal("truncated = false")
 	}
+	cached, _ := readSubList(t, h)
+	if !*cached.Truncated {
+		t.Fatal("cached truncated = false")
+	}
 	stored := loadSubFile(t, dir)
 	if len(stored) != 4096 {
 		t.Fatalf("stored = %d", len(stored))
