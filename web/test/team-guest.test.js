@@ -1067,3 +1067,35 @@ test("shared actions open, close, move, bookmark and send", async () => {
   click(action("bookmark")); assert.equal(ops.length, 1); assert.equal(f.get("sv_note").textContent, "Already bookmarked.");
   click(action("sendto")); assert.equal(f.get("sharedview").hidden, true); assert.deepEqual(sends, [{ text: "two", exceptId: "", title: "Send to…", role: "assistant", who: undefined, prov: undefined, source: null }]);
 });
+
+test("shared action keyboard, links and ticks keep focus and the row", async () => {
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([{ t: "user", seq: 1, text: "x" }], 1), undefined, undefined, { bookmarks: () => [], uiMutate() {}, openSendTo() {} });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const first = sharedActionBubble(1), missing = sharedActionBubble(99);
+  const keydown = f.get("sharedview").listeners.get("keydown");
+  let prevented = 0;
+  keydown({ key: "Enter", target: first.bubble, preventDefault() { prevented++; } });
+  assert.equal(prevented, 1); assert.ok(first.turn.nextElementSibling);
+  const focus = { focus() { f.doc.activeElement = focus; } }; focus.focus();
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.equal(f.doc.activeElement, focus); assert.ok(first.turn.nextElementSibling);
+  const link = { closest(sel) { if (sel === "a") return this; if (sel === ".bubble") return first.bubble; return null; } };
+  f.click("sharedview", link); assert.ok(first.turn.nextElementSibling);
+  keydown({ key: " ", target: first.bubble, preventDefault() { prevented++; } });
+  assert.equal(prevented, 2); assert.equal(first.turn.nextElementSibling, null);
+  f.click("sharedview", missing.bubble); assert.equal(missing.turn.nextElementSibling, null);
+  keydown({ key: "Enter", target: { closest() { return null; } }, preventDefault() { assert.fail(); } });
+});
+
+test("shared bookmark duplicates compare all six address fields", async () => {
+  const address = { server: "s", owner: "o", chat: "c", generation: "g", log: "mirror", seq: 1 };
+  for (const field of Object.keys(address)) {
+    const stored = [{ team: { ...address, [field]: "different" } }], ops = [];
+    const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([{ t: "user", seq: 1, text: "x" }], 1), undefined, undefined, { bookmarks: () => stored, uiMutate: op => ops.push(op), openSendTo() {} });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    const bubble = sharedActionBubble(1); f.click("sharedview", bubble.bubble);
+    const action = { dataset: { gact: "bookmark" }, closest(sel) { return sel === "[data-gact]" ? this : null; } };
+    f.click("sharedview", action); assert.equal(ops.length, 1, field);
+    assert.deepEqual(ops[0].bookmark, { t: new Date(0).toISOString(), text: "x", role: "person", who: "Owner", seat: "o", from: "Chat", turnTime: undefined, team: address });
+  }
+});
