@@ -92,8 +92,7 @@ export function createSharingSection({ api, doc }) {
     rowMessage.clear();
     rows = body.servers.map(server => {
       if (nameVersions.get(server.id) !== beforeNames.get(server.id)) {
-        const prior = byId.get(server.id);
-        if (prior) return { ...server, seat_name: prior.seat_name };
+        return { ...server, seat_name: byId.get(server.id).seat_name };
       }
       return server;
     });
