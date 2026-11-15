@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -735,6 +736,9 @@ func projectSubRecord(record team.MirrorRecord) (map[string]any, int, bool) {
 		raw, ok := body[field]
 		if !ok {
 			continue
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil, 0, false
 		}
 		if field == "prov" {
 			var b bool
