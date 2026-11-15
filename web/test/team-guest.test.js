@@ -1319,3 +1319,37 @@ test("shared name editor uses a bounded, styled input", () => {
   const css = readFileSync(new URL("../css/layout.css", import.meta.url), "utf8");
   assert.match(css, /#sharedview[^{}]*\[data-grename\]\s*\{[^}]*font:\s*inherit/);
 });
+
+test("comments refresh can introduce a local-name change", async () => {
+  const pending = deferred(), people = { "s/o": "First" }; let reads = 0;
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(),
+    async () => ++reads === 1 ? pending.promise : commentsAnswer(), undefined, { people: () => people });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item);
+  await Promise.resolve(); await Promise.resolve();
+  const before = f.invalidations(); people["s/o"] = "Second"; pending.resolve(commentsAnswer()); await f.feature.settled();
+  assert.equal(f.invalidations(), before + 1); assert.equal(f.get("sv_from").textContent, "From Second · Server");
+});
+
+test("rename actions ignore closed, missing and non-person rows", async () => {
+  const view = { ...base, access: "owner" };
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([view]) : readAnswer([{ t: "user", seq: 1, text: "x" }], 1, false, view), undefined, undefined,
+    { people: () => ({}), uiMutate() {}, bookmarks: () => [], openSendTo() {} });
+  const key = f.get("sharedview").listeners.get("keydown");
+  const event = { key: "Escape", target: { dataset: { grename: "" } }, preventDefault() {}, stopPropagation() {} };
+  key(event);
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); key(event);
+  const bubble = sharedRenameBubble(1, f); f.click("sharedview", bubble.bubble);
+  sharedNameAction(f, "rename"); sharedNameAction(f, "name-save"); key(event);
+  assert.equal(f.get("sharedview").hidden, false);
+});
+
+test("comment rename can restore its server name", async () => {
+  const people = { "s/a": "Local" }, ops = [];
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(),
+    async () => commentsAnswer([{ seq: 1, anchor: 0, text: "x", author: "a", mine: false }], 1, false, { a: "Writer" }), undefined,
+    { people: () => people, uiMutate(op) { ops.push(op); if (op.name) people[op.key] = op.name; else delete people[op.key]; }, bookmarks: () => [], openSendTo() {} });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const bubble = sharedRenameBubble(0, f); bubble.turn.dataset = { cseq: "1" }; f.click("sharedview", bubble.bubble);
+  sharedNameAction(f, "rename"); bubble.turn.nextElementSibling.querySelector("[data-grename]").value = "Writer"; sharedNameAction(f, "name-save");
+  assert.deepEqual(ops, [{ k: "person-name", key: "s/a", name: "" }]);
+});
