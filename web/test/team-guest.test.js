@@ -160,6 +160,24 @@ test("shared header describes each delivery and access state", () => {
   ]) assert.equal(guestStateText(v), text);
 });
 
+for (const [access, delivery, from, state] of [
+  ["owner", "ok", "Your chat · Server", "Shared by you"],
+  ["owner", "offline", "Your chat · Server", "Shared by you · offline, showing the saved copy"],
+  ["read", "ok", "From Owner · Server", "Can view"],
+  ["write", "offline", "From Owner · Server", "Can comment · offline, showing the saved copy"],
+]) {
+  test(`shared header for ${access} with ${delivery}`, async () => {
+    const view = { ...base, access, delivery };
+    const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([view]) : readAnswer([], 0, false, view));
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    assert.equal(f.get("sv_from").textContent, from);
+    assert.equal(f.get("sv_state").textContent, state);
+  });
+  test(`shared state for ${access} with ${delivery}`, () => {
+    assert.equal(guestStateText({ state: "live", access, delivery }), state);
+  });
+}
+
 test("read errors have safe fixed messages", () => {
   for (const [code, text] of [["not_found", "This chat is no longer in your list."], ["copy_damaged", "The saved copy of this chat is damaged and cannot be shown."], ["storage_full", "This computer's storage is full. Free some space to load more."], ["other", "That did not work. It will be tried again."]]) assert.equal(guestErrorText(code), text);
 });
