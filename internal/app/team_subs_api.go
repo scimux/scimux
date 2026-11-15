@@ -1103,7 +1103,6 @@ func (h *teamHandler) answerComments(w http.ResponseWriter, r *http.Request, id 
 		out.Next = last
 	}
 	textBytes := 0
-	authors := make(map[string]bool)
 	for _, record := range records {
 		entry, size, ok := projectCommentRecord(record, string(inst))
 		if !ok {
@@ -1117,7 +1116,6 @@ func (h *teamHandler) answerComments(w http.ResponseWriter, r *http.Request, id 
 		out.Entries = append(out.Entries, entry)
 		out.Next = record.Seq
 		textBytes += size
-		authors[record.Author] = true
 	}
 	if stopped {
 		out.More = true
@@ -1131,7 +1129,7 @@ func (h *teamHandler) answerComments(w http.ResponseWriter, r *http.Request, id 
 			return
 		}
 	}
-	out.Names = h.commentNames(r.Context(), id.Server, server, joined, string(inst), authors)
+	out.Names = h.commentNames(r.Context(), id.Server, server, joined, string(inst))
 	writeJSONStatus(w, http.StatusOK, out)
 }
 
@@ -1182,7 +1180,7 @@ func (h *teamHandler) storeRoster(server string, seats []team.Seat) {
 	h.subAsks[server] = ask
 }
 
-func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string, authors map[string]bool) map[string]string {
+func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string) map[string]string {
 	h.mu.Lock()
 	if h.subAsks == nil {
 		h.subAsks = make(map[string]subAsk)
@@ -1213,16 +1211,11 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 	defer h.mu.Unlock()
 	ask = h.subAsks[id]
 	names := make(map[string]string)
-	for author := range authors {
-		if joined {
-			if author == inst {
-				names[author] = server.SeatName
-				continue
-			}
-		}
-		if name, ok := ask.names[author]; ok {
-			names[author] = name
-		}
+	for seat, name := range ask.names {
+		names[seat] = name
+	}
+	if joined {
+		names[inst] = server.SeatName
 	}
 	return names
 }

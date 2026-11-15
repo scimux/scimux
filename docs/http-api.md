@@ -1578,7 +1578,8 @@ rules as the mirror. It answers `{"entries":[{"seq","at","author","mine",
 "text","anchor"}],"names":{},"last":N,"next":N,"more":false}`. Names are
 cached per server in memory, and the roster is read again at most once per 60
 seconds while comments are read, so a known author's new name shows within
-about a minute. Unknown comment shapes remain in the copy
+about a minute; `names` holds every seat of the cached roster of that server.
+Unknown comment shapes remain in the copy
 but are skipped in the answer.
 
 `POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments`
