@@ -1387,3 +1387,19 @@ test("non-Escape keys leave the shared name editor open", async () => {
   let prevented = false; f.get("sharedview").listeners.get("keydown")({ key: "Enter", target: field, preventDefault() { prevented = true; } });
   assert.equal(prevented, false); assert.equal(row.querySelector("[data-grename]"), field);
 });
+
+test("stale local names do not change the empty shared list", async () => {
+  const f = viewFixture(async () => list(), undefined, undefined, { people: () => ({ "s/o": "Local" }) });
+  f.feature.tick(); await f.feature.settled(); assert.equal(f.invalidations(), 0); assert.equal(f.feature.tab.tabHTML(false), "");
+});
+
+test("renaming a person never sends the local name to team routes", async () => {
+  const calls = [], people = {};
+  const f = viewFixture(async (path, opts) => { calls.push({ path, body: opts?.body || "" }); if (path === "/api/team/subscriptions") return list([base]); return readAnswer([{ t: "user", seq: 1, text: "x" }], 1); }, undefined, undefined,
+    { people: () => people, uiMutate(op) { people[op.key] = op.name; }, bookmarks: () => [], openSendTo() {} });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const bubble = sharedRenameBubble(1, f); f.click("sharedview", bubble.bubble); sharedNameAction(f, "rename");
+  bubble.turn.nextElementSibling.querySelector("[data-grename]").value = "SyntheticLocalName"; sharedNameAction(f, "name-save");
+  f.setTime(10000); f.feature.tick(); await f.feature.settled();
+  assert.equal(calls.some(call => (call.path + call.body).includes("SyntheticLocalName")), false);
+});
