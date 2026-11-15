@@ -2911,11 +2911,13 @@ func TestSubRemoveEntryVanishedDuringCopyRemoval(t *testing.T) {
 
 func TestSubListRemovalDuringRefresh(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		expire bool
+		name    string
+		expire  bool
+		advance int64
 	}{
 		{name: "stale refresh"},
-		{name: "removal expires", expire: true},
+		{name: "removal still held at 60 seconds", advance: 60},
+		{name: "removal expires", expire: true, advance: 61},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
@@ -2954,8 +2956,8 @@ func TestSubListRemovalDuringRefresh(t *testing.T) {
 			go func() { done <- doTeam(h, http.MethodGet, "/api/team/subscriptions", "") }()
 			<-entered
 			removed := doTeam(h, http.MethodDelete, subReadPath(), "")
-			if tc.expire {
-				seconds.Store(61)
+			if tc.advance != 0 {
+				seconds.Store(tc.advance)
 				empty.Store(true)
 				refresh := doTeam(h, http.MethodGet, "/api/team/subscriptions", "")
 				if refresh.Code != http.StatusOK {
@@ -3012,5 +3014,8 @@ func TestSubListRefreshAfterRemovalAddsAgain(t *testing.T) {
 	}
 	if subs[0].SeenMirror != 0 {
 		t.Error("re-added subscription was not new")
+	}
+	if again := doTeam(h, http.MethodDelete, subReadPath(), ""); again.Code != http.StatusNoContent {
+		t.Errorf("second remove status %d", again.Code)
 	}
 }
