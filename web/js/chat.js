@@ -1337,7 +1337,7 @@ export function createChatFeature(deps){
   let foldCanAny = false;
   let foldAnchor = null;
   /* Where to put the focus after this fold, or null when the control that
-     started it did not hold the focus. Cleared once the rebuild is queued. */
+     started it did not hold the focus. Kept until a rebuild uses it. */
   let foldReturnFocus = null;
   /* Per-node chat poll validator (ETag). Keyed by node id so a tag from A is
      never sent for B; cleared on node switch (onSelectChange). */
@@ -1661,9 +1661,7 @@ export function createChatFeature(deps){
   function commitFold(){
     if (foldUID && d.foldStorage) writeFoldState(d.foldStorage, foldUID, foldState);
     chatSig = "";
-    const restoreFocus = foldReturnFocus;
-    foldReturnFocus = null;
-    refreshChat(restoreFocus);
+    refreshChat();
   }
 
   /* Distance from the top of the scroll area, so the clicked control can be
@@ -1747,6 +1745,20 @@ export function createChatFeature(deps){
     }
     const kind = focus.kind === "open" ? "close" : "open";
     focusWithoutScroll(findFoldControl(el, kind, focus.key));
+  }
+
+  function foldFocusMayReturn(el){
+    const active = doc && doc.activeElement;
+    if (!active || active === doc.body) return true;
+    /* Fold all hides its own head control as part of this render. */
+    if (active === chatfoldall && foldState.all) return true;
+    for (let node = active; node; node = node.parentNode){
+      if (node === el) return true;
+    }
+    if (doc && typeof doc.contains === "function") return !doc.contains(active);
+    /* Headless integrations without a document-membership API retain the
+       previous behavior; browsers provide document.contains. */
+    return true;
   }
 
   /* A jump to a hidden bubble opens that bubble's range before the transcript
@@ -2213,7 +2225,7 @@ export function createChatFeature(deps){
     msgs.scrollTop = msgs.scrollHeight;
   }
 
-  async function refreshChat(restoreFocus){
+  async function refreshChat(){
     const n = nodeById(g("sel", ""));
     if (!n){
       foldUID = "";
@@ -2447,6 +2459,8 @@ export function createChatFeature(deps){
 
     const el = msgs;
     if (!el){ endChatLoad(); return; }
+    const pendingFoldFocus = foldReturnFocus;
+    const shouldRestoreFoldFocus = !!pendingFoldFocus && foldFocusMayReturn(el);
     const atBottom = nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
 
     clearRenderedListeners();
@@ -2489,6 +2503,9 @@ export function createChatFeature(deps){
       (echo ? echoBubbleHTML(echo.text, "", { markdown }) : "") +
       (data.compacting ? compactingStatusHTML() : "") +
       elicitationStatusHTML(data, { escape });
+    /* A skipped render never reaches this point, so its pending target stays
+       available for the first poll or action response that rebuilds. */
+    foldReturnFocus = null;
 
     /* The pane's own region. Created rather than written into the markup so the
        feature can hold a live reference: #msgs is rewritten wholesale, and a
@@ -2539,7 +2556,7 @@ export function createChatFeature(deps){
     /* Unconditional clamp backstop after every rebuild — overscroll from a
        shrink or a stale offset never leaves a blank viewport. */
     clampChatScroll(el);
-    if (restoreFocus) restoreFoldFocus(el, restoreFocus);
+    if (shouldRestoreFoldFocus) restoreFoldFocus(el, pendingFoldFocus);
     const onRendered = (node, event, handler) => {
       if (!node || typeof node.addEventListener !== "function") return;
       node.addEventListener(event, handler);
