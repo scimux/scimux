@@ -52,19 +52,21 @@ type subKey struct {
 }
 
 type subscriptionView struct {
-	Server     string `json:"server"`
-	ServerName string `json:"server_name"`
-	Owner      string `json:"owner"`
-	OwnerName  string `json:"owner_name"`
-	Chat       string `json:"chat"`
-	Generation string `json:"generation"`
-	Title      string `json:"title"`
-	Access     string `json:"access"`
-	State      string `json:"state"`
-	MirrorLast uint64 `json:"mirror_last"`
-	SeenMirror uint64 `json:"seen_mirror"`
-	Unread     bool   `json:"unread"`
-	FirstSeen  string `json:"first_seen"`
+	Server       string `json:"server"`
+	ServerName   string `json:"server_name"`
+	Owner        string `json:"owner"`
+	OwnerName    string `json:"owner_name"`
+	Chat         string `json:"chat"`
+	Generation   string `json:"generation"`
+	Title        string `json:"title"`
+	Access       string `json:"access"`
+	State        string `json:"state"`
+	MirrorLast   uint64 `json:"mirror_last"`
+	SeenMirror   uint64 `json:"seen_mirror"`
+	CommentsLast uint64 `json:"comments_last"`
+	SeenComments uint64 `json:"seen_comments"`
+	Unread       bool   `json:"unread"`
+	FirstSeen    string `json:"first_seen"`
 }
 
 type subscriptionServerView struct {
@@ -359,7 +361,9 @@ func needsSeats(subs []team.Subscription, server string, ask subAsk, now time.Ti
 	}
 	for _, sub := range subs {
 		if sub.Server == server {
-			return true
+			if sub.Access != "owner" {
+				return true
+			}
 		}
 	}
 	return false
@@ -405,8 +409,14 @@ func applyChannels(subs []team.Subscription, outcome subOutcome, inst string, no
 	listed := map[subKey]team.Channel{}
 	order := make([]subKey, 0, len(outcome.channels))
 	for _, channel := range outcome.channels {
-		if channel.Owner == inst || (channel.Access != "read" && channel.Access != "write") {
-			continue
+		if channel.Owner == inst {
+			if channel.Access != "owner" {
+				continue
+			}
+		} else {
+			if channel.Access != "read" && channel.Access != "write" {
+				continue
+			}
 		}
 		key := subKey{owner: channel.Owner, chat: channel.Chat, gen: channel.Generation}
 		listed[key] = channel
@@ -435,6 +445,16 @@ func applyChannels(subs []team.Subscription, outcome subOutcome, inst string, no
 				subs[idx].MirrorLast = channel.MirrorLast
 				changed = true
 			}
+			if subs[idx].CommentsLast != channel.CommentsLast {
+				subs[idx].CommentsLast = channel.CommentsLast
+				changed = true
+			}
+			if channel.Access == "owner" {
+				if subs[idx].OwnerName != outcome.entry.SeatName {
+					subs[idx].OwnerName = outcome.entry.SeatName
+					changed = true
+				}
+			}
 			continue
 		}
 		if len(subs) >= subListCap {
@@ -448,10 +468,13 @@ func applyChannels(subs []team.Subscription, outcome subOutcome, inst string, no
 				break
 			}
 		}
+		if channel.Access == "owner" {
+			ownerName = outcome.entry.SeatName
+		}
 		subs = append(subs, team.Subscription{
 			Server: id, Owner: channel.Owner, Chat: channel.Chat, Generation: channel.Generation,
 			ServerName: outcome.entry.Name, OwnerName: ownerName, Title: channel.Title, Access: channel.Access,
-			State: "live", MirrorLast: channel.MirrorLast, SeenMirror: 0,
+			State: "live", MirrorLast: channel.MirrorLast, SeenMirror: 0, CommentsLast: channel.CommentsLast,
 			FirstSeen: now.Format(time.RFC3339),
 		})
 		changed = true
@@ -478,6 +501,9 @@ func applySeatNames(subs []team.Subscription, server string, seats []team.Seat) 
 	changed := false
 	for i := range subs {
 		if subs[i].Server != server {
+			continue
+		}
+		if subs[i].Access == "owner" {
 			continue
 		}
 		name, ok := names[subs[i].Owner]
@@ -531,7 +557,7 @@ func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.
 		views = append(views, subscriptionView{
 			Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName,
 			Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State,
-			MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, Unread: sub.State == "live" && sub.MirrorLast > sub.SeenMirror,
+			MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub),
 			FirstSeen: sub.FirstSeen,
 		})
 	}
@@ -542,6 +568,19 @@ func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.
 	}
 	sort.Slice(servers, func(i, j int) bool { return servers[i].ID < servers[j].ID })
 	return subListResponse{Subscriptions: views, Servers: servers, Truncated: truncated}
+}
+
+func subUnread(sub team.Subscription) bool {
+	if sub.State != "live" {
+		return false
+	}
+	if sub.CommentsLast > sub.SeenComments {
+		return true
+	}
+	if sub.Access == "owner" {
+		return false
+	}
+	return sub.MirrorLast > sub.SeenMirror
 }
 
 func subLess(a, b subscriptionView) bool {
@@ -729,7 +768,7 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	var out subscriptionReadResponse
-	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, Unread: sub.State == "live" && sub.MirrorLast > sub.SeenMirror, FirstSeen: sub.FirstSeen}
+	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub), FirstSeen: sub.FirstSeen}
 	out.View.Delivery = delivery
 	out.Last = last
 	out.Entries = []map[string]any{}
