@@ -63,6 +63,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
   const pending = new Set();
   const collapsed = new Set();
   let rendered = "";
+  let renderedDOM = "";
   let listEl = null;
   let bound = false;
   let open = null;
@@ -108,7 +109,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     listEl = el;
     const content = html();
     if (content === rendered) {
-      if (el.innerHTML === content) return true;
+      if (el.innerHTML === renderedDOM) return true;
     }
     let selector = "";
     const focus = doc.activeElement;
@@ -120,6 +121,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards }) {
     }
     el.innerHTML = content;
     rendered = content;
+    renderedDOM = el.innerHTML;
     if (selector) {
       const replacement = el.querySelector(selector);
       if (replacement) replacement.focus();
