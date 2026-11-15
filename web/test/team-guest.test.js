@@ -1353,3 +1353,27 @@ test("comment rename can restore its server name", async () => {
   sharedNameAction(f, "rename"); bubble.turn.nextElementSibling.querySelector("[data-grename]").value = "Writer"; sharedNameAction(f, "name-save");
   assert.deepEqual(ops, [{ k: "person-name", key: "s/a", name: "" }]);
 });
+
+test("new bookmark and send-to use the renamed person's name", async () => {
+  const people = {}, ops = [], sends = [];
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([{ t: "user", seq: 1, text: "synthetic" }], 1), undefined, undefined, {
+    people: () => people, bookmarks: () => [], openSendTo: opts => sends.push(opts),
+    uiMutate(op) { ops.push(op); if (op.k === "person-name") people[op.key] = op.name; },
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const bubble = sharedRenameBubble(1, f); f.click("sharedview", bubble.bubble); sharedNameAction(f, "rename");
+  bubble.turn.nextElementSibling.querySelector("[data-grename]").value = 'New <&"'; sharedNameAction(f, "name-save");
+  sharedNameAction(f, "bookmark"); assert.equal(ops[1].bookmark.who, 'New <&"'); assert.equal(ops[1].bookmark.role, "person"); assert.equal(ops[1].bookmark.seat, "o");
+  sharedNameAction(f, "sendto"); assert.equal(sends[0].who, 'New <&"'); assert.equal(sends[0].role, "person");
+  assert.match(guestModule.guestMessageHTML({ seq: 1, anchor: 0, text: "x", author: "o", mine: false }, { o: "Owner" }, "s", people), /New &lt;&amp;&quot;/);
+});
+
+test("a changed local name updates existing message labels on the next answer", async () => {
+  const people = { "s/a": "First" };
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(), async () => commentsAnswer([], 0, false, { a: "Writer" }), undefined, { people: () => people });
+  const label = { dataset: { seat: "a" }, textContent: "" };
+  f.get("sv_body").querySelectorAll = sel => sel === "[data-seat]" ? [label] : [];
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); assert.equal(label.textContent, "First");
+  people["s/a"] = 'Second <&"'; assert.equal(label.textContent, "First");
+  f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(label.textContent, 'Second <&"');
+});
