@@ -1533,7 +1533,7 @@ func TestSubReadFetchesCopiesAndProjects(t *testing.T) {
 		}
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	stored, last, err := team.ReadCopy(dir, id, 0)
+	stored, last, err := team.ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || last != 8 || len(stored) != 8 {
 		t.Fatalf("copy last = %d count = %d err = %v", last, len(stored), err)
 	}
@@ -1678,7 +1678,7 @@ func TestSubReadConcurrentStoresOnce(t *testing.T) {
 		}
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	entries, last, err := team.ReadCopy(dir, id, 0)
+	entries, last, err := team.ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || last != 1 || len(entries) != 1 {
 		t.Fatalf("copy last %d entries %d err %v", last, len(entries), err)
 	}
@@ -1771,7 +1771,7 @@ func TestSubReadIgnoresMalformedBodyFields(t *testing.T) {
 		t.Fatalf("read = %+v", got)
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	entries, _, err := team.ReadCopy(dir, id, 0)
+	entries, _, err := team.ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || len(entries) != 4 {
 		t.Fatalf("entries = %d err %v", len(entries), err)
 	}

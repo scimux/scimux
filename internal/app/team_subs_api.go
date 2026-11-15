@@ -617,7 +617,7 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 		writeTeamError(w, 404, "not_found")
 		return
 	}
-	_, last, err := team.ReadCopy(h.dataDir, id, ^uint64(0))
+	_, last, err := team.ReadCopy(h.dataDir, id, ^uint64(0), 256, 4<<20)
 	if err != nil {
 		writeTeamError(w, 500, "copy_damaged")
 		return
@@ -688,7 +688,7 @@ func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 	}
-	records, last, err := team.ReadCopy(h.dataDir, id, after)
+	records, last, err := team.ReadCopy(h.dataDir, id, after, 256, 4<<20)
 	if err != nil {
 		writeTeamError(w, 500, "copy_damaged")
 		return
@@ -803,7 +803,7 @@ func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id
 	}
 	for i := range subs {
 		if sameCopy(subs[i], id) {
-			_, last, err := team.ReadCopy(h.dataDir, id, ^uint64(0))
+			_, last, err := team.ReadCopy(h.dataDir, id, ^uint64(0), 256, 4<<20)
 			if err != nil {
 				writeTeamError(w, 500, "store_unavailable")
 				return

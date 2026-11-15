@@ -63,7 +63,7 @@ func TestCopyAppendsInOrderAndSkipsARepeat(t *testing.T) {
 	if err := AppendCopy(dir, id, []MirrorRecord{first, second}); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err := ReadCopy(dir, id, 0)
+	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,18 +111,18 @@ func TestCopyAppendsInOrderAndSkipsARepeat(t *testing.T) {
 	if err := AppendCopy(dir, id, overlap); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err = ReadCopy(dir, id, 1)
+	got, last, err = ReadCopy(dir, id, 1, 256, 4<<20)
 	if err != nil || last != 3 || len(got) != 2 || got[0].Seq != 2 || got[1].Seq != 3 || string(got[1].Body) != "null" {
 		t.Fatalf("after overlap = %+v last = %d err = %v", got, last, err)
 	}
 	if !bytes.HasPrefix(readCopyFile(t, dir, id), before) {
 		t.Fatal("overlap append rewrote earlier lines")
 	}
-	none, last, err := ReadCopy(dir, id, 3)
+	none, last, err := ReadCopy(dir, id, 3, 256, 4<<20)
 	if err != nil || last != 3 || len(none) != 0 {
 		t.Fatalf("after last = %+v last = %d err = %v", none, last, err)
 	}
-	none, last, err = ReadCopy(dir, id, 9)
+	none, last, err = ReadCopy(dir, id, 9, 256, 4<<20)
 	if err != nil || last != 3 || len(none) != 0 {
 		t.Fatalf("past last = %+v last = %d err = %v", none, last, err)
 	}
@@ -139,7 +139,7 @@ func TestCopyNilAppendCreatesNothing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat = %v", err)
 	}
-	got, last, err := ReadCopy(dir, sampleCopyID(), 0)
+	got, last, err := ReadCopy(dir, sampleCopyID(), 0, 256, 4<<20)
 	if err != nil || last != 0 || len(got) != 0 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
@@ -224,14 +224,14 @@ func TestCopyDamageIsLeftUntouched(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := []byte(tc.body)
-			_, _, err := ReadCopy(dir, id, 0)
+			_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
 			if !errors.Is(err, ErrCopyDamaged) {
 				t.Fatalf("Read = %v", err)
 			}
 			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "North") {
 				t.Fatalf("Read quotes the copy: %v", err)
 			}
-			_, _, err = ReadCopy(dir, id, 0)
+			_, _, err = ReadCopy(dir, id, 0, 256, 4<<20)
 			if !errors.Is(err, ErrCopyDamaged) {
 				t.Fatalf("second Read = %v", err)
 			}
@@ -259,18 +259,18 @@ func TestCopyEmptyFileIsAnEmptyCopy(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err := ReadCopy(dir, id, 0)
+	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || last != 0 || len(got) != 0 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
-	got, last, err = ReadCopy(dir, id, 0)
+	got, last, err = ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || last != 0 || len(got) != 0 {
 		t.Fatalf("second = %+v last = %d err = %v", got, last, err)
 	}
 	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err = ReadCopy(dir, id, 0)
+	got, last, err = ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || last != 1 || len(got) != 1 {
 		t.Fatalf("after append = %+v last = %d err = %v", got, last, err)
 	}
@@ -301,7 +301,7 @@ func TestCopyReadNearTheEndDoesNotReadTheWholeFile(t *testing.T) {
 	}
 	readBytes.Store(0)
 	const after = 9900
-	got, last, err := ReadCopy(dir, id, after)
+	got, last, err := ReadCopy(dir, id, after, 256, 4<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestCopyReadScansAFileItDidNotWrite(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, last, err := ReadCopy(dst, id, 1)
+	got, last, err := ReadCopy(dst, id, 1, 256, 4<<20)
 	if err != nil || last != 2 || len(got) != 1 || got[0].Seq != 2 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
@@ -369,7 +369,7 @@ func TestCopyRejectsABadPath(t *testing.T) {
 		if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, "")}); !errors.Is(err, ErrCopyPath) {
 			t.Fatalf("Append %v error = %v", id, err)
 		}
-		if _, _, err := ReadCopy(dir, id, 0); !errors.Is(err, ErrCopyPath) {
+		if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyPath) {
 			t.Fatalf("Read %v error = %v", id, err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, CopiesDir)); !errors.Is(err, os.ErrNotExist) {
@@ -403,7 +403,7 @@ func TestCopySameLengthEditIsDamaged(t *testing.T) {
 	if err := os.WriteFile(path, edited, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := ReadCopy(dir, id, 0)
+	_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
 	if !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("Read = %v", err)
 	}
@@ -433,7 +433,7 @@ func TestCopyTamperRescans(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := readCopyFile(t, dir, id)
-	_, _, err = ReadCopy(dir, id, 0)
+	_, _, err = ReadCopy(dir, id, 0, 256, 4<<20)
 	if !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("Read = %v", err)
 	}
@@ -471,7 +471,7 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 		if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, "")}); err != nil {
 			t.Fatal(err)
 		}
-		got, last, err := ReadCopy(dir, id, 0)
+		got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
 		if err != nil || last != 2 || len(got) != 2 {
 			t.Fatalf("retry = %+v last = %d err = %v", got, last, err)
 		}
@@ -495,7 +495,7 @@ func TestCopyWriteFailuresLeaveTheCopy(t *testing.T) {
 		if err := AppendCopy(fresh, id, []MirrorRecord{copyRec(2, "")}); err != nil {
 			t.Fatal(err)
 		}
-		got, last, err := ReadCopy(fresh, id, 0)
+		got, last, err := ReadCopy(fresh, id, 0, 256, 4<<20)
 		if err != nil || last != 2 || len(got) != 2 || got[1].Seq != 2 {
 			t.Fatalf("retry = %+v last = %d err = %v", got, last, err)
 		}
@@ -583,7 +583,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		boom := errors.New("read failed")
 		copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 0, boom }
-		_, _, err := ReadCopy(dir, id, 0)
+		_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
 		if !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
@@ -593,7 +593,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	})
 	t.Run("short", func(t *testing.T) {
 		copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 1, nil }
-		_, _, err := ReadCopy(dir, id, 0)
+		_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
 		if !errors.Is(err, ErrCopyDamaged) {
 			t.Fatalf("error = %v", err)
 		}
@@ -606,7 +606,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 			}
 			return n, io.EOF
 		}
-		got, last, err := ReadCopy(dir, id, 0)
+		got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
 		if err != nil || last != 2 || len(got) != 2 {
 			t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 		}
@@ -614,7 +614,7 @@ func TestCopyReadFailureLeavesTheCopy(t *testing.T) {
 	t.Run("open", func(t *testing.T) {
 		boom := errors.New("open read failed")
 		copyOps.open = func(string, int, os.FileMode) (*os.File, error) { return nil, boom }
-		_, _, err := ReadCopy(dir, id, 0)
+		_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
 		if !errors.Is(err, boom) {
 			t.Fatalf("error = %v", err)
 		}
@@ -631,7 +631,7 @@ func TestCopyDirectoryFileIsAnError(t *testing.T) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := ReadCopy(dir, id, 0)
+	_, _, err := ReadCopy(dir, id, 0, 256, 4<<20)
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("Read = %v", err)
 	}
@@ -653,7 +653,7 @@ func TestCopyFileDataDirIsAnError(t *testing.T) {
 	if err := os.WriteFile(file, []byte("synthetic"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := ReadCopy(file, sampleCopyID(), 0)
+	_, _, err := ReadCopy(file, sampleCopyID(), 0, 256, 4<<20)
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("Read = %v", err)
 	}
@@ -683,7 +683,7 @@ func TestCopyConcurrentAppendStoresOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, last, err := ReadCopy(dir, id, 0)
+	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || last != 1 || len(got) != 1 || got[0].Seq != 1 {
 		t.Fatalf("read = %+v last = %d err = %v", got, last, err)
 	}
@@ -706,7 +706,7 @@ func TestCopySameLengthDamageIsDetectedByFreshIndex(t *testing.T) {
 	}
 	// Discard this process's cached index to model opening the copy after restart.
 	copyMetas.Delete(path)
-	if _, _, err := ReadCopy(dir, id, 0); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("read error = %v", err)
 	}
 	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
@@ -727,7 +727,7 @@ func TestCopySizeChangeMakesWarmIndexRescan(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ReadCopy(dir, id, 0); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("read error = %v", err)
 	}
 	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(2, `{"v":1}`)}); !errors.Is(err, ErrCopyDamaged) {
@@ -749,7 +749,103 @@ func TestCopySameLengthMissingNewlineIsDamaged(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ReadCopy(dir, id, 0); !errors.Is(err, ErrCopyDamaged) {
+	if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
 		t.Fatalf("read error = %v", err)
+	}
+}
+
+func TestCopyReadIsBoundedAtEveryPosition(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	const total = 4000
+	records := make([]MirrorRecord, total)
+	for i := range records {
+		records[i] = copyRec(uint64(i+1), `{"v":1,"text":"`+strings.Repeat("x", 64)+`"}`)
+	}
+	if err := AppendCopy(dir, id, records); err != nil {
+		t.Fatal(err)
+	}
+	snapshotCopy(t)
+	real := copyOps.readAt
+	var bytesRead int64
+	copyOps.readAt = func(f *os.File, p []byte, off int64) (int, error) {
+		n, e := real(f, p, off)
+		bytesRead += int64(n)
+		return n, e
+	}
+	info, err := os.Stat(copyPathOf(dir, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, after := range []uint64{0, 2000, 3900} {
+		bytesRead = 0
+		got, last, err := ReadCopy(dir, id, after, 256, 4<<20)
+		if err != nil || last != total || len(got) == 0 || len(got) > 256 {
+			t.Fatalf("after %d count %d last %d err %v", after, len(got), last, err)
+		}
+		if bytesRead >= info.Size()/2 {
+			t.Fatalf("after %d read %d of %d", after, bytesRead, info.Size())
+		}
+	}
+	bytesRead = 0
+	_, _, err = ReadCopy(dir, id, ^uint64(0), 256, 4<<20)
+	if err != nil || bytesRead != 0 {
+		t.Fatalf("last read bytes %d err %v", bytesRead, err)
+	}
+}
+
+func TestCopyReadReturnsOversizedFirstBody(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	body := `"` + strings.Repeat("x", (4<<20)+1) + `"`
+	if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, body), copyRec(2, `{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
+	if err != nil || last != 2 || len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("count %d last %d err %v", len(got), last, err)
+	}
+}
+
+func TestCopyInitialScanUsesPiecesAndFindsBoundaryDamage(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	records := make([]MirrorRecord, 1200)
+	for i := range records {
+		records[i] = copyRec(uint64(i+1), `{"text":"`+strings.Repeat("x", 100)+`"}`)
+	}
+	if err := AppendCopy(dir, id, records); err != nil {
+		t.Fatal(err)
+	}
+	path := copyPathOf(dir, id)
+	copyMetas.Delete(path)
+	snapshotCopy(t)
+	real := copyOps.readAt
+	var calls int
+	var largest int
+	copyOps.readAt = func(f *os.File, p []byte, off int64) (int, error) {
+		calls++
+		if len(p) > largest {
+			largest = len(p)
+		}
+		return real(f, p, off)
+	}
+	_, last, err := ReadCopy(dir, id, ^uint64(0), 256, 4<<20)
+	info, e := os.Stat(path)
+	if err != nil || e != nil || last != 1200 || calls < 2 || int64(largest) >= info.Size() {
+		t.Fatalf("scan calls %d largest %d last %d err %v", calls, largest, last, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := bytes.IndexByte(raw[65535:], '\n')
+	if boundary < 0 {
+		t.Fatal("missing boundary newline")
+	}
+	raw[65535+boundary] = '!'
+	if err = os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copyMetas.Delete(path)
+	if _, _, err = ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+		t.Fatalf("boundary error %v", err)
 	}
 }

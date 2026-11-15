@@ -146,7 +146,7 @@ func AppendCopy(dataDir string, id CopyID, entries []MirrorRecord) error {
 
 // ReadCopy returns the stored entries whose number is above after.
 // A missing copy is an empty result and is not created.
-func ReadCopy(dataDir string, id CopyID, after uint64) ([]MirrorRecord, uint64, error) {
+func ReadCopy(dataDir string, id CopyID, after uint64, maxEntries int, maxBodyBytes int) ([]MirrorRecord, uint64, error) {
 	path, err := copyPath(dataDir, id)
 	if err != nil {
 		return nil, 0, err
