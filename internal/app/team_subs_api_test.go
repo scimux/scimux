@@ -3874,3 +3874,75 @@ func TestSubRouteRejectsWrongPrefixAndCommentMethods(t *testing.T) {
 		assertAPIError(t, doTeam(h, tc.method, subReadPath()+"/"+tc.suffix, ""), 404, "not_found")
 	}
 }
+
+func TestSubCommentsReadRacingRemovalDoesNotRestoreCopy(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/hello":
+			_, _ = io.WriteString(w, helloJSON(teamServerID, "Synthetic"))
+		case "/v1/channels/" + subOwner + "/" + subChat + "/comments":
+			close(entered)
+			<-release
+			_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{}`)))
+		case "/v1/channels/" + subOwner + "/" + subChat + "/membership":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	seedSub(t, dir, baseSub())
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- doTeam(h, http.MethodGet, subReadPath()+"/comments", "") }()
+	<-entered
+	removed := doTeam(h, http.MethodDelete, subReadPath(), "")
+	close(release)
+	read := <-done
+	if removed.Code != 204 {
+		t.Errorf("remove status = %d", removed.Code)
+	}
+	assertAPIError(t, read, 404, "not_found")
+	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "comments.jsonl")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Error("removed comments returned")
+	}
+}
+
+func TestSubCommentsRosterRefusesChangedServer(t *testing.T) {
+	rosterCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hello" {
+			_, _ = io.WriteString(w, helloJSON(teamOtherID, "Synthetic"))
+			return
+		}
+		rosterCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	h, dir := testTeamSurface(t, clientFor(srv))
+	joinLab(t, dir, teamServerID, srv.URL)
+	s := baseSub()
+	s.State = "ended"
+	seedSub(t, dir, s)
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	record := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"comment","text":"synthetic","anchor":0}`)}
+	if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal("cannot seed comments")
+	}
+	got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if _, ok := got.Names[subOwner]; ok || rosterCalls != 0 {
+		t.Error("changed server received roster request")
+	}
+}
+
+/* Wave 5a condition table (each mutation was caught by the named test):
+| condition | test for each half |
+| channel access != read && != write | TestSubListAddsASharedChannel: read; write |
+| mirror missing && comments missing | TestSubSeenBothLogsCapsAndWritesOnce: mirror only; comments only |
+| version != 1 && version != 2 | TestSubsVersionTwoAndLegacyMigration: legacy; version two |
+| comments_last missing || seen_comments missing | TestSubsVersionTwoNeedsBothValidCounters: each missing field |
+| access != read && != write && != owner | TestSubsRoundTripKeepsFieldsAndMode: read and write; TestSubsVersionTwoAndLegacyMigration: owner |
+*/
