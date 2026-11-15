@@ -3744,3 +3744,100 @@ func TestSubCommentPostNetworkCallsHoldNoLock(t *testing.T) {
 		t.Errorf("status = %d", rec.Code)
 	}
 }
+
+func TestSubSeenBothLogsCapsAndWritesOnce(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	s := baseSub()
+	seedSub(t, dir, s)
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	records := func(n int) []team.MirrorRecord {
+		out := make([]team.MirrorRecord, n)
+		for i := range out {
+			out[i] = team.MirrorRecord{Seq: uint64(i + 1), Key: fmt.Sprintf("k%d", i+1), Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{}`)}
+		}
+		return out
+	}
+	if err := team.AppendCopy(dir, id, team.MirrorLog, records(2)); err != nil {
+		t.Fatal("cannot seed mirror")
+	}
+	if err := team.AppendCopy(dir, id, team.CommentsLog, records(3)); err != nil {
+		t.Fatal("cannot seed comments")
+	}
+	writes := 0
+	asTeamHandler(t, h).saveSubs = func(data string, subs []team.Subscription) error { writes++; return team.SaveSubs(data, subs) }
+	for _, tc := range []struct {
+		body             string
+		mirror, comments uint64
+		writes           int
+	}{
+		{`{"mirror":1}`, 1, 0, 1}, {`{"comments":2}`, 1, 2, 2},
+		{`{"mirror":99,"comments":99}`, 2, 3, 3}, {`{"mirror":1,"comments":1}`, 2, 3, 3},
+		{`{"comments":3}`, 2, 3, 3},
+	} {
+		rec := doTeam(h, http.MethodPut, subReadPath()+"/seen", tc.body)
+		if rec.Code != 204 {
+			t.Errorf("seen status = %d", rec.Code)
+			continue
+		}
+		got := loadSubFile(t, dir)[0]
+		if got.SeenMirror != tc.mirror || got.SeenComments != tc.comments || writes != tc.writes {
+			t.Error("seen counters or write count incorrect")
+		}
+	}
+	for _, body := range []string{`{}`, `{"comments":null}`, `{"comments":-1}`, `{"comments":1,"extra":2}`, `{"comments":1} {}`} {
+		assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", body), 400, "bad_request")
+	}
+}
+
+func TestSubRemoveOwnerLiveOrEnded(t *testing.T) {
+	for _, state := range []string{"live", "ended"} {
+		t.Run(state, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+			defer srv.Close()
+			h, dir := testTeamSurface(t, clientFor(srv))
+			joinLab(t, dir, teamServerID, srv.URL)
+			s := baseSub()
+			s.Access = "owner"
+			s.State = state
+			seedSub(t, dir, s)
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			record := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{}`)}
+			if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
+				t.Fatal("cannot seed mirror")
+			}
+			if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{record}); err != nil {
+				t.Fatal("cannot seed comments")
+			}
+			rec := doTeam(h, http.MethodDelete, subReadPath(), "")
+			if state == "live" {
+				assertAPIError(t, rec, 409, "own_share")
+				if len(loadSubFile(t, dir)) != 1 {
+					t.Error("live owner state removed")
+				}
+				for _, log := range []string{team.MirrorLog, team.CommentsLog} {
+					_, last, err := team.ReadCopy(dir, id, log, 0, 256, 4<<20)
+					if err != nil || last != 1 {
+						t.Error("live owner copy removed")
+					}
+				}
+			} else {
+				if rec.Code != 204 {
+					t.Errorf("ended owner status = %d", rec.Code)
+				}
+				if len(loadSubFile(t, dir)) != 0 {
+					t.Error("ended owner state retained")
+				}
+				for _, log := range []string{team.MirrorLog, team.CommentsLog} {
+					_, last, err := team.ReadCopy(dir, id, log, 0, 256, 4<<20)
+					if err != nil || last != 0 {
+						t.Error("ended owner copy retained")
+					}
+				}
+			}
+			if calls != 0 {
+				t.Error("owner removal contacted server")
+			}
+		})
+	}
+}
