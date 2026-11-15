@@ -1,12 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as guestModule from "../js/team-guest.js";
+import { readFileSync } from "node:fs";
 import { jsonResponse } from "./s2-helpers.js";
 import { decodeResponse } from "../js/api.js";
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
 const list = (subscriptions = [], servers = [], truncated = false) => ({ subscriptions: subscriptions.map(view => ({ ...view })), servers, truncated });
+
+test("shared actions are wired and have touch-sized buttons", () => {
+  const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../css/layout.css", import.meta.url), "utf8");
+  assert.match(app, /uiMutate:\s*op\s*=>\s*uiMutate\(op\)/);
+  assert.match(app, /bookmarks:\s*\(\)\s*=>\s*getUI\(\)\.bookmarks/);
+  assert.match(app, /openSendTo:\s*opts\s*=>\s*bookmarksFeature\.openSendTo\(opts\)/);
+  assert.match(css, /#sharedview[^{}]*\.bubactions\s+button\s*\{[^}]*min-height:\s*44px/);
+});
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
