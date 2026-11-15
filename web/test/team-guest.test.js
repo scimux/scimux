@@ -551,3 +551,22 @@ test("a non-JSON removal error uses the generic message", async () => {
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_remove"); f.click("sv_remove"); await f.feature.settled();
   assert.equal(f.get("sv_note").textContent, "That did not work. Try again.");
 });
+
+test("late removal after destroy has no effects", async () => {
+  const pending = deferred(); let deletes = 0;
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([base]);
+    if (opts) { if (opts.method === "DELETE") { deletes++; return pending.promise; } }
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); f.click("sv_remove"); f.click("sv_remove");
+  assert.equal(deletes, 1); const before = f.invalidations(); f.feature.destroy(); pending.resolve(""); await f.feature.settled();
+  assert.equal(f.invalidations(), before);
+});
+
+test("removal controls do nothing when no view is open", async () => {
+  let calls = 0;
+  const f = viewFixture(async () => { calls++; return list(); });
+  f.click("sv_remove"); f.click("sharedview", f.get("sv_body"));
+  f.feature.tick(); await f.feature.settled(); assert.equal(calls, 1);
+});
