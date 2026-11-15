@@ -1226,3 +1226,8 @@ test("a local name change appears when a new answer arrives", async () => {
   f.setTime(5000); f.feature.tick(); await f.feature.settled();
   assert.equal(f.get("sv_from").textContent, "From Second · Server");
 });
+
+test("shared view receives local people lazily", () => {
+  const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+  assert.match(app, /people:\s*\(\)\s*=>\s*getUI\(\)\.people/);
+});
