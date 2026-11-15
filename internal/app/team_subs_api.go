@@ -222,6 +222,7 @@ func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Tim
 			continue
 		}
 		if needsSeats(subs, outcome.entry.ID, h.subAsks[outcome.entry.ID], now) {
+			h.rememberSeats(outcome.entry.ID, now)
 			due = append(due, outcome.entry)
 		}
 	}
@@ -265,7 +266,6 @@ func (h *teamHandler) commitSubs(inst string, outcomes []subOutcome, seats []sea
 		if applySeatNames(subs, seat.id, seat.seats) {
 			changed = true
 		}
-		h.rememberSeats(seat.id, now)
 	}
 	if changed {
 		save := h.saveSubs
@@ -316,24 +316,15 @@ func (h *teamHandler) deliveryWord(id string) string {
 }
 
 func needsSeats(subs []team.Subscription, server string, ask subAsk, now time.Time) bool {
-	has := false
-	empty := false
-	for _, sub := range subs {
-		if sub.Server != server {
-			continue
-		}
-		has = true
-		if sub.OwnerName == "" {
-			empty = true
-		}
-	}
-	if !has {
+	if !ask.seats.IsZero() && now.Sub(ask.seats) < subSeatsEvery {
 		return false
 	}
-	if empty {
-		return true
+	for _, sub := range subs {
+		if sub.Server == server {
+			return true
+		}
 	}
-	return ask.seats.IsZero() || now.Sub(ask.seats) >= subSeatsEvery
+	return false
 }
 
 func mergeSubs(subs []team.Subscription, entries []team.Entry, outcomes []subOutcome, inst string, now time.Time) ([]team.Subscription, map[string]bool, bool) {
