@@ -2911,11 +2911,13 @@ func TestSubRemoveEntryVanishedDuringCopyRemoval(t *testing.T) {
 
 func TestSubListRemovalDuringRefresh(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		expire  bool
-		advance int64
+		name     string
+		expire   bool
+		advance  int64
+		removeAt int64
 	}{
 		{name: "stale refresh"},
+		{name: "removal follows ask", removeAt: 1},
 		{name: "removal still held at 60 seconds", advance: 60},
 		{name: "removal expires", expire: true, advance: 61},
 	} {
@@ -2955,6 +2957,7 @@ func TestSubListRemovalDuringRefresh(t *testing.T) {
 			done := make(chan *httptest.ResponseRecorder, 1)
 			go func() { done <- doTeam(h, http.MethodGet, "/api/team/subscriptions", "") }()
 			<-entered
+			seconds.Store(tc.removeAt)
 			removed := doTeam(h, http.MethodDelete, subReadPath(), "")
 			if tc.advance != 0 {
 				seconds.Store(tc.advance)
