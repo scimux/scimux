@@ -136,10 +136,10 @@ function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, l
   }
   const body = elements.get("#sv_body");
   Object.defineProperty(body, "children", { get() {
-    const pieces = this.innerHTML.split(/(?=<div class="(?:turn |previewtrunc))/).filter(Boolean);
+    const pieces = this.innerHTML.split(/(?=<div class="(?:turn |previewtrunc|bubactions))/).filter(Boolean);
     return pieces.map((piece, index) => {
       const read = name => piece.match(new RegExp(`data-${name}="([^"]*)"`))?.[1];
-      return { dataset: { seq: read("seq"), cseq: read("cseq"), anchor: read("anchor") },
+      return { dataset: { seq: read("seq"), cseq: read("cseq"), anchor: read("anchor"), gactions: piece.includes("data-gactions") ? "" : undefined },
         insertAdjacentHTML(_where, html) { pieces.splice(index, 0, html); body.innerHTML = pieces.join(""); } };
     });
   } });
@@ -1098,4 +1098,35 @@ test("shared bookmark duplicates compare all six address fields", async () => {
     f.click("sharedview", action); assert.equal(ops.length, 1, field);
     assert.deepEqual(ops[0].bookmark, { t: new Date(0).toISOString(), text: "x", role: "person", who: "Owner", seat: "o", from: "Chat", turnTime: undefined, team: address });
   }
+});
+
+test("shared actions ignore invalid targets and capture comments", async () => {
+  const sends = [];
+  const f = viewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([{ t: "user", seq: 1, omitted: "too_large" }], 1),
+    async () => ({ entries: [{ seq: 2, anchor: 1, text: "message", at: "then", author: "seat", mine: false }], names: { seat: "Ann" }, last: 2, next: 2, more: false }), undefined,
+    { bookmarks: () => [], uiMutate() {}, openSendTo: opts => sends.push(opts) });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const action = { dataset: { gact: "bookmark" }, closest(sel) { return sel === "[data-gact]" ? this : null; } };
+  f.click("sharedview", action);
+  const orphan = { closest(sel) { return sel === ".bubble" ? this : null; } }; f.click("sharedview", orphan);
+  const omitted = sharedActionBubble(1); f.click("sharedview", omitted.bubble); assert.equal(omitted.turn.nextElementSibling, null);
+  const message = sharedActionBubble(0); message.turn.dataset = { cseq: "2" }; f.click("sharedview", message.bubble);
+  action.dataset.gact = "sendto"; f.click("sharedview", action);
+  assert.deepEqual(sends, [{ text: "message", exceptId: "", title: "Send to…", role: "person", who: "Ann", prov: undefined, source: null }]);
+  const keydown = f.get("sharedview").listeners.get("keydown");
+  keydown({ key: "a" }); keydown({ key: "Enter", target: message.bubble, preventDefault() {} });
+});
+
+test("a later shared entry does not split the action row", async () => {
+  let reads = 0;
+  const f = viewFixture(async path => {
+    if (path === "/api/team/subscriptions") return list([base]);
+    if (path.endsWith("/seen")) return "";
+    return ++reads === 1 ? readAnswer([{ t: "user", seq: 1, text: "first" }, { t: "user", seq: 3, text: "third" }], 3) : readAnswer([{ t: "user", seq: 2, text: "second" }], 3);
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const body = f.get("sv_body");
+  body.innerHTML = body.innerHTML.replace('<div class="turn assistant" data-seq="3"', '<div class="bubactions" data-gactions><button>bookmark</button></div><div class="turn assistant" data-seq="3"');
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.match(body.innerHTML, /data-seq="1"[\s\S]*data-gactions[\s\S]*data-seq="2"[\s\S]*data-seq="3"/);
 });
