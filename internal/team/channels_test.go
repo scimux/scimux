@@ -38,7 +38,7 @@ func channelNames() []string {
 func runChannel(c *Client, ctx context.Context, base, name string) error {
 	switch name {
 	case "seats":
-		_, err := c.Seats(ctx, base, chToken, false)
+		_, err := c.Seats(ctx, base, chToken)
 		return err
 	case "put":
 		_, _, err := c.PutChannel(ctx, base, chToken, chOwner, chChat, chTitle)
@@ -218,7 +218,7 @@ func TestChannelCallsReportCreatedOrderAndLast(t *testing.T) {
 	if err != nil || created || gen != chGen {
 		t.Fatalf("update gen = %q created = %v err = %v", gen, created, err)
 	}
-	seats, err := c.Seats(context.Background(), srv.URL, chToken, false)
+	seats, err := c.Seats(context.Background(), srv.URL, chToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		}
 	}
 	check("seats", seats, http.StatusOK, func(c *Client, base string) error {
-		_, err := c.Seats(context.Background(), base, chToken, false)
+		_, err := c.Seats(context.Background(), base, chToken)
 		return err
 	})
 	check("put", channels, http.StatusCreated, func(c *Client, base string) error {
@@ -419,7 +419,7 @@ func TestChannelCallsRejectAnOversizedAnswer(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, wide)
 	})
-	seats, err := clientOn(srv).Seats(context.Background(), srv.URL, chToken, false)
+	seats, err := clientOn(srv).Seats(context.Background(), srv.URL, chToken)
 	if err != nil || len(seats) != 2000 || seats[0].Name != "Ada" || seats[1999].ID != fmt.Sprintf("%032x", 2000) {
 		t.Fatalf("seats = %d err = %v", len(seats), err)
 	}
