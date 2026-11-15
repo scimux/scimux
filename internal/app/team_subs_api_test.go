@@ -3841,3 +3841,21 @@ func TestSubRemoveOwnerLiveOrEnded(t *testing.T) {
 		})
 	}
 }
+
+func TestSubSeenDamagedCommentsDoesNotSaveMirror(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	seedSub(t, dir, baseSub())
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	record := team.MirrorRecord{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{}`)}
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal("cannot seed mirror")
+	}
+	path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "comments.jsonl")
+	if err := os.WriteFile(path, []byte("bad\n"), 0o600); err != nil {
+		t.Fatal("cannot damage comments")
+	}
+	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":1,"comments":1}`), 500, "store_unavailable")
+	if got := loadSubFile(t, dir)[0]; got.SeenMirror != 0 || got.SeenComments != 0 {
+		t.Error("partial read marks were saved")
+	}
+}
