@@ -2075,3 +2075,200 @@ func TestSubReadNextTracksUnknownEntries(t *testing.T) {
 		})
 	}
 }
+
+func TestSubBranchInvalidPathPartsNeverReadState(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	path := filepath.Join(dir, team.SubsFile)
+	if err := os.WriteFile(path, []byte("damaged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	good := []string{teamServerID, subOwner, subChat, subGen}
+	for i := range good {
+		for _, method := range []string{http.MethodGet, http.MethodPut} {
+			t.Run(fmt.Sprintf("part%d_%s", i, method), func(t *testing.T) {
+				parts := append([]string(nil), good...)
+				parts[i] = "bad"
+				p := "/api/team/subscriptions/" + strings.Join(parts, "/")
+				if method == http.MethodPut {
+					p += "/seen"
+				}
+				assertAPIError(t, doTeam(h, method, p, `{"mirror":1}`), 404, "not_found")
+			})
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || string(raw) != "damaged" {
+		t.Fatal("invalid path changed state")
+	}
+}
+
+func TestSubBranchUnknownFifthPartDoesNothing(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	seedSub(t, dir, baseSub())
+	path := filepath.Join(dir, team.SubsFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAPIError(t, doTeam(h, http.MethodPut, subReadPath()+"/other", `{"mirror":1}`), 404, "not_found")
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("unknown path changed state")
+	}
+}
+
+func TestSubBranchUpdateOneFieldAtATime(t *testing.T) {
+	for _, field := range []string{"access", "title"} {
+		t.Run(field, func(t *testing.T) {
+			script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 2)), seatsBody: seatsOf(subOwner, "Ada")}
+			h, dir, _ := subSurface(t, script)
+			seedSub(t, dir, baseSub())
+			clock := holdClock(t, h)
+			readSubList(t, h)
+			*clock = clock.Add(10 * time.Second)
+			title, access := "Synthetic title", "read"
+			if field == "title" {
+				title = "Other title"
+			} else {
+				access = "write"
+			}
+			script.mu.Lock()
+			script.channelsBody = channelsOf(guestChannel(subOwner, subChat, title, subGen, access, 2))
+			script.mu.Unlock()
+			got, _ := readSubList(t, h)
+			one := mustFindSub(t, got, subOwner, subChat, subGen)
+			if one.Title != title || one.Access != access || one.MirrorLast != 2 {
+				t.Fatalf("updated = %+v", one)
+			}
+			stored := loadSubFile(t, dir)
+			if stored[0].Title != title || stored[0].Access != access {
+				t.Fatal("update was not stored")
+			}
+		})
+	}
+}
+
+func TestSubBranchSeenNeverShrinksOrRewrites(t *testing.T) {
+	h, dir := testTeamSurface(t, team.NewClient())
+	seedSub(t, dir, baseSub())
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	var recs []team.MirrorRecord
+	for i := 1; i <= 5; i++ {
+		recs = append(recs, team.MirrorRecord{Seq: uint64(i), Key: fmt.Sprintf("k%d", i), Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{}`)})
+	}
+	if err := team.AppendCopy(dir, id, recs); err != nil {
+		t.Fatal(err)
+	}
+	if r := doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":5}`); r.Code != 204 {
+		t.Fatalf("first = %d", r.Code)
+	}
+	path := filepath.Join(dir, team.SubsFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { writes++; return errors.New("unexpected write") }
+	if r := doTeam(h, http.MethodPut, subReadPath()+"/seen", `{"mirror":2}`); r.Code != 204 {
+		t.Fatalf("second = %d", r.Code)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) || writes != 0 {
+		t.Fatal("seen file changed or was rewritten")
+	}
+	if s := loadSubFile(t, dir)[0]; s.SeenMirror != 5 {
+		t.Fatalf("seen = %d", s.SeenMirror)
+	}
+}
+
+func TestSubBranchRead401EndsOnlyItsServer(t *testing.T) {
+	script := &subScript{mirrorStatus: 401}
+	h, dir, srv := subSurface(t, script)
+	joinLab(t, dir, teamOtherID, srv.URL)
+	for _, server := range []string{teamServerID, teamOtherID} {
+		for _, chat := range []string{subChat, subChatB} {
+			s := baseSub()
+			s.Server = server
+			s.Chat = chat
+			seedSub(t, dir, s)
+		}
+	}
+	decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	for _, s := range loadSubFile(t, dir) {
+		want := "live"
+		if s.Server == teamServerID {
+			want = "ended"
+		}
+		if s.State != want {
+			t.Fatalf("server %s state %s", s.Server, s.State)
+		}
+	}
+}
+
+func TestSubBranchRosterOnlyForServerWithNewOwner(t *testing.T) {
+	a := &subScript{}
+	b := &subScript{helloID: teamOtherID, channelsBody: channelsOf(guestChannel(subOwnerB, subChatB, "Synthetic title", subGen, "read", 1)), seatsBody: seatsOf(subOwnerB, "Bea")}
+	h, dir, _ := subSurface(t, a)
+	bs := httptest.NewServer(b)
+	t.Cleanup(bs.Close)
+	joinLab(t, dir, teamOtherID, bs.URL)
+	clock := holdClock(t, h)
+	readSubList(t, h)
+	*clock = clock.Add(10 * time.Second)
+	a.mu.Lock()
+	a.channelsBody = channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1))
+	a.seatsBody = seatsOf(subOwner, "Ada")
+	a.mu.Unlock()
+	got, _ := readSubList(t, h)
+	if s := mustFindSub(t, got, subOwner, subChat, subGen); s.OwnerName != "Ada" {
+		t.Fatalf("owner = %+v", s)
+	}
+	if na, nb := countSubPath(a.snapshot(), "/v1/seats"), countSubPath(b.snapshot(), "/v1/seats"); na != 1 || nb != 1 {
+		t.Fatalf("roster counts = %d %d", na, nb)
+	}
+}
+
+func TestSubBranchOwnerNameIsScopedToServer(t *testing.T) {
+	a := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1)), seatsBody: seatsOf(subOwner, "Ada")}
+	b := &subScript{helloID: teamOtherID}
+	h, dir, _ := subSurface(t, a)
+	bs := httptest.NewServer(b)
+	t.Cleanup(bs.Close)
+	joinLab(t, dir, teamOtherID, bs.URL)
+	clock := holdClock(t, h)
+	readSubList(t, h)
+	*clock = clock.Add(10 * time.Second)
+	b.mu.Lock()
+	b.channelsBody = channelsOf(guestChannel(subOwner, subChatB, "Synthetic title", subGen, "read", 1))
+	b.mu.Unlock()
+	got, _ := readSubList(t, h)
+	found := false
+	for _, s := range got.Subscriptions {
+		if s.Server == teamOtherID && s.Owner == subOwner && s.Chat == subChatB {
+			found = true
+			if s.OwnerName != "" {
+				t.Fatalf("wrong server name = %+v", s)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing subscription on second server")
+	}
+}
+
+func TestSubBranchStorageFullReturnsExistingEntries(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, subPage(subGen, 2, false, subRecord(2, `{"v":1,"t":"user","text":"y"}`)))
+	})
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	if err := team.AppendCopy(dir, id, []team.MirrorRecord{{Seq: 1, Key: "k1", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"x"}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_global_limit_bytes":1,"storage_min_free_bytes":0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+	if got.Last != 1 || len(got.Entries) != 1 || got.Next != 1 {
+		t.Fatalf("read = %+v", got)
+	}
+}

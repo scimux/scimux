@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -911,5 +912,24 @@ func TestCopyFailedIndexScanDoesNotCachePartialIndex(t *testing.T) {
 	got, last, err := ReadCopy(dir, id, 0, 256, 4<<20)
 	if err != nil || last != 100 || len(got) != 100 {
 		t.Fatalf("retry last %d count %d err %v", last, len(got), err)
+	}
+}
+
+func TestCopyBranchShortReadWithoutError(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fresh), func(t *testing.T) {
+			dir, id := t.TempDir(), sampleCopyID()
+			if err := AppendCopy(dir, id, []MirrorRecord{copyRec(1, `{}`)}); err != nil {
+				t.Fatal(err)
+			}
+			if fresh {
+				copyMetas.Delete(copyPathOf(dir, id))
+			}
+			snapshotCopy(t)
+			copyOps.readAt = func(*os.File, []byte, int64) (int, error) { return 1, nil }
+			if _, _, err := ReadCopy(dir, id, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
