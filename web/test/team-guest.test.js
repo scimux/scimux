@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { jsonResponse } from "./s2-helpers.js";
 import { decodeResponse } from "../js/api.js";
-import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML } from "../js/team-guest.js";
+import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
 const list = (subscriptions = [], servers = [], truncated = false) => ({ subscriptions: subscriptions.map(view => ({ ...view })), servers, truncated });
@@ -111,13 +111,13 @@ test("render avoids needless writes and restores list focus after rebuilding", a
   old.dataset = { group: "s/o" }; value = ""; f.feature.tab.render(f.el); assert.equal(focused, 2);
 });
 
-function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, last: 0, next: 0, more: false })) {
+function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, last: 0, next: 0, more: false }), randomBytes = n => new Uint8Array(n)) {
   let time = 0, invalidations = 0;
   const elements = new Map();
   const doc = { activeElement: null, querySelector(sel) { return elements.get(sel); } };
-  for (const id of ["cardlist", "cardtabs", "sharedview", "sv_scrim", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note", "sv_remove"]) {
+  for (const id of ["cardlist", "cardtabs", "sharedview", "sv_scrim", "sv_back", "sv_title", "sv_from", "sv_state", "sv_body", "sv_more", "sv_note", "sv_remove", "sv_compose", "sv_text", "sv_send", "sv_hint"]) {
     const listeners = new Map();
-    const el = { id, innerHTML: "", textContent: "", hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
+    const el = { id, innerHTML: "", textContent: "", value: "", selectionStart: 0, selectionEnd: 0, disabled: false, hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
       addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
       focus() { doc.activeElement = el; }, contains(node) { return node === el; },
       querySelector() { return null; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
@@ -136,7 +136,7 @@ function viewFixture(api, commentsApi = async () => ({ entries: [], names: {}, l
     if (path.includes("/comments?")) return commentsApi(path, opts);
     return api(path, opts);
   };
-  const feature = createGuestFeature({ api: routed, doc, now: () => time, invalidateCards: () => invalidations++ });
+  const feature = createGuestFeature({ api: routed, doc, now: () => time, invalidateCards: () => invalidations++, randomBytes });
   const get = id => elements.get("#" + id);
   const click = (id, target = get(id)) => get(id).listeners.get("click")({ target });
   const item = { dataset: { sub: guestKey(base) }, closest(sel) { if (sel === "[data-sub]") return this; return null; }, focus() { doc.activeElement = item; } };
@@ -283,9 +283,11 @@ test("destroy removes all guest listeners and prevents later requests", async ()
   let calls = 0;
   const f = viewFixture(async path => { calls++; if (path === "/api/team/subscriptions") return list([base]); return readAnswer(); });
   for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sv_remove"]) assert.equal(f.get(id).listeners.size, 1);
+  assert.equal(f.get("sv_text").listeners.size, 2);
+  assert.equal(f.get("sv_send").listeners.size, 1);
   assert.equal(f.get("sharedview").listeners.size, 2);
   f.feature.destroy();
-  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sv_remove", "sharedview"]) assert.equal(f.get(id).listeners.size, 0);
+  for (const id of ["cardlist", "sv_back", "sv_scrim", "sv_more", "sv_remove", "sharedview", "sv_text", "sv_send"]) assert.equal(f.get(id).listeners.size, 0);
   f.feature.tick(); await f.feature.settled(); assert.equal(calls, 0);
 });
 
@@ -777,4 +779,121 @@ test("late combined seen answer does not mark a closed view", async () => {
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await started.promise;
   f.click("sv_back"); seen.resolve(""); await f.feature.settled();
   assert.ok(f.feature.tab.tabHTML(false).includes("1 unread"));
+});
+
+function setGuestDraft(f, text) {
+  const field = f.get("sv_text"); field.value = text;
+  const listener = field.listeners.get("input"); assert.ok(listener, "missing draft listener"); listener({ target: field });
+}
+
+test("guest comment keys use eight bytes in lower-case hex", () => {
+  assert.equal(guestHexKey(new Uint8Array([0, 1, 15, 16, 127, 128, 254, 255])), "00010f107f80feff");
+});
+
+test("composer follows live access and read updates", async () => {
+  for (const tc of [
+    { access:"read", state:"live", visible:false }, { access:"write", state:"live", visible:true },
+    { access:"owner", state:"live", visible:true }, { access:"write", state:"ended", visible:false },
+    { access:"owner", state:"ended", visible:false },
+  ]) {
+    const view = { ...base, ...tc };
+    const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([view]); return readAnswer([], 0, false, view); });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    assert.equal(f.get("sv_compose").hidden, !tc.visible);
+  }
+  const writable = { ...base, access:"write" }, ended = { ...writable, state:"ended" };
+  let reads = 0;
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([writable]); reads++; return readAnswer([], 0, false, reads === 1 ? writable : ended); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); assert.equal(f.get("sv_compose").hidden, false);
+  f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(f.get("sv_compose").hidden, true);
+});
+
+test("composer validates UTF-8 byte limit and in-flight sends", async () => {
+  const pending = deferred(), view = { ...base, access:"write" };
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") return pending.promise; return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(f.get("sv_send").disabled, true);
+  setGuestDraft(f, " \n "); assert.equal(f.get("sv_send").disabled, true);
+  setGuestDraft(f, "a".repeat(16382) + "é"); assert.equal(f.get("sv_send").disabled, false);
+  setGuestDraft(f, "a".repeat(16383) + "é"); assert.equal(f.get("sv_send").disabled, true); assert.equal(f.get("sv_note").textContent, "That message is too long.");
+  setGuestDraft(f, "synthetic"); assert.equal(f.get("sv_send").disabled, false);
+  f.click("sv_send"); assert.equal(f.get("sv_send").disabled, true); pending.resolve({ seq:1 }); await f.feature.settled();
+});
+
+test("sending keeps a draft key on failure and changes it with the text", async () => {
+  const posts = []; let serial = 0, reads = 0;
+  const view = { ...base, access:"write" };
+  const f = viewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    if (opts?.method === "POST") { posts.push(JSON.parse(opts.body)); if (posts.length < 3) throw new Error('{"error":"unreachable"}'); return { seq:3 }; }
+    if (path.endsWith("/seen")) return "";
+    reads++; return readAnswer([], 7, false, view);
+  }, undefined, n => { assert.equal(n, 8); serial++; return new Uint8Array(n).fill(serial); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const field = f.get("sv_text"); field.focus(); setGuestDraft(f, " first ");
+  f.click("sv_send"); await f.feature.settled();
+  assert.ok(field.value === " first "); assert.equal(f.doc.activeElement, field); assert.equal(f.get("sv_note").textContent, "The server could not be reached. Your message is still here.");
+  f.click("sv_send"); await f.feature.settled();
+  assert.ok(JSON.stringify(posts.slice(0, 2)) === JSON.stringify([{ text:" first ", anchor:7, key:"0101010101010101" }, { text:" first ", anchor:7, key:"0101010101010101" }]));
+  setGuestDraft(f, "second"); f.click("sv_send"); await f.feature.settled();
+  assert.ok(JSON.stringify(posts[2]) === JSON.stringify({ text:"second", anchor:7, key:"0202020202020202" }));
+  assert.ok(field.value === ""); assert.equal(f.doc.activeElement, field); assert.ok(reads >= 2);
+});
+
+test("composer keyboard sends only control or meta Enter", async () => {
+  let posts = 0;
+  const view = { ...base, access:"write" };
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") { posts++; throw new Error("failed"); } return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled(); setGuestDraft(f, "synthetic");
+  const key = f.get("sv_text").listeners.get("keydown"); assert.ok(key, "missing key listener");
+  let prevented = 0;
+  key({ key:"Enter", ctrlKey:false, metaKey:false, preventDefault() { prevented++; } }); assert.equal(posts, 0); assert.equal(prevented, 0);
+  key({ key:"Enter", ctrlKey:true, metaKey:false, preventDefault() { prevented++; } }); await f.feature.settled();
+  key({ key:"Enter", ctrlKey:false, metaKey:true, preventDefault() { prevented++; } }); await f.feature.settled();
+  assert.equal(posts, 2); assert.equal(prevented, 2);
+});
+
+test("composer reports every send failure without losing the draft", async () => {
+  for (const [code, expected] of [["read_only", "You can only view this chat."], ["not_active", "Sharing of this chat has ended."], ["unreachable", "The server could not be reached. Your message is still here."], ["refused", "The server ended this computer's access."], ["server_full", "The server has no room for more messages."], ["too_large", "That message is too long."], ["other", "That did not work. Your message is still here."]]) {
+    const view = { ...base, access:"write" };
+    const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") throw new Error(JSON.stringify({ error:code })); return readAnswer([], 0, false, view); });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    const field = f.get("sv_text"); field.focus(); setGuestDraft(f, "synthetic"); f.click("sv_send"); await f.feature.settled();
+    assert.ok(field.value === "synthetic"); assert.equal(f.doc.activeElement, field); assert.equal(f.get("sv_note").textContent, expected);
+  }
+});
+
+test("drafts survive polling, selection, closing and changing chats", async () => {
+  const first = { ...base, access:"write" }, second = { ...first, chat:"d", title:"Other" };
+  const f = viewFixture(async path => { if (path === "/api/team/subscriptions") return list([first, second]); if (path.includes("/d/g?")) return readAnswer([], 0, false, second); return readAnswer([], 0, false, first); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  const field = f.get("sv_text"); setGuestDraft(f, "first"); field.selectionStart = 1; field.selectionEnd = 3; field.focus();
+  f.setTime(10000); f.feature.tick(); await f.feature.settled();
+  assert.ok(field.value === "first"); assert.equal(field.selectionStart, 1); assert.equal(field.selectionEnd, 3); assert.equal(f.doc.activeElement, field);
+  const other = { dataset:{ sub:guestKey(second) }, closest(sel) { if (sel === "[data-sub]") return this; return null; } };
+  f.click("cardlist", other); await f.feature.settled(); assert.ok(field.value === ""); setGuestDraft(f, "second");
+  f.click("sv_back"); f.click("cardlist", f.item); await f.feature.settled(); assert.ok(field.value === "first");
+  f.click("cardlist", other); await f.feature.settled(); assert.ok(field.value === "second");
+});
+
+test("late send answers keep another view and update only their own draft", async () => {
+  for (const success of [true, false]) {
+    const pending = deferred(), first = { ...base, access:"write" }, second = { ...first, chat:"d", title:"Other" };
+    let random = 0, posts = 0;
+    const f = viewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list([first, second]);
+      if (opts?.method === "POST") { posts++; return pending.promise; }
+      if (path.includes("/d/g?")) return readAnswer([], 0, false, second);
+      return readAnswer([], 0, false, first);
+    }, undefined, n => { random++; return new Uint8Array(n).fill(random); });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+    setGuestDraft(f, "first"); f.click("sv_send");
+    const other = { dataset:{ sub:guestKey(second) }, closest(sel) { if (sel === "[data-sub]") return this; return null; } };
+    f.click("cardlist", other); setGuestDraft(f, "second"); f.get("sv_text").focus();
+    if (success) pending.resolve({ seq:1 }); else pending.reject(new Error('{"error":"unreachable"}'));
+    await f.feature.settled();
+    assert.ok(f.get("sv_text").value === "second"); assert.equal(f.get("sv_title").textContent, "Other"); assert.equal(f.doc.activeElement, f.get("sv_text"));
+    f.click("cardlist", f.item); await f.feature.settled();
+    assert.ok(f.get("sv_text").value === (success ? "" : "first")); assert.equal(posts, 1); assert.equal(random, 1);
+  }
 });

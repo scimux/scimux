@@ -477,6 +477,9 @@ export function guestMessageHTML(entry, names) {
   if (entry.mine) { cls = "turn user gmsg"; name = ""; }
   return `<div class="${cls}" data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"><div class="bubble" title="${esc(entry.at)}">${name}${md(entry.text)}</div></div>`;
 }
+export function guestHexKey(bytes) {
+  return "";
+}
 export function guestEntryHTML(entry, ownerName) {
   let line = "";
   if (entry.t === "start") {
