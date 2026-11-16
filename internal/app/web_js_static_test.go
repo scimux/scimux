@@ -24,6 +24,7 @@ var productionJSURLs = []string{
 	"/js/claude-interaction.js",
 	"/js/composer.js",
 	"/js/format.js",
+	"/js/fold.js",
 	"/js/harness.js",
 	"/js/insets.js",
 	"/js/lane-picker.js",
