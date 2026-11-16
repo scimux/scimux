@@ -31,6 +31,7 @@ type subAsk struct {
 	seats     time.Time
 	roster    time.Time
 	names     map[string]string
+	unnamed   map[string]struct{}
 	delivery  string
 	truncated bool
 }
@@ -1085,6 +1086,10 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if lastServer {
+		if ask, ok := h.subAsks[id.Server]; ok {
+			ask.unnamed = nil
+			h.subAsks[id.Server] = ask
+		}
 		if people, err := team.LoadPeople(h.dataDir); err == nil {
 			kept := make([]team.Person, 0, len(people))
 			for _, person := range people {
@@ -1200,6 +1205,27 @@ func (h *teamHandler) storeRoster(server string, seats []team.Seat) {
 	h.subAsks[server] = ask
 }
 
+// rememberUnnamed adds a server and seat only while the handler-wide bound permits it.
+// The caller holds h.mu and writes ask back to h.subAsks.
+func (h *teamHandler) rememberUnnamed(id string, ask *subAsk, seat string) {
+	if _, ok := ask.unnamed[seat]; ok {
+		return
+	}
+	count := len(ask.unnamed)
+	for server, other := range h.subAsks {
+		if server != id {
+			count += len(other.unnamed)
+		}
+	}
+	if count >= 4096 {
+		return
+	}
+	if ask.unnamed == nil {
+		ask.unnamed = make(map[string]struct{})
+	}
+	ask.unnamed[seat] = struct{}{}
+}
+
 func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string, entries []map[string]any) map[string]string {
 	h.mu.Lock()
 	if h.subAsks == nil {
@@ -1247,7 +1273,25 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 			authors[author] = true
 		}
 	}
+	for seat := range authors {
+		if _, ok := stored[seat]; ok {
+			continue
+		}
+		if _, ok := ask.names[seat]; !ok {
+			h.rememberUnnamed(id, &ask, seat)
+			continue
+		}
+		if loadErr != nil {
+			h.rememberUnnamed(id, &ask, seat)
+		}
+	}
+	if loadErr == nil {
+		for seat := range stored {
+			delete(ask.unnamed, seat)
+		}
+	}
 	changed := false
+	var added []string
 	for seat, name := range ask.names {
 		names[seat] = name
 		if loadErr != nil {
@@ -1258,14 +1302,31 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 				people[i].Name = name
 				changed = true
 			}
-		} else if authors[seat] && len(people) < 4096 {
-			people = append(people, team.Person{Server: id, Seat: seat, Name: name})
-			changed = true
+			continue
 		}
+		candidate := authors[seat]
+		if _, ok := ask.unnamed[seat]; ok {
+			candidate = true
+		}
+		if !candidate {
+			continue
+		}
+		h.rememberUnnamed(id, &ask, seat)
+		if len(people) >= 4096 {
+			continue
+		}
+		people = append(people, team.Person{Server: id, Seat: seat, Name: name})
+		added = append(added, seat)
+		changed = true
 	}
 	if changed {
-		_ = team.SavePeople(h.dataDir, people)
+		if err := team.SavePeople(h.dataDir, people); err == nil {
+			for _, seat := range added {
+				delete(ask.unnamed, seat)
+			}
+		}
 	}
+	h.subAsks[id] = ask
 	if joined {
 		names[inst] = server.SeatName
 	}

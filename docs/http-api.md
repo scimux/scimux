@@ -1582,8 +1582,10 @@ again at most once per 60 seconds while comments are read, so a known author's
 new name shows within about a minute. Last-known names survive a restart or a
 seat leaving; they are removed when the last subscription to that server is
 removed. Local browser names still take precedence in the page. A failure to
-read or write last-known names does not fail the comments read. Unknown comment
-shapes remain in the copy but are skipped in the answer.
+read or write last-known names does not fail the comments read. A muxer restart
+while an author is still unnamed forgets that author until a read from the start
+of the copy, for example opening the view, shows the comment again. Unknown
+comment shapes remain in the copy but are skipped in the answer.
 
 `POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments`
 takes `{"text":"...","anchor":N,"key":"<16 lowercase hex>"}`, at most
