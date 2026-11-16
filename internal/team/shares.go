@@ -257,45 +257,5 @@ func writeShares(dir string, shares []Share) error {
 	if len(body) > maxSharesFile {
 		return ErrTooManyShares
 	}
-	return publishShares(dir, body)
-}
-
-// publishShares writes team-shares.json. publish is fixed to team.json.
-func publishShares(dir string, body []byte) error {
-	f, err := storeOps.createTemp(dir)
-	if err != nil {
-		return fmt.Errorf("team: write share file: %w", err)
-	}
-	tmpName := f.Name()
-	closed := false
-	defer func() {
-		if !closed {
-			_ = storeOps.close(f)
-		}
-		if tmpName != "" {
-			_ = storeOps.remove(tmpName)
-		}
-	}()
-	if err := storeOps.chmod(f, 0o600); err != nil {
-		return fmt.Errorf("team: write share file: %w", err)
-	}
-	n, err := storeOps.write(f, body)
-	if err != nil {
-		return fmt.Errorf("team: write share file: %w", err)
-	}
-	if n != len(body) {
-		return fmt.Errorf("team: write share file: %w", io.ErrShortWrite)
-	}
-	if err := storeOps.syncFile(f); err != nil {
-		return fmt.Errorf("team: write share file: %w", err)
-	}
-	if err := storeOps.close(f); err != nil {
-		return fmt.Errorf("team: write share file: %w", err)
-	}
-	closed = true
-	if err := storeOps.rename(tmpName, filepath.Join(dir, SharesFile)); err != nil {
-		return fmt.Errorf("team: write share file: %w", err)
-	}
-	tmpName = ""
-	return nil
+	return publishFile(dir, SharesFile, "share file", body)
 }
