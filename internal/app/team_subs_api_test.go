@@ -4629,3 +4629,109 @@ func TestCommentNamedAuthorRetriesFailedInitialSave(t *testing.T) {
 		t.Fatalf("named author not retried after failed load: %+v, %v", people, err)
 	}
 }
+
+func TestCommentNamedAuthorRetriesAfterPeopleCap(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := asTeamHandler(t, handler)
+	people := make([]team.Person, 4096)
+	for i := range people {
+		people[i] = team.Person{Server: teamOtherID, Seat: fmt.Sprintf("%032x", i), Name: "Existing"}
+	}
+	if err := team.SavePeople(dir, people); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	h.storeRoster(teamServerID, []team.Seat{{ID: subOwner, Name: "Writer"}})
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}})
+	if err := team.SavePeople(dir, people[:len(people)-1]); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	got, err := team.LoadPeople(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, person := range got {
+		if person.Server == teamServerID && person.Seat == subOwner && person.Name == "Writer" {
+			return
+		}
+	}
+	t.Fatal("named author was not stored after a people slot became free")
+}
+
+func TestCommentNamedAuthorRetriesAfterSaveFailure(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := asTeamHandler(t, handler)
+	rows := make([]team.Person, 4095)
+	for i := range rows {
+		rows[i] = team.Person{Server: teamOtherID, Seat: fmt.Sprintf("%032x", i), Name: strings.Repeat("<", 64)}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(map[string]any{"v": 1, "people": rows}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, team.PeopleFile)
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	h.storeRoster(teamServerID, []team.Seat{{ID: subOwner, Name: "Writer"}})
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}})
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, buf.Bytes()) {
+		t.Fatalf("initial save did not fail without changing the file: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	people, err := team.LoadPeople(dir)
+	if err != nil || len(people) != 1 || people[0].Seat != subOwner || people[0].Name != "Writer" {
+		t.Fatalf("named author not retried after failed save: %+v, %v", people, err)
+	}
+}
+
+func TestCommentStoredAuthorRecoveryReleasesUnnamedSlot(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := asTeamHandler(t, handler)
+	ctx := context.Background()
+	if err := team.SavePeople(dir, []team.Person{{Server: teamServerID, Seat: subOwner, Name: "Known"}}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, team.PeopleFile)
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	others := make([]map[string]any, 4095)
+	for i := range others {
+		others[i] = map[string]any{"author": fmt.Sprintf("%032x", i)}
+	}
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", others)
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}})
+	if err := os.WriteFile(path, saved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	const later = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", []map[string]any{{"author": later}})
+	h.storeRoster(teamOtherID, []team.Seat{{ID: later, Name: "Later"}})
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", nil)
+	people, err := team.LoadPeople(dir)
+	if err != nil || len(people) != 2 {
+		t.Fatalf("recovered stored author did not release unnamed slot: %+v, %v", people, err)
+	}
+	for _, person := range people {
+		if person.Server == teamOtherID && person.Seat == later && person.Name == "Later" {
+			return
+		}
+	}
+	t.Fatalf("new author was not retained after recovery: %+v", people)
+}
