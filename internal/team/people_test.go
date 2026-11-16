@@ -2,6 +2,7 @@ package team
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -35,11 +36,16 @@ func TestPeopleContractGenerated(t *testing.T) {
 	for name, raw := range map[string]string{
 		"empty": "", "json": "{", "version": "{\"v\":2,\"people\":[]}", "missing version": "{\"people\":[]}",
 		"missing people": "{\"v\":1}", "null people": "{\"v\":1,\"people\":null}", "unknown": "{\"v\":1,\"people\":[],\"x\":1}", "extra": "{\"v\":1,\"people\":[]} {}",
-		"server":    "{\"v\":1,\"people\":[{\"server\":\"bad\",\"seat\":\"" + seat + "\",\"name\":\"Ada\"}]}",
-		"seat":      "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"bad\",\"name\":\"Ada\"}]}",
-		"name":      "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\" Ada \"}]}",
-		"duplicate": "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"Ada\"},{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"Ada\"}]}",
-		"large":     strings.Repeat(" ", (1<<20)+1), "utf8": string([]byte{0xff}),
+		"server":               "{\"v\":1,\"people\":[{\"server\":\"bad\",\"seat\":\"" + seat + "\",\"name\":\"Ada\"}]}",
+		"seat":                 "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"bad\",\"name\":\"Ada\"}]}",
+		"name":                 "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\" Ada \"}]}",
+		"missing name":         "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\"}]}",
+		"empty name":           "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"\"}]}",
+		"control name":         "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"a\\nb\"}]}",
+		"long name":            "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"" + strings.Repeat("a", 65) + "\"}]}",
+		"unknown person field": "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"Ada\",\"extra\":1}]}",
+		"duplicate":            "{\"v\":1,\"people\":[{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"Ada\"},{\"server\":\"" + server + "\",\"seat\":\"" + seat + "\",\"name\":\"Ada\"}]}",
+		"large":                strings.Repeat(" ", (1<<20)+1), "utf8": string([]byte{0xff}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -67,6 +73,19 @@ func TestPeopleContractGenerated(t *testing.T) {
 		}
 		if err := SavePeople(dir, rows); err == nil {
 			t.Fatal("accepted too many")
+		}
+		raw, err := json.Marshal(struct {
+			V      int      `json:"v"`
+			People []Person `json:"people"`
+		}{1, rows})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, PeopleFile), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadPeople(dir); !errors.Is(err, ErrPeopleDamaged) {
+			t.Fatalf("loaded too many: %v", err)
 		}
 	})
 }
