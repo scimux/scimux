@@ -35,8 +35,9 @@ type teamHandler struct {
 	// removeShare replaces the share-file delete. Nil uses the real one.
 	// A test sets it when the second write of one request has to fail.
 	removeShare func(dataDir, uid string) error
-	// saveSubs replaces subscription persistence in tests.
-	saveSubs func(string, []team.Subscription) error
+	// saveShare and saveSubs replace metadata persistence in tests.
+	saveShare func(string, team.Share) error
+	saveSubs  func(string, []team.Subscription) error
 	// seatOpen and seatRename let tests force atomic publication failures.
 	seatOpen   func(string) (*os.File, error)
 	seatRename func(string, string) error

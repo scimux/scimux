@@ -1022,15 +1022,9 @@ func TestSubListStoreUnavailable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(dir, 0o555); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		asTeamHandler(t, h).saveSubs = func(string, []team.Subscription) error { return os.ErrPermission }
 		rec := doTeam(h, http.MethodGet, "/api/team/subscriptions", "")
 		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
-		if err := os.Chmod(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
 		after, err := os.ReadFile(filepath.Join(dir, team.SubsFile))
 		if err != nil || !bytes.Equal(before, after) {
 			t.Fatal("a failed write replaced the subscription file")
