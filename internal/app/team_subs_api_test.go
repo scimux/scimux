@@ -4350,3 +4350,36 @@ func TestCommentPeopleSaveFailureKeepsReadAvailable(t *testing.T) {
 		t.Fatal("failed save changed file")
 	}
 }
+
+func TestCommentNamesDoNotStoreRosterMembersWithoutComments(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Writer", subOwnerB, "Reader"))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+	})
+	got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if got.Names[subOwnerB] != "Reader" {
+		t.Fatalf("roster name missing from answer: %+v", got.Names)
+	}
+	people, err := team.LoadPeople(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundWriter := false
+	for _, person := range people {
+		if person.Server != teamServerID {
+			continue
+		}
+		if person.Seat == subOwnerB {
+			t.Fatal("stored a roster member who wrote no comment")
+		}
+		if person.Seat == subOwner && person.Name == "Writer" {
+			foundWriter = true
+		}
+	}
+	if !foundWriter {
+		t.Fatal("comment author's name was not stored")
+	}
+}

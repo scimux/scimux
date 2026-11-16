@@ -2790,3 +2790,27 @@ func TestOutboxStopKeepsDifferentShareUID(t *testing.T) {
 		t.Fatal("unrelated share removed")
 	}
 }
+
+func TestOutboxStopDoesNotMatchAnotherSharesGeneration(t *testing.T) {
+	box, dir, _, inst := newShareBox(t, &outboxScript{})
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: "1111222233334444"})
+	mustSaveShare(t, dir, team.Share{UID: shareUIDB, Node: "other", Generation: shareGen})
+	old, ok := storedShare(t, dir, shareUID)
+	if !ok {
+		t.Fatal("missing replacement share")
+	}
+	old.Generation = shareGen
+	entries, err := team.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box.stop(context.Background(), entries[0], inst, old)
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.Generation != "1111222233334444" {
+		t.Fatalf("replacement share removed or changed: %+v, present %t", stored, ok)
+	}
+	other, ok := storedShare(t, dir, shareUIDB)
+	if !ok || other.Generation != shareGen {
+		t.Fatalf("unrelated share removed or changed: %+v, present %t", other, ok)
+	}
+}
