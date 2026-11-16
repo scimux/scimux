@@ -1646,7 +1646,11 @@ func TestCommentsClientRejectsBadRepliesAndTransport(t *testing.T) {
 // This adapter lets the regression commit build before the signature changes.
 func deleteWithGeneration(c *Client, ctx context.Context, base, token, owner, chat, generation string) error {
 	method := reflect.ValueOf(c).MethodByName("DeleteChannel")
-	args := []reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(base), reflect.ValueOf(token), reflect.ValueOf(owner), reflect.ValueOf(chat)}
+	contextValue := reflect.ValueOf(ctx)
+	if ctx == nil {
+		contextValue = reflect.Zero(method.Type().In(0))
+	}
+	args := []reflect.Value{contextValue, reflect.ValueOf(base), reflect.ValueOf(token), reflect.ValueOf(owner), reflect.ValueOf(chat)}
 	if method.Type().NumIn() == 6 {
 		args = append(args, reflect.ValueOf(generation))
 	}
