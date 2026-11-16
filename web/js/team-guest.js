@@ -381,22 +381,20 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         morePages = result.more;
         if (!morePages) break;
       }
-      const messages = [];
       for (let n = 0; n < 40; n++) {
         const result = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext);
         if (!currentRead(current, gen)) return;
         Object.assign(current.names, result.names);
         if (refreshPeople()) invalidateCards();
-        messages.push(...result.entries);
+        for (const message of result.entries) {
+          if (current.empty) { body.innerHTML = ""; current.empty = false; }
+          insertOrdered(body, guestMessageHTML(message, current.names, current.view.server, knownPeople), [message.anchor, 1, message.seq]);
+          current.entries.set("comments/" + message.seq, message);
+          hasEntries = true;
+        }
         current.cnext = result.next;
         moreComments = result.more;
         if (!moreComments) break;
-      }
-      for (const message of messages) {
-        current.entries.set("comments/" + message.seq, message);
-        if (current.empty) { body.innerHTML = ""; current.empty = false; }
-        insertOrdered(body, guestMessageHTML(message, current.names, current.view.server, knownPeople), [message.anchor, 1, message.seq]);
-        hasEntries = true;
       }
       if (first) {
         if (!hasEntries) {
@@ -477,8 +475,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function draftInput() {
     if (!open) return;
     const text = $("sv_text").value;
-    let draft = drafts.get(open.key);
-    if (!draft) { draft = { text: "", key: "", keyText: "", sending: false }; drafts.set(open.key, draft); open.draft = draft; }
+    const draft = open.draft;
     draft.text = text;
     if (text !== draft.keyText) draft.key = "";
     if (open.sendNote) { open.sendNote = false; $("sv_note").textContent = ""; }
@@ -524,16 +521,20 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       return;
     }
     draft.sending = false;
-    if (drafts.get(current.key) === draft) drafts.delete(current.key);
-    if (open !== current) return;
-    current.draft = { text: "", key: "", keyText: "", sending: false };
-    drafts.set(current.key, current.draft);
-    $("sv_text").value = "";
-    current.sendNote = false;
+    const unchanged = draft.text === text;
+    if (unchanged && drafts.get(current.key) === draft) drafts.delete(current.key);
+    const live = open;
+    if (!live || live.key !== current.key) return;
+    if (unchanged) {
+      live.draft = { text: "", key: "", keyText: "", sending: false };
+      drafts.set(current.key, live.draft);
+      $("sv_text").value = "";
+    }
+    live.sendNote = false;
     $("sv_note").textContent = "";
-    updateCompose(current);
+    updateCompose(live);
     $("sv_text").focus();
-    if (current.busy) { current.busy = false; readGeneration++; }
+    if (live.busy) { live.busy = false; readGeneration++; }
     startRead();
   }
   function disarm(current) {
