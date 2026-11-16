@@ -899,6 +899,11 @@ connected browser views. It defaults to false, which uses the matching
 monochrome badges. Changing it affects the current browser immediately;
 other browsers pick up the change when they next read settings.
 
+`experimental_feature_team` enables the experimental team feature when its
+JSON value is `true`. It can be edited in the file or set with PUT; changes
+take effect on the next team request or poll without a restart. Other values
+are off. The environment switch can also enable the feature.
+
 The storage fields are non-negative integer byte counts. A zero global or
 per-node limit means unlimited; a zero minimum-free value disables that
 reserve. A missing `storage_min_free_bytes` uses the 64 MiB safety default.
@@ -1323,11 +1328,12 @@ the namespace when the experiment is inactive.
 
 ## Team
 
-Experimental. These routes exist only when the process is the muxer and it
-was started with `SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM=1`. Any other
-value, including an unset variable, leaves every `/api/team` path on the
-ordinary not-found path. The gate is read once at startup. Installing it
-creates no file and contacts no team server.
+Experimental. The muxer serves these routes when it was started with
+`SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM=1` or the settings file has
+`"experimental_feature_team": true`. The file switch is read on each team
+request and poll; when both switches are off, team paths take the ordinary
+not-found path and polling stops kicking the outbox. A running outbox round
+finishes. Installing the feature creates no file and contacts no team server.
 
 The token a team server returns is a credential. It is stored in
 `team.json` and never leaves the server process: no response, log line, or

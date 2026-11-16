@@ -43,7 +43,9 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   each server this seat has joined. Only the muxer reads and writes it, and
   a write happens only from an explicit join, forget, or changing this seat's own name on a server.
   A damaged file is never overwritten.
-  With the gate off it is neither read nor written.
+  The team gate is on when the environment variable is `1` or the settings
+  file switch is true. With the gate off it is neither read nor written,
+  except that an outbox round already running is allowed to finish.
 - **Shared chats name a server and who may read them.** `team-shares.json`
   holds each share's server, scope, members, and delivery cursor.
   It holds no chat content and no token. Only the muxer reads and writes
