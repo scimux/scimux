@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -4381,5 +4382,250 @@ func TestCommentNamesDoNotStoreRosterMembersWithoutComments(t *testing.T) {
 	}
 	if !foundWriter {
 		t.Fatal("comment author's name was not stored")
+	}
+}
+
+func TestCommentUnnamedAuthorLearnedLaterSurvivesRestart(t *testing.T) {
+	for _, otherSubscription := range []bool{false, true} {
+		t.Run(fmt.Sprintf("other_subscription_%t", otherSubscription), func(t *testing.T) {
+			rosterCalls := 0
+			left := false
+			h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/seats" {
+					rosterCalls++
+					if rosterCalls == 1 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+					} else if left {
+						_, _ = io.WriteString(w, seatsOf())
+					} else {
+						_, _ = io.WriteString(w, seatsOf(subOwner, "Writer"))
+					}
+					return
+				}
+				if strings.Contains(r.URL.Path, "/"+subChatB+"/") {
+					_, _ = io.WriteString(w, subPage(subGen, 0, false))
+				} else if r.URL.Query().Get("after") == "0" {
+					_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+				} else {
+					_, _ = io.WriteString(w, subPage(subGen, 1, false))
+				}
+			})
+			if otherSubscription {
+				other := baseSub()
+				other.Chat = subChatB
+				seedSub(t, dir, other)
+			}
+			clock := holdClock(t, h)
+			first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+			if len(first.Entries) != 1 || first.Names[subOwner] != "" || rosterCalls != 1 {
+				t.Fatalf("initial read: %+v, roster calls %d", first, rosterCalls)
+			}
+			*clock = clock.Add(61 * time.Second)
+			path := subReadPath() + "/comments?after=1"
+			if otherSubscription {
+				path = strings.Replace(subReadPath(), subChat, subChatB, 1) + "/comments"
+			}
+			next := decodeCommentsRead(t, doTeam(h, http.MethodGet, path, ""))
+			if len(next.Entries) != 0 || next.Names[subOwner] != "Writer" || rosterCalls != 2 {
+				t.Fatalf("later read: %+v, roster calls %d", next, rosterCalls)
+			}
+			people, err := team.LoadPeople(dir)
+			if err != nil || len(people) != 1 || people[0].Server != teamServerID || people[0].Seat != subOwner || people[0].Name != "Writer" {
+				t.Fatalf("later name not stored: %+v, %v", people, err)
+			}
+			left = true
+			original := asTeamHandler(t, h)
+			restarted := newTeamHandler(dir, original.now, original.client)
+			saved := decodeCommentsRead(t, doTeam(restarted, http.MethodGet, subReadPath()+"/comments", ""))
+			if len(saved.Entries) != 1 || saved.Names[subOwner] != "Writer" {
+				t.Fatalf("restart lost author name: %+v", saved)
+			}
+		})
+	}
+}
+
+func TestCommentUnnamedAuthorsBoundAndRetry(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := asTeamHandler(t, handler)
+	ctx := context.Background()
+	first := make([]map[string]any, 2048)
+	second := make([]map[string]any, 2048)
+	for i := 0; i < 2048; i++ {
+		first[i] = map[string]any{"author": fmt.Sprintf("%032x", i)}
+		second[i] = map[string]any{"author": fmt.Sprintf("%032x", i+2048)}
+	}
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", first)
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", first)
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", second)
+	const overflow = "ffffffffffffffffffffffffffffffff"
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", []map[string]any{{"author": overflow}})
+	h.storeRoster(teamOtherID, []team.Seat{{ID: overflow, Name: "Overflow"}})
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", nil)
+	people, err := team.LoadPeople(dir)
+	if err != nil || len(people) != 0 {
+		t.Fatalf("overflow author was retained: %+v, %v", people, err)
+	}
+	known := fmt.Sprintf("%032x", 0)
+	full := make([]team.Person, 4096)
+	for i := range full {
+		full[i] = team.Person{Server: teamOtherID, Seat: fmt.Sprintf("%032x", i), Name: "Existing"}
+	}
+	if err := team.SavePeople(dir, full); err != nil {
+		t.Fatal(err)
+	}
+	h.storeRoster(teamServerID, []team.Seat{{ID: known, Name: "Known"}})
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	if err := team.SavePeople(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	people, err = team.LoadPeople(dir)
+	if err != nil || len(people) != 1 || people[0].Server != teamServerID || people[0].Seat != known || people[0].Name != "Known" {
+		t.Fatalf("capped author not retried: %+v, %v", people, err)
+	}
+	if err := team.SavePeople(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	people, err = team.LoadPeople(dir)
+	if err != nil || len(people) != 0 {
+		t.Fatalf("saved author stayed unnamed: %+v, %v", people, err)
+	}
+	const later = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", []map[string]any{{"author": later}})
+	h.storeRoster(teamOtherID, []team.Seat{{ID: later, Name: "Later"}})
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", nil)
+	people, err = team.LoadPeople(dir)
+	if err != nil || len(people) != 1 || people[0].Seat != later {
+		t.Fatalf("freed unnamed slot was not reused: %+v, %v", people, err)
+	}
+}
+
+func TestCommentUnnamedAuthorRetriesStorageFailures(t *testing.T) {
+	for _, mode := range []string{"load", "save"} {
+		t.Run(mode, func(t *testing.T) {
+			handler, dir := testTeamSurface(t, team.NewClient())
+			h := asTeamHandler(t, handler)
+			ctx := context.Background()
+			h.commentNames(ctx, teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}})
+			path := filepath.Join(dir, team.PeopleFile)
+			if mode == "load" {
+				if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				rows := make([]team.Person, 4095)
+				for i := range rows {
+					rows[i] = team.Person{Server: teamOtherID, Seat: fmt.Sprintf("%032x", i), Name: strings.Repeat("<", 64)}
+				}
+				var buf bytes.Buffer
+				enc := json.NewEncoder(&buf)
+				enc.SetEscapeHTML(false)
+				if err := enc.Encode(map[string]any{"v": 1, "people": rows}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.storeRoster(teamServerID, []team.Seat{{ID: subOwner, Name: "Writer"}})
+			names := h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+			if names[subOwner] != "Writer" {
+				t.Fatal("roster name lost on storage failure")
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "load" && string(before) != "broken" {
+				t.Fatal("damaged file overwritten")
+			}
+			if mode == "save" && !bytes.Contains(before, []byte(strings.Repeat("<", 64))) {
+				t.Fatal("failed save replaced the file")
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+			people, err := team.LoadPeople(dir)
+			if err != nil || len(people) != 1 || people[0].Seat != subOwner || people[0].Name != "Writer" {
+				t.Fatalf("failed storage not retried: %+v, %v", people, err)
+			}
+		})
+	}
+}
+
+func TestCommentUnnamedAuthorsPrunedPerServer(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := asTeamHandler(t, handler)
+	for _, item := range []struct{ server, chat string }{{teamServerID, subChat}, {teamServerID, subChatB}, {teamOtherID, subChat}} {
+		sub := baseSub()
+		sub.Server, sub.Chat, sub.State = item.server, item.chat, "ended"
+		seedSub(t, dir, sub)
+	}
+	ctx := context.Background()
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}, {"author": subOwnerB}})
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", []map[string]any{{"author": subOwnerC}})
+	if rec := doTeam(handler, http.MethodDelete, subReadPath(), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("first remove: %d", rec.Code)
+	}
+	h.storeRoster(teamServerID, []team.Seat{{ID: subOwner, Name: "First"}})
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	people, err := team.LoadPeople(dir)
+	if err != nil || len(people) != 1 || people[0].Seat != subOwner {
+		t.Fatalf("another subscription did not retain authors: %+v, %v", people, err)
+	}
+	second := strings.Replace(subReadPath(), subChat, subChatB, 1)
+	if rec := doTeam(handler, http.MethodDelete, second, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("last remove: %d", rec.Code)
+	}
+	h.storeRoster(teamServerID, []team.Seat{{ID: subOwnerB, Name: "Dropped"}})
+	h.storeRoster(teamOtherID, []team.Seat{{ID: subOwnerC, Name: "Other"}})
+	h.commentNames(ctx, teamServerID, team.Entry{}, false, "", nil)
+	h.commentNames(ctx, teamOtherID, team.Entry{}, false, "", nil)
+	people, err = team.LoadPeople(dir)
+	if err != nil || len(people) != 1 || people[0].Server != teamOtherID || people[0].Seat != subOwnerC {
+		t.Fatalf("pruned incorrect server: %+v, %v", people, err)
+	}
+}
+
+func TestCommentStoredAuthorIsNotUnnamed(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := asTeamHandler(t, handler)
+	if err := team.SavePeople(dir, []team.Person{{Server: teamServerID, Seat: subOwner, Name: "Known"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(context.Background(), teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}})
+	if err := team.SavePeople(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.storeRoster(teamServerID, []team.Seat{{ID: subOwner, Name: "Renamed"}})
+	h.commentNames(context.Background(), teamServerID, team.Entry{}, false, "", nil)
+	people, err := team.LoadPeople(dir)
+	if err != nil || len(people) != 0 {
+		t.Fatalf("already known author treated as unnamed: %+v, %v", people, err)
+	}
+}
+
+func TestCommentNamedAuthorRetriesFailedInitialSave(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := asTeamHandler(t, handler)
+	path := filepath.Join(dir, team.PeopleFile)
+	if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(context.Background(), teamServerID, team.Entry{}, false, "", nil)
+	h.storeRoster(teamServerID, []team.Seat{{ID: subOwner, Name: "Writer"}})
+	names := h.commentNames(context.Background(), teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}})
+	if names[subOwner] != "Writer" {
+		t.Fatal("roster name missing")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	h.commentNames(context.Background(), teamServerID, team.Entry{}, false, "", nil)
+	people, err := team.LoadPeople(dir)
+	if err != nil || len(people) != 1 || people[0].Seat != subOwner {
+		t.Fatalf("named author not retried after failed load: %+v, %v", people, err)
 	}
 }
