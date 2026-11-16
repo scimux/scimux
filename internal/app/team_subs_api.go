@@ -1077,6 +1077,26 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
+	lastServer := true
+	for _, remaining := range subs {
+		if remaining.Server == id.Server {
+			lastServer = false
+			break
+		}
+	}
+	if lastServer {
+		if people, err := team.LoadPeople(h.dataDir); err == nil {
+			kept := make([]team.Person, 0, len(people))
+			for _, person := range people {
+				if person.Server != id.Server {
+					kept = append(kept, person)
+				}
+			}
+			if len(kept) != len(people) {
+				_ = team.SavePeople(h.dataDir, kept)
+			}
+		}
+	}
 	if h.removedSubs == nil {
 		h.removedSubs = make(map[team.CopyID]time.Time)
 	}
@@ -1129,7 +1149,7 @@ func (h *teamHandler) answerComments(w http.ResponseWriter, r *http.Request, id 
 			return
 		}
 	}
-	out.Names = h.commentNames(r.Context(), id.Server, server, joined, string(inst))
+	out.Names = h.commentNames(r.Context(), id.Server, server, joined, string(inst), out.Entries)
 	writeJSONStatus(w, http.StatusOK, out)
 }
 
@@ -1180,7 +1200,7 @@ func (h *teamHandler) storeRoster(server string, seats []team.Seat) {
 	h.subAsks[server] = ask
 }
 
-func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string) map[string]string {
+func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string, entries []map[string]any) map[string]string {
 	h.mu.Lock()
 	if h.subAsks == nil {
 		h.subAsks = make(map[string]subAsk)
@@ -1211,8 +1231,40 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 	defer h.mu.Unlock()
 	ask = h.subAsks[id]
 	names := make(map[string]string)
+	people, loadErr := team.LoadPeople(h.dataDir)
+	stored := make(map[string]int)
+	if loadErr == nil {
+		for i, person := range people {
+			if person.Server == id {
+				names[person.Seat] = person.Name
+				stored[person.Seat] = i
+			}
+		}
+	}
+	authors := make(map[string]bool)
+	for _, entry := range entries {
+		if author, ok := entry["author"].(string); ok {
+			authors[author] = true
+		}
+	}
+	changed := false
 	for seat, name := range ask.names {
 		names[seat] = name
+		if loadErr != nil {
+			continue
+		}
+		if i, ok := stored[seat]; ok {
+			if people[i].Name != name {
+				people[i].Name = name
+				changed = true
+			}
+		} else if authors[seat] && len(people) < 4096 {
+			people = append(people, team.Person{Server: id, Seat: seat, Name: name})
+			changed = true
+		}
+	}
+	if changed {
+		_ = team.SavePeople(h.dataDir, people)
 	}
 	if joined {
 		names[inst] = server.SeatName
