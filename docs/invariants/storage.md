@@ -52,6 +52,11 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   names, access, state and mirror and comment counters and read positions, with no chat content
   or token. Removing a shared chat deletes its subscription entry. Only the
   muxer writes it; with the team gate off it is neither read nor written.
+- **Comment author names are metadata.** `team-people.json` holds at most 4096
+  last-known names per server and seat for retained comment authors, without
+  chat content or tokens. Current roster names take precedence. Removing the
+  last subscription for a server removes its names. A damaged file is never
+  overwritten, and with the team gate off it is neither read nor written.
 - **Guest copies are retained received history.** `team-copies/` holds received
   mirror and `comments.jsonl` entries, including for this seat's own shared chats,
   unchanged and append-only, including after

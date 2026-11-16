@@ -1576,11 +1576,14 @@ entry after `after`.
 fetches and reads the comments copy under the same paging, retention and error
 rules as the mirror. It answers `{"entries":[{"seq","at","author","mine",
 "text","anchor"}],"names":{},"last":N,"next":N,"more":false}`. Names are
-cached per server in memory, and the roster is read again at most once per 60
-seconds while comments are read, so a known author's new name shows within
-about a minute; `names` holds every seat of the cached roster of that server.
-Unknown comment shapes remain in the copy
-but are skipped in the answer.
+the last-known names of retained comment authors on that server, overlaid by
+its cached roster and then this seat's own name when joined. The roster is read
+again at most once per 60 seconds while comments are read, so a known author's
+new name shows within about a minute. Last-known names survive a restart or a
+seat leaving; they are removed when the last subscription to that server is
+removed. Local browser names still take precedence in the page. A failure to
+read or write last-known names does not fail the comments read. Unknown comment
+shapes remain in the copy but are skipped in the answer.
 
 `POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments`
 takes `{"text":"...","anchor":N,"key":"<16 lowercase hex>"}`, at most
