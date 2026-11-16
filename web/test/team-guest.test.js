@@ -768,10 +768,12 @@ test("shared view merges both logs by anchor and keeps names", async () => {
     if (path.endsWith("after=2")) return commentsAnswer([{ seq:3, anchor:4, author:"a", text:"z" }], 3, false, { b:"Bea" });
     return commentsAnswer([], 3);
   });
+  const label = { dataset: { seat: "b" }, textContent: "" };
+  f.get("sv_body").querySelectorAll = sel => sel === "[data-seat]" ? [label] : [];
   f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
   const order = () => [...f.get("sv_body").innerHTML.matchAll(/data-(seq|cseq)="(\d+)"/g)].map(m => m[1] + m[2]);
   assert.deepEqual(order(), ["seq1", "cseq1", "cseq2", "seq3", "cseq3"]);
-  assert.ok(f.get("sv_body").innerHTML.includes("Ada")); assert.ok(f.get("sv_body").innerHTML.includes("Bea"));
+  assert.ok(f.get("sv_body").innerHTML.includes("Ada")); assert.equal(label.textContent, "Bea");
   assert.deepEqual(puts[0], { mirror:3, comments:3 });
   assert.ok(paths[0].endsWith("?after=0")); assert.ok(paths[1].endsWith("/comments?after=0")); assert.ok(paths[2].endsWith("/comments?after=2"));
   f.setTime(5000); f.feature.tick(); await f.feature.settled();
