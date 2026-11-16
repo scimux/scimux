@@ -24,16 +24,17 @@ import (
 )
 
 type outboxScript struct {
-	helloStatus  int
-	helloID      string
-	putStatus    int
-	deleteStatus int
-	mirrorStatus int
-	mirrorGen    string
-	channel      string
-	failPath     string
-	owner        string
-	mu           sync.Mutex
+	helloStatus   int
+	helloID       string
+	putStatus     int
+	deleteStatus  int
+	deleteQueries []string
+	mirrorStatus  int
+	mirrorGen     string
+	channel       string
+	failPath      string
+	owner         string
+	mu            sync.Mutex
 	// mirrorArrived is closed when a mirror call is inside the server.
 	// mirrorGate holds that call until it is closed.
 	mirrorArrived chan struct{}
@@ -89,6 +90,9 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `{"error":"nope"}`)
 		}
 	case r.Method == http.MethodDelete:
+		s.mu.Lock()
+		s.deleteQueries = append(s.deleteQueries, r.URL.Query().Get("generation"))
+		s.mu.Unlock()
 		status := deleteStatus
 		if status == 0 {
 			status = http.StatusNoContent
@@ -196,6 +200,9 @@ func newShareBox(t *testing.T, script *outboxScript) (*shareOutbox, string, *[]s
 	t.Helper()
 	srv, calls := recordOutbox(t, script)
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "nodes.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := identity.LoadOrCreateInstallation(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -719,10 +726,14 @@ func assertTitleDoesNotResurrect(t *testing.T, putStatus int, gen string, delete
 	})
 	box.tick(context.Background())
 	got := snapshotCalls(calls)
-	if len(got) != 3 || got[0].path != "/v1/hello" || got[1].method != http.MethodPut || got[2].method != http.MethodDelete {
+	wantCalls := 2
+	if putStatus == http.StatusCreated {
+		wantCalls = 3
+	}
+	if len(got) != wantCalls || got[0].path != "/v1/hello" || got[1].method != http.MethodPut {
 		t.Fatalf("calls = %+v", got)
 	}
-	if !strings.Contains(got[1].body, `"title":"South"`) || got[2].path != channelBase(inst, shareUID) {
+	if !strings.Contains(got[1].body, `"title":"South"`) || (wantCalls == 3 && (got[2].path != channelBase(inst, shareUID) || len(script.deleteQueries) != 1 || script.deleteQueries[0] != gen)) {
 		t.Fatalf("calls = %+v", got)
 	}
 	for _, c := range got {
@@ -2635,4 +2646,107 @@ func TestOutboxLeavesAStoppedShareThatChanged(t *testing.T) {
 		t.Fatalf("stored = %+v", stored)
 	}
 	assertMembersEqual(t, stored.Members, wantMembers)
+}
+
+func TestOutboxOldStopDoesNotDeleteNewGeneration(t *testing.T) {
+	script := &outboxScript{}
+	box, h, dir, inst := newRaceBox(t, script)
+	armActiveShare(t, dir, nil)
+	old, ok := storedShare(t, dir, shareUID)
+	if !ok {
+		t.Fatal("missing share")
+	}
+	old.State = "stopping"
+	if err := team.SaveShare(dir, old); err != nil {
+		t.Fatal(err)
+	}
+	original := *box.client
+	arrived, release := make(chan struct{}), make(chan struct{})
+	box.client = &team.Client{Transport: teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/hello" {
+			close(arrived)
+			<-release
+		}
+		if r.Method == http.MethodDelete {
+			if r.URL.Query().Get("generation") != shareGen {
+				t.Errorf("old stop generation = %q", r.URL.RawQuery)
+			}
+			script.mu.Lock()
+			current := channelGeneration(script.channel)
+			script.mu.Unlock()
+			if r.URL.Query().Get("generation") == current {
+				return original.Transport.RoundTrip(r)
+			}
+			return &http.Response{StatusCode: http.StatusConflict, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"stale_generation"}`)), Request: r}, nil
+		}
+		return original.Transport.RoundTrip(r)
+	})}
+	entries, err := team.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); box.one(context.Background(), entries, inst, old, nil) }()
+	select {
+	case <-arrived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("stop did not arrive")
+	}
+	if rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, ""); rec.Code != http.StatusNoContent {
+		close(release)
+		<-done
+		t.Fatalf("stop=%d", rec.Code)
+	}
+	const fresh = "1111222233334444"
+	script.set(func(s *outboxScript) {
+		s.putStatus = http.StatusCreated
+		s.channel = channelJSON(inst, shareUID, "North", fresh)
+	})
+	if rec := putShare(h, shareNode, sharePutBody(teamServerID, "all", []team.Member{})); rec.Code != http.StatusCreated {
+		close(release)
+		<-done
+		t.Fatalf("reshare=%d", rec.Code)
+	}
+	close(release)
+	<-done
+	stored, ok := storedShare(t, dir, shareUID)
+	if !ok || stored.Generation != fresh {
+		t.Fatal("older stop deleted new share")
+	}
+}
+
+func TestOutboxStopFencesStoredGeneration(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusConflict, http.StatusUnauthorized, http.StatusNotFound} {
+		for _, replace := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status_%d_replace_%t", status, replace), func(t *testing.T) {
+				script := &outboxScript{deleteStatus: status}
+				box, dir, _, inst := newShareBox(t, script)
+				mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, State: "stopping"})
+				old, _ := storedShare(t, dir, shareUID)
+				original := *box.client
+				box.client = &team.Client{Transport: teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodDelete && replace {
+						fresh := old
+						fresh.Generation = "1111222233334444"
+						if err := team.SaveShare(dir, fresh); err != nil {
+							t.Error(err)
+						}
+					}
+					return original.Transport.RoundTrip(r)
+				})}
+				entries, err := team.Load(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				box.stop(context.Background(), entries[0], inst, old)
+				stored, ok := storedShare(t, dir, shareUID)
+				if ok != replace || (replace && stored.Generation != "1111222233334444") {
+					t.Fatalf("stored: %+v, present=%t", stored, ok)
+				}
+				if len(script.deleteQueries) != 1 || script.deleteQueries[0] != shareGen {
+					t.Fatalf("delete generations: %v", script.deleteQueries)
+				}
+			})
+		}
+	}
 }

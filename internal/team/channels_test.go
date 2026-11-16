@@ -44,7 +44,7 @@ func runChannel(c *Client, ctx context.Context, base, name string) error {
 		_, _, err := c.PutChannel(ctx, base, chToken, chOwner, chChat, chTitle)
 		return err
 	case "delete":
-		return c.DeleteChannel(ctx, base, chToken, chOwner, chChat)
+		return deleteWithGeneration(c, ctx, base, chToken, chOwner, chChat, chGen)
 	case "members":
 		return c.SetMembers(ctx, base, chToken, chOwner, chChat, []Member{
 			{Seat: chOther, Access: "read"},
@@ -240,7 +240,7 @@ func TestChannelCallsReportCreatedOrderAndLast(t *testing.T) {
 	if err != nil || gen != chGen || last != 43 {
 		t.Fatalf("append gen = %q last = %d err = %v", gen, last, err)
 	}
-	if err := c.DeleteChannel(context.Background(), srv.URL, chToken, chOwner, chChat); err != nil {
+	if err := deleteWithGeneration(c, context.Background(), srv.URL, chToken, chOwner, chChat, chGen); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -336,7 +336,7 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 			c := NewClient()
 			c.Transport = trip
 			c.timeout = time.Second
-			err := c.DeleteChannel(context.Background(), "http://relay.example", chToken, chOwner, chChat)
+			err := deleteWithGeneration(c, context.Background(), "http://relay.example", chToken, chOwner, chChat, chGen)
 			if !errors.Is(err, ErrProtocol) {
 				t.Fatalf("error = %v", err)
 			}
@@ -350,7 +350,7 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		delSrv, delGot := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
 			w.WriteHeader(http.StatusOK)
 		})
-		err := clientOn(delSrv).DeleteChannel(context.Background(), delSrv.URL, chToken, chOwner, chChat)
+		err := deleteWithGeneration(clientOn(delSrv), context.Background(), delSrv.URL, chToken, chOwner, chChat, chGen)
 		if !errors.Is(err, ErrProtocol) {
 			t.Fatalf("error = %v", err)
 		}
@@ -688,7 +688,7 @@ func TestChannelCallsRejectInvalidOwnerAndChat(t *testing.T) {
 			return err
 		},
 		func(owner, chat string) error {
-			return c.DeleteChannel(context.Background(), srv.URL, chToken, owner, chat)
+			return deleteWithGeneration(c, context.Background(), srv.URL, chToken, owner, chat, chGen)
 		},
 		func(owner, chat string) error {
 			return c.SetMembers(context.Background(), srv.URL, chToken, owner, chat, nil)
@@ -723,7 +723,7 @@ func TestChannelCallsRejectInvalidOwnerAndChat(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	if err := clientOn(ok).DeleteChannel(context.Background(), ok.URL, chToken, chOwner, chat64); err != nil {
+	if err := deleteWithGeneration(clientOn(ok), context.Background(), ok.URL, chToken, chOwner, chat64, chGen); err != nil {
 		t.Fatal(err)
 	}
 	if len(*got) != 0 {
@@ -1640,5 +1640,47 @@ func TestCommentsClientRejectsBadRepliesAndTransport(t *testing.T) {
 	}
 	if _, err := c.AppendComment(context.Background(), "http://127.0.0.1", chToken, chOwner, chChat, chGen, "c/key", json.RawMessage(`{}`)); !errors.Is(err, ErrUnreachable) {
 		t.Error("append transport error not mapped")
+	}
+}
+
+// This adapter lets the regression commit build before the signature changes.
+func deleteWithGeneration(c *Client, ctx context.Context, base, token, owner, chat, generation string) error {
+	method := reflect.ValueOf(c).MethodByName("DeleteChannel")
+	args := []reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(base), reflect.ValueOf(token), reflect.ValueOf(owner), reflect.ValueOf(chat)}
+	if method.Type().NumIn() == 6 {
+		args = append(args, reflect.ValueOf(generation))
+	}
+	out := method.Call(args)[0]
+	if out.IsNil() {
+		return nil
+	}
+	return out.Interface().(error)
+}
+
+func TestDeleteChannelGenerationQuery(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Query().Get("generation") != chGen {
+			t.Errorf("generation = %q", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":"stale_generation"}`)
+	}))
+	defer srv.Close()
+	c := clientOn(srv)
+	for _, gen := range []string{"", "0123456789abcdeF", "bad"} {
+		if err := deleteWithGeneration(c, context.Background(), srv.URL, chToken, chOwner, chChat, gen); !errors.Is(err, ErrProtocol) {
+			t.Errorf("invalid %q: %v", gen, err)
+		}
+	}
+	if hits != 0 {
+		t.Fatalf("invalid generation sent %d requests", hits)
+	}
+	if err := deleteWithGeneration(c, context.Background(), srv.URL, chToken, chOwner, chChat, chGen); !errors.Is(err, ErrStaleGeneration) {
+		t.Fatalf("stale: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("requests: %d", hits)
 	}
 }

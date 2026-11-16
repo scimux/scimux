@@ -81,16 +81,17 @@ type shareCall struct {
 }
 
 type shareScript struct {
-	helloStatus  int
-	helloID      string
-	helloBody    string
-	putStatuses  []int
-	memberStatus int
-	deleteStatus int
-	seatsStatus  int
-	seatsBody    string
-	channel      string
-	failPath     string
+	helloStatus   int
+	helloID       string
+	helloBody     string
+	putStatuses   []int
+	memberStatus  int
+	deleteStatus  int
+	deleteQueries []string
+	seatsStatus   int
+	seatsBody     string
+	channel       string
+	failPath      string
 }
 
 func (s *shareScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +146,7 @@ func (s *shareScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, s.channel)
 		}
 	case r.Method == http.MethodDelete:
+		s.deleteQueries = append(s.deleteQueries, r.URL.Query().Get("generation"))
 		status := s.deleteStatus
 		if status == 0 {
 			status = http.StatusNoContent
@@ -955,6 +957,9 @@ func TestStartSharingReplacesALeftoverChannel(t *testing.T) {
 		if _, ok := storedShare(t, dir, shareUID); !ok {
 			t.Fatal("share missing")
 		}
+		if len(script.deleteQueries) != 1 || script.deleteQueries[0] != shareGen {
+			t.Fatalf("delete generations: %v", script.deleteQueries)
+		}
 	})
 	t.Run("still present", func(t *testing.T) {
 		script := &shareScript{putStatuses: []int{http.StatusOK, http.StatusOK}}
@@ -965,6 +970,9 @@ func TestStartSharingReplacesALeftoverChannel(t *testing.T) {
 		assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
 		assertNoShareLeak(t, rec.Body.String(), dir)
 		assertNoStoredShare(t, dir, shareUID)
+		if len(script.deleteQueries) != 2 || script.deleteQueries[0] != shareGen || script.deleteQueries[1] != shareGen {
+			t.Fatalf("delete generations: %v", script.deleteQueries)
+		}
 		if countDeletes(snapshotCalls(calls)) != 2 {
 			t.Fatalf("calls = %+v", snapshotCalls(calls))
 		}
@@ -982,6 +990,18 @@ func TestStartSharingReplacesALeftoverChannel(t *testing.T) {
 			t.Fatalf("calls = %+v", got)
 		}
 	})
+	t.Run("stale leftover", func(t *testing.T) {
+		script := &shareScript{putStatuses: []int{http.StatusOK}, deleteStatus: http.StatusConflict}
+		h, dir, calls, inst := readySurface(t, script)
+		script.channel = channelJSON(inst, shareUID, "North", shareGen)
+		seedChat(t, dir, shareNode, "North", shareUID, 0)
+		rec := putShare(h, shareNode, sharePutBody(teamServerID, "all", []team.Member{}))
+		assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
+		assertNoStoredShare(t, dir, shareUID)
+		if countDeletes(snapshotCalls(calls)) != 1 || len(script.deleteQueries) != 1 || script.deleteQueries[0] != shareGen {
+			t.Fatalf("calls = %+v", snapshotCalls(calls))
+		}
+	})
 	t.Run("second create fails", func(t *testing.T) {
 		script := &shareScript{putStatuses: []int{http.StatusOK, http.StatusInternalServerError}}
 		h, dir, calls, inst := readySurface(t, script)
@@ -990,7 +1010,7 @@ func TestStartSharingReplacesALeftoverChannel(t *testing.T) {
 		rec := putShare(h, shareNode, sharePutBody(teamServerID, "all", []team.Member{}))
 		assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
 		assertNoStoredShare(t, dir, shareUID)
-		if countDeletes(snapshotCalls(calls)) != 2 {
+		if countDeletes(snapshotCalls(calls)) != 1 {
 			t.Fatalf("calls = %+v", snapshotCalls(calls))
 		}
 	})
@@ -1025,6 +1045,11 @@ func TestStartSharingFailureStoresNothing(t *testing.T) {
 		assertBearer(t, got[0], false)
 		if countDeletes(got) != deletes {
 			t.Fatalf("deletes = %d calls %+v", countDeletes(got), got)
+		}
+		for _, gen := range b.script.deleteQueries {
+			if gen != shareGen {
+				t.Fatalf("cleanup generation = %q", gen)
+			}
 		}
 		for _, c := range got {
 			if strings.Contains(c.body, teamToken) {
@@ -1085,6 +1110,11 @@ func TestStartSharingFailureStoresNothing(t *testing.T) {
 		b.script.failPath = channelBase(b.inst, shareUID) + "/members"
 		rec := putShare(b.h, shareNode, body)
 		assertClean(t, b, rec, http.StatusBadGateway, "unreachable", 1)
+	})
+	t.Run("members protocol and stale cleanup", func(t *testing.T) {
+		b := setup(t, &shareScript{memberStatus: http.StatusInternalServerError, deleteStatus: http.StatusConflict})
+		rec := putShare(b.h, shareNode, body)
+		assertClean(t, b, rec, http.StatusBadGateway, "bad_server", 1)
 	})
 	t.Run("members protocol and delete fails", func(t *testing.T) {
 		b := setup(t, &shareScript{memberStatus: http.StatusInternalServerError, deleteStatus: http.StatusInternalServerError})
@@ -1438,6 +1468,7 @@ func TestStopSharingRemovesTheShare(t *testing.T) {
 	}{
 		{"deleted", http.StatusNoContent},
 		{"already gone", http.StatusNotFound},
+		{"stale", http.StatusConflict},
 		{"refused", http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1457,6 +1488,9 @@ func TestStopSharingRemovesTheShare(t *testing.T) {
 			}
 			assertBearer(t, got[0], false)
 			assertBearer(t, got[1], true)
+			if len(script.deleteQueries) != 1 || script.deleteQueries[0] != shareGen {
+				t.Fatalf("delete generations: %v", script.deleteQueries)
+			}
 			if strings.Contains(rec.Body.String(), teamToken) {
 				t.Fatal("token in the response")
 			}
@@ -1825,4 +1859,40 @@ func TestShareRoutesMatchTheSettingsBoundary(t *testing.T) {
 		t.Fatalf("delete behind the boundary = %d %q", delRec.Code, delRec.Body.String())
 	}
 	assertNoSecrets(t, delRec.Body.String(), "", teamToken)
+}
+
+func TestStopSharingFencesStoredGeneration(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusConflict} {
+		for _, replace := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status_%d_replace_%t", status, replace), func(t *testing.T) {
+				script := &shareScript{deleteStatus: status}
+				handler, dir, _, _ := readySurface(t, script)
+				seedChat(t, dir, shareNode, "North", shareUID, 0)
+				mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode})
+				h := asTeamHandler(t, handler)
+				original := *h.client
+				h.client = &team.Client{Transport: teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodDelete && replace {
+						fresh, _ := storedShare(t, dir, shareUID)
+						fresh.Generation = "1111222233334444"
+						if err := team.SaveShare(dir, fresh); err != nil {
+							t.Error(err)
+						}
+					}
+					return original.Transport.RoundTrip(r)
+				})}
+				rec := doTeam(handler, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+				if rec.Code != http.StatusNoContent {
+					t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+				}
+				stored, ok := storedShare(t, dir, shareUID)
+				if ok != replace || (replace && stored.Generation != "1111222233334444") {
+					t.Fatalf("stored: %+v, present=%t", stored, ok)
+				}
+				if len(script.deleteQueries) != 1 || script.deleteQueries[0] != shareGen {
+					t.Fatalf("delete generations: %v", script.deleteQueries)
+				}
+			})
+		}
+	}
 }

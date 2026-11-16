@@ -37,7 +37,10 @@ type seatReplayRecord struct {
 }
 
 // The local fake server has a different URL from the recorded proxy.
-var seatReplayExceptions = []string{"The fake server URL replaces the recorded proxy URL."}
+var seatReplayExceptions = []string{
+	"The fake server URL replaces the recorded proxy URL.",
+	"Channel DELETE checks the last observed generation and matches without its query because the recording predates conditional deletion.",
+}
 
 func seatReplayJSON(raw []byte) any {
 	if len(raw) == 0 || string(raw) == "null" {
@@ -153,12 +156,13 @@ func seatReplayPath(path string) string {
 }
 
 type seatReplayWire struct {
-	mu        sync.Mutex
-	records   []seatReplayRecord
-	used      []bool
-	cursor    int
-	tokens    map[string]string
-	errorText string
+	mu          sync.Mutex
+	records     []seatReplayRecord
+	used        []bool
+	cursor      int
+	tokens      map[string]string
+	errorText   string
+	generations map[string]string
 }
 
 func (f *seatReplayWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -170,9 +174,18 @@ func (f *seatReplayWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	requestPath := r.URL.RequestURI()
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/channels/") && len(strings.Split(r.URL.Path, "/")) == 5 && r.URL.RawQuery != "" {
+		if r.URL.Query().Get("generation") != f.generations[r.URL.Path] || len(r.URL.Query()) != 1 {
+			f.errorText = "incorrect delete generation"
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		requestPath = r.URL.Path
+	}
 	for i := f.cursor; i < len(f.records); i++ {
 		x := f.records[i]
-		if f.used[i] || x.Method != r.Method || x.Path != r.URL.RequestURI() || x.Auth != auth {
+		if f.used[i] || x.Method != r.Method || x.Path != requestPath || x.Auth != auth {
 			continue
 		}
 		if seatReplayDiff(seatReplayJSON(x.Req), got, "$", "") != "" {
@@ -187,6 +200,25 @@ func (f *seatReplayWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(x.Status)
 		res := seatReplayJSON(x.Res)
 		if obj, ok := res.(map[string]any); ok {
+			if f.generations == nil {
+				f.generations = map[string]string{}
+			}
+			remember := func(ch map[string]any) {
+				owner, a := ch["owner"].(string)
+				chat, b := ch["chat"].(string)
+				gen, c := ch["generation"].(string)
+				if a && b && c {
+					f.generations["/v1/channels/"+owner+"/"+chat] = gen
+				}
+			}
+			remember(obj)
+			if rows, ok := obj["channels"].([]any); ok {
+				for _, item := range rows {
+					if ch, ok := item.(map[string]any); ok {
+						remember(ch)
+					}
+				}
+			}
 			if alias, ok := obj["token"].(string); ok {
 				for token, a := range f.tokens {
 					if a == alias {
