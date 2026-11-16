@@ -4135,3 +4135,181 @@ func TestSubCommentsReadAfterValidation(t *testing.T) {
 		assertAPIError(t, doTeam(h, http.MethodGet, subReadPath()+"/comments?"+query, ""), 400, "bad_request")
 	}
 }
+
+func TestCommentNamesSurviveRestartAndRename(t *testing.T) {
+	roster := "Ada"
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, seatsOf(subOwner, roster))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+	})
+	first := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if first.Names[subOwner] != "Ada" {
+		t.Fatal("initial roster name missing")
+	}
+	original := asTeamHandler(t, h)
+	roster = "Bea"
+	renamed := newTeamHandler(dir, fixedTeamClock(), original.client)
+	updated := decodeCommentsRead(t, doTeam(renamed, http.MethodGet, subReadPath()+"/comments?after=1", ""))
+	if updated.Names[subOwner] != "Bea" {
+		t.Fatal("current roster did not win")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "team-people.json"))
+	if err != nil || !bytes.Contains(raw, []byte(`"name":"Bea"`)) {
+		t.Fatalf("rename not stored: %s %v", raw, err)
+	}
+	if err := team.Remove(dir, teamServerID); err != nil {
+		t.Fatal(err)
+	}
+	restarted := newTeamHandler(dir, fixedTeamClock(), original.client)
+	saved := decodeCommentsRead(t, doTeam(restarted, http.MethodGet, subReadPath()+"/comments", ""))
+	if saved.Names[subOwner] != "Bea" {
+		t.Fatalf("departed author name = %q", saved.Names[subOwner])
+	}
+}
+
+func TestCommentNamesLoadAndSaveFailuresStaySilent(t *testing.T) {
+	for _, damaged := range []bool{false, true} {
+		t.Run(fmt.Sprint(damaged), func(t *testing.T) {
+			h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/seats" {
+					_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+					return
+				}
+				_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+			})
+			path := filepath.Join(dir, "team-people.json")
+			if damaged {
+				if err := os.WriteFile(path, []byte("broken"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+			if got.Names[subOwner] != "Ada" {
+				t.Fatal("roster missing on storage failure")
+			}
+			if damaged {
+				raw, _ := os.ReadFile(path)
+				if string(raw) != "broken" {
+					t.Fatal("damaged people file overwritten")
+				}
+			}
+		})
+	}
+}
+
+func TestCommentPeoplePrunedOnlyAfterLastSubscription(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Ada"))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 0, false))
+	})
+	other := baseSub()
+	other.Chat = subChatB
+	other.State = "ended"
+	seedSub(t, dir, other)
+	subs := loadSubFile(t, dir)
+	subs[0].State = "ended"
+	if err := team.SaveSubs(dir, subs); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "team-people.json")
+	raw := []byte(`{"v":1,"people":[{"server":"` + teamServerID + `","seat":"` + subOwner + `","name":"Ada"},{"server":"` + teamOtherID + `","seat":"` + subOwner + `","name":"Other"}]}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec := doTeam(h, http.MethodDelete, subReadPath(), ""); rec.Code != 204 {
+		t.Fatalf("remove = %d", rec.Code)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(first, []byte(`"Ada"`)) {
+		t.Fatal("pruned while another subscription exists")
+	}
+	secondPath := strings.Replace(subReadPath(), subChat, subChatB, 1)
+	if rec := doTeam(h, http.MethodDelete, secondPath, ""); rec.Code != 204 {
+		t.Fatalf("remove second = %d", rec.Code)
+	}
+	last, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(last, []byte(`"Ada"`)) || !bytes.Contains(last, []byte(`"Other"`)) {
+		t.Fatalf("prune: %s %v", last, err)
+	}
+}
+
+func TestCommentPeopleCapStillUpdatesKnownNames(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Renamed", subOwnerB, "New"))
+			return
+		}
+		record := strings.Replace(subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`), subOwner, subOwnerB, 1)
+		_, _ = io.WriteString(w, subPage(subGen, 1, false, record))
+	})
+	rows := make([]map[string]string, 0, 4096)
+	rows = append(rows, map[string]string{"server": teamServerID, "seat": subOwner, "name": "Old"})
+	for i := 0; i < 4095; i++ {
+		rows = append(rows, map[string]string{"server": teamServerID, "seat": fmt.Sprintf("%032x", i), "name": "Person"})
+	}
+	raw, _ := json.Marshal(map[string]any{"v": 1, "people": rows})
+	path := filepath.Join(dir, "team-people.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if got.Names[subOwner] != "Renamed" || got.Names[subOwnerB] != "New" {
+		t.Fatal("roster names missing")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		People []struct{ Seat, Name string } `json:"people"`
+	}
+	if err := json.Unmarshal(after, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.People) != 4096 {
+		t.Fatalf("count %d", len(doc.People))
+	}
+	for _, p := range doc.People {
+		if p.Seat == subOwner && p.Name != "Renamed" {
+			t.Fatal("known name not updated")
+		}
+		if p.Seat == subOwnerB {
+			t.Fatal("added name past cap")
+		}
+	}
+}
+
+func TestCommentNamesOwnNameOverridesStoredAndRoster(t *testing.T) {
+	var inst string
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, seatsOf(inst, "Roster"))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 0, false))
+	})
+	inst = installationOf(t, dir)
+	path := filepath.Join(dir, "team-people.json")
+	raw := []byte(`{"v":1,"people":[{"server":"` + teamServerID + `","seat":"` + inst + `","name":"Stored"}]}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servers, err := team.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if got.Names[inst] != servers[0].SeatName {
+		t.Fatalf("own name = %q", got.Names[inst])
+	}
+}
