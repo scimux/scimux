@@ -602,7 +602,7 @@ func TestOutboxReadsTheNodeFileOnce(t *testing.T) {
 	})
 	t.Run("unreadable", func(t *testing.T) {
 		script := &outboxScript{}
-		box, dir, _, _ := newShareBox(t, script)
+		box, dir, calls, _ := newShareBox(t, script)
 		armCountedShares(t, dir, 1)
 		reads := 0
 		box.readNodes = func(string) ([]byte, error) {
@@ -613,7 +613,37 @@ func TestOutboxReadsTheNodeFileOnce(t *testing.T) {
 		if reads != 1 {
 			t.Fatalf("reads = %d", reads)
 		}
-		assertNoStoredShare(t, dir, shareUID)
+		if _, ok := storedShare(t, dir, shareUID); !ok || len(snapshotCalls(calls)) != 0 {
+			t.Fatal("read failure changed the share or sent a request")
+		}
+		box.readNodes = nil
+		box.tick(context.Background())
+		if _, ok := storedShare(t, dir, shareUID); !ok || len(snapshotCalls(calls)) == 0 {
+			t.Fatal("readable retry did not resume delivery")
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		box, dir, calls, _ := newShareBox(t, &outboxScript{})
+		armCountedShares(t, dir, 1)
+		path := filepath.Join(dir, "nodes.jsonl")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		box.tick(context.Background())
+		if _, ok := storedShare(t, dir, shareUID); !ok || len(snapshotCalls(calls)) != 0 {
+			t.Fatal("missing nodes changed the share or sent a request")
+		}
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		box.tick(context.Background())
+		if _, ok := storedShare(t, dir, shareUID); !ok || len(snapshotCalls(calls)) == 0 {
+			t.Fatal("readable retry did not resume delivery")
+		}
 	})
 }
 
@@ -1244,9 +1274,11 @@ func TestOutboxNeedsAnInstallation(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, identity.InstallationFile)); err != nil {
 		t.Fatal(err)
 	}
+	reads := 0
+	box.readNodes = func(string) ([]byte, error) { reads++; return nil, errors.New("unexpected nodes read") }
 	box.tick(context.Background())
-	if len(snapshotCalls(calls)) != 0 {
-		t.Fatalf("calls = %+v", snapshotCalls(calls))
+	if len(snapshotCalls(calls)) != 0 || reads != 0 {
+		t.Fatalf("calls = %+v, node reads = %d", snapshotCalls(calls), reads)
 	}
 	stored, ok := storedShare(t, dir, shareUID)
 	if !ok || stored.State != "active" {
