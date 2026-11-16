@@ -154,7 +154,10 @@ func (o *shareOutbox) tick(ctx context.Context) {
 		return
 	}
 	owner := string(inst)
-	nodes := o.nodeLog()
+	nodes, err := o.nodeLog()
+	if err != nil {
+		return
+	}
 	for _, share := range shares {
 		o.one(ctx, entries, owner, share, nodes)
 	}
@@ -318,12 +321,12 @@ func (o *shareOutbox) hasChat(share team.Share, nodes map[string]nodeSnap) (stri
 	return snap.title, true
 }
 
-func (o *shareOutbox) nodeLog() map[string]nodeSnap {
+func (o *shareOutbox) nodeLog() (map[string]nodeSnap, error) {
 	raw, err := o.readNodeBytes()
 	if err != nil {
-		return map[string]nodeSnap{}
+		return nil, err
 	}
-	return parseNodeLog(raw)
+	return parseNodeLog(raw), nil
 }
 
 func (o *shareOutbox) readNodeBytes() ([]byte, error) {
