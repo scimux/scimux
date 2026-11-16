@@ -4063,6 +4063,9 @@ func TestSubCommentsGateOffDoesNothing(t *testing.T) {
 	}
 	assertNoTeamFile(t, data)
 	assertNoSubsFile(t, data)
+	if _, err := os.Stat(filepath.Join(data, "team-people.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("gate-off route touched people storage")
+	}
 	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Error("gate-off comment route touched copies")
 	}
