@@ -1416,3 +1416,97 @@ test("renaming a person never sends the local name to team routes", async () => 
   f.setTime(10000); f.feature.tick(); await f.feature.settled();
   assert.equal(calls.some(call => (call.path + call.body).includes("SyntheticLocalName")), false);
 });
+
+test("review: text typed during a send is retained", async () => {
+ const sent = deferred(), view = { ...base, access: "write" };
+ const f = viewFixture(async (path, opts) => {
+   if (path === "/api/team/subscriptions") return list([view]);
+   if (opts?.method === "POST") return sent.promise;
+   return readAnswer([], 0, false, view);
+ });
+ f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+ setGuestDraft(f, "first message"); f.click("sv_send");
+ setGuestDraft(f, "second message being composed");
+ sent.resolve({ seq: 1 }); await f.feature.settled();
+ assert.equal(f.get("sv_text").value, "second message being composed");
+});
+
+test("review: a send during paged comments does not lose earlier comments", async () => {
+ const held = deferred(), view = { ...base, access: "write" };
+ let reads = 0;
+ const f = viewFixture(async (path, opts) => {
+   if (path === "/api/team/subscriptions") return list([view]);
+   if (opts?.method === "POST") return { seq: 3 };
+   return readAnswer([], 0, false, view);
+ }, async path => {
+   reads++;
+   if (reads === 1) return { entries: [{seq:1,at:"2026-01-01T00:00:00Z",author:"other",text:"first received comment",anchor:0}], names:{other:"Other"},last:2,next:1,more:true };
+   if (reads === 2) return held.promise;
+   return {entries:[],names:{},last:2,next:2,more:false};
+ });
+ f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item);
+ for (let i=0;i<20 && reads<2;i++) await Promise.resolve();
+ assert.equal(reads,2);
+ setGuestDraft(f, "outbound"); f.click("sv_send");
+ for (let i=0;i<20;i++) await Promise.resolve();
+ held.resolve({entries:[],names:{},last:2,next:2,more:false}); await f.feature.settled();
+ assert.match(f.get("sv_body").innerHTML,/first received comment/);
+});
+
+test("review: a failed later comment page does not discard the first page", async()=>{
+ const view={...base,access:'write'};let reads=0;
+ const first={seq:1,at:'2026-01-01T00:00:00Z',author:'other',text:'first page message',anchor:0};
+ const second={...first,seq:2,text:'second page message'};
+ const f=viewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>{
+  reads++; if(reads===1)return {entries:[first],names:{other:'Other'},last:2,next:1,more:true};
+  if(reads===2)throw new Error('{"error":"unreachable"}');
+  return {entries:[second],names:{other:'Other'},last:2,next:2,more:false};
+ });
+ f.feature.tick();await f.feature.settled();f.click('cardlist',f.item);await f.feature.settled();
+ f.setTime(5000);f.feature.tick();await f.feature.settled();
+ assert.match(f.get('sv_body').innerHTML,/first page message/);
+ assert.match(f.get('sv_body').innerHTML,/second page message/);
+});
+
+
+test("reopened view keeps an edit made while sending", async () => {
+  const pending = deferred(), view = { ...base, access: "write" };
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") return pending.promise; return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  setGuestDraft(f, "first"); f.click("sv_send"); f.click("sv_back"); f.click("cardlist", f.item); setGuestDraft(f, "second");
+  pending.resolve({ seq: 1 }); await f.feature.settled(); assert.equal(f.get("sv_text").value, "second");
+  f.click("sv_back"); f.click("cardlist", f.item); await f.feature.settled(); assert.equal(f.get("sv_text").value, "second");
+});
+
+test("reopened view clears the unchanged sent draft", async () => {
+  const pending = deferred(), view = { ...base, access: "write" };
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") return pending.promise; return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  setGuestDraft(f, "first"); f.click("sv_send"); f.click("sv_back"); f.click("cardlist", f.item);
+  pending.resolve({ seq: 1 }); await f.feature.settled(); assert.equal(f.get("sv_text").value, "");
+});
+
+test("failed reopened send keeps text and retry key", async () => {
+  const pending = deferred(), posts = [], view = { ...base, access: "write" };
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") { posts.push(JSON.parse(opts.body)); if (posts.length === 1) return pending.promise; throw new Error("failed"); } return readAnswer([], 0, false, view); });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  setGuestDraft(f, "first"); f.click("sv_send"); f.click("sv_back"); f.click("cardlist", f.item);
+  pending.reject(new Error("failed")); await f.feature.settled(); assert.equal(f.get("sv_text").value, "first");
+  f.click("sv_send"); await f.feature.settled(); assert.equal(posts[0].key, posts[1].key);
+});
+
+test("a cancelled comment read resumes from its last rendered page", async () => {
+  const pending = deferred(), paths = [], view = { ...base, access: "write" };
+  const f = viewFixture(async (path, opts) => { if (path === "/api/team/subscriptions") return list([view]); if (opts?.method === "POST") return { seq: 3 }; return readAnswer([], 0, false, view); }, async path => {
+    paths.push(path);
+    if (paths.length === 1) return commentsAnswer([{ seq: 1, anchor: 0, author: "a", text: "first" }], 1, true, { a: "Ada" });
+    if (paths.length === 2) return pending.promise;
+    return commentsAnswer([{ seq: 2, anchor: 0, author: "a", text: "second" }], 2, false, { a: "Ada" });
+  });
+  f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item);
+  for (let i = 0; i < 20 && paths.length < 2; i++) await Promise.resolve();
+  assert.equal(paths.length, 2); setGuestDraft(f, "message"); f.click("sv_send");
+  for (let i = 0; i < 20 && paths.length < 3; i++) await Promise.resolve();
+  pending.resolve(commentsAnswer([], 2)); await f.feature.settled();
+  assert.match(paths[2], /after=1$/); assert.match(f.get("sv_body").innerHTML, /first/); assert.match(f.get("sv_body").innerHTML, /second/);
+});
