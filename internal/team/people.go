@@ -92,7 +92,7 @@ func SavePeople(dir string, people []Person) error {
 		}
 		return sorted[i].Seat < sorted[j].Seat
 	})
-	body, err := json.Marshal(struct {
+	body, err := marshalTeam(struct {
 		V      int      `json:"v"`
 		People []Person `json:"people"`
 	}{1, sorted})
