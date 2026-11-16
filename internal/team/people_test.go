@@ -114,3 +114,27 @@ func TestPeopleStorageFailuresAndSize(t *testing.T) {
 		}
 	})
 }
+
+func TestPeopleMarshalFailureLeavesOldFile(t *testing.T) {
+	dir := t.TempDir()
+	row := Person{Server: strings.Repeat("1", 32), Seat: strings.Repeat("2", 32), Name: "Ada"}
+	if err := SavePeople(dir, []Person{row}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, PeopleFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := marshalTeam
+	defer func() { marshalTeam = previous }()
+	boom := errors.New("synthetic encoding failure")
+	marshalTeam = func(any) ([]byte, error) { return nil, boom }
+	if err := SavePeople(dir, []Person{row}); !errors.Is(err, boom) {
+		t.Fatalf("error = %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("failed encoding changed file")
+	}
+}
