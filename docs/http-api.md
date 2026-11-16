@@ -902,7 +902,9 @@ other browsers pick up the change when they next read settings.
 `experimental_feature_team` enables the experimental team feature when its
 JSON value is `true`. It can be edited in the file or set with PUT; changes
 take effect on the next team request or poll without a restart. Other values
-are off. The environment switch can also enable the feature.
+are off. The environment switch can also enable the feature. A browser page
+that observes the feature off must be reloaded after it is enabled to restore
+the team controls.
 
 The storage fields are non-negative integer byte counts. A zero global or
 per-node limit means unlimited; a zero minimum-free value disables that
