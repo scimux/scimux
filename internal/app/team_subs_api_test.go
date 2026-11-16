@@ -4313,3 +4313,37 @@ func TestCommentNamesOwnNameOverridesStoredAndRoster(t *testing.T) {
 		t.Fatalf("own name = %q", got.Names[inst])
 	}
 }
+
+func TestCommentPeopleSaveFailureKeepsReadAvailable(t *testing.T) {
+	h, dir := readSurface(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/seats" {
+			_, _ = io.WriteString(w, seatsOf(subOwner, "Renamed"))
+			return
+		}
+		_, _ = io.WriteString(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
+	})
+	rows := make([]map[string]string, 0, 4096)
+	rows = append(rows, map[string]string{"server": teamServerID, "seat": subOwner, "name": "Old"})
+	for i := 0; i < 4095; i++ {
+		rows = append(rows, map[string]string{"server": teamServerID, "seat": fmt.Sprintf("%032x", i), "name": strings.Repeat("<", 64)})
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(map[string]any{"v": 1, "people": rows}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "team-people.json")
+	before := buf.Bytes()
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := decodeCommentsRead(t, doTeam(h, http.MethodGet, subReadPath()+"/comments", ""))
+	if got.Names[subOwner] != "Renamed" {
+		t.Fatal("roster unavailable after save failed")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("failed save changed file")
+	}
+}
