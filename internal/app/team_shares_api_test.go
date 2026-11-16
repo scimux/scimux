@@ -401,14 +401,6 @@ func countDeletes(calls []shareCall) int {
 	return n
 }
 
-func lockShareDir(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-}
-
 func readySurface(t *testing.T, script *shareScript) (http.Handler, string, *[]shareCall, string) {
 	t.Helper()
 	srv, calls := recordShareServer(t, script)
@@ -1135,14 +1127,13 @@ func TestStartSharingFailureStoresNothing(t *testing.T) {
 	})
 	t.Run("share file unwritable", func(t *testing.T) {
 		b := setup(t, &shareScript{})
-		lockShareDir(t, b.dir)
+		asTeamHandler(t, b.h).saveShare = func(string, team.Share) error { return os.ErrPermission }
 		rec := putShare(b.h, shareNode, body)
 		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
 		assertNoSecrets(t, rec.Body.String(), "", teamToken)
 		if countDeletes(snapshotCalls(b.calls)) != 1 {
 			t.Fatalf("calls = %+v", snapshotCalls(b.calls))
 		}
-		_ = os.Chmod(b.dir, 0o700)
 		assertNoStoredShare(t, b.dir, shareUID)
 	})
 	t.Run("reused node keeps the old share", func(t *testing.T) {
@@ -1410,13 +1401,12 @@ func TestShareUpdateReplacesMembersOnly(t *testing.T) {
 		script.channel = channelJSON(inst, shareUID, "North", shareGen)
 		seedChat(t, dir, shareNode, "North", shareUID, 0)
 		mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Members: old})
-		lockShareDir(t, dir)
+		asTeamHandler(t, h).saveShare = func(string, team.Share) error { return os.ErrPermission }
 		rec := putShare(h, shareNode, sharePutBody(teamServerID, "from_now", next))
 		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
 		if countDeletes(snapshotCalls(calls)) != 0 {
 			t.Fatalf("calls = %+v", snapshotCalls(calls))
 		}
-		_ = os.Chmod(dir, 0o700)
 		stored, ok := storedShare(t, dir, shareUID)
 		if !ok {
 			t.Fatal("share missing")
@@ -1644,13 +1634,12 @@ func TestStopSharingAnswersStoppingWhenTheServerStays(t *testing.T) {
 	t.Run("cannot save stopping", func(t *testing.T) {
 		h, dir, calls, _ := readySurface(t, &shareScript{})
 		mustSaveShare(t, dir, shareNodeShare())
-		lockShareDir(t, dir)
+		asTeamHandler(t, h).saveShare = func(string, team.Share) error { return os.ErrPermission }
 		rec := doTeam(h, http.MethodDelete, "/api/team/shares/"+shareNode, "")
 		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
 		if len(snapshotCalls(calls)) != 0 {
 			t.Fatal("called the server")
 		}
-		_ = os.Chmod(dir, 0o700)
 		got, ok := storedShare(t, dir, shareUID)
 		if !ok || got.State != "active" {
 			t.Fatalf("stored = %+v", got)

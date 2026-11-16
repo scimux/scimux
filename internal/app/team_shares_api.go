@@ -425,6 +425,13 @@ func (h *teamHandler) readShares() ([]team.Share, error) {
 func (h *teamHandler) writeShare(s team.Share) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.saveShareState(s)
+}
+
+func (h *teamHandler) saveShareState(s team.Share) error {
+	if h.saveShare != nil {
+		return h.saveShare(h.dataDir, s)
+	}
 	return team.SaveShare(h.dataDir, s)
 }
 
@@ -442,7 +449,7 @@ func (h *teamHandler) keepShareFields(uid string, apply func(*team.Share)) (team
 			continue
 		}
 		apply(&shares[i])
-		if err := team.SaveShare(h.dataDir, shares[i]); err != nil {
+		if err := h.saveShareState(shares[i]); err != nil {
 			return team.Share{}, err
 		}
 		return shares[i], nil
