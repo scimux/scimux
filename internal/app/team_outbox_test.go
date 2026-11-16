@@ -2775,3 +2775,18 @@ func TestOutboxStopLeavesDamagedShareFile(t *testing.T) {
 		t.Fatalf("damaged file changed: %q %v", raw, err)
 	}
 }
+
+func TestOutboxStopKeepsDifferentShareUID(t *testing.T) {
+	box, dir, _, inst := newShareBox(t, &outboxScript{})
+	mustSaveShare(t, dir, team.Share{UID: shareUIDB, Node: shareNode, State: "stopping"})
+	old, _ := storedShare(t, dir, shareUIDB)
+	old.UID = shareUID
+	entries, err := team.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box.stop(context.Background(), entries[0], inst, old)
+	if _, ok := storedShare(t, dir, shareUIDB); !ok {
+		t.Fatal("unrelated share removed")
+	}
+}

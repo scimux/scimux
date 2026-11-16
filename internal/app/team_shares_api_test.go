@@ -1918,3 +1918,14 @@ func TestStopSharingLeavesDamagedShareFile(t *testing.T) {
 		t.Fatalf("damaged file changed: %q %v", raw, err)
 	}
 }
+
+func TestDeleteShareFileKeepsDifferentUID(t *testing.T) {
+	handler, dir, _, _ := readySurface(t, &shareScript{})
+	mustSaveShare(t, dir, team.Share{UID: shareUIDB, Node: shareNode})
+	if err := asTeamHandler(t, handler).deleteShareFile(shareUID, shareGen); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := storedShare(t, dir, shareUIDB); !ok {
+		t.Fatal("unrelated share removed")
+	}
+}
