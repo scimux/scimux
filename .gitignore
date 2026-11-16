@@ -11,6 +11,7 @@ internal/transcript/testdata/real-*.jsonl
 internal/acp/codex/testdata/real-*.ndjson
 internal/acp/testdata/real-*.ndjson
 internal/acp/muse/testdata/real-*.ndjson
+internal/app/testdata/real-team-e2e-*
 internal/acp/muse/schema/
 
 # Only README.md, AGENTS.md, CLAUDE.md, SECURITY.md, PRIVACY.md, and the published docs/
@@ -53,4 +54,3 @@ internal/acp/muse/schema/
 
 # server runtime log (nohup ./scimux …)
 nohup.out
-internal/app/testdata/real-team-e2e-*

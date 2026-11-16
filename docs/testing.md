@@ -83,10 +83,11 @@ can exceed the platform socket-path limit and produce unrelated failures.
   are **gitignored — never commit them**: even scrubbed they are personal
   environment snapshots. Optional replay tests skip when these local files
   are absent. `TestRealTeamE2EReplay` uses the ignored
-  `internal/app/testdata/real-team-e2e-*` recording files. Live capture tools are private maintainer utilities archived
-  under `attic/scripts/`; public tests must not depend on them. Keep system
-  prompts, tool/skill/path inventories, hostnames, session ids, timezone and
-  secret-shaped strings out of committed fixtures.
+  `internal/app/testdata/real-team-e2e-*` recording files. Live capture tools
+  are private maintainer utilities archived under `attic/scripts/`; public
+  tests must not depend on them. Keep system prompts, tool/skill/path
+  inventories, hostnames, session ids, timezone and secret-shaped strings out
+  of committed fixtures.
 - `TestRealDshReplay` and `TestRealDshModelMenu` are that lane for dsh, and they
   are the only checks that a real dsh still states occupancy in `usage_update`
   and still encodes a model option value as the JSON `["provider","model"]`
@@ -99,6 +100,26 @@ can exceed the platform socket-path limit and produce unrelated failures.
   `internal/app/testdata/codex-session-sample.jsonl`, and the fare fixtures in
   `internal/sessionlog/testdata/fare/`. Keep them that way; never paste real
   transcript or wire content into them.
+
+## Team server interoperability
+
+`TestTeamServerWorkflow` exercises the seat handlers and outbox against a
+real, independently built team server. Its conversations are synthetic and
+it launches no agent CLI. Build `scimux-team` in its own repository, then run:
+
+```sh
+SCIMUX_TEAM_E2E_BINARY=/absolute/path/to/scimux-team \
+  go test ./internal/app -run '^TestTeamServerWorkflow$' -count=1
+```
+
+The test owns its temporary server state and loopback listener. It covers
+both sharing scopes, comment permissions and retries, author-name refresh,
+permission changes, offline copies, relay restart and outbox recovery, title
+changes and clear seams, removal, sharing again, node deletion, leave/rejoin,
+operator revoke, and local forgetting.
+It skips without that explicit binary path and in the `-short` lane. It
+complements the browser unit suite and live browser acceptance; it does not
+exercise DOM rendering or run automatically in the single-repository CI.
 
 ## Public repository CI and release setup
 
