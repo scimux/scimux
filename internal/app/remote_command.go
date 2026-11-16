@@ -240,8 +240,13 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	c.application = a
-	if c.ExperimentalTeam && c.muxerOnly {
-		installShareOutbox(c.application, c.Config.DataDir, time.Now)
+	if c.muxerOnly {
+		if c.ExperimentalTeam {
+			installShareOutbox(c.application, c.Config.DataDir, time.Now)
+		} else {
+			a.teamSettingsGate = true
+			a.teamDataDir = c.Config.DataDir
+		}
 	}
 	policy, err := newRequestPolicy(*addr, trustedHosts)
 	if err != nil {

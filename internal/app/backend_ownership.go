@@ -33,9 +33,12 @@ func newCoreMux(a *app) (http.Handler, error) {
 			http.NotFound(w, r)
 			return
 		}
-		if a.teamHandler != nil && (r.URL.Path == "/api/team" || strings.HasPrefix(r.URL.Path, "/api/team/")) {
-			a.teamHandler.ServeHTTP(w, r)
-			return
+		if r.URL.Path == "/api/team" || strings.HasPrefix(r.URL.Path, "/api/team/") {
+			h, _ := a.teamComponents()
+			if h != nil {
+				h.ServeHTTP(w, r)
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	}), nil

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -872,10 +873,27 @@ func deliveryWord(err error) string {
 
 // copySharedChats is the poll loop's hook. A nil outbox does nothing.
 func (a *app) copySharedChats() {
-	if a.shareOutbox == nil {
+	_, box := a.teamComponents()
+	if box == nil {
 		return
 	}
-	a.shareOutbox.kick()
+	box.kick()
+}
+
+// teamComponents reads the live gate before serializing installation.
+func (a *app) teamComponents() (http.Handler, *shareOutbox) {
+	if !a.teamSettingsGate {
+		return a.teamHandler, a.shareOutbox
+	}
+	if !a.settings().teamEnabled() {
+		return nil, nil
+	}
+	a.teamInstallMu.Lock()
+	defer a.teamInstallMu.Unlock()
+	if a.teamHandler == nil {
+		installShareOutbox(a, a.teamDataDir, time.Now)
+	}
+	return a.teamHandler, a.shareOutbox
 }
 
 // installShareOutbox builds the muxer's share copy and the delivery hook
