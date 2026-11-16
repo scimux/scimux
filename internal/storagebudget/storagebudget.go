@@ -239,7 +239,7 @@ func managedUsage(dataDir string) (int64, map[string]int64, error) {
 	} else if err != nil && !os.IsNotExist(err) {
 		return 0, nil, err
 	}
-	for _, top := range []string{"sessions", "attachments", "assets", "reference-media"} {
+	for _, top := range []string{"sessions", "attachments", "assets", "reference-media", "team-copies"} {
 		root := filepath.Join(dataDir, top)
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -275,7 +275,7 @@ func managedUsage(dataDir string) (int64, map[string]int64, error) {
 }
 
 func liveNodeForPath(top, root, path string) string {
-	if top == "reference-media" {
+	if top == "reference-media" || top == "team-copies" {
 		return ""
 	}
 	rel, err := filepath.Rel(root, path)

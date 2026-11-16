@@ -39,6 +39,34 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   The ID is not a credential and must never be accepted as proof of identity.
   A damaged file is never regenerated automatically. Deleting the file yields
   a new ID on the next start.
+- **Joined team servers are credentials.** `team.json` holds the token of
+  each server this seat has joined. Only the muxer reads and writes it, and
+  a write happens only from an explicit join, forget, or changing this seat's own name on a server.
+  A damaged file is never overwritten.
+  The team gate is on when the environment variable is `1` or the settings
+  file switch is true. With the gate off it is neither read nor written,
+  except that an outbox round already running is allowed to finish.
+- **Shared chats name a server and who may read them.** `team-shares.json`
+  holds each share's server, scope, members, and delivery cursor.
+  It holds no chat content and no token. Only the muxer reads and writes
+  it. With the gate off it is neither read nor written.
+- **Guest subscription state is metadata.** `team-subs.json` holds the identities,
+  names, access, state and mirror and comment counters and read positions, with no chat content
+  or token. Removing a shared chat deletes its subscription entry. Only the
+  muxer writes it; with the team gate off it is neither read nor written.
+- **Comment author names are metadata.** `team-people.json` holds at most 4096
+  last-known names per server and seat for retained comment authors, without
+  chat content or tokens. Current roster names take precedence. Removing the
+  last subscription for a server removes its names. A damaged file is never
+  overwritten, and with the team gate off it is neither read nor written.
+- **Guest copies are retained received history.** `team-copies/` holds received
+  mirror and `comments.jsonl` entries, including for this seat's own shared chats,
+  unchanged and append-only, including after
+  sharing ends. Removing a shared chat deletes its copy, and a cut-off last
+  line is removed during repair. Copies count toward total storage usage and
+  belong to no node.
+  They are never sent anywhere or logged; with the team gate off they are
+  neither read nor written.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth
   (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a
   default 64 MiB free-space reserve plus optional global/per-node byte budgets

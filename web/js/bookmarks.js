@@ -231,7 +231,9 @@ export function bookmarkListHTML(opts){
   }
   return list.map(nt => {
     const nd = nt.node && typeof nodeById === "function" ? nodeById(nt.node) : null;
-    const src = nd ? " · " + e(nd.title) : "";
+    let src = nd ? " · " + e(nd.title) : "";
+    if (nt.who) src += " · " + e(nt.who);
+    if (nt.from) src += " · " + e(nt.from);
     const rendered = nt.media
       ? mediaTextAndTiles(nt.text || "", nt.media, { esc: e, assetURL: opts.assetURL })
       : (hasSupportedImageMarker(nt.text) ? legacyMediaTextAndTiles(nt, opts.legacyMedia, { esc:e, assetURL:opts.assetURL }) : { clean: nt.text || "", html: "" });
@@ -394,6 +396,16 @@ export function discloseAgentOutput(text, role){
   const t = text || "";
   if (!t || role !== "assistant") return t;
   return AI_DISCLOSURE + "\n\n" + t;
+}
+
+export function discloseQuoted(text, { role, who, prov }){
+  if (!text) return "";
+  if (role === "person"){
+    const writer = who || "another person";
+    const ai = prov === true ? ", includes AI-generated text" : "";
+    return `[Written by ${writer}${ai}, quoted from a shared chat — not written by me:]\n\n${text}`;
+  }
+  return discloseAgentOutput(text, role);
 }
 
 /** Longpress send-to: merge bookmark text into an existing per-node draft. */
@@ -782,6 +794,7 @@ export function createBookmarksFeature(deps){
           exceptId: nt.node || "",
           title: "Send bookmark to\u2026",
           role: nt.role || "",
+          who: nt.who || "", prov: nt.prov,
           source: (nt.node || nt.uid) ? {
             node: nt.node || "", turnTime: nt.turnTime || "",
             ...(nt.uid ? { uid: nt.uid, segment: Number(nt.segment) || 0, record: Number(nt.record) || 0 } : {}),
@@ -903,11 +916,11 @@ export function createBookmarksFeature(deps){
     if (typeof d.openSheet === "function") d.openSheet("#sendto");
   }
 
-  function openSendTo({ text = "", exceptId = "", title = "", role = "", source = null } = {}){
+  function openSendTo({ text = "", exceptId = "", title = "", role = "", who = "", prov, source = null } = {}){
     /* Disclose once, here, rather than at each of the four callers: the two
        branches below (seed a new chat, merge into a live draft) both carry the
        text onward, and a caller that forgot would fail silently. */
-    const body = discloseAgentOutput(text, role);
+    const body = discloseQuoted(text, { role, who, prov });
     const lm = typeof d.laneModel === "function" ? d.laneModel() : { color: () => "" };
     const nodes = typeof d.orderedNodes === "function" ? d.orderedNodes() : [];
     const pins = typeof d.pinned === "function" ? d.pinned() : [];

@@ -652,6 +652,18 @@ body.cards-open #msgs { overflow: hidden; }
 #keyrow .ci-card .ci-action { font: inherit; }
 #keyrow .ci-card textarea { font: inherit; width: 100%; }
 
+/* Share control in the chat header. The later rule wins over the 34px
+   headtoggle. A display on the status line has to put [hidden] back. */
+#sharebtn.headtoggle {
+  width: 44px; height: 44px; min-height: 44px;
+}
+#sharestatus {
+  display: block; width: 100%; min-height: 44px; margin: 0; padding: 0 2px;
+  text-align: left; color: var(--dim); font: inherit; font-size: 13px;
+  background: transparent; border: 0;
+}
+#sharestatus[hidden] { display: none; }
+
 /* A run of intermediate agent bubbles, hidden or opened again in this tab. */
 .foldrow { display: flex; justify-content: center; padding: 6px 4px; }
 .foldtoggle {

@@ -562,7 +562,7 @@ export function buildBookmarkSnapshot(nt, deps = {}){
   const speaker = snapshotSpeaker(nt);
   const snap = {
     lane: laneId ? laneColor(laneId) : "",
-    station: nd ? nd.title : "",
+    station: nd ? nd.title : (nt && nt.from) || "",
     speaker,
     time: (nt && (nt.turnTime || nt.t)) || "",
     text: (nt && nt.text) || "",
@@ -590,6 +590,7 @@ function snapshotSpeaker(nt){
   if (!nt) return "";
   if (nt.role === "user") return "you";
   if (nt.role === "assistant") return nt.agent || "agent";
+  if (nt.role === "person") return nt.who || "another person";
   return "";
 }
 
@@ -759,7 +760,9 @@ export function inboxItemHTML(nt, color, deps = {}){
   const actions = deps.bookmarkActionsHTML || bookmarkActionsHTMLDefault;
   const nodeById = deps.nodeById || (() => null);
   const nd = nt.node ? nodeById(nt.node) : null;
-  const src = nd ? " · " + esc(nd.title) : "";
+  let src = nd ? " · " + esc(nd.title) : "";
+  if (nt.who) src += " · " + esc(nt.who);
+  if (nt.from) src += " · " + esc(nt.from);
   const rendered = nt.media
     ? mediaTextAndTiles(nt.text || "", nt.media, { esc, assetURL: deps.assetURL })
     : (hasSupportedImageMarker(nt.text) ? legacyMediaTextAndTiles(nt, deps.legacyMedia, { esc, assetURL:deps.assetURL }) : { clean: nt.text || "", html: "" });
@@ -1632,6 +1635,8 @@ export function createNotesFeature(deps){
         /* The snapshot freezes the transcript role independently of its
            display speaker, which may be an actual agent name. */
         role: (ref.snapshot && ref.snapshot.role) || "",
+        who: ref.snapshot && ref.snapshot.role === "person" ? ref.snapshot.speaker : "",
+        prov: ref.snapshot && ref.snapshot.prov,
         source: (src.node || src.uid) ? { ...src } : null,
       });
       return;
@@ -1847,6 +1852,7 @@ export function createNotesFeature(deps){
           exceptId: nt.node || "",
           title: "Send bookmark to\u2026",
           role: nt.role || "",
+          who: nt.who || "", prov: nt.prov,
           source: (nt.node || nt.uid) ? {
             node: nt.node || "", turnTime: nt.turnTime || "",
             ...(nt.uid ? { uid: nt.uid, segment: Number(nt.segment) || 0, record: Number(nt.record) || 0 } : {}),

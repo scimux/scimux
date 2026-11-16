@@ -118,6 +118,9 @@ import {
 } from "./returnto.js";
 import { createSheetsFeature } from "./sheets.js";
 import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl, homeScreenInstallable } from "./pairing-ui.js";
+import { createSharingSection } from "./team-ui.js";
+import { createShareFeature } from "./team-share.js";
+import { createGuestFeature } from "./team-guest.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { APP_SLOT, claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
@@ -594,8 +597,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const laneModel = () => laneModelMod(nodes, getUI().lanes);
   const isArchived = id => isArchivedMod(id, getUI().archived);
 
+  const guestFeature = own(createGuestFeature({ api, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)), uiMutate: op => uiMutate(op), bookmarks: () => getUI().bookmarks, openSendTo: opts => bookmarksFeature.openSendTo(opts), people: () => getUI().people }));
   /* Activities card feature factory — owns #cardtabs/#cardlist only. */
   const cardsFeature = own(createCardsFeature({
+    sharedTab: guestFeature.tab,
     roots: { tabs: $("#cardtabs"), list: $("#cardlist") },
     document,
     CSS,
@@ -1246,6 +1251,14 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     doc: document,
     onUnlinked: () => { deviceList.refresh(); pairControl.refresh(); },
   }));
+  const sharingSection = own(createSharingSection({ api, doc: document }));
+  const shareFeature = own(createShareFeature({
+    api,
+    doc: document,
+    openSheet: (id) => sheetsFeature.openSheet(id),
+    closeSheets: () => sheetsFeature.closeSheets(),
+    now: () => Date.now(),
+  }));
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */
   /* the chevron must describe the tap: on desktop the button is a toggle, so it
@@ -1417,6 +1430,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     cardsSig = "";
     renderCards();
     renderChatHead();
+    shareFeature.select(id);
     renderMap();   /* full-screen wall map: move the selection marker + action bar */
     refreshChat();
   }
@@ -1615,6 +1629,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   pairControl.bind();
   homeScreen.bind();
   unlinkControl.bind();
+  sharingSection.bind();
+  shareFeature.bind();
+  guestFeature.bind();
   const refocusTitleEditor = () => {
     if (editingTitle) focusTitleEditorNow(editingTitle);
   };
@@ -1838,6 +1855,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     deviceList.refresh();
     pairControl.refresh();
     unlinkControl.refresh();
+    sharingSection.refresh();
     loadHarnesses();
   });
   /* A dark Claude gauge that the user could switch on is the only badge worth
@@ -2046,7 +2064,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderMapTabs: () => renderMapTabs(),
     renderBookmarksPane: () => renderBookmarksPane(),
     renderChatHead: () => renderChatHead(),
-    refreshChat: () => refreshChat(),
+    refreshChat: () => { refreshChat(); shareFeature.tick(); guestFeature.tick(); },
     renderWsInbox: () => renderWsInbox(),
     invalidateCardsSig: () => { cardsSig = ""; },
     invalidateMap: () => mapFeature.invalidate(),

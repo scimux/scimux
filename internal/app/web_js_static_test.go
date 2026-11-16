@@ -46,6 +46,9 @@ var productionJSURLs = []string{
 	"/js/sheets.js",
 	"/js/state.js",
 	"/js/storage.js",
+	"/js/team-guest.js",
+	"/js/team-share.js",
+	"/js/team-ui.js",
 	"/js/usage.js",
 }
 

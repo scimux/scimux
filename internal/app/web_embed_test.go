@@ -50,6 +50,9 @@ var productionJSModules = []string{
 	"web/js/sheets.js",
 	"web/js/state.js",
 	"web/js/storage.js",
+	"web/js/team-guest.js",
+	"web/js/team-share.js",
+	"web/js/team-ui.js",
 	"web/js/usage.js",
 }
 

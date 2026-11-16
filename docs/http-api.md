@@ -899,6 +899,13 @@ connected browser views. It defaults to false, which uses the matching
 monochrome badges. Changing it affects the current browser immediately;
 other browsers pick up the change when they next read settings.
 
+`experimental_feature_team` enables the experimental team feature when its
+JSON value is `true`. It can be edited in the file or set with PUT; changes
+take effect on the next team request or poll without a restart. Other values
+are off. The environment switch can also enable the feature. A browser page
+that observes the feature off must be reloaded after it is enabled to restore
+the team controls.
+
 The storage fields are non-negative integer byte counts. A zero global or
 per-node limit means unlimited; a zero minimum-free value disables that
 reserve. A missing `storage_min_free_bytes` uses the 64 MiB safety default.
@@ -1320,3 +1327,302 @@ embedded filesystem the handlers serve, computed once per process. GET
 needs no CSRF header. It is always reachable during an active remote run —
 this is application content, not pairing state — and absent with the rest of
 the namespace when the experiment is inactive.
+
+## Team
+
+Experimental. The muxer serves these routes when it was started with
+`SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM=1` or the settings file has
+`"experimental_feature_team": true`. The file switch is read on each team
+request and poll; when both switches are off, team paths take the ordinary
+not-found path and polling stops kicking the outbox. A running outbox round
+finishes. Installing the feature creates no file and contacts no team server.
+
+The token a team server returns is a credential. It is stored in
+`team.json` and never leaves the server process: no response, log line, or
+error text contains it.
+
+All bodies are JSON. An error is `{"error":"<code>"}`. The routes sit
+behind the same request boundary as `/api/settings`.
+
+### List
+
+`GET /api/team/servers` answers `200` and
+`{"servers":[{"id","name","url","seat_name","joined_at"}]}`.
+An empty list is `{"servers":[]}`. The token is not a field. A server file
+that cannot be read, including a damaged one, is `500` `store_unavailable`.
+
+### Join
+
+`POST /api/team/servers` takes a body `{"link","name"}`, at most 4 KiB,
+with no unknown fields. `name` is
+1 to 64 bytes of UTF-8 without control characters and without leading or
+trailing space. `link` is `BASE/join#CODE`.
+
+Success is `201` with one server object in the same shape as the list.
+
+Checks run in this order:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `bad_request` | The body or the name is not usable, or the team server rejected the registration as `bad_request` |
+| 400 | `invalid_link` | The link is not a join link |
+| 500 | `identity_unavailable` | The installation ID cannot be read |
+| 500 | `store_unavailable` | The server file cannot be read |
+| 502 | `unreachable` | The team server could not be contacted |
+| 502 | `bad_server` | The team server did not speak protocol 1, or registration named a different server than hello |
+| 409 | `already_joined` | This seat already has that server. The join code is not sent |
+| 403 | `join_refused` | The team server refused the join code |
+| 409 | `already_registered` | The installation is already registered on that server |
+| 507 | `server_full` | The team server is at its seat limit |
+| 500 | `joined_but_not_saved` | The team server accepted the seat and this computer could not store the result. The join code is spent |
+
+### Status
+
+`GET /api/team/servers/{id}/status` answers `200` and
+`{"status":"<state>"}`. The check writes nothing. It is bounded to 8
+seconds. The token is sent only after Hello on the stored URL names the
+stored server.
+
+| State | When |
+| --- | --- |
+| `connected` | Hello named the stored server and the token is still accepted |
+| `refused` | Hello named the stored server and the token was refused |
+| `offline` | Hello or the token check could not reach the server, or the time bound passed |
+| `changed` | Hello named another server, or the answer was not protocol 1, or the token check failed for another reason |
+
+An id that is not in the server file is `404` `not_found`. A server file
+that cannot be read, including a damaged one, is `500` `store_unavailable`.
+
+### Change this seat's name
+
+`PUT /api/team/servers/{id}/seat` takes `{"name":"..."}`, at most 1 KiB,
+with no unknown fields, and requires CSRF. The name follows the join name
+rules. The seat confirms the server identity before sending its token and the
+new name. Success is `200` with the server object from the list, including the
+updated `seat_name`.
+
+Errors are `400 bad_request` for a bad body or name, `404 not_found` when the
+server is not joined, `502 unreachable` when it cannot be reached, `502 refused`
+when the token is refused, `422 name_refused` when the server rejects the name,
+`502 bad_server` for an identity or protocol error, and `500 store_unavailable`
+when local state cannot be saved. If the server accepts the change but saving
+fails, the names differ until the next successful change.
+
+### Leave
+
+`POST /api/team/servers/{id}/leave` takes no body. Success is `204` when
+the seat left the server and the entry was removed. A token the server
+refuses counts as left: the seat is already gone there, the entry is
+removed, and the answer is `204`. An entry another request removed in the
+meantime is still `204`. The token is sent only after Hello on the stored
+URL names the stored server.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 404 | `not_found` | The id is not in the server file |
+| 500 | `store_unavailable` | The server file cannot be read |
+| 502 | `unreachable` | Hello or the leave call could not reach the server |
+| 502 | `bad_server` | Hello named another server, or Hello or the leave call failed for another reason |
+| 500 | `left_but_not_removed` | The seat left and the entry could not be removed |
+
+On `unreachable` and `bad_server` the entry stays.
+
+### Forget
+
+`DELETE /api/team/servers/{id}` answers `204` when the server was
+forgotten, and `404` `not_found` when it was not in the file. The call
+does not contact the team server. The seat stays registered there until the operator revokes it. Use this when leaving is not possible. A damaged server file is
+`500` `store_unavailable` and is left untouched.
+
+### Seats
+
+`GET /api/team/servers/{id}/seats` answers `200` and
+`{"self":"<installation id>","seats":[{"id","name"}]}` in the order the
+team server sent. An empty roster is `"seats":[]`. The token is sent only
+after Hello on the stored URL names the stored server. The call does not
+write a file.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 404 | `not_found` | The id is not in the server file |
+| 500 | `identity_unavailable` | The installation ID cannot be read |
+| 500 | `store_unavailable` | The server file cannot be read |
+| 502 | `unreachable` | Hello or the roster call could not reach the server |
+| 502 | `bad_server` | Hello named another server, or the answer was not the roster |
+| 502 | `refused` | The team server answered 401 |
+| 422 | `unknown_member` | The team server rejected a member |
+| 507 | `server_full` | The team server is at its quota |
+
+### Shares
+
+`GET /api/team/shares` answers `200` and `{"shares":[<view>]}` ordered by
+node, then chat id. An empty list is `{"shares":[]}`. The file is not
+created when there are no shares.
+`GET /api/team/shares/{node}` answers one view, or `404` `not_found`.
+Neither call contacts a team server.
+
+```json
+{"uid":"...","node":"...","server":"...","scope":"from_now",
+ "state":"active","delivery":"ok","members":[{"seat":"...","access":"read"}],
+ "shared_at":"2026-11-14T09:30:00Z"}
+```
+
+`members` is `[]` when no seat was named. `delivery` is what the outbox
+last saw for that server in this process.
+
+| Delivery | When |
+| --- | --- |
+| `ok` | The last copy succeeded, or no copy has been attempted |
+| `offline` | The team server could not be reached |
+| `refused` | The team server answered 401 |
+| `changed` | Hello named another server, or the answer was not protocol 1 |
+
+Before the first attempt it is `ok`. A word outside this list is reported
+as `ok`.
+
+`PUT /api/team/shares/{node}` takes
+`{"server","scope","members":[{"seat","access"}]}`, at most 64 KiB, with
+no unknown fields. `scope` is `from_now` or `all`. `access` is `read` or
+`write`. `seat` is 32 lowercase hexadecimal characters, not this
+installation's id, and not repeated. At most 200 members. `members` may
+be `[]` and may not be null or absent.
+
+The node must still be in `nodes.jsonl`, and its session log must carry
+one chat id. Otherwise `404` `not_found` or `409` `no_history`.
+
+No share for that chat: Hello, create the channel, set the members, then
+save state `active`. Success is `201` and the view. `from_now` starts at
+the current record count. `all` starts at 0. A channel that already
+exists is deleted and created once more. If it still exists, the answer
+is `502` `bad_server` and nothing is stored. A failure after the channel
+exists deletes it again, best effort, and stores nothing.
+
+A share for that chat: `server` and `scope` must equal the stored ones,
+otherwise `409` `share_fixed`. State `active` replaces the members and
+answers `200` and the view. The cursor, title, generation, and sharing
+time stay as they were. Any other state is `409` `not_active`.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `bad_request` | The body, the scope, or a member is not usable |
+| 404 | `not_found` | The node or the server is not known |
+| 409 | `no_history` | The node has no single chat id in its session log |
+| 409 | `share_fixed` | The server or the scope differs from the stored share |
+| 409 | `not_active` | The share is stopping, lost, or full |
+| 422 | `unknown_member` | The team server rejected a member |
+| 500 | `identity_unavailable` | The installation ID cannot be read |
+| 500 | `store_unavailable` | A file cannot be read or written |
+| 502 | `unreachable` | Hello or a channel call could not reach the server |
+| 502 | `bad_server` | Hello named another server, or the answer was not protocol 1 |
+| 502 | `refused` | The team server answered 401 |
+| 507 | `server_full` | The team server is at its quota |
+| 507 | `too_many` | This seat already has 256 shares |
+
+`DELETE /api/team/shares/{node}` stops sharing. The share is saved as
+`stopping` before any call, and from then on the outbox sends no content
+for it. Hello and delete follow. Success, a missing channel, and a
+refused token all count as stopped: the share is removed and the answer
+is `204` with an empty body. When Hello cannot reach the server, or Hello
+names another server, the answer is `202` and the view with state
+`stopping`. The outbox finishes the job. A server that is no longer in
+the server file has no URL to call, so the share is removed locally and
+the answer is `204`.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 404 | `not_found` | This node has no share |
+| 500 | `identity_unavailable` | The installation ID cannot be read. The share stays as it was |
+| 500 | `store_unavailable` | A file cannot be read or written. A failed save leaves the previous state |
+| 502 | `bad_server` | Hello or the delete call failed for a reason other than being unreachable or naming another server. The share stays `stopping` |
+| 202 | `stopping` | The server could not be reached, or Hello named another server |
+
+### Subscriptions
+
+`GET /api/team/subscriptions` lists chats shared with this seat. It answers
+`200` with `{"subscriptions":[<view>],"servers":[{"id","delivery"}],"truncated":false}`.
+A view contains `server`, `server_name`, `owner`, `owner_name`, `chat`,
+`generation`, `title`, `access`, `state`, `mirror_last`, `seen_mirror`,
+`comments_last`, `seen_comments`, `unread` and `first_seen`. Views are ordered by server, owner, chat and first
+sighting. Access is `read`, `write` or `owner`; state is `live` or `ended`.
+Unread means the subscription is live and comments are unseen, or, for a
+guest, mirror entries are unseen. The owner's own mirror entries do not count.
+`truncated` says the 4096-entry
+limit prevented a new subscription from being stored. Delivery is `ok`,
+`offline`, `refused` or `changed` as in the share view, and starts at `ok`.
+Channels whose owner, chat or generation is not fixed-length lowercase hex
+are skipped.
+
+The list refreshes each joined server at most once per ten seconds, after
+Hello confirms its identity. Missing or revoked shares become ended; a subscription becomes live again
+if the same generation is listed again, retaining its read position and copy.
+A new subscription inherits a known owner name from the same server; otherwise
+a new unnamed owner prompts a roster request. Other roster refreshes are at
+least ten minutes apart, including after a failed request.
+A damaged or inaccessible server or subscription file is `500`
+`store_unavailable`.
+
+`GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}?after=N`
+fetches up to eight pages for a live subscription on a joined server, appends
+valid entries to its local copy, then answers `200` with
+`{"view":<view with delivery>,"entries":[...],"last":N,"next":N,"more":false}`.
+`after` defaults to zero. The answer includes at most 256 entries and 4 MiB
+of text; `last` is the highest sequence in the copy. `next` is the last
+sequence dealt with, including omitted entries; pass it as `after` to continue.
+When no entry was dealt with, `next` is `after`, capped at `last`. `more`
+is true when `next` is below `last` or the fetch stopped at its page limit. Known start, user,
+assistant and source bodies are projected with `seq` and `at`; unknown bodies
+remain in the copy and are omitted. A user entry may carry boolean `prov` to identify forwarded AI text and string `omitted` when the message is too large to share. Ended subscriptions and unavailable
+servers remain readable from the copy.
+
+Errors are `404` `not_found` for an invalid identity or unknown subscription,
+`400` `bad_request` for an invalid `after`, `500` `store_unavailable` for
+unavailable state, `500` `copy_damaged` for a damaged copy, and `507`
+`storage_full` when the storage budget refuses an append and the copy has no
+entry after `after`.
+
+`GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments?after=N`
+fetches and reads the comments copy under the same paging, retention and error
+rules as the mirror. It answers `{"entries":[{"seq","at","author","mine",
+"text","anchor"}],"names":{},"last":N,"next":N,"more":false}`. Names are
+the last-known names of retained comment authors on that server, overlaid by
+its cached roster and then this seat's own name when joined. The roster is read
+again at most once per 60 seconds while comments are read, so a known author's
+new name shows within about a minute. Last-known names survive a restart or a
+seat leaving; they are removed when the last subscription to that server is
+removed. Local browser names still take precedence in the page. A failure to
+read or write last-known names does not fail the comments read. A muxer restart
+while an author is still unnamed forgets that author until a read from the start
+of the copy, for example opening the view, shows the comment again. Unknown
+comment shapes remain in the copy but are skipped in the answer.
+
+`POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments`
+takes `{"text":"...","anchor":N,"key":"<16 lowercase hex>"}`, at most
+64 KiB, without unknown fields, and requires CSRF. Text must be valid UTF-8,
+nonblank, and at most 16,384 bytes. The anchor cannot exceed the last copied
+mirror number. A successful or duplicate append answers `200 {"seq":N}`;
+messages are not queued or copied by the post. Errors are `400 bad_request`,
+`404 not_found`, `403 read_only`, `409 not_active`, `500 store_unavailable`,
+`500 copy_damaged`, `502 refused`, `502 unreachable`, `502 bad_server`,
+`507 server_full`, and `413 too_large`.
+
+`PUT /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/seen`
+takes `{"mirror":N}`, `{"comments":N}`, or both, with no unknown fields
+and at most 1 KiB, and requires the CSRF header. It records the greater of
+each old seen position and `N`, capped at that log's highest copied sequence,
+without contacting a server. Success
+is `204`; errors are `404` `not_found`, `400` `bad_request`, and `500`
+`store_unavailable`.
+
+`DELETE /api/team/subscriptions/{server}/{owner}/{chat}/{generation}` removes
+one subscription and its saved copy. For a live subscription on a joined
+server, it first confirms that server's identity and leaves the channel;
+ended or unjoined subscriptions need no server request. Success is `204`.
+Errors are `404` `not_found` for an invalid identity or unknown subscription,
+`409` `own_share` for a live owner subscription, `502` `unreachable` for an unreachable server, `502` `bad_server` for another
+server failure, and `500` `store_unavailable` for a local storage failure.
+A failed local save can leave the entry without its copy, so it can be retried.
+
+The subscription list, read and comment-post routes ask a team server on
+behalf of this seat; no background subscription fetch is performed.
+
+Any other method or path under `/api/team` is `404` `not_found`.

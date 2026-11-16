@@ -195,6 +195,7 @@ func Run() {
 		Stderr:             os.Stderr,
 		Home:               home,
 		ExperimentalRemote: experimentalRemoteEnabled(os.Getenv),
+		ExperimentalTeam:   experimentalTeamEnabled(os.Getenv),
 		Config: remote.Config{
 			Stdin:  os.Stdin,
 			Stdout: os.Stdout,
@@ -289,6 +290,7 @@ func Run() {
 			// cache no-ops outside the prompt-driven window, so this cannot
 			// probe providers overnight (usage.go).
 			a.maybeRefreshUsageAsync()
+			a.copySharedChats()
 			time.Sleep(2 * time.Second)
 		}
 	}()

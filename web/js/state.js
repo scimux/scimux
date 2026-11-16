@@ -52,13 +52,22 @@ export function normUI(j) {
    R20.7: they dedupe by stable identity and must always replay across revision changes. Wholesale list
    snapshots (groups/lanes/pin-order) and arch/unarch/pin are not. */
 export function idempotentOp(op) {
-  return op.k === "bookmark-add" || op.k === "bookmark-del" || op.k === "forward-link-add";
+  return op.k === "bookmark-add" || op.k === "bookmark-del" || op.k === "forward-link-add" || op.k === "person-name";
 }
 
 /* Apply one operation to doc IN PLACE. Returns the same doc reference.
    Unknown op.k is a no-op. Matches the inline switch body exactly. */
 export function applyOp(doc, op) {
   switch (op.k) {
+    case "person-name":
+      if (typeof op.key !== "string") break;
+      if (!/^[0-9a-f]{32}\/[0-9a-f]{32}$/i.test(op.key)) break;
+      if (typeof op.name !== "string") break;
+      if ([...op.name].length > 64) break;
+      doc.people ||= {};
+      if (op.name) doc.people[op.key] = op.name;
+      else delete doc.people[op.key];
+      break;
     case "arch":
       doc.archived ||= [];
       if (!doc.archived.includes(op.id)) doc.archived.push(op.id);

@@ -3,6 +3,7 @@
  * re-test format escaping, lanes hash, Notes workspace, or search. */
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as bookmarkModule from "../js/bookmarks.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -36,6 +37,45 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const bookmarksSrc = readFileSync(join(__dirname, "../js/bookmarks.js"), "utf8");
 const chatSrc = readFileSync(join(__dirname, "../js/chat.js"), "utf8");
 const appSrc = readFileSync(join(__dirname, "../js/app.js"), "utf8");
+
+test("quoted shared text identifies its writer and any AI content", () => {
+  const quote = bookmarkModule.discloseQuoted;
+  assert.equal(typeof quote, "function");
+  assert.equal(quote("", { role: "person", who: "A" }), "");
+  assert.equal(quote("x", { role: "assistant" }), AI_DISCLOSURE + "\n\nx");
+  assert.equal(quote("x", { role: "user" }), "x");
+  assert.equal(quote("x", {}), "x");
+  for (const prov of [false, {}, undefined]) {
+    assert.equal(quote("x", { role: "person", who: "A", prov }), "[Written by A, quoted from a shared chat — not written by me:]\n\nx");
+  }
+  assert.equal(quote("x", { role: "person", who: "A", prov: true }), "[Written by A, includes AI-generated text, quoted from a shared chat — not written by me:]\n\nx");
+  assert.equal(quote("x", { role: "person" }), "[Written by another person, quoted from a shared chat — not written by me:]\n\nx");
+  for (const role of ["assistant", "user", ""]) for (const prov of [undefined, {}]) {
+    assert.equal(quote("x", { role, prov }), discloseAgentOutput("x", role));
+  }
+});
+
+test("send-to quotes a shared person's text", () => {
+  const ctx = createFeature({ nodes: sendtoNodes });
+  ctx.feature.openSendTo({ text: "synthetic", role: "person", who: "A", prov: true });
+  const target = el("button", { dataset: { fwd: "ok" } });
+  target.closest = sel => sel === "[data-fwd]" ? target : null;
+  ctx.roots.sendtoList.onclick({ target });
+  assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "ok"), "[Written by A, includes AI-generated text, quoted from a shared chat — not written by me:]\n\nsynthetic");
+});
+
+test("bookmark pane sends the shared writer and provenance", () => {
+  const ctx = createFeature({ bookmarks: [{ t: "shared", text: "synthetic", role: "person", who: "A", prov: true }] });
+  ctx.feature.bind(); ctx.feature.setOpen(true);
+  const card = el("div", { dataset: { t: "shared" } });
+  const button = el("button", { dataset: { bmact: "sendto" } });
+  button.closest = sel => sel === "[data-bmact]" ? button : sel === ".bookmark" ? card : null;
+  ctx.roots.bookmarkspane.dispatch("click", { target: button });
+  const target = el("button", { dataset: { fwd: "n2" } });
+  target.closest = sel => sel === "[data-fwd]" ? target : null;
+  ctx.roots.sendtoList.onclick({ target });
+  assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "n2"), "[Written by A, includes AI-generated text, quoted from a shared chat — not written by me:]\n\nsynthetic");
+});
 
 /* ---------- module shape ---------- */
 test("bookmarks.js exports factory and pure helpers; no later-feature imports", () => {
@@ -2156,4 +2196,25 @@ test("a bookmark taken from a chat turn records whose turn it was", () => {
     "chat bubble bookmark stamps the turn's role");
   assert.match(appSrc, /bookmark\.role\s*=/,
     "station bookmark stamps the turn's role");
+});
+
+test("shared bookmark source line names its writer and chat", () => {
+  const esc = s => String(s).replaceAll("<", "&lt;").replaceAll("&", "&amp;");
+  const html = nt => bookmarkListHTML({ list: [{ t: "T", text: "x", ...nt }], bookmarkTab: "GENERAL", esc, fmtWhen: () => "TIME" });
+  assert.match(html({ who: "Ann" }), /TIME · Ann/);
+  assert.match(html({ from: "Chat" }), /TIME · Chat/);
+  assert.match(html({ who: "Ann", from: "Chat" }), /TIME · Ann · Chat/);
+  assert.match(html({ who: "<A", from: "<B" }), /&amp;lt;A · &amp;lt;B/);
+  assert.match(html({}), /<div class="when">TIME<\/div>/);
+});
+
+test("old send-to roles keep their original draft with or without provenance", () => {
+  for (const role of ["assistant", "user", ""]) for (const prov of [undefined, { synthetic: true }]) {
+    const ctx = createFeature({ nodes: sendtoNodes });
+    ctx.feature.openSendTo({ text: "synthetic", role, prov });
+    const target = el("button", { dataset: { fwd: "ok" } });
+    target.closest = sel => sel === "[data-fwd]" ? target : null;
+    ctx.roots.sendtoList.onclick({ target });
+    assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "ok"), discloseAgentOutput("synthetic", role));
+  }
 });

@@ -781,3 +781,41 @@ test("operation matrix: every known k applied once produces expected fields", ()
   assert.equal(doc.groups, groups);
   assert.equal(doc.lanes, lanes);
 });
+
+test("person-name sets, changes and removes local names idempotently", () => {
+  const key = "a".repeat(32) + "/" + "b".repeat(32), other = "c".repeat(32) + "/" + "d".repeat(32);
+  const doc = {};
+  const op = name => ({ k: "person-name", key, name });
+  assert.equal(idempotentOp(op("Ann")), true);
+  applyOp(doc, op("Ann")); applyOp(doc, op("Ann")); assert.deepEqual(doc.people, { [key]: "Ann" });
+  applyOp(doc, op("Bea")); applyOp(doc, { k: "person-name", key: other, name: "Cy" });
+  assert.deepEqual(doc.people, { [key]: "Bea", [other]: "Cy" });
+  applyOp(doc, op("")); assert.deepEqual(doc.people, { [other]: "Cy" });
+  applyOp(doc, op("")); applyOp(doc, { k: "person-name", key: other, name: "" }); assert.deepEqual(doc.people, {});
+  const missing = {}; applyOp(missing, op("")); assert.deepEqual(missing.people, {});
+});
+
+test("person-name rejects malformed keys and overly long names", () => {
+  const valid = "a".repeat(32) + "/" + "b".repeat(32);
+  for (const key of ["", "a".repeat(31) + "/" + "b".repeat(32), "a".repeat(32) + "/" + "b".repeat(31), "g".repeat(32) + "/" + "b".repeat(32), "a".repeat(32) + "-" + "b".repeat(32), valid + "/x", null]) {
+    const doc = {}; applyOp(doc, { k: "person-name", key, name: "A" }); assert.deepEqual(doc, {});
+  }
+  for (const name of ["x".repeat(65), "🙂".repeat(65), null]) {
+    const doc = {}; applyOp(doc, { k: "person-name", key: valid, name }); assert.deepEqual(doc, {});
+  }
+  const doc = {}; applyOp(doc, { k: "person-name", key: valid, name: "🙂".repeat(64) }); assert.equal(doc.people[valid], "🙂".repeat(64));
+  const uppercase = "A".repeat(32) + "/" + "B".repeat(32);
+  applyOp(doc, { k: "person-name", key: uppercase, name: "Upper" }); assert.equal(doc.people[uppercase], "Upper");
+});
+
+test("other operations leave absent people absent", () => {
+  const ops = [
+    { k: "arch", id: "a" }, { k: "unarch", id: "a" },
+    { k: "bookmark-add", bookmark: { t: "1" } }, { k: "bookmark-del", t: "1" },
+    { k: "forward-link-add", link: { id: "1" } }, { k: "pin", id: "a" }, { k: "unpin", id: "a" },
+    { k: "pin-order", pinned: [] }, { k: "groups", groups: [] }, { k: "lanes", lanes: [] }, { k: "other" },
+  ];
+  for (const op of ops) {
+    const doc = {}; applyOp(doc, op); assert.equal(Object.hasOwn(doc, "people"), false, op.k);
+  }
+});

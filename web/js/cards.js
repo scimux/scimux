@@ -303,7 +303,7 @@ export function attnFoldButtonHTML(foldLen, attnFoldOpen){
 
 export function cardTabsHTML({
   cardTab, laneFilter, laneColor, laneName, currentCount, archivedCount, pinnedCount,
-  escape = esc,
+  escape = esc, extra = "",
 }){
   const scope = laneFilter
     ? `<span class="tabdot" style="background:${escape(laneColor)}"></span>${escape(laneName)} (${currentCount})<span class="x" data-clear-scope aria-label="show all activities">&#10005;</span>`
@@ -311,7 +311,7 @@ export function cardTabsHTML({
   const pc = pinnedCount || 0;
   return `<button data-tab="current" class="${cardTab === "current" ? "on" : ""}">${scope}</button>` +
     (pc ? `<button data-tab="pinned" class="${cardTab === "pinned" ? "on" : ""}">Pinned (${pc})</button>` : "") +
-    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}">Archived (${archivedCount})</button>`;
+    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}">Archived (${archivedCount})</button>` + extra;
 }
 
 /* Drag end: persist DOM order, then append any off-screen survivors. */
@@ -397,6 +397,7 @@ export function createCardsFeature(deps){
   let cardSwipe = null;
   let ageTimer = null;
   let bound = false;
+  let lastTabsHTML = "";
   const cleanups = [];
 
   const icons = d.icons || {};
@@ -479,7 +480,7 @@ export function createCardsFeature(deps){
     </div>`;
   }
 
-  function renderCardTabs(){
+  function renderCardTabs(sharedPath = false){
     if (!tabs) return;
     const laneFilter = g("laneFilter", "");
     const cardTab = g("cardTab", "current");
@@ -494,7 +495,9 @@ export function createCardsFeature(deps){
     });
     const color = laneFilter && d.laneColor ? d.laneColor(laneFilter) : "";
     const name = laneFilter && d.laneName ? d.laneName(laneFilter) : "";
-    tabs.innerHTML = cardTabsHTML({
+    let extra = "";
+    if (d.sharedTab) extra = d.sharedTab.tabHTML(cardTab === "shared");
+    const html = cardTabsHTML({
       cardTab,
       laneFilter,
       laneColor: color,
@@ -502,8 +505,13 @@ export function createCardsFeature(deps){
       currentCount,
       archivedCount,
       pinnedCount: pinnedCount(),
-      escape,
+      escape, extra,
     });
+    if (sharedPath) {
+      if (html === lastTabsHTML) return;
+    }
+    tabs.innerHTML = html;
+    lastTabsHTML = html;
   }
 
   /* Runs on both poll branches, including the 304 short-circuit that is
@@ -586,6 +594,19 @@ export function createCardsFeature(deps){
       set("cardTab", cardTab);
     }
     const nodes = g("nodes", []) || [];
+    if (cardTab === "shared") {
+      if (d.sharedTab) {
+        if (d.sharedTab.render(list)) {
+          renderCardTabs(true);
+          set("cardsSig", "");
+          const waiting = nodes.filter(hardAttention).length;
+          if (doc) doc.title = (waiting ? `(${waiting}) ` : "") + "scimux";
+          return;
+        }
+      }
+      cardTab = "current";
+      set("cardTab", cardTab);
+    }
     const pinned = g("pinned", []);
     const archived = g("archived", []);
     const laneFilter = g("laneFilter", "");

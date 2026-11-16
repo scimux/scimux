@@ -91,11 +91,13 @@
         <span class="dot" id="chatdot"></span>
         <h2 id="chattitle">scimux</h2>
         <button class="headtoggle" id="infobtn" aria-label="show details"></button>
+        <button class="headtoggle" id="sharebtn" aria-label="share chat" title="Share chat" hidden></button>
         <button class="headtoggle" id="bookmarksbtn" aria-label="open bookmarks"></button>
         <!-- dock only: closes the wall map's chat pop-out. Trailing, so it sits
              top-right where the bookmarks chevron does outside the dock. -->
         <button class="headtoggle" id="dockclose" aria-label="close chat">&#10005;</button>
       </div>
+      <button id="sharestatus" hidden></button>
       <div class="mission" id="chatmission"></div>
       <div id="chatdetails" aria-hidden="true">
         <div class="detailmeta">
@@ -230,6 +232,31 @@
   </div>
 </div>
 
+
+<div id="sharedview" hidden role="dialog" aria-modal="true" aria-labelledby="sv_title">
+  <div id="sv_scrim"></div>
+  <div id="sv_panel">
+    <div id="sv_head">
+      <button id="sv_back">&#8249; Shared</button>
+      <div class="phtext">
+        <div id="sv_title"></div>
+        <div id="sv_from"></div>
+        <div id="sv_state"></div>
+      </div>
+      <button id="sv_remove"></button>
+    </div>
+    <div id="sv_body" role="log" aria-label="Shared chat" tabindex="0"></div>
+    <button id="sv_more" hidden>Load more</button>
+    <div id="sv_compose" hidden>
+      <label class="sr-only" for="sv_text">Message to people</label>
+      <textarea id="sv_text" rows="2" placeholder="Message to people" aria-describedby="sv_hint"></textarea>
+      <button id="sv_send">Send</button>
+      <div id="sv_hint">People in this chat see this. The agent does not.</div>
+    </div>
+    <div id="sv_note" role="status"></div>
+  </div>
+</div>
+
 <!-- Notes workspace (sheets): a singleton synthesis surface, mounted once and
      OUTSIDE every polled render region, so the section editors are never rebuilt
      from a poll (invariant). Three zones on iPad/desktop
@@ -350,6 +377,16 @@
   <div class="sect" id="sendto_list"></div>
 </div>
 
+<div class="sheet" id="sharesheet">
+  <div class="grab"></div>
+  <h3>Share chat</h3>
+  <div class="sect" id="sh_body"></div>
+  <div id="sh_note" hidden></div>
+  <button class="cta" id="sh_apply"></button>
+  <button class="cta" id="sh_stop" hidden></button>
+  <div class="sr-only" id="sh_live" aria-live="polite"></div>
+</div>
+
 <!-- fare ticket (tap a fare capsule on the wall map). The body is rendered by
      the map feature; the sheet itself is a plain static shell like every other
      one. No <h3>: the ticket prints its own head. -->
@@ -444,6 +481,21 @@
     <button class="cta" id="m_homescreen" hidden>Add to Home Screen</button>
     <button class="cta" id="m_unlink" hidden>Unlink from the rendezvous</button>
     <div id="m_unlink_note" hidden></div>
+  </details>
+  <details class="sect menu-section" id="m_sharing" hidden>
+    <summary>SHARING</summary>
+    <div id="m_team_servers"></div>
+    <button class="cta" id="m_team_add">Add server</button>
+    <div id="m_team_form" hidden>
+      <label for="m_team_link">Join link</label>
+      <input id="m_team_link" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="m_team_name">Your name on this server</label>
+      <input id="m_team_name" type="text" autocomplete="off" maxlength="64">
+      <button class="cta" id="m_team_join">Join</button>
+      <button class="cta" id="m_team_cancel">Cancel</button>
+    </div>
+    <div id="m_team_note" hidden></div>
+    <div class="sr-only" id="m_team_live" aria-live="polite"></div>
   </details>
   <details class="sect menu-section" id="m_harness_section">
     <summary>HARNESSES</summary>

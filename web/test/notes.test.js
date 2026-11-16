@@ -3756,3 +3756,72 @@ test("the workspace's two send-to callers pass the frozen transcript role", () =
   assert.match(notesSrc, /role:\s*\(ref\.snapshot && ref\.snapshot\.role\)/,
     "a reference's send-to passes its frozen role even when speaker is an agent name");
 });
+
+test("shared bookmark source and snapshot preserve the person", () => {
+  const html = nt => inboxItemHTML({ t: "T", text: "x", ...nt }, "color", { fmtWhen: () => "TIME" });
+  assert.match(html({ who: "Ann" }), /TIME · Ann/);
+  assert.match(html({ from: "Chat" }), /TIME · Chat/);
+  assert.match(html({ who: "Ann", from: "Chat" }), /TIME · Ann · Chat/);
+  assert.match(html({ who: "<A", from: "<B" }), /&lt;A · &lt;B/);
+  assert.match(html({}), /<div class="wsiwhen">TIME<\/div>/);
+  const snap = buildBookmarkSnapshot({ t: "T", text: "x", role: "person", who: "Ann", from: "Chat", prov: true });
+  assert.equal(snap.speaker, "Ann"); assert.equal(snap.station, "Chat"); assert.equal(snap.role, "person"); assert.equal(snap.prov, true);
+  assert.equal(buildBookmarkSnapshot({ role: "person" }).speaker, "another person");
+});
+
+test("notes inbox sends the shared writer and provenance", () => {
+  const calls = [];
+  const ctx = createFeature({ bookmarks: [{ t: "1", text: "x", role: "person", who: "Ann", prov: true }], deps: { openSendTo: opts => calls.push(opts) } });
+  ctx.feature.bind();
+  const card = el("div", { dataset: { t: "1" } });
+  const btn = el("button", { dataset: { bmact: "sendto" } });
+  btn.closest = sel => sel === "[data-bmact]" ? btn : sel === ".wsibookmark" ? card : null;
+  ctx.roots.wsinboxlist.dispatch("click", { target: btn });
+  assert.equal(calls[0].who, "Ann"); assert.equal(calls[0].prov, true); assert.equal(calls[0].role, "person");
+});
+
+test("note reference sends its frozen shared writer and provenance", async () => {
+  const calls = [];
+  const ctx = createFeature({ notes: [{ id: "n1", title: "N", order: 0 }], docs: { n1: { id: "n1", title: "N", sections: [{ id: "s1", title: "", body: "", order: 0, references: [{ id: "r1", source: {}, snapshot: { text: "x", role: "person", speaker: "Ann", prov: true } }] }] } }, deps: { openSendTo: opts => calls.push(opts) } });
+  ctx.feature.bind(); ctx.feature.open(); await settle(); await openNote(ctx, "n1");
+  const sec = el("div", { dataset: { sec: "s1" } }), ref = el("div", { dataset: { ref: "r1" } });
+  const btn = el("button", { dataset: { refact: "sendto" } });
+  btn.closest = sel => sel === "[data-refact]" ? btn : sel === ".wsref" ? ref : sel === ".wssec" ? sec : null;
+  ctx.roots.wssections.dispatch("click", { target: btn });
+  assert.equal(calls[0].who, "Ann"); assert.equal(calls[0].prov, true); assert.equal(calls[0].role, "person");
+});
+
+test("placing a shared person's bookmark freezes its source details", async () => {
+  const bookmark = { t: "1", text: "synthetic", role: "person", who: "Ann", from: "Chat", prov: true };
+  const ctx = createFeature({ notes: [{ id: "n1", title: "N", order: 0 }], docs: { n1: { id: "n1", title: "N", sections: [{ id: "s1", title: "S", body: "", order: 0, references: [] }] } }, bookmarks: [bookmark] });
+  ctx.feature.bind(); ctx.feature.open(); await settle(); await openNote(ctx, "n1"); ctx.feature.startPlacement(bookmark);
+  const sec = el("div", { className: "wssec", dataset: { sec: "s1" } });
+  sec.appendChild(el("div", { className: "wssecbody" }));
+  const add = el("button", { dataset: { addhere: "" } });
+  add.closest = sel => sel === "[data-addhere]" ? add : sel === ".wssec" ? sec : null;
+  ctx.roots.wssections.dispatch("click", { target: add }); await settle();
+  const post = ctx.apiLog.find(x => x.method === "POST" && x.url.includes("/references"));
+  assert.ok(post); const payload = JSON.parse(post.body);
+  assert.equal(payload.snapshot.role, "person"); assert.equal(payload.snapshot.speaker, "Ann");
+  assert.equal(payload.snapshot.station, "Chat"); assert.equal(payload.snapshot.prov, true);
+  ctx.setBookmarks([]); await openNote(ctx, "n1"); await settle();
+  assert.equal(ctx.docs.n1.sections[0].references[0].snapshot.speaker, "Ann");
+});
+
+test("shared snapshot station handles absent, local and untitled sources", () => {
+  assert.equal(buildBookmarkSnapshot(null, { bookmarkLaneId: () => "" }).station, "");
+  assert.equal(buildBookmarkSnapshot({ text: "x" }).station, "");
+  assert.equal(buildBookmarkSnapshot({ node: "n", from: "Shared" }, { nodeById: () => ({ title: "Local" }) }).station, "Local");
+  assert.equal(buildBookmarkSnapshot({ from: "Shared" }).station, "Shared");
+});
+
+test("note reference send handles a missing snapshot", async () => {
+  const calls = [];
+  const ctx = createFeature({ notes: [{ id: "n1", title: "N", order: 0 }], docs: { n1: { id: "n1", title: "N", sections: [{ id: "s1", title: "", body: "", order: 0, references: [{ id: "r1", source: {} }] }] } }, deps: { openSendTo: opts => calls.push(opts) } });
+  ctx.feature.bind(); ctx.feature.open(); await settle(); await openNote(ctx, "n1");
+  const sec = el("div", { dataset: { sec: "s1" } }), ref = el("div", { dataset: { ref: "r1" } });
+  const btn = el("button", { dataset: { refact: "sendto" } });
+  btn.closest = sel => sel === "[data-refact]" ? btn : sel === ".wsref" ? ref : sel === ".wssec" ? sec : null;
+  ctx.roots.wssections.dispatch("click", { target: btn });
+  assert.equal(calls[0].who, ""); assert.equal(calls[0].prov, undefined); assert.equal(calls[0].role, "");
+});
