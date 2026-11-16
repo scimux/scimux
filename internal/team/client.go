@@ -283,12 +283,19 @@ func (c *Client) authed(ctx context.Context, method, baseURL, path, token string
 // Content-Type. limit is the largest response that is still a protocol
 // answer; a larger one is ErrProtocol.
 func (c *Client) doAuthed(ctx context.Context, method, baseURL, path, token string, body []byte, limit int) (int, []byte, error) {
+	return c.doAuthedQuery(ctx, method, baseURL, path, "", token, body, limit)
+}
+
+func (c *Client) doAuthedQuery(ctx context.Context, method, baseURL, path, query, token string, body []byte, limit int) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	endpoint, err := endpointURL(baseURL, path)
 	if err != nil {
 		return 0, nil, err
+	}
+	if query != "" {
+		endpoint += "?" + query
 	}
 	var reader io.Reader
 	if body != nil {

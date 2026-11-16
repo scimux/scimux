@@ -187,9 +187,9 @@ func (o *shareOutbox) stop(ctx context.Context, entry team.Entry, owner string, 
 	if !o.open(ctx, entry) {
 		return
 	}
-	err := o.client.DeleteChannel(ctx, entry.URL, entry.Token, owner, share.UID)
-	if err == nil || errors.Is(err, team.ErrNoChannel) || errors.Is(err, team.ErrUnauthorized) {
-		o.deleteStored(share.UID)
+	err := o.client.DeleteChannel(ctx, entry.URL, entry.Token, owner, share.UID, share.Generation)
+	if err == nil || errors.Is(err, team.ErrNoChannel) || errors.Is(err, team.ErrStaleGeneration) || errors.Is(err, team.ErrUnauthorized) {
+		o.deleteStoredGeneration(share)
 		o.noteSuccess(entry.ID)
 		return
 	}
@@ -243,7 +243,9 @@ func (o *shareOutbox) send(ctx context.Context, entry team.Entry, owner string, 
 			return
 		}
 		if created || gen != born {
-			_ = o.client.DeleteChannel(ctx, entry.URL, entry.Token, owner, share.UID)
+			if created {
+				_ = o.client.DeleteChannel(ctx, entry.URL, entry.Token, owner, share.UID, gen)
+			}
 			share.State = "lost"
 			_ = o.persist(share, born)
 			o.clearConfirmed(entry.ID)
@@ -412,6 +414,22 @@ func (o *shareOutbox) withFiles(fn func() error) error {
 func (o *shareOutbox) deleteStored(uid string) {
 	_ = o.withFiles(func() error {
 		return team.RemoveShare(o.dataDir, uid)
+	})
+}
+
+// deleteStoredGeneration removes only the share the remote delete meant.
+func (o *shareOutbox) deleteStoredGeneration(share team.Share) {
+	_ = o.withFiles(func() error {
+		shares, err := team.LoadShares(o.dataDir)
+		if err != nil {
+			return err
+		}
+		for _, stored := range shares {
+			if stored.UID == share.UID && stored.Generation == share.Generation {
+				return team.RemoveShare(o.dataDir, share.UID)
+			}
+		}
+		return nil
 	})
 }
 

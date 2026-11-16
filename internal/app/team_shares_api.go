@@ -298,24 +298,23 @@ func (h *teamHandler) createShare(w http.ResponseWriter, r *http.Request, entry 
 		return
 	}
 	if !created {
-		if err := h.client.DeleteChannel(ctx, entry.URL, entry.Token, inst, uid); err != nil {
+		if err := h.client.DeleteChannel(ctx, entry.URL, entry.Token, inst, uid, gen); err != nil {
 			writeShareCallError(w, err)
 			return
 		}
 		gen, created, err = h.client.PutChannel(ctx, entry.URL, entry.Token, inst, uid, sentTitle)
 		if err != nil {
-			h.bestEffortDelete(ctx, entry, inst, uid)
 			writeShareCallError(w, err)
 			return
 		}
 		if !created {
-			h.bestEffortDelete(ctx, entry, inst, uid)
+			h.bestEffortDelete(ctx, entry, inst, uid, gen)
 			writeTeamError(w, http.StatusBadGateway, "bad_server")
 			return
 		}
 	}
 	if err := h.client.SetMembers(ctx, entry.URL, entry.Token, inst, uid, members); err != nil {
-		h.bestEffortDelete(ctx, entry, inst, uid)
+		h.bestEffortDelete(ctx, entry, inst, uid, gen)
 		writeShareCallError(w, err)
 		return
 	}
@@ -330,15 +329,15 @@ func (h *teamHandler) createShare(w http.ResponseWriter, r *http.Request, entry 
 		State: "active", SharedAt: h.now().UTC().Format("2006-01-02T15:04:05Z"),
 	}
 	if err := h.writeShare(share); err != nil {
-		h.bestEffortDelete(ctx, entry, inst, uid)
+		h.bestEffortDelete(ctx, entry, inst, uid, gen)
 		writeShareSaveError(w, err)
 		return
 	}
 	writeJSONStatus(w, http.StatusCreated, h.shareAPI(share))
 }
 
-func (h *teamHandler) bestEffortDelete(ctx context.Context, entry team.Entry, inst, chat string) {
-	_ = h.client.DeleteChannel(ctx, entry.URL, entry.Token, inst, chat)
+func (h *teamHandler) bestEffortDelete(ctx context.Context, entry team.Entry, inst, chat, gen string) {
+	_ = h.client.DeleteChannel(ctx, entry.URL, entry.Token, inst, chat, gen)
 }
 
 // stopShare reads the installation and the server before it marks the share
@@ -363,7 +362,7 @@ func (h *teamHandler) stopShare(w http.ResponseWriter, r *http.Request, node str
 	entry, err := h.serverByID(share.Server)
 	if err != nil {
 		if errors.Is(err, team.ErrNotFound) {
-			h.finishStop(w, share.UID)
+			h.finishStop(w, share)
 			return
 		}
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
@@ -385,9 +384,9 @@ func (h *teamHandler) stopShare(w http.ResponseWriter, r *http.Request, node str
 		writeTeamError(w, http.StatusBadGateway, "bad_server")
 		return
 	}
-	err = h.client.DeleteChannel(r.Context(), entry.URL, entry.Token, string(inst), share.UID)
-	if err == nil || errors.Is(err, team.ErrNoChannel) || errors.Is(err, team.ErrUnauthorized) {
-		h.finishStop(w, share.UID)
+	err = h.client.DeleteChannel(r.Context(), entry.URL, entry.Token, string(inst), share.UID, share.Generation)
+	if err == nil || errors.Is(err, team.ErrNoChannel) || errors.Is(err, team.ErrStaleGeneration) || errors.Is(err, team.ErrUnauthorized) {
+		h.finishStop(w, share)
 		return
 	}
 	if errors.Is(err, team.ErrUnreachable) {
@@ -397,8 +396,8 @@ func (h *teamHandler) stopShare(w http.ResponseWriter, r *http.Request, node str
 	writeTeamError(w, http.StatusBadGateway, "bad_server")
 }
 
-func (h *teamHandler) finishStop(w http.ResponseWriter, uid string) {
-	err := h.deleteShareFile(uid)
+func (h *teamHandler) finishStop(w http.ResponseWriter, share team.Share) {
+	err := h.deleteShareFile(share.UID, share.Generation)
 	if err == nil || errors.Is(err, team.ErrNotFound) {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -451,9 +450,23 @@ func (h *teamHandler) keepShareFields(uid string, apply func(*team.Share)) (team
 	return team.Share{}, team.ErrNotFound
 }
 
-func (h *teamHandler) deleteShareFile(uid string) error {
+func (h *teamHandler) deleteShareFile(uid, generation string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	shares, err := team.LoadShares(h.dataDir)
+	if err != nil {
+		return err
+	}
+	matched := false
+	for _, share := range shares {
+		if share.UID == uid && share.Generation == generation {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return nil
+	}
 	if h.removeShare != nil {
 		return h.removeShare(h.dataDir, uid)
 	}

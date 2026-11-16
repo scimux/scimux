@@ -134,12 +134,15 @@ func (c *Client) PutChannel(ctx context.Context, baseURL, token, owner, chat, ti
 }
 
 // DeleteChannel is DELETE /v1/channels/{owner}/{chat}.
-func (c *Client) DeleteChannel(ctx context.Context, baseURL, token, owner, chat string) error {
+func (c *Client) DeleteChannel(ctx context.Context, baseURL, token, owner, chat, generation string) error {
 	path, err := channelPath(owner, chat, "")
 	if err != nil {
 		return err
 	}
-	status, raw, err := c.doAuthed(ctx, http.MethodDelete, baseURL, path, token, nil, maxResponseBody)
+	if !validHex(generation, 16) {
+		return ErrProtocol
+	}
+	status, raw, err := c.doAuthedQuery(ctx, http.MethodDelete, baseURL, path, "generation="+generation, token, nil, maxResponseBody)
 	if err != nil {
 		return err
 	}
@@ -452,7 +455,7 @@ func (c *Client) readLog(ctx context.Context, baseURL, token, owner, chat, log s
 	if err != nil {
 		return MirrorPage{}, err
 	}
-	status, raw, err := c.withAfter(after).doAuthed(ctx, http.MethodGet, baseURL, path, token, nil, maxMirrorRead)
+	status, raw, err := c.doAuthedQuery(ctx, http.MethodGet, baseURL, path, "after="+strconv.FormatUint(after, 10), token, nil, maxMirrorRead)
 	if err != nil {
 		return MirrorPage{}, err
 	}
@@ -464,29 +467,6 @@ func (c *Client) readLog(ctx context.Context, baseURL, token, owner, chat, log s
 		return MirrorPage{}, ErrProtocol
 	}
 	return page, nil
-}
-
-// queryTrip adds the mirror page query. The inner transport is the client's.
-type queryTrip struct {
-	inner http.RoundTripper
-	query string
-}
-
-func (q queryTrip) RoundTrip(r *http.Request) (*http.Response, error) {
-	next := r.Clone(r.Context())
-	next.URL.RawQuery = q.query
-	return q.inner.RoundTrip(next)
-}
-
-// withAfter returns a client that sends after= on the next call.
-func (c *Client) withAfter(after uint64) *Client {
-	clone := *c
-	inner := c.Transport
-	if inner == nil {
-		inner = &http.Transport{Proxy: nil, DisableKeepAlives: true}
-	}
-	clone.Transport = queryTrip{inner: inner, query: "after=" + strconv.FormatUint(after, 10)}
-	return &clone
 }
 
 func parseChannels(raw []byte, skipInvalidIDs bool) ([]Channel, error) {
