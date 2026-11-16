@@ -1896,3 +1896,25 @@ func TestStopSharingFencesStoredGeneration(t *testing.T) {
 		}
 	}
 }
+
+func TestStopSharingLeavesDamagedShareFile(t *testing.T) {
+	handler, dir, _, _ := readySurface(t, &shareScript{})
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode})
+	h := asTeamHandler(t, handler)
+	original := *h.client
+	h.client = &team.Client{Transport: teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodDelete {
+			if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("broken"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+		return original.Transport.RoundTrip(r)
+	})}
+	rec := doTeam(handler, http.MethodDelete, "/api/team/shares/"+shareNode, "")
+	assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+	raw, err := os.ReadFile(filepath.Join(dir, team.SharesFile))
+	if err != nil || string(raw) != "broken" {
+		t.Fatalf("damaged file changed: %q %v", raw, err)
+	}
+}

@@ -2750,3 +2750,28 @@ func TestOutboxStopFencesStoredGeneration(t *testing.T) {
 		}
 	}
 }
+
+func TestOutboxStopLeavesDamagedShareFile(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, _, inst := newShareBox(t, script)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, State: "stopping"})
+	old, _ := storedShare(t, dir, shareUID)
+	original := *box.client
+	box.client = &team.Client{Transport: teamRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodDelete {
+			if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("broken"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+		return original.Transport.RoundTrip(r)
+	})}
+	entries, err := team.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box.stop(context.Background(), entries[0], inst, old)
+	raw, err := os.ReadFile(filepath.Join(dir, team.SharesFile))
+	if err != nil || string(raw) != "broken" {
+		t.Fatalf("damaged file changed: %q %v", raw, err)
+	}
+}
