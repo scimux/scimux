@@ -2213,3 +2213,176 @@ func TestTeamRenameSeatRejectsOtherMethods(t *testing.T) {
 		t.Fatal("wrong method reached server")
 	}
 }
+
+func TestTeamSettingLiveMuxer(t *testing.T) {
+	cmd, data, _, _ := startTeamCommand(t, false, true)
+	a := cmd.application
+	h, err := newCoreMux(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(on bool) {
+		t.Helper()
+		if err := os.WriteFile(a.settingsPath, []byte(fmt.Sprintf(`{"experimental_feature_team":%t}`, on)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func() int {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/team/servers", nil))
+		return rec.Code
+	}
+	assertTeamPathsMatchUnknown(t, h)
+	a.copySharedChats()
+	assertNoTeamFile(t, data)
+	set(true)
+	if got := get(); got != 200 {
+		t.Fatalf("file on: %d", got)
+	}
+	firstHandler, firstOutbox := a.teamHandler, a.shareOutbox
+	if firstHandler == nil || firstOutbox == nil {
+		t.Fatal("missing installation")
+	}
+	file := filepath.Join(data, team.SharesFile)
+	original := []byte("[]\n")
+	if err := os.WriteFile(file, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	set(false)
+	assertTeamPathsMatchUnknown(t, h)
+	firstOutbox.mu.Lock()
+	done := make(chan struct{})
+	go func() { a.copySharedChats(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		firstOutbox.mu.Unlock()
+		t.Fatal("off poll kicked outbox")
+	}
+	firstOutbox.mu.Unlock()
+	if got, err := os.ReadFile(file); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("team file changed: %q %v", got, err)
+	}
+	set(true)
+	if got := get(); got != 200 {
+		t.Fatalf("file on again: %d", got)
+	}
+	if a.teamHandler != firstHandler || a.shareOutbox != firstOutbox {
+		t.Fatal("installation replaced")
+	}
+	firstOutbox.mu.Lock()
+	done = make(chan struct{})
+	go func() { a.copySharedChats(); close(done) }()
+	select {
+	case <-done:
+		firstOutbox.mu.Unlock()
+		t.Fatal("on poll did not kick outbox")
+	case <-time.After(50 * time.Millisecond):
+	}
+	firstOutbox.mu.Unlock()
+	<-done
+	set(false)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/settings", strings.NewReader(`{"experimental_feature_team":true}`)))
+	if rec.Code != 200 || get() != 200 {
+		t.Fatalf("PUT on: %d", rec.Code)
+	}
+}
+
+func TestTeamSettingOutsideMuxer(t *testing.T) {
+	cmd, data, _, _ := startTeamCommand(t, false, false)
+	if err := os.WriteFile(filepath.Join(data, "settings.json"), []byte(`{"experimental_feature_team":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	assertTeamPathsMatchUnknown(t, cmd.Handler())
+	cmd.application.copySharedChats()
+	if cmd.application.teamHandler != nil || cmd.application.shareOutbox != nil {
+		t.Fatal("non-muxer installed team")
+	}
+	assertNoTeamFile(t, data)
+	for _, arg := range []string{webChildCmd, sessionWorkerCmd} {
+		t.Run(arg, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"experimental_feature_team":true}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c := &Command{Args: []string{"scimux", arg, "-data", dir}, Home: t.TempDir(), Stdout: io.Discard, Stderr: io.Discard, muxerOnly: true}
+			if err := c.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if c.application != nil {
+				t.Fatal("child built an application")
+			}
+			assertNoTeamFile(t, dir)
+		})
+	}
+}
+
+func TestTeamSettingConcurrentInstall(t *testing.T) {
+	cmd, _, _, _ := startTeamCommand(t, false, true)
+	a := cmd.application
+	h, err := newCoreMux(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := newTeamClient
+	var mu sync.Mutex
+	installs := 0
+	newTeamClient = func() *team.Client { mu.Lock(); installs++; mu.Unlock(); return orig() }
+	defer func() { newTeamClient = orig }()
+	if err := a.saveSettings(settings{Extra: map[string]json.RawMessage{"experimental_feature_team": []byte("true")}}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 30; j++ {
+				if i == 0 {
+					rec := httptest.NewRecorder()
+					a.handleSettingsPut(rec, httptest.NewRequest("PUT", "/api/settings", strings.NewReader(fmt.Sprintf(`{"experimental_feature_team":%t}`, j%2 == 0))))
+				} else if i%2 == 0 {
+					a.copySharedChats()
+				} else {
+					h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/team/servers", nil))
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if err := a.saveSettings(settings{Extra: map[string]json.RawMessage{"experimental_feature_team": []byte("true")}}); err != nil {
+		t.Fatal(err)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/team/servers", nil))
+	mu.Lock()
+	got := installs
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("installations = %d", got)
+	}
+}
+
+func TestTeamSettingPollInstallsAndEnvironmentOverrides(t *testing.T) {
+	cmd, _, _, _ := startTeamCommand(t, false, true)
+	if err := os.WriteFile(cmd.application.settingsPath, []byte(`{"experimental_feature_team":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd.application.copySharedChats()
+	if cmd.application.teamHandler == nil || cmd.application.shareOutbox == nil {
+		t.Fatal("poll did not install")
+	}
+	env, _, _, _ := startTeamCommand(t, true, true)
+	if err := os.WriteFile(env.application.settingsPath, []byte(`{"experimental_feature_team":false}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := newCoreMux(env.application)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/team/servers", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("environment override: %d", rec.Code)
+	}
+}
