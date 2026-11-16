@@ -1512,3 +1512,30 @@ test("a cancelled comment read resumes from its last rendered page", async () =>
   pending.resolve(commentsAnswer([], 2)); await f.feature.settled();
   assert.match(paths[2], /after=1$/); assert.match(f.get("sv_body").innerHTML, /first/); assert.match(f.get("sv_body").innerHTML, /second/);
 });
+
+test("a late success leaves a replacement stored draft alone", async () => {
+  const pending = deferred(), first = { ...base, access: "write" }, second = { ...first, chat: "d", title: "Other" };
+  let draftMap;
+  const originalSet = Map.prototype.set;
+  Map.prototype.set = function(key, value) {
+    if (value && typeof value === "object" && Object.hasOwn(value, "keyText") && Object.hasOwn(value, "sending")) draftMap = this;
+    return originalSet.call(this, key, value);
+  };
+  let f;
+  try {
+    f = viewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list([first, second]);
+      if (opts?.method === "POST") return pending.promise;
+      return readAnswer([], 0, false, path.includes("/d/g?") ? second : first);
+    });
+    f.feature.tick(); await f.feature.settled(); f.click("cardlist", f.item); await f.feature.settled();
+  } finally { Map.prototype.set = originalSet; }
+  assert.ok(draftMap);
+  setGuestDraft(f, "first"); f.click("sv_send");
+  const other = { dataset: { sub: guestKey(second) }, closest(sel) { return sel === "[data-sub]" ? this : null; } };
+  f.click("cardlist", other);
+  draftMap.set(guestKey(first), { text: "replacement", key: "", keyText: "", sending: false });
+  pending.resolve({ seq: 1 }); await f.feature.settled();
+  f.click("cardlist", f.item); await f.feature.settled();
+  assert.equal(f.get("sv_text").value, "replacement");
+});
