@@ -191,6 +191,42 @@ or distill models. Your selected provider's processing and training practices
 depend on its terms, your plan, and settings.
 scimux does not publish comparative harness benchmarks.
 
+Experimental team sharing never gives recipients control of your agent.
+People with view access can read; people with comment access can also reply
+to the human discussion. The unified sharing UI invites people with view
+and comment access by default, without a permission dropdown; existing
+read-only permissions remain enforced, including when a sharing sheet was opened
+before a permission change. Their replies never go to your agent automatically.
+Only you, as the chat owner, may use a reply as a prompt and explicitly send
+it to your own agent. See the [team ownership boundary](docs/http-api.md#agent-ownership-boundary).
+
+Shared chats appear in Activities and open in the normal chat panel. Human
+replies appear in the owner's original timeline, including replies accepted
+before the first native session seam when there are no earlier agent turns to
+open in history. In a shared chat the owner can choose People or Agent; the
+two destinations keep separate drafts, and
+People is the default. Recipients can participate in the human discussion
+when their access permits, but have no Agent destination. In the owner’s timeline,
+your People comments and Agent prompts have distinct labels. A recipient can use
+the header action to leave a shared chat and remove its local copy after
+confirmation; the owner’s chat remains intact.
+
+All puts Mine first, with your own chats together, followed by a separate
+group for each sharer and server. Sharers with identical display names stay
+distinct. Shared with me shows received groups only. Group folds and unread
+indicators persist across navigation and reconnects; received chats can also
+be pinned in the native Pinned order while remaining in their owner's group.
+Saved received conversations remain readable when their server is offline.
+
+The owner's **Use as prompt** action is available while the local agent
+thread is open; retained shared comments remain usable after sharing ends. It
+prepares an editable Agent draft without sending it. Its source marker survives edits and draft restoration; erasing
+the draft cancels the pending association. A confirmed send retains a link
+to the exact resulting prompt, even if it was edited. A failed or uncertain
+send does not claim delivery, and missing evidence can leave an outcome
+unconfirmed. Confirmed links use the existing bounded navigation history;
+repeated uses show numbered choices with short submitted-prompt previews.
+
 Two optional operations can spend account quota and therefore default off:
 the Claude usage probe and the Muse approval judge. Their switches are
 computer-owned settings in the burger menu, not browser-local preferences.

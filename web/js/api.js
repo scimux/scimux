@@ -72,7 +72,18 @@ export async function decodeResponse(r) {
 /* Generic fetch wrapper: withCsrf then decodeResponse.
    deps.fetchImpl is required; deps.csrf defaults to ""; deps.HeadersImpl
    defaults to global Headers. */
+export function receivedNodePath(path) {
+  const match = String(path).match(/^\/api\/nodes\/([^/?]+)/);
+  if (!match) return false;
+  try {
+    if (decodeURIComponent(match[1]).startsWith("team/")) return true;
+    return /^\/api\/nodes\/team\/[0-9a-f]{32}\/[0-9a-f]{32}\/[0-9a-f]{16}\/[0-9a-f]{16}(?:[/?]|$)/.test(String(path));
+  }
+  catch { return false; }
+}
+
 export async function api(path, opts, deps = {}) {
+  if (receivedNodePath(path)) throw new Error("Received chats cannot control agents");
   const { fetchImpl, csrf = "", HeadersImpl = Headers } = deps;
   const r = await fetchImpl(path, withCsrf(opts, csrf, HeadersImpl));
   return decodeResponse(r);
@@ -92,6 +103,7 @@ export function conditionalGetRequest(path, etag) {
    Non-OK statuses other than 304 still throw (same Error shape as decodeResponse).
    On 200, data is the decoded JSON/text body. */
 export async function apiConditionalGet(path, etag, deps = {}) {
+  if (receivedNodePath(path)) throw new Error("Received chats cannot control agents");
   const { fetchImpl, csrf = "", HeadersImpl = Headers } = deps;
   const req = conditionalGetRequest(path, etag);
   const r = await fetchImpl(req.path, withCsrf(req.opts, csrf, HeadersImpl));

@@ -294,3 +294,7 @@ test("timers: missing set/clear are tolerated", () => {
   book.clear(1);
   book.clearAll();
 });
+
+test('teardown ignores a missing optional disposer', () => {
+ const ledger=createTeardown(); assert.equal(ledger.add(null),null); let ran=false; ledger.add(()=>{ran=true}); ledger.run(); assert.equal(ran,true);
+});

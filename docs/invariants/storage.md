@@ -50,10 +50,58 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   holds each share's server, scope, members, and delivery cursor.
   It holds no chat content and no token. Only the muxer reads and writes
   it. With the gate off it is neither read nor written.
+  The sharing UI selects people without a permission dropdown. Newly invited
+  members receive `write` (view and comment). Keep the underlying `read` and
+  `write` permissions and their enforcement; saving unrelated membership
+  changes must not silently upgrade existing read-only members. Membership-only
+  saves are serialized with share mutations and the outbox, retain current
+  permissions and unrelated new members, preserve concurrent removals of
+  baseline members, and check UID and generation. Queued outbox work refreshes
+  its share under the same gate before wire work; a missing, damaged or replaced
+  identity cannot upload or alter another generation.
+- **Early native discussion stays accessible.** A comment accepted at an
+  initial empty frontier can predate the first native seam. When there are no
+  earlier agent turns and thus no history control, display that discussion in
+  the owner's normal timeline, using the saved log UID and frontier rather
+  than writing the comment into the session log.
+- **Sharing never delegates agent control.** Recipients MUST NEVER send to
+  the sharer's agent, regardless of their sharing permission. `read` means
+  view; `write` means view and comment to people only. Received comments stay
+  in the human discussion and MUST NOT become agent input automatically.
+  Only the chat owner may select **Use as prompt**, review or edit the text
+  in their own agent composer, and explicitly send it to their own agent.
+  Selecting the action only prepares a draft and selects Agent; it never
+  sends. Recipients have neither this action nor an Agent destination for
+  the shared chat. Enforce the boundary in request handling and routing,
+  independently of hidden browser controls; retries, reconnects and tool
+  auto-approval never authorize forwarding. Preserve original authorship
+  and applicable AI provenance when the owner forwards text.
+- **Use as prompt retains its source.** In the unified shared-chat UI, the
+  owner-only action marks its source bubble using the existing bookmark
+  marker placement and visual style, with a distinct prompt icon and
+  accessible label. Address the source by its durable message identity,
+  never by matching edited prompt text. The marker appears when the action
+  prepares a nonblank Agent draft and survives partial edits. Completely
+  erasing the draft cancels that pending source association; later unrelated
+  typing does not restore it. Draft restoration and polling preserve the
+  association. Distinguish a prepared draft from confirmed agent delivery:
+  selecting Use as prompt is not evidence of a send. A confirmed send keeps
+  a persistent source marker linked to the resulting prompt, including when
+  the owner edited it. Clearing a later draft cannot erase earlier confirmed
+  links. Failed or unconfirmed sends must not be labelled as delivered.
+  HTTP acknowledgment, queue state, busy state and text alone do not prove
+  delivery. Require assistant evidence for the exact queued address before a
+  later user turn or error; keep ambiguous outcomes awaiting. Retained
+  comments may be prepared offline or after sharing ends only while their
+  owner's local node remains open.
 - **Guest subscription state is metadata.** `team-subs.json` holds the identities,
   names, access, state and mirror and comment counters and read positions, with no chat content
   or token. Removing a shared chat deletes its subscription entry. Only the
   muxer writes it; with the team gate off it is neither read nor written.
+  An owner subscription may retain its local node and exact share-start
+  segment/record frontier, without message content. The node is exposed only
+  after verifying its current session-log UID against the subscription.
+  The frontier survives sharing retirement and is removed with the subscription.
 - **Comment author names are metadata.** `team-people.json` holds at most 4096
   last-known names per server and seat for retained comment authors, without
   chat content or tokens. Current roster names take precedence. Removing the
@@ -187,6 +235,20 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   retains at most the newest 500 links and omits destination text when a
   transcript UID or timestamp can address the turn; last-resort text fallback
   is prefix-bounded.
+  Owner "Use as prompt" links use a distinct `prompt` kind in this same
+  bounded index. Their full local or shared source address and author/AI
+  provenance are retained; the destination is the exact queued UID, segment
+  and record. A link is created only after the trace reports actual response
+  evidence for that address. A bounded, whitespace-normalized preview of the
+  submitted prompt may be stored on the link solely to label chooser entries;
+  it is never part of the destination address or a navigation fallback. Older
+  links without previews use numbered labels. For owned Claude, the address requires a verified
+  complete transcript and mirror frontier and a unique later dated native user
+  row in the unchanged binding; the existing worker remains the sole mirror
+  writer. Missing, delayed or ambiguous evidence may leave a send unconfirmed. Preparing and awaiting associations stay
+  in the device-local draft state, with at most 32 unresolved flights per node.
+  An ambiguous outcome remains awaiting and stops trace polling; an interval
+  error restores the captured Agent draft without claiming it was never accepted.
 - **/clear = page turn, fork = fresh notebook.** `/clear` starts a fresh chat
   surface under the *same* node: same log file, an appended `source` seam,
   never a new file or truncation; the context gauge is segment-scoped.

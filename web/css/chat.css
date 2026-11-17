@@ -367,6 +367,7 @@ body.cards-open #msgs { overflow: hidden; }
    .bubactions, and the send-to glyph must rotate on every surface. */
 .rot180 { display: inline-flex; transform: rotate(180deg); }
 .rot90l { display: inline-flex; transform: rotate(-90deg); }
+.rot90r { display: inline-flex; transform: rotate(90deg); }
 
 .bubble p { margin: 0 0 8px; } .bubble p:last-child { margin: 0; }
 .bubble code { font: 12.5px/1.4 ui-monospace, "SF Mono", monospace; background: var(--code-bg);
@@ -570,7 +571,7 @@ body.cards-open #msgs { overflow: hidden; }
 #promptbar.closed [contenteditable] { opacity: .55; cursor: not-allowed; }
 #promptbar.closed #sendbtn, #promptbar.closed #attadd { opacity: .4; cursor: not-allowed; }
 #sendbtn {
-  width: 38px; height: 38px; border-radius: 19px; flex: none;
+  width: 44px; height: 44px; border-radius: 22px; flex: none;
   background: var(--work); color: #fff; font-size: 17px;
   display: flex; align-items: center; justify-content: center;
 }
@@ -654,8 +655,13 @@ body.cards-open #msgs { overflow: hidden; }
 
 /* Share control in the chat header. The later rule wins over the 34px
    headtoggle. A display on the status line has to put [hidden] back. */
-#sharebtn.headtoggle {
+#sharebtn.headtoggle, #guestremove.headtoggle {
   width: 44px; height: 44px; min-height: 44px;
+}
+/* Keep the full square clickable even where the painted control is rounded. */
+#sharebtn, #guestremove, #sendbtn { position: relative; }
+#sharebtn::before, #guestremove::before, #sendbtn::before {
+  content: ""; position: absolute; inset: 0;
 }
 #sharestatus {
   display: block; width: 100%; min-height: 44px; margin: 0; padding: 0 2px;
@@ -679,3 +685,29 @@ body.cards-open #msgs { overflow: hidden; }
   background: var(--surface);
 }
 .foldall[hidden] { display: none; }
+
+/* Received messages use the same conversation scroller and action row. */
+#msgs .gwho, #gueststate, #guestnote { color: var(--dim); font-size: 12px; }
+.chat-subtitle { display: flex; min-width: 0; gap: 8px; align-items: baseline; }
+.chat-subtitle .mission { flex: 1 1 0; min-width: 0; }
+#chathead.compact .chat-subtitle:has(#gueststate:not([hidden])) .mission { max-height: 40px; opacity: 1; }
+#gueststate { flex: 0 1 auto; max-width: 45%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#chathead #guestremove { width: 44px; height: 44px; }
+#msgs .turn.user .gwho { color: #fff; }
+@media (prefers-color-scheme: dark) {
+  #msgs .turn.user .bubble:has(> .gwho) { background: #0a6c75; }
+}
+#msgs .turn.user.media .bubble:has(> .gwho) { background: none; }
+#msgs .turn.user.media .gwho { color: var(--dim); }
+#msgs .bubactions button, #guestmore, #guestremove { min-height: 44px; }
+
+.destination { display: inline-flex; gap: 2px; margin-left: 6px; }
+.destination[hidden] { display: none; }
+#convtools .destination button {
+  width: auto; min-width: 60px; height: 44px; padding: 4px 8px;
+  font-size: 13px; line-height: 1.2;
+}
+#convtools .destination button[aria-pressed="true"] {
+  color: var(--work); background: var(--th-bg); font-weight: 700;
+}
+#convtools .destination button:focus-visible { outline: 2px solid var(--work); outline-offset: -2px; }

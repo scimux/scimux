@@ -70,6 +70,7 @@ import {
   visibleCardLists,
 } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
+import { sharedActivityId, isSharedActivityId, sharedPinnedOrder, readActivityFolds, toggleActivityFold } from "./team-guest.js";
 
 export const CARD_TIME_SWAP_MS = 30000;
 
@@ -309,9 +310,9 @@ export function cardTabsHTML({
     ? `<span class="tabdot" style="background:${escape(laneColor)}"></span>${escape(laneName)} (${currentCount})<span class="x" data-clear-scope aria-label="show all activities">&#10005;</span>`
     : "All";
   const pc = pinnedCount || 0;
-  return `<button data-tab="current" class="${cardTab === "current" ? "on" : ""}">${scope}</button>` +
-    (pc ? `<button data-tab="pinned" class="${cardTab === "pinned" ? "on" : ""}">Pinned (${pc})</button>` : "") +
-    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}">Archived (${archivedCount})</button>` + extra;
+  return `<button data-tab="current" class="${cardTab === "current" ? "on" : ""}" aria-pressed="${cardTab === "current"}">${scope}</button>` +
+    (pc ? `<button data-tab="pinned" class="${cardTab === "pinned" ? "on" : ""}" aria-pressed="${cardTab === "pinned"}">Pinned (${pc})</button>` : "") +
+    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}" aria-pressed="${cardTab === "archived"}">Archived (${archivedCount})</button>` + extra;
 }
 
 /* Drag end: persist DOM order, then append any off-screen survivors. */
@@ -362,7 +363,9 @@ export function withCardEditsPreserved(root, editingDesc, render, {
       }
     }
   }
+  const scrollTop = root.scrollTop;
   render();
+  if (typeof scrollTop === "number") root.scrollTop = scrollTop;
   if (!Object.keys(saved).length) return;
   const after = root.querySelectorAll ? root.querySelectorAll("input, textarea, select") : [];
   for (const el of after){
@@ -397,7 +400,8 @@ export function createCardsFeature(deps){
   let cardSwipe = null;
   let ageTimer = null;
   let bound = false;
-  let lastTabsHTML = "";
+  let activityFolds = readActivityFolds(d.storage);
+  let lastRenderedTab = null;
   const cleanups = [];
 
   const icons = d.icons || {};
@@ -422,7 +426,11 @@ export function createCardsFeature(deps){
 
   function isArchived(id){ return isArchivedMod(id, g("archived", [])); }
   function isPinned(id){ return isPinnedMod(id, g("pinned", [])); }
-  function pinnedCount(){ return pinnedLiveCount(g("pinned", []), g("nodes", [])); }
+  function sharedViews(){ return d.sharedTab?.activities ? d.sharedTab.activities() : []; }
+  function sharedGroups(){ return d.sharedTab?.groups ? d.sharedTab.groups() : []; }
+  function pinnedCount(){
+    return pinnedLiveCount(g("pinned", []), [...g("nodes", []), ...sharedViews().map(view => ({id:sharedActivityId(view)}))]);
+  }
 
   function railboxHTML(n){
     const color = d.laneColor ? d.laneColor(n.lane_id) : "";
@@ -435,6 +443,17 @@ export function createCardsFeature(deps){
   }
 
   function cardHTML(n){
+    if (n.shared) {
+      const view = n.shared;
+      const pinned = isPinned(n.id);
+      const selected = d.sharedTab?.selected?.() === n.id;
+      const title = view.title || "Untitled chat";
+      const status = view.state === "ended" ? "Sharing ended" : view.access === "write" ? "Can comment" : "Can view";
+      return `<div class="card shared-card ${selected ? "selected" : ""} ${g("actionCard", "") === n.id ? "actions-open" : ""}" ${g("cardTab", "current") === "pinned" ? 'draggable="true"' : ""} id="card-${escape(n.id)}">
+        <span class="stripe"></span><button class="go" data-open="${escape(n.id)}" aria-label="open ${escape(title)}"></button>
+        <div class="row1"><span class="title">${escape(title)}</span>${pinned ? `<span class="pinflag" aria-label="pinned">${icons.ICON_PIN || ""}</span>` : ""}${view.unread ? '<span class="activity-unread" aria-label="unread"></span>' : ""}</div>
+        <div class="status">${escape(status)}</div><div class="actions roundactions"><button class="pin" data-pin-action="${escape(n.id)}" aria-label="${pinned ? "unpin" : "pin"}">${pinned ? (icons.ICON_UNPIN || "") : (icons.ICON_PIN || "")}</button></div></div>`;
+    }
     const desc = n.description || n.prompt || "";
     const archived = isArchived(n.id);
     const pinned = isPinned(n.id);
@@ -480,7 +499,7 @@ export function createCardsFeature(deps){
     </div>`;
   }
 
-  function renderCardTabs(sharedPath = false){
+  function renderCardTabs(){
     if (!tabs) return;
     const laneFilter = g("laneFilter", "");
     const cardTab = g("cardTab", "current");
@@ -507,11 +526,29 @@ export function createCardsFeature(deps){
       pinnedCount: pinnedCount(),
       escape, extra,
     });
-    if (sharedPath) {
-      if (html === lastTabsHTML) return;
+    const previous = tabs.querySelector?.(`[data-tab="${cardTab}"]`);
+    const focused = tabs.contains?.(doc?.activeElement) ? doc.activeElement.dataset.tab : "";
+    const scroll = tabs.scrollLeft;
+    const changed = tabs.innerHTML !== html;
+    let keepVisible = false;
+    if (previous && changed) {
+      const strip = tabs.getBoundingClientRect();
+      const item = previous.getBoundingClientRect();
+      keepVisible = item.left >= strip.left && item.right <= strip.right;
     }
-    tabs.innerHTML = html;
-    lastTabsHTML = html;
+    if (changed) {
+      tabs.innerHTML = html;
+      if (focused) tabs.querySelector?.(`[data-tab="${focused}"]`)?.focus({preventScroll:true});
+      tabs.scrollLeft = scroll;
+    }
+    const selected = tabs.querySelector?.(`[data-tab="${cardTab}"]`);
+    if (selected && (lastRenderedTab !== cardTab || !previous || keepVisible)) {
+      const strip = tabs.getBoundingClientRect();
+      const item = selected.getBoundingClientRect();
+      if (item.left < strip.left) tabs.scrollLeft += item.left - strip.left;
+      else if (item.right > strip.right) tabs.scrollLeft += item.right - strip.right;
+    }
+    lastRenderedTab = cardTab;
   }
 
   /* Runs on both poll branches, including the 304 short-circuit that is
@@ -555,7 +592,7 @@ export function createCardsFeature(deps){
     const cards = list.querySelectorAll?.(".card") || [];
     for (const el of cards){
       const n = byId.get(String(el.id || "").slice(CARD_ID_PREFIX.length));
-      if (!n) continue;
+      if (!n || n.shared) continue;
       const state = cardState(n);
       for (const s of CARD_STATES) if (s !== state) el.classList?.remove?.(s);
       el.classList?.add?.(state);
@@ -594,16 +631,7 @@ export function createCardsFeature(deps){
       set("cardTab", cardTab);
     }
     const nodes = g("nodes", []) || [];
-    if (cardTab === "shared") {
-      if (d.sharedTab) {
-        if (d.sharedTab.render(list)) {
-          renderCardTabs(true);
-          set("cardsSig", "");
-          const waiting = nodes.filter(hardAttention).length;
-          if (doc) doc.title = (waiting ? `(${waiting}) ` : "") + "scimux";
-          return;
-        }
-      }
+    if (cardTab === "shared" && sharedViews().length === 0) {
       cardTab = "current";
       set("cardTab", cardTab);
     }
@@ -615,14 +643,19 @@ export function createCardsFeature(deps){
     const vis = visibleCardLists(nodes, {
       cardTab, pinned, archived, laneFilter, selectedId: sel,
     });
-    const cardArr = vis.list;
+    const cardArr = cardTab === "pinned" && d.sharedTab?.activities
+      ? sharedPinnedOrder(nodes, sharedViews(), pinned) : cardTab === "shared" ? [] : vis.list;
     const foldList = vis.foldList;
     if (!foldList.length){
       attnFoldOpen = false;
       set("attnFoldOpen", false);
     }
     const expanded = g("expanded", new Set());
-    const sig = computeCardsSignature({
+    const groups = cardTab === "current" || cardTab === "shared" ? sharedGroups() : [];
+    const activityShape = JSON.stringify([groups, [...activityFolds],
+      cardArr.filter(item => item.shared).map(item => item.shared), d.sharedTab?.selected?.() || "",
+      Boolean(d.sharedTab?.mineUnread?.())]);
+    const sig = activityShape + computeCardsSignature({
       list: cardArr, foldList, sel, expanded, cardTab, laneFilter,
       attnFoldOpen,
       bookmarksLen: (g("bookmarks", []) || []).length,
@@ -632,7 +665,7 @@ export function createCardsFeature(deps){
       editingDesc: g("editingDesc", ""),
       editingTitle: g("editingTitle", ""),
     });
-    const shapeSig = cardShapeSignature({
+    const shapeSig = activityShape + cardShapeSignature({
       list: cardArr, foldList, sel, expanded, cardTab, laneFilter,
       attnFoldOpen,
       bookmarksLen: (g("bookmarks", []) || []).length,
@@ -657,9 +690,23 @@ export function createCardsFeature(deps){
     const editingDesc = g("editingDesc", "");
     withCardEditsPreserved(list, editingDesc, () => {
       if (!list) return;
-      list.innerHTML = foldHtml + (cardArr.length
-        ? cardArr.map(cardHTML).join("")
-        : emptyCardsHTML({ laneFilter, cardTab }));
+      const hasActivities = Boolean(d.sharedTab?.activities);
+      if (!hasActivities || (cardTab !== "current" && cardTab !== "shared")) {
+        list.innerHTML = foldHtml + (cardArr.length ? cardArr.map(cardHTML).join("") : emptyCardsHTML({ laneFilter, cardTab }));
+        return;
+      }
+      const header = (key, label, unread) => `<button class="attnfold activity-group ${activityFolds.has(key) ? "" : "open"}" data-activity-group="${escape(key)}" aria-expanded="${!activityFolds.has(key)}"><span class="foldlabel">${escape(label)}</span>${unread ? '<span class="activity-unread" aria-label="unread"></span>' : ""}<span class="foldchev">&#8250;</span></button>`;
+      let html = "";
+      if (cardTab === "current") {
+        const mine = activityFolds.has("mine") ? cardArr.filter(hardAttention) : cardArr;
+        html = header("mine", "Mine", Boolean(d.sharedTab?.mineUnread?.())) + foldHtml + (mine.length ? mine.map(cardHTML).join("") : (!cardArr.length && !foldList.length ? emptyCardsHTML({laneFilter, cardTab}) : ""));
+      }
+      for (const group of groups) {
+        const key = "owner/" + group.key;
+        html += header(key, group.label, group.items.some(item => item.unread));
+        if (!activityFolds.has(key)) html += group.items.map(view => cardHTML({id:sharedActivityId(view),shared:view})).join("");
+      }
+      list.innerHTML = html || '<div class="empty">No shared activities yet.</div>';
     }, { document: doc, syncLanePicker: d.syncLanePicker });
     const waiting = nodes.filter(hardAttention).length;
     if (doc) doc.title = (waiting ? `(${waiting}) ` : "") + "scimux";
@@ -698,6 +745,18 @@ export function createCardsFeature(deps){
       invalidate();
       renderCards();
       return;
+    }
+    const group = e.target.closest("[data-activity-group]");
+    if (group) {
+      activityFolds = toggleActivityFold(d.storage, activityFolds, group.dataset.activityGroup);
+      invalidate(); renderCards();
+      list?.querySelector?.(`[data-activity-group="${CSSRef.escape(group.dataset.activityGroup)}"]`)?.focus?.();
+      return;
+    }
+    const blocked = [["[data-save-desc]", "saveDesc"], ["[data-exit]", "exit"], ["[data-arch-action]", "archAction"], ["[data-trash]", "trash"]];
+    for (const [selector, field] of blocked) {
+      const control = e.target.closest(selector);
+      if (control && isSharedActivityId(control.dataset[field])) return;
     }
     const save = e.target.closest("[data-save-desc]");
     if (save){
@@ -741,6 +800,7 @@ export function createCardsFeature(deps){
     const pinBtn = e.target.closest("[data-pin-action]");
     if (pinBtn){
       const id = pinBtn.dataset.pinAction;
+      if (isSharedActivityId(id) && !sharedViews().some(view => sharedActivityId(view) === id)) return;
       if (typeof d.uiMutate === "function")
         d.uiMutate({ k: isPinned(id) ? "unpin" : "pin", id });
       set("actionCard", "");
@@ -821,6 +881,10 @@ export function createCardsFeature(deps){
     if (go){
       set("actionCard", "");
       set("editingDesc", "");
+      if (isSharedActivityId(go.dataset.open)) {
+        d.sharedTab?.open?.(go.dataset.open);
+        return;
+      }
       if (typeof d.selectNode === "function") d.selectNode(go.dataset.open);
       if (typeof d.isDesktop === "function" ? !d.isDesktop() : false) {
         if (typeof d.setLevel === "function") d.setLevel(1);
@@ -905,7 +969,7 @@ export function createCardsFeature(deps){
     }
     if (typeof d.longpress === "function" && list) {
       const titleCleanup = d.longpress(list, ".card .title", el => {
-        if (typeof d.startTitleEdit === "function") d.startTitleEdit(el.dataset.title, "cards");
+        if (el.dataset.title && !isSharedActivityId(el.dataset.title) && typeof d.startTitleEdit === "function") d.startTitleEdit(el.dataset.title, "cards");
       });
       if (typeof titleCleanup === "function") cleanups.push(titleCleanup);
       const cardCleanup = d.longpress(list, ".card", (el, ev) => {
@@ -913,7 +977,7 @@ export function createCardsFeature(deps){
         if (ev?.target?.closest(".title,input,textarea,select,button")) return;
         const id = el.querySelector(".go")?.dataset.open;
         const n = id && nodeById(id);
-        if (!n) return;
+        if (!n && !sharedViews().some(view => sharedActivityId(view) === id)) return;
         set("actionCard", g("actionCard", "") === id ? "" : id);
         set("editingDesc", "");
         invalidate();
@@ -922,7 +986,7 @@ export function createCardsFeature(deps){
       if (typeof cardCleanup === "function") cleanups.push(cardCleanup);
       const summaryCleanup = d.longpress(list, ".summary", el => {
         const id = el.dataset.desc;
-        if (!id) return;
+        if (!id || isSharedActivityId(id)) return;
         const expanded = g("expanded", new Set());
         expanded.add(id);
         set("actionCard", "");

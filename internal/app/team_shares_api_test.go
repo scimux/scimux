@@ -304,14 +304,15 @@ func sharePutBody(server, scope string, members []team.Member) string {
 }
 
 type shareView struct {
-	UID      string        `json:"uid"`
-	Node     string        `json:"node"`
-	Server   string        `json:"server"`
-	Scope    string        `json:"scope"`
-	State    string        `json:"state"`
-	Delivery string        `json:"delivery"`
-	Members  []team.Member `json:"members"`
-	SharedAt string        `json:"shared_at"`
+	UID        string        `json:"uid"`
+	Node       string        `json:"node"`
+	Server     string        `json:"server"`
+	Scope      string        `json:"scope"`
+	Generation string        `json:"generation"`
+	State      string        `json:"state"`
+	Delivery   string        `json:"delivery"`
+	Members    []team.Member `json:"members"`
+	SharedAt   string        `json:"shared_at"`
 }
 
 func decodeShareView(t *testing.T, rec *httptest.ResponseRecorder) shareView {
@@ -1917,4 +1918,208 @@ func TestDeleteShareFileKeepsDifferentUID(t *testing.T) {
 	if _, ok := storedShare(t, dir, shareUIDB); !ok {
 		t.Fatal("unrelated share removed")
 	}
+}
+
+func TestMembershipOnlyPreservesCurrentRolesAndIdentity(t *testing.T) {
+	script := &shareScript{}
+	h, dir, _, inst := readySurface(t, script)
+	script.channel = channelJSON(inst, shareUID, "North", shareGen)
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, Members: []team.Member{{Seat: shareSeat, Access: "read"}}})
+	body := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[{"seat":%q,"access":"write"},{"seat":%q,"access":"write"}],"membership_only":{"uid":%q,"generation":%q,"baseline":[%q]}}`, teamServerID, shareSeat, shareSeatB, shareUID, shareGen, shareSeat)
+	rec := putShare(h, shareNode, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("membership save: %d %s", rec.Code, rec.Body.String())
+	}
+	assertMembersEqual(t, decodeShareView(t, rec).Members, []team.Member{{Seat: shareSeat, Access: "read"}, {Seat: shareSeatB, Access: "write"}})
+	stale := strings.Replace(body, `"generation":"`+shareGen+`"`, `"generation":"0000000000000000"`, 1)
+	rec = putShare(h, shareNode, stale)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale generation: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = putShare(h, shareNode, sharePutBody(teamServerID, "from_now", []team.Member{{Seat: shareSeat, Access: "write"}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("explicit role change: %d %s", rec.Code, rec.Body.String())
+	}
+	assertMembersEqual(t, decodeShareView(t, rec).Members, []team.Member{{Seat: shareSeat, Access: "write"}})
+}
+
+func TestMembershipOnlyValidationAndConcurrentMember(t *testing.T) {
+	script := &shareScript{}
+	h, dir, _, inst := readySurface(t, script)
+	script.channel = channelJSON(inst, shareUID, "North", shareGen)
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	other := "0123456789abcdef0123456789abcdef"
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, Members: []team.Member{{Seat: shareSeat, Access: "read"}, {Seat: other, Access: "read"}}})
+	body := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[{"seat":%q,"access":"read"}],"membership_only":{"uid":%q,"generation":%q,"baseline":[%q]}}`, teamServerID, shareSeatB, shareUID, shareGen, shareSeat)
+	rec := putShare(h, shareNode, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	assertMembersEqual(t, decodeShareView(t, rec).Members, []team.Member{{Seat: shareSeatB, Access: "write"}, {Seat: other, Access: "read"}})
+	for _, baseline := range []string{`null`, `["invalid"]`, fmt.Sprintf(`[%q,%q]`, shareSeat, shareSeat)} {
+		input := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[],"membership_only":{"uid":%q,"generation":%q,"baseline":%s}}`, teamServerID, shareUID, shareGen, baseline)
+		if got := putShare(h, shareNode, input); got.Code != http.StatusBadRequest {
+			t.Fatalf("baseline %s: %d", baseline, got.Code)
+		}
+	}
+	tooMany := make([]string, 201)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("%032x", i+1)
+	}
+	encoded, err := json.Marshal(tooMany)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[],"membership_only":{"uid":%q,"generation":%q,"baseline":%s}}`, teamServerID, shareUID, shareGen, encoded)
+	if got := putShare(h, shareNode, input); got.Code != http.StatusBadRequest {
+		t.Fatalf("oversized baseline: %d", got.Code)
+	}
+	stale := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[],"membership_only":{"uid":%q,"generation":"","baseline":[]}}`, teamServerID, shareUID)
+	if got := putShare(h, shareNode, stale); got.Code != http.StatusConflict {
+		t.Fatalf("empty generation: %d", got.Code)
+	}
+}
+
+func TestMembershipOnlySerializesWithExplicitRoleChange(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once, releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	script := &shareScript{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/members") {
+			once.Do(func() { close(entered); <-release })
+		}
+		script.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	defer letGo()
+	h, dir := testTeamSurface(t, clientFor(srv))
+	seedTeam(t, dir, labEntry(teamServerID, srv.URL, teamToken))
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	inst := installationOf(t, dir)
+	script.channel = channelJSON(inst, shareUID, "North", shareGen)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, Members: []team.Member{{Seat: shareSeat, Access: "write"}}})
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		first <- putShare(h, shareNode, sharePutBody(teamServerID, "from_now", []team.Member{{Seat: shareSeat, Access: "read"}}))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first update did not reach relay")
+	}
+	body := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[{"seat":%q,"access":"write"},{"seat":%q,"access":"write"}],"membership_only":{"uid":%q,"generation":%q,"baseline":[%q]}}`, teamServerID, shareSeat, shareSeatB, shareUID, shareGen, shareSeat)
+	second := make(chan *httptest.ResponseRecorder, 1)
+	go func() { second <- putShare(h, shareNode, body) }()
+	select {
+	case <-second:
+		letGo()
+		t.Fatal("membership update passed an in-flight role mutation")
+	case <-time.After(100 * time.Millisecond):
+	}
+	letGo()
+	if got := recvTeam(t, first, "first update"); got.Code != http.StatusOK {
+		t.Fatalf("first %d", got.Code)
+	}
+	got := recvTeam(t, second, "second update")
+	if got.Code != http.StatusOK {
+		t.Fatalf("second %d: %s", got.Code, got.Body.String())
+	}
+	assertMembersEqual(t, decodeShareView(t, got).Members, []team.Member{{Seat: shareSeat, Access: "read"}, {Seat: shareSeatB, Access: "write"}})
+}
+
+func TestMembershipOnlyRequiresSameActiveShare(t *testing.T) {
+	script := &shareScript{}
+	h, dir, calls, _ := readySurface(t, script)
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	body := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[],"membership_only":{"uid":%q,"generation":%q,"baseline":[]}}`, teamServerID, shareUID, shareGen)
+	if got := putShare(h, shareNode, body); got.Code != http.StatusConflict {
+		t.Fatalf("missing share: %d", got.Code)
+	}
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, Members: []team.Member{}})
+	wrong := strings.Replace(body, `"uid":"`+shareUID+`"`, `"uid":"`+shareUIDB+`"`, 1)
+	if got := putShare(h, shareNode, wrong); got.Code != http.StatusConflict {
+		t.Fatalf("wrong UID: %d", got.Code)
+	}
+	if len(snapshotCalls(calls)) != 0 {
+		t.Fatal("stale identity contacted relay")
+	}
+}
+
+func TestMembershipOnlyRejectsOversizedMergedMembership(t *testing.T) {
+	script := &shareScript{}
+	h, dir, calls, _ := readySurface(t, script)
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, Members: []team.Member{{Seat: shareSeat, Access: "read"}}})
+	members := make([]team.Member, 200)
+	for i := range members {
+		members[i] = team.Member{Seat: fmt.Sprintf("%032x", i+1), Access: "write"}
+	}
+	payload := struct {
+		Server         string        `json:"server"`
+		Scope          string        `json:"scope"`
+		Members        []team.Member `json:"members"`
+		MembershipOnly any           `json:"membership_only"`
+	}{teamServerID, "from_now", members, map[string]any{"uid": shareUID, "generation": shareGen, "baseline": []string{}}}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := putShare(h, shareNode, string(raw))
+	if got.Code != http.StatusBadRequest {
+		t.Fatalf("merged size: %d %s", got.Code, got.Body.String())
+	}
+	if len(snapshotCalls(calls)) != 0 {
+		t.Fatal("oversized merge contacted relay")
+	}
+}
+
+func TestMembershipOnlyRejectsEndedAndResharedGeneration(t *testing.T) {
+	script := &shareScript{}
+	h, dir, calls, _ := readySurface(t, script)
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	share := team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, State: "lost", Members: []team.Member{}}
+	mustSaveShare(t, dir, share)
+	body := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[],"membership_only":{"uid":%q,"generation":%q,"baseline":[]}}`, teamServerID, shareUID, shareGen)
+	if got := putShare(h, shareNode, body); got.Code != http.StatusConflict {
+		t.Fatalf("ended: %d %s", got.Code, got.Body.String())
+	}
+	share.State = "active"
+	share.Generation = "0000000000000001"
+	mustSaveShare(t, dir, share)
+	if got := putShare(h, shareNode, body); got.Code != http.StatusConflict {
+		t.Fatalf("reshared: %d %s", got.Code, got.Body.String())
+	}
+	if len(snapshotCalls(calls)) != 0 {
+		t.Fatal("ended or replaced share contacted relay")
+	}
+}
+
+func TestMembershipOnlyDoesNotRestoreConcurrentlyRemovedMember(t *testing.T) {
+	script := &shareScript{}
+	h, dir, _, inst := readySurface(t, script)
+	script.channel = channelJSON(inst, shareUID, "North", shareGen)
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, Members: []team.Member{}})
+	body := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[{"seat":%q,"access":"read"},{"seat":%q,"access":"write"}],"membership_only":{"uid":%q,"generation":%q,"baseline":[%q]}}`, teamServerID, shareSeat, shareSeatB, shareUID, shareGen, shareSeat)
+	rec := putShare(h, shareNode, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	assertMembersEqual(t, decodeShareView(t, rec).Members, []team.Member{{Seat: shareSeatB, Access: "write"}})
+}
+
+func TestMembershipOnlyFreshReinviteAfterRemoval(t *testing.T) {
+	script := &shareScript{}
+	h, dir, _, inst := readySurface(t, script)
+	script.channel = channelJSON(inst, shareUID, "North", shareGen)
+	seedChat(t, dir, shareNode, "North", shareUID, 0)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Generation: shareGen, Members: []team.Member{}})
+	body := fmt.Sprintf(`{"server":%q,"scope":"from_now","members":[{"seat":%q,"access":"read"}],"membership_only":{"uid":%q,"generation":%q,"baseline":[]}}`, teamServerID, shareSeat, shareUID, shareGen)
+	rec := putShare(h, shareNode, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reinvite: %d %s", rec.Code, rec.Body.String())
+	}
+	assertMembersEqual(t, decodeShareView(t, rec).Members, []team.Member{{Seat: shareSeat, Access: "write"}})
 }

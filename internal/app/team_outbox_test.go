@@ -2814,3 +2814,124 @@ func TestOutboxStopDoesNotMatchAnotherSharesGeneration(t *testing.T) {
 		t.Fatalf("unrelated share removed or changed: %+v, present %t", other, ok)
 	}
 }
+
+func TestOutboxRetainsOwnerFrontierBeforeDeletingGeneration(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := identity.LoadOrCreateInstallation(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := baseSub()
+	sub.Owner = string(inst)
+	sub.Access = "owner"
+	seedSub(t, dir, sub)
+	writeChatLog(t, dir, "local", sub.Chat, 2)
+	share := team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2}
+	mustSaveShare(t, dir, share)
+	box := &shareOutbox{dataDir: dir}
+	box.deleteStoredGeneration(share)
+	subs, err := team.LoadSubs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subs[0].OwnerFrontier == nil || subs[0].OwnerFrontier.Record != 1 {
+		t.Fatalf("frontier %+v", subs[0].OwnerFrontier)
+	}
+}
+
+func TestOutboxFrontierFailureKeepsShare(t *testing.T) {
+	for _, kind := range []string{"subs_damaged", "identity_missing", "frontier_unavailable", "already_retained"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			inst, err := identity.LoadOrCreateInstallation(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sub := baseSub()
+			sub.Owner = string(inst)
+			sub.Access = "owner"
+			if kind == "already_retained" {
+				sub.OwnerFrontier = &team.OwnerFrontier{Node: "local", Segment: 0, Record: 1}
+			}
+			seedSub(t, dir, sub)
+			share := team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2}
+			mustSaveShare(t, dir, share)
+			switch kind {
+			case "subs_damaged":
+				if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "identity_missing":
+				if err := os.Remove(filepath.Join(dir, identity.InstallationFile)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			box := &shareOutbox{dataDir: dir}
+			err = box.preserveOwnerFrontiers(share)
+			if kind == "already_retained" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil {
+				t.Fatal("missing error")
+			}
+			if kind != "already_retained" {
+				box.deleteStoredGeneration(share)
+				if _, err := team.LoadShares(dir); err != nil {
+					t.Fatal(err)
+				}
+				shares, _ := team.LoadShares(dir)
+				if len(shares) != 1 {
+					t.Fatal("failed frontier removed the share")
+				}
+			}
+		})
+	}
+}
+
+func TestOutboxDirectRetirementKeepsDamagedMetadata(t *testing.T) {
+	for _, kind := range []string{"shares", "subs"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			box := &shareOutbox{dataDir: dir}
+			if kind == "shares" {
+				if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				share := team.Share{UID: shareUID, Node: shareNode, Server: teamServerID, Generation: shareGen}
+				mustSaveShare(t, dir, share)
+				if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			box.deleteStored(shareUID)
+			if kind == "subs" {
+				shares, err := team.LoadShares(dir)
+				if err != nil || len(shares) != 1 {
+					t.Fatalf("share not retained: %v %v", shares, err)
+				}
+			}
+		})
+	}
+}
+
+func TestOutboxWaitsForShareMutation(t *testing.T) {
+	var lock sync.Mutex
+	o := &shareOutbox{dataDir: t.TempDir(), shareOps: &lock}
+	lock.Lock()
+	done := make(chan struct{})
+	go func() { o.one(context.Background(), nil, "", team.Share{UID: shareUID}, nil); close(done) }()
+	select {
+	case <-done:
+		lock.Unlock()
+		t.Fatal("outbox passed an in-flight share mutation")
+	case <-time.After(100 * time.Millisecond):
+	}
+	lock.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outbox did not resume")
+	}
+}

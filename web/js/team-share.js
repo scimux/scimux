@@ -24,6 +24,7 @@ const ERROR_TEXT = {
   no_history: "This chat has nothing to share yet.",
   not_active: "Sharing of this chat has ended. Stop it, then share again.",
   share_fixed: "Stop sharing first to change the server or the scope.",
+  share_changed: "Sharing changed. Close this sheet and review it again.",
   store_unavailable: "This computer could not save the change. Try again.",
 };
 
@@ -49,10 +50,10 @@ export function shareErrorText(code) {
   return ERROR_TEXT[code] || "That did not work. Try again.";
 }
 
-export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
+export function createShareFeature({ api, doc, openSheet, closeSheets, now, onChange = () => {} }) {
   const $ = (sel) => doc.querySelector(sel);
 
-  let off = false;
+  let destroyed = false;
   let joined = [];
   let selected = "";
   let view = null;
@@ -65,6 +66,8 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   let seatsGen = 0;
   let drawnNode = "";
   let drawnShare = "";
+  let drawnMembers = [];
+  let seatsReady = false;
   let chain = Promise.resolve();
   const side = new Set();
   const cleanups = [];
@@ -143,7 +146,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     }
     if (stale(gen)) return;
     if (serverErr) {
-      if (serverErr.status === 404) off = true;
+      if (serverErr.status === 404) onChange(node, null);
       return;
     }
     let shareBody = null;
@@ -158,29 +161,35 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     if (shareErr) {
       if (shareErr.status === 404) {
         view = null;
+        onChange(node, null);
         paintHeader();
       }
       return;
     }
     view = shareBody && typeof shareBody === "object" ? shareBody : null;
+    onChange(node, view);
     paintHeader();
   }
 
   function select(node) {
+    if (destroyed) return;
     const shown = sheetNode;
-    if (node !== selected) view = null;
+    if (node !== selected) { view = null; hideControls(); }
     selected = node;
-    hideControls();
     if (shown && shown !== node) {
       sheetNode = "";
       closeSheets();
     }
-    if (off) return;
+    if (!node) { generation++; return; }
     return beginLoad(node);
   }
 
+  function ensureSelected(node) {
+    if (node !== selected) return select(node);
+  }
+
   function tick() {
-    if (off) return;
+    if (destroyed) return;
     if (!selected) return;
     if (pendingLoads > 0) return;
     if (now() - lastLoadAt < INTERVAL) return;
@@ -246,9 +255,8 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   }
 
   function accessOf(seatId) {
-    if (!view || !Array.isArray(view.members)) return "";
-    for (const member of view.members) {
-      if (member.seat !== seatId) continue;
+    for (const member of drawnMembers) {
+      if (!member || member.seat !== seatId) continue;
       if (member.access === "write") return "write";
       if (member.access === "read") return "read";
       return "";
@@ -256,23 +264,14 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     return "";
   }
 
-  function option(value, label, on) {
-    return '<option value="' + value + '"' + (on ? " selected" : "") + ">" + label + "</option>";
-  }
-
   function personRow(seat) {
-    const access = accessOf(seat.id);
-    return "<label>" + esc(seat.name) +
-      '<select data-seat="' + esc(seat.id) + '" aria-label="' + esc(seat.name) + '">' +
-      option("", "No access", access === "") +
-      option("read", "Can view", access === "read") +
-      option("write", "Can comment", access === "write") +
-      "</select></label>";
+    const checked = accessOf(seat.id) ? " checked" : "";
+    return '<label><input type="checkbox" data-seat="' + esc(seat.id) + '"' + checked + '>' + esc(seat.name) + '</label>';
   }
 
   function renderNew(body) {
     body.innerHTML = serverFields() + scopeFields() + '<div id="sh_people">Loading people…</div>';
-    setApply("Share chat", false, false);
+    setApply("Share chat", false, true);
     setStop(true);
   }
 
@@ -304,6 +303,8 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
 
   function renderSheet() {
     seatsGen += 1;
+    seatsReady = false;
+    drawnMembers = view && Array.isArray(view.members) ? view.members.map(member => member && { ...member }) : [];
     armed = false;
     const body = $("#sh_body");
     if (!view) renderNew(body);
@@ -315,7 +316,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
 
   function shareToken(v) {
     if (!v) return "";
-    return String(v.uid) + "\n" + String(v.state) + "\n" + String(v.server) + "\n" + String(v.scope) + "\n" + String(v.shared_at);
+    return String(v.uid) + "\n" + String(v.generation) + "\n" + String(v.state) + "\n" + String(v.server) + "\n" + String(v.scope) + "\n" + String(v.shared_at);
   }
 
   function rememberDrawn() {
@@ -347,9 +348,9 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
 
   function chosenMembers() {
     const members = [];
-    for (const sel of $("#sh_body").querySelectorAll("select")) {
-      if (sel.value === "read" || sel.value === "write") {
-        members.push({ seat: sel.dataset.seat, access: sel.value });
+    for (const input of $("#sh_body").querySelectorAll("input")) {
+      if (input.type === "checkbox" && input.dataset.seat && input.checked) {
+        members.push({ seat: input.dataset.seat, access: accessOf(input.dataset.seat) || "write" });
       }
     }
     return members;
@@ -363,7 +364,10 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
         members: chosenMembers(),
       };
     }
-    return { server: view.server, scope: view.scope, members: chosenMembers() };
+    const baseline = Array.from($("#sh_body").querySelectorAll("input"))
+      .filter(input => input.type === "checkbox" && input.dataset.seat && accessOf(input.dataset.seat))
+      .map(input => input.dataset.seat);
+    return { server: view.server, scope: view.scope, members: chosenMembers(), membership_only: { uid: view.uid, generation: view.generation, baseline } };
   }
 
   function chosenServerJoined() {
@@ -377,6 +381,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   function sheetDrifted() {
     if (drawnNode !== selected) return true;
     if (shareToken(view) !== drawnShare) return true;
+    if (view && JSON.stringify(view.members || []) !== JSON.stringify(drawnMembers)) return true;
     if (drawnShare === "" && !chosenServerJoined()) return true;
     return false;
   }
@@ -394,29 +399,24 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   }
 
   function sameAsView() {
-    for (const sel of $("#sh_body").querySelectorAll("select")) {
-      if (sel.value !== accessOf(sel.dataset.seat)) return false;
+    for (const input of $("#sh_body").querySelectorAll("input")) {
+      if (input.type === "checkbox" && input.dataset.seat && input.checked !== Boolean(accessOf(input.dataset.seat))) return false;
     }
     return true;
   }
 
   function syncApply() {
-    const apply = $("#sh_apply");
-    if (!view) {
-      apply.disabled = false;
-      return;
-    }
-    apply.disabled = sameAsView();
+    $("#sh_apply").disabled = !seatsReady || (Boolean(view) && sameAsView());
   }
 
   function applyShouldDisable() {
-    if ($("#sh_apply").hidden) return true;
-    if (!view) return false;
-    return sameAsView();
+    return $("#sh_apply").hidden || !seatsReady || (Boolean(view) && sameAsView());
   }
 
   function loadSeats(serverId) {
     const gen = ++seatsGen;
+    seatsReady = false;
+    syncApply();
     const node = selected;
     $("#sh_people").textContent = "Loading people…";
     const pending = api(SERVERS + "/" + serverId + "/seats").then(
@@ -435,12 +435,19 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       syncApply();
       return;
     }
-    const seats = body && Array.isArray(body.seats) ? body.seats : [];
-    const selfId = body && typeof body.self === "string" ? body.self : "";
-    const others = [];
-    for (const seat of seats) {
-      if (seat.id !== selfId) others.push(seat);
+    if (!body || !Array.isArray(body.seats) || typeof body.self !== "string" || !body.self ||
+        body.seats.some(seat => !seat || typeof seat.id !== "string" || !seat.id || typeof seat.name !== "string")) {
+      host.textContent = shareErrorText("");
+      syncApply();
+      return;
     }
+    const others = body.seats.filter(seat => seat.id !== body.self);
+    if (drawnMembers.some(member => (member && (member.access === "read" || member.access === "write")) && !others.some(seat => seat.id === member.seat))) {
+      host.textContent = shareErrorText("unknown_member");
+      syncApply();
+      return;
+    }
+    seatsReady = true;
     if (others.length === 0) {
       host.textContent = "Nobody else has joined this server yet.";
       syncApply();
@@ -469,7 +476,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       loadSeats(target.value);
       return;
     }
-    if (target.tagName === "SELECT") syncApply();
+    if (target.type === "checkbox" && target.dataset.seat) syncApply();
   }
 
   function onSheetClick(ev) {
@@ -540,7 +547,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       err = e;
     }
     sheetBusy = false;
-    if (node !== selected) return;
+    if (destroyed || node !== selected) return;
     if (err) {
       showNote(codeOf(err));
       $("#sh_stop").disabled = false;
@@ -548,6 +555,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       return;
     }
     view = body;
+    onChange(selected, view);
     paintHeader();
     showSheet();
     $("#sh_live").textContent = hadView ? "People updated." : "Sharing started.";
@@ -556,6 +564,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
 
   function markStopped() {
     view = null;
+    onChange(selected, null);
     paintHeader();
     sheetNode = "";
     closeSheets();
@@ -571,12 +580,13 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
       err = e;
     }
     sheetBusy = false;
-    if (node !== selected) return;
+    if (destroyed || node !== selected) return;
     if (err) {
       if (err.status === 404) markStopped();
       else showNote(codeOf(err));
     } else if (typeof body === "object") {
       view = body;
+      onChange(selected, view);
       paintHeader();
       showSheet();
     } else {
@@ -592,6 +602,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   }
 
   function bind() {
+    if (destroyed) return;
     const btn = $("#sharebtn");
     btn.innerHTML = SHARE_ICON;
     listen(btn, "click", onOpen);
@@ -601,6 +612,9 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   }
 
   function destroy() {
+    destroyed = true;
+    generation++;
+    seatsGen++;
     while (cleanups.length) cleanups.pop()();
   }
 
@@ -614,5 +628,5 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
     } while (chain !== prev || side.size > 0);
   }
 
-  return { select, tick, bind, destroy, settled };
+  return { select, ensureSelected, tick, bind, destroy, settled };
 }

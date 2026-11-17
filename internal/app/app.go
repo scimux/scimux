@@ -493,6 +493,8 @@ type app struct {
 	// cannot interleave a partial line, and pairs each append with an fsync —
 	// these records are the durable truth the supervisor replays and audits.
 	storeMu sync.Mutex
+	// promptGates serialize owner send/clear admission and trace readback.
+	promptGates [64]sync.Mutex
 	// settingsMu serializes saveSettings. The document is consent (settings.go),
 	// so its write-then-rename must be one critical section: a save that
 	// reports success has to be the save that reached disk. The settings

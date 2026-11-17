@@ -394,3 +394,29 @@ test("UNSAFE regex matches production methods only", () => {
   assert.equal(UNSAFE.test("GET"), false);
   assert.equal(UNSAFE.test("TRACE"), false);
 });
+
+test("node routing guard rejects received identities including escaped separators", async () => {
+  let calls=0;
+  const fetchImpl=async()=>{calls++; return new Response('{}',{headers:{'content-type':'application/json'}})};
+  for (const path of ['/api/nodes/team%2Fs%2Fo%2Fc%2Fg/send','/api/nodes/team/'+ 'a'.repeat(32)+'/'+ 'b'.repeat(32)+'/'+ 'c'.repeat(16)+'/'+ 'd'.repeat(16)+'/key']) {
+    await assert.rejects(api(path,{method:'POST'},{fetchImpl}), /Received chats/);
+  }
+  await api('/api/nodes/local/send',{method:'POST'},{fetchImpl});
+  assert.equal(calls,1);
+});
+
+test('local node named team retains controller and conditional reads', async () => {
+  const calls=[]; const fetchImpl=async(path)=>{calls.push(path); return new Response('{}',{headers:{'content-type':'application/json'}})};
+  for (const suffix of ['send','send/interrupt','attachments/file','attachments/deep/nested/file','chat']) await api('/api/nodes/team/'+suffix,{method:'POST'},{fetchImpl});
+  await apiConditionalGet('/api/nodes/team/chat','',{fetchImpl});
+  for (const path of ['/api/nodes/team%2Fs%2Fo%2Fc%2Fg/send','/api/nodes/team/'+ 'a'.repeat(32)+'/'+ 'b'.repeat(32)+'/'+ 'c'.repeat(16)+'/'+ 'd'.repeat(16)+'/key']) {
+    await assert.rejects(api(path,{method:'POST'},{fetchImpl}),/Received chats/);
+    await assert.rejects(apiConditionalGet(path,'',{fetchImpl}),/Received chats/);
+  }
+  assert.equal(calls.length,6);
+});
+
+test('malformed escaped node paths never throw in the routing decision', async () => {
+  let calls=0; const fetchImpl=async()=>{calls++; return new Response('{}',{headers:{'content-type':'application/json'}})};
+  await api('/api/nodes/%broken/chat',{}, {fetchImpl}); assert.equal(calls,1);
+});

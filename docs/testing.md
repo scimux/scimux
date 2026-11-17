@@ -121,6 +121,49 @@ It skips without that explicit binary path and in the `-short` lane. It
 complements the browser unit suite and live browser acceptance; it does not
 exercise DOM rendering or run automatically in the single-repository CI.
 
+### Shared-chat ownership acceptance
+
+The unified shared-chat UI must satisfy these cases with synthetic content
+and fake agent transports before its canary release:
+
+- A recipient with `read` or `write` access has no Agent destination or
+  **Use as prompt** action in the received chat. Forged actions and direct
+  requests cannot reach the sharer's agent or its controller routes.
+- A writable recipient's comment becomes visible in the owner's original
+  chat, with the recipient's authorship. Receipt, polling, retries and
+  reconnects cause zero agent sends, including with auto-approval enabled.
+- During a selected received chat, hold an actual mirror or comments response,
+  disable Team in settings until the subscription list returns 404, then
+  re-enable it. Release the stale response after a replacement read starts,
+  post a new human comment, and verify recovery without switching chats,
+  duplicate entries, lost drafts, false read marks, or agent sends.
+- Only the owner can select **Use as prompt**. It copies the selected text
+  into an editable Agent draft, preserves attribution and applicable AI
+  provenance, and selects Agent without sending. Only the owner's later
+  explicit Send dispatches that draft to their own agent.
+- Use as prompt immediately marks the source bubble for a nonblank draft.
+  The marker uses the bookmark marker placement with a distinct prompt icon
+  and accessible label. Partial edits, draft restoration and polls preserve
+  its durable source identity. Completely erasing the draft cancels the
+  pending marker; unrelated later typing does not restore it. Confirmed
+  delivery retains a source marker linked to the resulting prompt even after
+  edits. A new empty draft does not remove previously confirmed links.
+  Failed and unconfirmed sends never show a delivered marker. Two confirmed
+  uses of one source in the same chat show distinct chooser labels; each
+  choice navigates to its exact saved address, including through keyboard
+  selection and Escape focus restoration.
+- The sharing sheet has a people picker and no permission dropdown. Newly
+  invited members are submitted with `access: "write"`; deselected people
+  are omitted. Saving another membership change retains existing `read`
+  grants. Background enforcement still rejects comments from read-only
+  recipients and agent requests from all recipients.
+- Returning to People, changing chats, losing access, or receiving a stale
+  asynchronous result cannot dispatch a draft or transfer agent authority.
+
+Cover both browser behaviour and the server/request boundary. Hiding a
+button alone does not establish the ownership invariant documented in
+[storage invariants](invariants/storage.md) and the [Team API](http-api.md#agent-ownership-boundary).
+
 ## Public repository CI and release setup
 
 `pr.yml` tests the PR merge commit on a fresh GitHub-hosted Ubuntu runner,
@@ -160,3 +203,75 @@ Keep the build/offline and other repositories' entries. Do not add PR workflows
 to this self-hosted group. Release the new main commit (or a later descendant):
 old tags still contain the old caller workflow. Keep immutable releases disabled
 until a separate change uploads and verifies assets in a draft before publishing.
+
+## Opt-in browser team acceptance
+
+`web/test/team-e2e.cjs` runs synthetic scimux seats against a separately built
+real scimux-team relay. It uses real browser interactions for the sharing,
+chat and navigation journeys; API calls provide fixture setup, forged requests
+and evidence. The native edge-whitespace check uses the API because the
+browser composer trims outer whitespace. All agent executables are synthetic;
+no installed agent CLI is used. The phone runs use iPhone Chromium emulation,
+not physical Safari. Width checks also use 320, 390 and 768 pixel viewports.
+
+Python 3, tmux, Node 22+, Playwright and its Chromium browser are required.
+Playwright is test-only and is not a shipped dependency. Install it outside
+this repository, for example with `npm install --prefix /some/test-tools
+playwright` followed by `/some/test-tools/node_modules/.bin/playwright install
+chromium`; install the browser's system libraries as needed. Build scimux and
+an independent relay, then supply absolute paths:
+
+```sh
+CGO_ENABLED=0 go build -o /some/output/scimux ./cmd/scimux
+(cd /some/scimux-team && CGO_ENABLED=0 go build -o /some/output/scimux-team ./cmd/scimux-team)
+SCIMUX_E2E_BINARY=/some/output/scimux \
+SCIMUX_TEAM_E2E_BINARY=/some/output/scimux-team \
+SCIMUX_E2E_PLAYWRIGHT=/some/test-tools/node_modules/playwright \
+node web/test/team-e2e.cjs
+```
+
+Set `PLAYWRIGHT_BROWSERS_PATH` for a custom browser location. The runner fails
+on missing prerequisites. Its default executes all implemented scenarios and
+records only assertions that passed. The printed private artifact directory
+contains a manifest, screenshots, logs, and raw browser JavaScript coverage
+with matching sources. It can contain synthetic credentials: keep it private.
+Each run owns its temporary homes, relay, fake PATH, workers and private tmux
+sockets. Teardown deletes its fixture nodes and stops owned processes on
+success, failure and catchable signals; it retains an owned socket and fails
+if the server cannot be confirmed dead. The native fixture can also be checked
+with `python3 web/test/testdata/team-e2e/test_native.py`. Cleanup behavior is
+checked with `node --test web/test/testdata/team-e2e/test-cleanup.mjs
+web/test/testdata/team-e2e/test-tmux-cleanup.mjs`. `SCIMUX_E2E_FAIL_AFTER_NATIVE=1`
+injects an intentional failure; `SCIMUX_E2E_CLEANUP_PROBE=failure` or `signal`
+selects a cleanup probe, not an acceptance run.
+
+Use `SCIMUX_E2E_SCENARIO` for a bounded run. The available selections are
+`ui-join`, `stale-membership`, `stale-removed-membership`, `early-native`,
+`conversation-core`, `conversation-native`, `conversation-refusal`,
+`conversation-trace`, `native-start-failure`, `recipient-boundary`,
+`received-offline`, `permission-lifecycle`, `recipient-leave`, `leave-stale`,
+`leave-empty`, `held-evidence`, `dropped-send`, `reshare-stale`, `ai-source`,
+`viewport-keyboard`, `media-contrast`, `unshared`, and `held-chat-loading`.
+The test-only native fixture uses a marker in its private synthetic HOME to
+stay alive without SessionStart for the startup-failure scenario. Normal
+fixture launches run the usual hook.
+
+The manifest's assertion IDs map the principal requirements to real journeys:
+
+| Requirement | Scenario and assertion examples |
+| --- | --- |
+| Selected chat sharing and membership | `ui-join`: `selected-ui-team-join`; `stale-membership`: `stale-keeps-current-read`; `stale-removed-membership`: `stale-removed-stays-absent` |
+| Activities, folds and pins | Default: `mine-first-distinct-identities`, `folded-unread-poll`, `mixed-pinned`; `viewport-keyboard`: `viewport-keyboard-*` |
+| Unified discussion and source links | `conversation-core`: `trace-original-once`, `trace-human-not-agent-log`, `trace-confirmed-exact-address`, `trace-editor-focused-during-poll`, `trace-jump-exact-onscreen`; `early-native`: `early-native-author-source-once` |
+| Owner-only agent control | `recipient-boundary`: `boundary-real-clear-and-fork-rejected`, `boundary-forgeries-rejected`, `boundary-armed-owner-comments-no-dispatch`; `ai-source`: `ai-source-explicit-exact-mirrored` |
+| Offline, permissions and leave | `received-offline`: `received-offline-saved-copy-and-draft`, `received-explicit-retry-idempotent`; `permission-lifecycle`: `permission-read-draft-and-denial`; `recipient-leave`, `leave-stale`, `leave-empty`: their `leave-*` assertions |
+| Delivery and drafts | `held-evidence`: `held-evidence-awaiting-not-sent`; `dropped-send`: `dropped-response-explicit-retry-once`; `reshare-stale`: `reshare-stale-response-keeps-new-generation`; `conversation-core`: `trace-held-upload-*` and `trace-failed-upload-*` |
+| Rendering and native recovery | `media-contrast`: `media-caption-contrast`; `viewport-keyboard`: `viewport-control-target`; `held-chat-loading`: `held-chat-loading-reduced-motion`; `native-start-failure`: `native-start-failure-restores-draft` |
+
+The mapping identifies exercised behavior, not every combination of transport,
+error and lifecycle state. Tests never substitute callback invocation for a
+browser interaction. Structured refusal reports its actual error and does not
+invent a `restore_draft` field; the separate Claude startup scenario exercises
+that native recovery path. A complete acceptance run uses the current default
+and the Go, Node and build checks described above; a bounded scenario alone
+does not stand in for that run.

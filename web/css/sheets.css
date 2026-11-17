@@ -330,13 +330,16 @@ label:has(> #m_vibe_inspect) > input {
 #m_sharing #m_team_note[hidden] { display: none; }
 #m_sharing button.danger { color: var(--bad); font-weight: 600; }
 
-/* Share sheet. Radios opt out of the full-width field rule so the target
-   stays a 44px control. Apply and stop already hide through .sheet .cta[hidden]. */
-#sharesheet label { min-height: 44px; }
-#sharesheet input[type="radio"] {
-  width: 44px; height: 44px; min-width: 44px; min-height: 44px;
-  margin: 0; padding: 0; flex: none;
+/* Share sheet choices keep native-sized indicators and touch-sized labels. */
+#sharesheet fieldset { border: 0; padding: 0; margin: 16px 0 0; min-width: 0; }
+#sharesheet legend { padding: 0; font-size: 11px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+#sharesheet p { color: var(--dim); font-size: 13px; }
+#sharesheet label { min-height: 44px; display: flex; align-items: center; gap: 8px; }
+#sharesheet input[type="radio"],
+#sharesheet input[type="checkbox"] {
+  width: auto; height: auto; min-width: 0; min-height: 0;
+  margin: 0; padding: 0; flex: none; accent-color: var(--work);
 }
-#sharesheet select { min-height: 44px; }
 #sharesheet #sh_apply,
 #sharesheet #sh_stop { min-height: 44px; }

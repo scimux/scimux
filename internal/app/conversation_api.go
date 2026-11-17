@@ -17,6 +17,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -120,6 +122,7 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		Trace       bool         `json:"trace,omitempty"`
 		Text        string       `json:"text"`
 		Attachments []Attachment `json:"attachments"`
 	}
@@ -153,10 +156,27 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	// Fixed-size striped gates serialize all owner sends and clears with the
+	// trace snapshots, without retaining a receipt or a lock per node.
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(n.ID))
+	gate := &a.promptGates[hash.Sum32()%uint32(len(a.promptGates))]
+	gate.Lock()
+	defer gate.Unlock()
+
 	// delivered is what the transport receives and records: the user's text with
 	// a plain-text reference to each uploaded file appended (extendPrompt). The
 	// raw text is kept only for /clear detection and unconfirmed-draft echo.
 	delivered := extendPrompt(body.Text, atts)
+	isClear := strings.TrimSpace(body.Text) == "/clear"
+	var nativeBefore claudeTraceFrontier
+	nativeVerified := false
+	if body.Trace && n.Agent == "claude" && !isClear {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		nativeBefore, nativeVerified = a.captureOwnedClaudeFrontier(ctx, n)
+		cancel()
+	}
+	admission := time.Now()
 	if a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID) {
 		var delivery sessionworker.Delivery
 		var err error
@@ -176,9 +196,15 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(body.Text) != "/clear" {
 			a.noteUsagePrompt(n.Agent)
 		}
-		response := map[string]string{"status": delivery.Status}
+		response := map[string]any{"status": delivery.Status}
 		if delivery.Status == sessionworker.DeliveryUnconfirmed {
 			response["text"] = body.Text
+		} else if body.Trace && nativeVerified && delivery.Status == sessionworker.DeliveryAcknowledged {
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			if address, ok := a.awaitClaudePromptAddress(ctx, n, nativeBefore, delivered, admission); ok {
+				response["trace"] = address
+			}
+			cancel()
 		}
 		writeJSON(w, response)
 		return
@@ -249,6 +275,10 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		// Boundary sample → Send → primed arm under the auto-gate so the
 		// first permission of this turn cannot race into the cutoff, and a
 		// concurrent enable cannot install between Send and arm.
+		var before []sessionlog.Event
+		if body.Trace && a.sessionsDir != "" && structuredTraceTransport(n) {
+			before = sessionlog.ReadEvents(a.sessionLogPath(n.ID))
+		}
 		if err := a.acceptStructuredPrompt(n, pm, delivered); err != nil {
 			code := 500
 			if pm.Conflict(err) {
@@ -258,6 +288,20 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.noteUsagePrompt(n.Agent)
+		if body.Trace {
+			response := map[string]any{"status": "acknowledged"}
+			a.mu.Lock()
+			sameNode := a.byID[n.ID] == n
+			a.mu.Unlock()
+			if a.sessionsDir != "" && sameNode && structuredTraceTransport(n) {
+				after := sessionlog.ReadEvents(a.sessionLogPath(n.ID))
+				if address, ok := queuedPromptAddress(before, after, delivered); ok {
+					response["trace"] = address
+				}
+			}
+			writeJSON(w, response)
+			return
+		}
 		writeJSON(w, map[string]string{"status": "acknowledged"})
 		return
 	}
@@ -266,9 +310,15 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	response := map[string]string{"status": string(delivery)}
+	response := map[string]any{"status": string(delivery)}
 	if delivery == initialUnconfirmed {
 		response["text"] = body.Text
+	} else if body.Trace && nativeVerified && delivery == initialAcknowledged {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		if address, ok := a.awaitClaudePromptAddress(ctx, n, nativeBefore, delivered, admission); ok {
+			response["trace"] = address
+		}
+		cancel()
 	}
 	writeJSON(w, response)
 }
@@ -642,7 +692,15 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		resp := map[string]any{"segments": segs}
+		empty := []sessionlog.HistorySegment{}
+		if a.sessionsDir != "" {
+			for _, surface := range sessionlog.ReadHistoryIncludingEmpty(a.sessionLogPath(n.ID)) {
+				if len(surface.Turns) == 0 && len(surface.Decisions) == 0 {
+					empty = append(empty, surface)
+				}
+			}
+		}
+		resp := map[string]any{"segments": segs, "empty_segments": empty}
 		resp["allow_external_attachments"] = a.settings().AllowExternalAttachments
 		if len(assets) > 0 {
 			resp["assets"] = assets
@@ -661,8 +719,19 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"turns": turns, "last_change": lastMS,
 		"chat_started": seg.StartTime, "prior_turns": seg.PriorTurns,
+		"log_uid": seg.UID, "segment_index": seg.Index,
 	}
 	resp["allow_external_attachments"] = a.settings().AllowExternalAttachments
+	if query := r.URL.Query(); query.Has("trace_uid") {
+		segment, segErr := strconv.Atoi(query.Get("trace_segment"))
+		record, recErr := strconv.Atoi(query.Get("trace_record"))
+		outcome := "unknown"
+		if segErr == nil && recErr == nil && a.sessionsDir != "" && (structuredTraceTransport(n) || n.Agent == "claude") && !n.Adopted {
+			address := promptAddress{UID: query.Get("trace_uid"), Segment: segment, Record: record}
+			outcome = promptTraceOutcome(sessionlog.ReadEvents(a.sessionLogPath(n.ID)), address)
+		}
+		resp["trace_outcome"] = outcome
+	}
 	// fresh: zero-turn current segment with prior history behind a source
 	// seam — a /clear'ed chat. The client trusts this over fallback so a
 	// cleared Claude node says "fresh chat — send a prompt" instead of

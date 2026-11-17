@@ -13,6 +13,8 @@ import (
 // it is the fresh chat surface, everything before it stays in the same file
 // as prior history. A log that never rolled over is one segment.
 type Segment struct {
+	UID        string
+	Index      int
 	Turns      []transcript.Turn
 	PriorTurns int // turns before the last seam; >0 means "render a divider"
 	// StartTime is when the current chat surface began: the last seam's own
@@ -120,6 +122,7 @@ func segmentOf(evs []Event) Segment {
 			seg.StartTime = t0
 		}
 	}
+	seg.UID, seg.Index = uid, recSeg
 	return seg
 }
 
@@ -157,6 +160,8 @@ func ReadSegment(path string) Segment {
 // R20.9 rule as Segment.StartTime — adopted/imported turns can be far older
 // than their bind seam).
 type HistorySegment struct {
+	UID       string            `json:"log_uid,omitempty"`
+	Index     int               `json:"segment_index"`
 	Start     string            `json:"start"`
 	Seam      string            `json:"seam"`
 	Reason    string            `json:"reason,omitempty"` // opening seam's reason; "" for the log's first surface
@@ -171,15 +176,23 @@ type HistorySegment struct {
 // turn zero behind a fresh seam — and history is a reading surface, so the
 // honest repeat beats a dedup guess. Not cached: this is a per-tap read, not
 // a poll path.
-func ReadHistory(path string) []HistorySegment {
+func ReadHistory(path string) []HistorySegment { return readHistory(path, false) }
+
+// ReadHistoryIncludingEmpty adds empty seam surfaces for locally anchored comments.
+func ReadHistoryIncludingEmpty(path string) []HistorySegment { return readHistory(path, true) }
+
+func readHistory(path string, includeEmpty bool) []HistorySegment {
+	var uid, agent string
+	recSeg := 0
 	segs := []HistorySegment{}
 	cur := HistorySegment{Turns: []transcript.Turn{}, Decisions: []DecisionSurface{}}
 	flush := func() {
 		// Drop surfaces with neither readable turns nor decisions (back-to-back
 		// mechanical seams). A decision-only surface is still history P4 needs.
-		if len(cur.Turns) == 0 && len(cur.Decisions) == 0 {
+		if !includeEmpty && len(cur.Turns) == 0 && len(cur.Decisions) == 0 {
 			return
 		}
+		cur.UID, cur.Index = uid, recSeg
 		if len(cur.Turns) > 0 {
 			if t0 := cur.Turns[0].Time; t0 != "" && earlier(t0, cur.Start) {
 				cur.Start = t0
@@ -189,8 +202,6 @@ func ReadHistory(path string) []HistorySegment {
 	}
 	// Durable address bookkeeping, kept identical to segmentOf/ScanLog so a turn
 	// resolves to the same identity whether it's read live or as history.
-	var uid, agent string
-	recSeg := 0
 	for i, ev := range ReadEvents(path) {
 		if ev.T == "meta" && ev.Meta != nil {
 			uid = ev.Meta.UID

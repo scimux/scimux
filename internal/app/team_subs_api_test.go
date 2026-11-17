@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/scimux/scimux/internal/identity"
+	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/team"
 )
 
@@ -197,21 +198,24 @@ func holdClock(t *testing.T, h http.Handler) *time.Time {
 }
 
 type subView struct {
-	Server       string `json:"server"`
-	ServerName   string `json:"server_name"`
-	Owner        string `json:"owner"`
-	OwnerName    string `json:"owner_name"`
-	Chat         string `json:"chat"`
-	Generation   string `json:"generation"`
-	Title        string `json:"title"`
-	Access       string `json:"access"`
-	State        string `json:"state"`
-	MirrorLast   uint64 `json:"mirror_last"`
-	SeenMirror   uint64 `json:"seen_mirror"`
-	CommentsLast uint64 `json:"comments_last"`
-	SeenComments uint64 `json:"seen_comments"`
-	Unread       bool   `json:"unread"`
-	FirstSeen    string `json:"first_seen"`
+	Server        string              `json:"server"`
+	ServerName    string              `json:"server_name"`
+	Owner         string              `json:"owner"`
+	OwnerName     string              `json:"owner_name"`
+	Chat          string              `json:"chat"`
+	Generation    string              `json:"generation"`
+	Title         string              `json:"title"`
+	Access        string              `json:"access"`
+	State         string              `json:"state"`
+	MirrorLast    uint64              `json:"mirror_last"`
+	SeenMirror    uint64              `json:"seen_mirror"`
+	CommentsLast  uint64              `json:"comments_last"`
+	SeenComments  uint64              `json:"seen_comments"`
+	Unread        bool                `json:"unread"`
+	FirstSeen     string              `json:"first_seen"`
+	LocalNode     string              `json:"local_node,omitempty"`
+	LocalOrder    *int                `json:"local_order,omitempty"`
+	LocalFrontier *team.OwnerFrontier `json:"local_frontier,omitempty"`
 }
 
 type subServerView struct {
@@ -4728,4 +4732,307 @@ func TestCommentStoredAuthorRecoveryReleasesUnnamedSlot(t *testing.T) {
 		}
 	}
 	t.Fatalf("new author was not retained after recovery: %+v", people)
+}
+
+func TestOwnedMirrorLocalAddress(t *testing.T) {
+	rec := team.MirrorRecord{Seq: 7, Key: "2/37", Body: json.RawMessage(`{"v":1,"t":"user","text":"synthetic"}`)}
+	for _, tc := range []struct {
+		access string
+		want   bool
+	}{{"owner", true}, {"read", false}, {"write", false}} {
+		got, _, ok := projectSubRecordForAccess(rec, tc.access)
+		if !ok {
+			t.Fatal("entry rejected")
+		}
+		segment, present := got["local_segment"]
+		if present != tc.want {
+			t.Fatalf("access %s address presence = %v", tc.access, present)
+		}
+		if tc.want && (segment != 2 || got["local_record"] != 37) {
+			t.Fatalf("address = %v", got)
+		}
+	}
+	for _, key := range []string{"start", "-1/2", "1/-2", "a/2", "1/2/3"} {
+		rec.Key = key
+		got, _, ok := projectSubRecordForAccess(rec, "owner")
+		if !ok {
+			t.Fatal("entry rejected")
+		}
+		if _, exists := got["local_record"]; exists {
+			t.Fatalf("invalid key %q exposed", key)
+		}
+	}
+}
+
+func TestSubReadLocalAddressOwnerOnly(t *testing.T) {
+	for _, access := range []string{"owner", "read", "write"} {
+		t.Run(access, func(t *testing.T) {
+			h, dir := readSurface(t, func(http.ResponseWriter, *http.Request) {})
+			subs, err := team.LoadSubs(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			subs[0].Access = access
+			subs[0].State = "ended"
+			if err := team.SaveSubs(dir, subs); err != nil {
+				t.Fatal(err)
+			}
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			record := team.MirrorRecord{Seq: 1, Key: "2/37", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"synthetic"}`)}
+			if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
+				t.Fatal(err)
+			}
+			result := decodeSubRead(t, doTeam(h, http.MethodGet, subReadPath(), ""))
+			if len(result.Entries) != 1 {
+				t.Fatalf("entries = %v", result.Entries)
+			}
+			_, present := result.Entries[0]["local_record"]
+			if present != (access == "owner") {
+				t.Fatalf("access=%s entry=%v", access, result.Entries[0])
+			}
+		})
+	}
+}
+
+func TestOwnerStartPositionTracksSeamsAndFromNow(t *testing.T) {
+	events := []sessionlog.Event{{T: "meta"}, {T: "user"}, {T: "source"}, {T: "assistant"}}
+	for _, tc := range []struct {
+		start, segment, record int
+		ok                     bool
+	}{{0, 0, -1, true}, {2, 0, 1, true}, {3, 1, 2, true}, {4, 1, 3, true}, {5, 0, 0, false}, {-1, 0, 0, false}} {
+		segment, record, ok := ownerStartPosition(events, tc.start)
+		if ok != tc.ok || (ok && (segment != tc.segment || record != tc.record)) {
+			t.Fatalf("start %d: %d,%d,%v", tc.start, segment, record, ok)
+		}
+	}
+}
+
+func TestShareViewCarriesGenerationForOwnerSubscriptionMatching(t *testing.T) {
+	h := &teamHandler{}
+	got := h.shareAPI(team.Share{UID: "aaaaaaaaaaaaaaaa", Node: "local", Server: teamServerID, Generation: subGen})
+	if got.Generation != subGen {
+		t.Fatalf("generation=%q", got.Generation)
+	}
+}
+
+func TestOwnerFrontierSurvivesShareRetirementAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := identity.LoadOrCreateInstallation(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := baseSub()
+	sub.Owner = string(inst)
+	sub.Access = "owner"
+	seedSub(t, dir, sub)
+	writeChatLog(t, dir, "local", sub.Chat, 2)
+	mustSaveShare(t, dir, team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2})
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	h := &teamHandler{dataDir: dir}
+	seg, rec, ok := h.ownerStartAddress(id)
+	if !ok || seg != 0 || rec != 1 {
+		t.Fatalf("live frontier %d/%d %v", seg, rec, ok)
+	}
+	if err := team.RemoveShare(dir, sub.Chat); err != nil {
+		t.Fatal(err)
+	}
+	h = &teamHandler{dataDir: dir}
+	seg, rec, ok = h.ownerStartAddress(id)
+	if !ok || seg != 0 || rec != 1 {
+		t.Fatalf("retained frontier %d/%d %v", seg, rec, ok)
+	}
+}
+
+func TestStopRetainsOwnerFrontierBeforeDeletingShare(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := identity.LoadOrCreateInstallation(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := baseSub()
+	sub.Owner = string(inst)
+	sub.Access = "owner"
+	seedSub(t, dir, sub)
+	writeChatLog(t, dir, "local", sub.Chat, 2)
+	share := team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2}
+	mustSaveShare(t, dir, share)
+	h := &teamHandler{dataDir: dir}
+	rec := httptest.NewRecorder()
+	h.finishStop(rec, share)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status %d", rec.Code)
+	}
+	saved, err := team.LoadSubs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved[0].OwnerFrontier == nil || saved[0].OwnerFrontier.Record != 1 {
+		t.Fatalf("frontier %+v", saved[0].OwnerFrontier)
+	}
+}
+
+func TestOwnerLocalNodeRequiresMatchingLogIdentity(t *testing.T) {
+	dir := t.TempDir()
+	h := &teamHandler{dataDir: dir}
+	sub := baseSub()
+	sub.Access = "owner"
+	sub.OwnerFrontier = &team.OwnerFrontier{Node: "local", Segment: 0, Record: 1}
+	writeChatLog(t, dir, "local", sub.Chat, 1)
+	got := h.subscriptionView([]team.Subscription{sub}, nil, false)
+	if got.Subscriptions[0].LocalNode != "local" || got.Subscriptions[0].LocalFrontier == nil {
+		t.Fatalf("view %+v", got.Subscriptions[0])
+	}
+	sub.Chat = subChatB
+	got = h.subscriptionView([]team.Subscription{sub}, nil, false)
+	if got.Subscriptions[0].LocalNode != "" {
+		t.Fatalf("reused node exposed %+v", got.Subscriptions[0])
+	}
+	sub.Chat = subChat
+	sub.Access = "read"
+	got = h.subscriptionView([]team.Subscription{sub}, nil, false)
+	if got.Subscriptions[0].LocalNode != "" || got.Subscriptions[0].LocalFrontier != nil {
+		t.Fatalf("recipient node exposed %+v", got.Subscriptions[0])
+	}
+}
+
+func TestCaptureOwnerFrontierOnSubscriptionRefresh(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := identity.LoadOrCreateInstallation(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := baseSub()
+	sub.Owner = string(inst)
+	sub.Access = "owner"
+	writeChatLog(t, dir, "local", sub.Chat, 2)
+	share := team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2}
+	mustSaveShare(t, dir, share)
+	h := &teamHandler{dataDir: dir}
+	subs := []team.Subscription{sub}
+	if !h.captureOwnerFrontiers(subs, string(inst)) || subs[0].OwnerFrontier == nil || subs[0].OwnerFrontier.Record != 1 {
+		t.Fatalf("frontier %+v", subs[0].OwnerFrontier)
+	}
+	if h.captureOwnerFrontiers(subs, string(inst)) {
+		t.Fatal("unchanged frontier reported changed")
+	}
+}
+
+func TestOwnerFrontierFailurePaths(t *testing.T) {
+	for _, kind := range []string{"identity_missing", "wrong_owner", "subs_damaged", "other_subscription", "shares_damaged", "other_share", "missing_log", "cursor_beyond_log", "save_failure", "no_share"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			inst, err := identity.LoadOrCreateInstallation(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sub := baseSub()
+			sub.Owner = string(inst)
+			sub.Access = "owner"
+			seedSub(t, dir, sub)
+			writeChatLog(t, dir, "local", sub.Chat, 2)
+			share := team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2}
+			if kind == "other_share" {
+				share.Generation = subGenB
+			}
+			if kind == "cursor_beyond_log" {
+				share.Start = 99
+				share.Next = 99
+			}
+			if kind != "no_share" {
+				mustSaveShare(t, dir, share)
+			}
+			id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+			h := &teamHandler{dataDir: dir}
+			switch kind {
+			case "identity_missing":
+				if err := os.Remove(filepath.Join(dir, "installation.json")); err != nil {
+					t.Fatal(err)
+				}
+			case "wrong_owner":
+				id.Owner = subOwnerB
+			case "subs_damaged":
+				if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "other_subscription":
+				id.Generation = subGenB
+			case "shares_damaged":
+				if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "missing_log":
+				if err := os.Remove(chatLogPath(dir, "local")); err != nil {
+					t.Fatal(err)
+				}
+			case "save_failure":
+				h.saveSubs = func(string, []team.Subscription) error { return errors.New("synthetic failure") }
+			}
+			if _, _, ok := h.ownerStartAddress(id); ok {
+				t.Fatalf("%s unexpectedly resolved", kind)
+			}
+		})
+	}
+}
+
+func TestCaptureOwnerFrontiersRejectsDamagedOrUnrelatedState(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := identity.LoadOrCreateInstallation(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &teamHandler{dataDir: dir}
+	sub := baseSub()
+	sub.Owner = string(inst)
+	sub.Access = "owner"
+	subs := []team.Subscription{sub}
+	if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if h.captureOwnerFrontiers(subs, string(inst)) {
+		t.Fatal("damaged shares captured")
+	}
+	if err := os.Remove(filepath.Join(dir, team.SharesFile)); err != nil {
+		t.Fatal(err)
+	}
+	mustSaveShare(t, dir, team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: subGenB})
+	if h.captureOwnerFrontiers(subs, string(inst)) {
+		t.Fatal("different generation captured")
+	}
+	mustSaveShare(t, dir, team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation})
+	if h.captureOwnerFrontiers(subs, string(inst)) {
+		t.Fatal("missing log captured")
+	}
+}
+
+func TestStopKeepsShareWhenOwnerFrontierCannotBeSaved(t *testing.T) {
+	for _, kind := range []string{"bad_subs", "missing_log"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			inst, err := identity.LoadOrCreateInstallation(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sub := baseSub()
+			sub.Owner = string(inst)
+			sub.Access = "owner"
+			seedSub(t, dir, sub)
+			share := team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation}
+			mustSaveShare(t, dir, share)
+			if kind == "bad_subs" {
+				if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h := &teamHandler{dataDir: dir}
+			rec := httptest.NewRecorder()
+			h.finishStop(rec, share)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status %d", rec.Code)
+			}
+			shares, err := team.LoadShares(dir)
+			if err != nil || len(shares) != 1 {
+				t.Fatalf("share not retained: %v %v", shares, err)
+			}
+		})
+	}
 }

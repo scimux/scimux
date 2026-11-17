@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -179,12 +180,37 @@ func TestTeamServerWorkflow(t *testing.T) {
 			t.Fatal("member did not receive the future answer")
 		}
 	}
+	beforeComment, err := os.ReadFile(chatLogPath(owner.dir, shareNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"send", "key", "auto-approve", "send/interrupt"} {
+		request(writer, "POST", path+"/"+action, map[string]any{"text": "forged"}, 404)
+	}
+	request(writer, "POST", path+"/comments", map[string]any{"text": "forged", "anchor": 0, "key": "1122334455667788", "prompt": true}, 400)
 	comment := map[string]any{"text": "Synthetic comment", "anchor": 0, "key": "1122334455667788"}
 	first := request(writer, "POST", path+"/comments", comment, 200)
 	if string(request(writer, "POST", path+"/comments", comment, 200)) != string(first) {
 		t.Fatal("retry was not idempotent")
 	}
 	request(reader, "POST", path+"/comments", comment, 403)
+	own := list(owner)
+	if len(own.Subscriptions) != 1 || own.Subscriptions[0].LocalNode != shareNode || own.Subscriptions[0].LocalFrontier == nil || own.Subscriptions[0].LocalFrontier.Record != 2 {
+		t.Fatalf("owner frontier missing: %+v", own.Subscriptions)
+	}
+	ownPath := address(own.Subscriptions[0])
+	var ownerMirror subscriptionReadResponse
+	decode(request(owner, "GET", ownPath, nil, 200), &ownerMirror)
+	if len(ownerMirror.Entries) == 0 || ownerMirror.Entries[0]["local_record"] != float64(2) {
+		t.Fatalf("owner start address missing: %+v", ownerMirror.Entries)
+	}
+	afterComment, err := os.ReadFile(chatLogPath(owner.dir, shareNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeComment, afterComment) {
+		t.Fatal("comments changed the owner worker log")
+	}
 	var comments commentReadResponse
 	decode(request(reader, "GET", path+"/comments", nil, 200), &comments)
 	if len(comments.Entries) != 1 || comments.Names[writer.id] != "Writer" {
@@ -229,11 +255,37 @@ func TestTeamServerWorkflow(t *testing.T) {
 		t.Fatal("removed member reappeared")
 	}
 	request(owner, "DELETE", "/api/team/shares/"+shareNode, nil, 204)
+	retained := list(owner)
+	if len(retained.Subscriptions) != 1 || retained.Subscriptions[0].State != "ended" || retained.Subscriptions[0].LocalNode != shareNode || retained.Subscriptions[0].LocalFrontier == nil {
+		t.Fatalf("owner retained frontier missing: %+v", retained.Subscriptions)
+	}
 	if list(writer).Subscriptions[0].State != "ended" || !strings.Contains(string(request(writer, "GET", path, nil, 200)), "Synthetic future answer") {
 		t.Fatal("stopping sharing discarded received history")
 	}
 	share("all", 201)
 	box.tick(ctx)
+	ownerCopies := list(owner)
+	if len(ownerCopies.Subscriptions) != 2 {
+		t.Fatalf("owner generations = %+v", ownerCopies.Subscriptions)
+	}
+	var oldOwner, newOwner *subscriptionView
+	for i := range ownerCopies.Subscriptions {
+		copy := &ownerCopies.Subscriptions[i]
+		if copy.State == "ended" {
+			oldOwner = copy
+		}
+		if copy.State == "live" {
+			newOwner = copy
+		}
+	}
+	if oldOwner == nil || newOwner == nil || oldOwner.Generation == newOwner.Generation || oldOwner.LocalFrontier == nil || newOwner.LocalFrontier == nil || oldOwner.LocalFrontier.Record != 2 || newOwner.LocalFrontier.Record != -1 {
+		t.Fatalf("owner generation frontiers = %+v", ownerCopies.Subscriptions)
+	}
+	var retainedMirror subscriptionReadResponse
+	decode(request(owner, "GET", address(*oldOwner), nil, 200), &retainedMirror)
+	if len(retainedMirror.Entries) == 0 || retainedMirror.Entries[0]["local_record"] != float64(2) {
+		t.Fatalf("retained owner frontier missing: %+v", retainedMirror.Entries)
+	}
 	var next subscriptionView
 	for _, sub := range list(writer).Subscriptions {
 		if sub.State == "live" {

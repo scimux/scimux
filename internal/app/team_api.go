@@ -26,6 +26,8 @@ type teamHandler struct {
 	now     func() time.Time
 	client  *team.Client
 	mu      sync.Mutex
+	// shareOps serializes share mutations with outbox work across network calls.
+	shareOps sync.Mutex
 	// statusBound is the time limit for one status check. Tests set it.
 	// Production sets eight seconds.
 	statusBound time.Duration
