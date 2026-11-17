@@ -21,6 +21,7 @@ const ERRORS = [
   ["no_history", "This chat has nothing to share yet."],
   ["not_active", "Sharing of this chat has ended. Stop it, then share again."],
   ["share_fixed", "Stop sharing first to change the server or the scope."],
+  ["share_changed", "Sharing changed. Close this sheet and review it again."],
   ["store_unavailable", "This computer could not save the change. Try again."],
   ["nope", "That did not work. Try again."],
 ];
@@ -356,7 +357,7 @@ function inputs(body, name) {
 }
 
 function selects(body) {
-  return body.querySelectorAll("select");
+  return body.querySelectorAll("input").filter(input => input.type === "checkbox" && input.dataset.seat);
 }
 
 test("shareStatusText covers every row for one member and for three", () => {
@@ -387,7 +388,7 @@ test("shareErrorText covers every code and an unknown one", () => {
   assert.equal(shareErrorText(""), "That did not work. Try again.");
 });
 
-test("a gate that is off sends one probe and then nothing", async () => {
+test("changing the selection probes even while the gate is off", async () => {
   const { feature, calls, btn, status } = setup(() => rejected(404, JSON.stringify({ error: "not_found" })));
   feature.select("node-1");
   await feature.settled();
@@ -397,7 +398,7 @@ test("a gate that is off sends one probe and then nothing", async () => {
   for (let i = 0; i < 10; i++) feature.select("node-" + (i + 2));
   for (let i = 0; i < 10; i++) feature.tick();
   await feature.settled();
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 11);
   assert.equal(btn.hidden, true);
   assert.equal(status.hidden, true);
 });
@@ -703,7 +704,7 @@ test("opening and choosing send no share request", async () => {
   scopes[1].checked = true;
   scopes[1].emit("change");
   const choice = selects(body)[0];
-  choice.value = "read";
+  choice.checked = true;
   choice.emit("change");
   await feature.settled();
   assert.equal(calls.some((call) => call.method === "PUT"), false);
@@ -714,13 +715,13 @@ test("opening and choosing send no share request", async () => {
 test("the put body covers nobody, read, read and write, entire history, and the second server", async () => {
   const cases = [
     { choose: () => {}, members: [] },
-    { choose: (body) => { selects(body)[0].value = "read"; }, members: [{ seat: blue.id, access: "read" }] },
+    { choose: (body) => { selects(body)[0].checked = true; }, members: [{ seat: blue.id, access: "write" }] },
     {
       choose: (body) => {
-        selects(body)[0].value = "read";
-        selects(body)[1].value = "write";
+        selects(body)[0].checked = true;
+        selects(body)[1].checked = true;
       },
-      members: [{ seat: blue.id, access: "read" }, { seat: red.id, access: "write" }],
+      members: [{ seat: blue.id, access: "write" }, { seat: red.id, access: "write" }],
     },
     {
       scope: "all",
@@ -805,13 +806,12 @@ test("self is not a row, an empty roster says so, and a failed roster shows the 
     btn.click();
     await feature.settled();
     const host = peopleOf(sheet);
-    if (body && Array.isArray(body.seats) && body.seats.some((seat) => seat.id === blue.id) && body.self == null) {
-      assert.equal(selects(sheet).length, 1);
-      assert.equal(selects(sheet)[0].dataset.seat, blue.id);
-    } else {
+    if (body && Array.isArray(body.seats) && typeof body.self === "string") {
       assert.equal(host.textContent, "Nobody else has joined this server yet.");
-      assert.equal(selects(sheet).length, 0);
+    } else {
+      assert.equal(host.textContent, "That did not work. Try again.");
     }
+    assert.equal(selects(sheet).length, 0);
   }
   const { feature, btn, body } = setup((call) => {
     if (call.path === "/api/team/servers") return { servers: [north] };
@@ -827,7 +827,7 @@ test("self is not a row, an empty roster says so, and a failed roster shows the 
   assert.equal(rows.some((row) => row.dataset.seat === selfId), false);
   assert.match(peopleOf(body).innerHTML, /A &lt;b&gt; &amp; &quot;q&quot;/);
   assert.doesNotMatch(peopleOf(body).innerHTML, /A <b>/);
-  assert.match(peopleOf(body).innerHTML, /aria-label="A &lt;b&gt; &amp; &quot;q&quot;"/);
+  assert.match(peopleOf(body).innerHTML, /<label><input type="checkbox"/);
   const failed = setup((call) => {
     if (call.path === "/api/team/servers") return { servers: [north] };
     if (call.path.endsWith("/seats")) return rejected(502, JSON.stringify({ error: "unreachable" }));
@@ -923,43 +923,16 @@ test("a second click while sharing sends nothing", async () => {
   assert.equal(calls.filter((call) => call.method === "PUT").length, 1);
 });
 
-test("selects follow the view and a member who is not a seat is left out", async () => {
-  const { feature, btn, body, calls } = setup((call) => {
-    if (call.path === "/api/team/servers") return { servers: [north, south] };
+test("a missing existing member disables save rather than dropping the grant", async () => {
+  const ui = setup(call => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
     if (call.path.endsWith("/seats")) return roster([selfSeat(), blue, red]);
-    if (call.method === "PUT") return viewOf({ members: call.body.members });
-    return viewOf({
-      members: [
-        { seat: blue.id, access: "read" },
-        { seat: "seat-missing", access: "write" },
-        { seat: red.id, access: "other" },
-      ],
-    });
+    return viewOf({ members: [{seat:blue.id,access:"read"},{seat:"seat-missing",access:"write"},{seat:red.id,access:"other"}] });
   });
-  feature.select("node-1");
-  await feature.settled();
-  btn.click();
-  await feature.settled();
-  assert.equal(body.querySelectorAll("input").length, 0);
-  assert.match(body.innerHTML, /North/);
-  assert.match(body.innerHTML, /From now on/);
-  assert.match(body.innerHTML, /To change the server or the scope, stop sharing and share again\./);
-  assert.match(body.innerHTML, /Members keep what they already received\./);
-  const rows = selects(body);
-  assert.deepEqual(rows.map((row) => row.dataset.seat), [blue.id, red.id]);
-  assert.equal(rows[0].value, "read");
-  assert.equal(rows[1].value, "");
-  rows[0].value = "write";
-  rows[0].emit("change");
-  body.ownerDoc.byId.get("sh_apply").click();
-  await feature.settled();
-  const put = calls.find((call) => call.method === "PUT");
-  assert.deepEqual(put.body, {
-    server: north.id,
-    scope: "from_now",
-    members: [{ seat: blue.id, access: "write" }],
-  });
-  assert.equal(calls.some((call) => String(call.body || "").includes("seat-missing")), false);
+  ui.feature.select("node-1"); await ui.feature.settled(); ui.btn.click(); await ui.feature.settled();
+  assert.equal(ui.apply.disabled, true);
+  assert.match(peopleOf(ui.body).textContent, /left the server/);
+  ui.apply.click(); assert.equal(ui.calls.some(call => call.method === "PUT"), false);
 });
 
 test("save people stays disabled until a choice differs and again when it is put back", async () => {
@@ -976,10 +949,10 @@ test("save people stays disabled until a choice differs and again when it is put
   assert.equal(ui.apply.disabled, true);
   ui.apply.click();
   assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   assert.equal(ui.apply.disabled, false);
-  row.value = "read";
+  row.checked = true;
   row.emit("change");
   assert.equal(ui.apply.disabled, true);
   ui.apply.click();
@@ -997,7 +970,7 @@ test("an active share whose scope is the whole history is shown as text", async 
   ui.btn.click();
   await ui.feature.settled();
   assert.match(ui.body.innerHTML, /Entire history/);
-  assert.equal(selects(ui.body)[0].value, "");
+  assert.equal(selects(ui.body)[0].checked, false);
   assert.equal(ui.apply.disabled, true);
 });
 
@@ -1162,7 +1135,7 @@ test("focus returns to share, to save, and to the armed stop control", async () 
   saving.btn.click();
   await saving.feature.settled();
   const row = selects(saving.body)[0];
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   const saveFocus = watch(saving.apply);
   saving.apply.focus();
@@ -1271,12 +1244,17 @@ test("share controls keep a 44px target and hidden still hides them", () => {
   const sheets = fs.readFileSync(new URL("../css/sheets.css", import.meta.url), "utf8");
   const chatShare = chat.slice(chat.indexOf("#sharebtn"));
   const sheetShare = sheets.slice(sheets.indexOf("#sharesheet"));
-  assert.match(chatShare, /#sharebtn\.headtoggle\s*\{[^}]*min-height:\s*44px/);
+  const shareRule = chatShare.match(/^([^{}]+)\{([^{}]*)\}/);
+  assert.ok(shareRule, "share control rule exists");
+  assert.ok(shareRule[1].split(",").map(selector => selector.trim()).includes("#sharebtn.headtoggle"));
+  for (const property of ["width", "height", "min-height"]) {
+    assert.match(shareRule[2], new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*44px\\s*(?:;|$)`));
+  }
+  assert.match(chat, /#chathead\s+\.headtoggle\[hidden\]\s*\{[^}]*display:\s*none/);
   assert.match(chatShare, /#sharestatus\s*\{[^}]*min-height:\s*44px/);
   assert.match(chatShare, /#sharestatus\[hidden\]\s*\{[^}]*display:\s*none/);
   assert.match(sheetShare, /#sharesheet label\s*\{[^}]*min-height:\s*44px/);
-  assert.match(sheetShare, /#sharesheet input\[type="radio"\]\s*\{[^}]*height:\s*44px/);
-  assert.match(sheetShare, /#sharesheet select\s*\{[^}]*min-height:\s*44px/);
+  assert.match(sheetShare, /#sharesheet input\[type="radio"\],\s*#sharesheet input\[type="checkbox"\]\s*\{[^}]*width:\s*auto/);
   assert.match(sheetShare, /#sharesheet #sh_apply,\s*#sharesheet #sh_stop\s*\{[^}]*min-height:\s*44px/);
   assert.doesNotMatch(chatShare, /@import|url\(/);
   assert.doesNotMatch(sheetShare, /@import|url\(/);
@@ -1298,7 +1276,7 @@ test("a save after the share ended elsewhere sends no put and shows the unshared
   ui.btn.click();
   await ui.feature.settled();
   const row = selects(ui.body)[0];
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   assert.equal(ui.apply.textContent, "Save people");
   assert.match(ui.body.innerHTML, />North</);
@@ -1364,7 +1342,7 @@ test("save people sends no put when a tick finds the share lost", async () => {
   ui.btn.click();
   await ui.feature.settled();
   const row = selects(ui.body)[0];
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   state = "lost";
   ui.time.now = 10000;
@@ -1661,7 +1639,7 @@ test("save people sends no put when the share was started again", async () => {
   ui.btn.click();
   await ui.feature.settled();
   const row = selects(ui.body)[0];
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   assert.equal(ui.apply.disabled, false);
   assert.match(ui.body.innerHTML, />North</);
@@ -1696,7 +1674,7 @@ test("save people sends no put when only the scope differs", async () => {
   ui.btn.click();
   await ui.feature.settled();
   const row = selects(ui.body)[0];
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   scope = "all";
   ui.time.now = 10000;
@@ -1725,13 +1703,13 @@ test("save people sends no put when only the shared time differs", async () => {
   ui.btn.click();
   await ui.feature.settled();
   const row = selects(ui.body)[0];
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   at = "2026-11-14T11:00:00Z";
   ui.time.now = 10000;
   ui.feature.tick();
   await ui.feature.settled();
-  assert.equal(row.value, "write");
+  assert.equal(row.checked, false);
   ui.apply.click();
   await ui.feature.settled();
   assert.equal(ui.calls.some((call) => call.method === "PUT"), false);
@@ -1739,10 +1717,10 @@ test("save people sends no put when only the shared time differs", async () => {
   assert.match(ui.body.innerHTML, />North</);
   assert.match(ui.body.innerHTML, /From now on/);
   assert.doesNotMatch(ui.body.innerHTML, />South</);
-  assert.equal(selects(ui.body)[0].value, "read");
+  assert.equal(selects(ui.body)[0].checked, true);
 });
 
-test("save people still sends a put when only members and delivery differ", async () => {
+test("save people detects concurrent membership changes", async () => {
   let changed = false;
   const seen = [];
   const ui = setup((call) => {
@@ -1763,7 +1741,7 @@ test("save people still sends a put when only members and delivery differ", asyn
   ui.btn.click();
   await ui.feature.settled();
   const row = selects(ui.body)[0];
-  row.value = "write";
+  row.checked = false;
   row.emit("change");
   changed = true;
   ui.time.now = 10000;
@@ -1773,12 +1751,237 @@ test("save people still sends a put when only members and delivery differ", asyn
   assert.match(ui.body.innerHTML, /From now on/);
   ui.apply.click();
   await ui.feature.settled();
-  assert.equal(seen.length, 1);
-  assert.deepEqual(seen[0], {
-    server: north.id,
-    scope: "from_now",
-    members: [{ seat: blue.id, access: "write" }],
+  assert.equal(seen.length, 0);
+  assert.equal(ui.note.textContent, CHANGED);
+});
+
+test("phase 1: unavailable sharing retries on cadence and selection can recover", async () => {
+  let online = false;
+  const ui = setup(call => {
+    if (call.path === "/api/team/servers") return online ? { servers: [north] } : rejected(404, "off");
+    return viewOf();
   });
-  assert.equal(ui.note.textContent, "");
-  assert.equal(ui.live.textContent, "People updated.");
+  ui.feature.select("node-1"); await ui.feature.settled();
+  online = true;
+  ui.time.now = 9999; ui.feature.tick(); await ui.feature.settled();
+  assert.equal(ui.calls.length, 1);
+  ui.time.now = 10000; ui.feature.tick(); await ui.feature.settled();
+  assert.equal(ui.btn.hidden, false);
+  assert.equal(ui.status.textContent, "Shared with 1 · North");
+});
+
+test("phase 1: membership checkboxes preserve read and add write", async () => {
+  const ui = setup(call => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue, red]);
+    if (call.method === "PUT") return viewOf({ members: call.body.members });
+    return viewOf();
+  });
+  ui.feature.select("node-1"); await ui.feature.settled(); ui.btn.click(); await ui.feature.settled();
+  const choices = ui.body.querySelectorAll("input").filter(x => x.type === "checkbox");
+  assert.equal(ui.body.querySelectorAll("select").length, 0);
+  assert.deepEqual(choices.map(x => x.checked), [true, false]);
+  choices[1].checked = true; choices[1].emit("change");
+  assert.equal(ui.apply.disabled, false); ui.apply.click(); await ui.feature.settled();
+  assert.deepEqual(ui.calls.find(c => c.method === "PUT").body.members, [{seat:blue.id,access:"read"},{seat:red.id,access:"write"}]);
+});
+
+test("phase 1: failed roster cannot submit a destructive membership update", async () => {
+  const ui = setup(call => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path.endsWith("/seats")) return rejected(502, "offline");
+    return viewOf();
+  });
+  ui.feature.select("node-1"); await ui.feature.settled(); ui.btn.click(); await ui.feature.settled();
+  assert.equal(ui.apply.disabled, true); ui.apply.click();
+  assert.equal(ui.calls.some(c => c.method === "PUT"), false);
+});
+
+test("phase 1: malformed access is unchecked, removal and revert preserve Apply state", async () => {
+  const ui = setup(call => {
+    if (call.path === "/api/team/servers") return {servers:[north]};
+    if (call.path.endsWith("/seats")) return roster([selfSeat(),blue,red]);
+    if (call.method === "PUT") return viewOf({members:call.body.members});
+    return viewOf({members:[{seat:blue.id,access:"read"},{seat:red.id,access:"invalid"},null]});
+  });
+  ui.feature.select("node-1"); await ui.feature.settled(); ui.btn.click(); await ui.feature.settled();
+  const rows = selects(ui.body);
+  assert.deepEqual(rows.map(row => row.checked), [true,false]);
+  assert.equal(ui.apply.disabled,true);
+  rows[0].checked = false; rows[0].emit("change"); assert.equal(ui.apply.disabled,false);
+  rows[0].checked = true; rows[0].emit("change"); assert.equal(ui.apply.disabled,true);
+  rows[0].checked = false; rows[0].emit("change"); ui.apply.click(); await ui.feature.settled();
+  assert.deepEqual(ui.calls.find(c => c.method === "PUT").body.members, []);
+});
+
+test("phase 1: a new share cannot submit while its roster fails or is malformed", async () => {
+  for (const answer of [null, {self:selfId,seats:[null]}, {self:selfId,seats:[{id:"",name:"bad"}]}, {self:selfId,seats:[{id:"bad"}]}]) {
+    const ui = setup(call => {
+      if (call.path === "/api/team/servers") return {servers:[north]};
+      if (call.path.endsWith("/seats")) return answer;
+      return rejected(404,"not found");
+    });
+    ui.feature.select("node-1"); await ui.feature.settled(); ui.btn.click(); await ui.feature.settled();
+    assert.equal(ui.apply.disabled,true); ui.apply.click(); assert.equal(ui.calls.some(c => c.method === "PUT"),false);
+  }
+});
+
+test("phase 1: clearing selection cancels a pending header read", async () => {
+  const gate = deferred(); const ui = setup(() => gate.promise);
+  ui.feature.select("node-1"); ui.feature.select(""); gate.resolve({servers:[north]});
+  await ui.feature.settled(); ui.time.now = 20000; ui.feature.tick(); await ui.feature.settled();
+  assert.equal(ui.calls.length,1); assert.equal(ui.btn.hidden,true);
+});
+
+test("phase 1: null stored members still allow stopping without a false drift", async () => {
+  const ui = setup(call => {
+    if (call.path === "/api/team/servers") return {servers:[north]};
+    if (call.path.endsWith("/seats")) return roster([]);
+    if (call.method === "DELETE") return "";
+    return viewOf({members:null});
+  });
+  ui.feature.select("node-1"); await ui.feature.settled(); ui.btn.click(); await ui.feature.settled();
+  ui.stop.click(); ui.stop.click(); await ui.feature.settled();
+  assert.equal(ui.calls.some(c=>c.method === "DELETE"),true);
+});
+
+test("retired sharing feature cannot repaint the successor after a delayed header read", async () => {
+  const gate = deferred();
+  const ui = setup(call => call.path === "/api/team/servers" ? gate.promise : viewOf());
+  ui.feature.select("node-1"); ui.feature.destroy();
+  ui.btn.hidden = true; ui.status.hidden = false; ui.status.textContent = "successor";
+  gate.resolve({servers:[north]}); await ui.feature.settled();
+  assert.equal(ui.btn.hidden,true); assert.equal(ui.status.textContent,"successor");
+  assert.equal(ui.calls.length,1);
+  ui.btn.innerHTML = "successor icon";
+  ui.feature.select("node-2"); ui.feature.ensureSelected("node-3"); ui.time.now = 20000; ui.feature.tick(); ui.feature.bind(); ui.feature.destroy();
+  assert.equal(ui.calls.length,1); assert.equal(ui.btn.hidden,true); assert.equal(ui.btn.innerHTML,"successor icon");
+});
+
+test("retirement prevents late share and roster reads from altering the successor", async () => {
+  for (const late of ["share", "roster"]) {
+    const gate = deferred();
+    const ui = setup(call => {
+      if (call.path === "/api/team/servers") return {servers:[north]};
+      if (call.path.endsWith("/seats")) return late === "roster" ? gate.promise : roster([selfSeat(),blue]);
+      return late === "share" ? gate.promise : viewOf();
+    });
+    ui.feature.select("node-1");
+    if (late === "share") await until(() => ui.calls.some(c=>c.path === "/api/team/shares/node-1"));
+    else { await ui.feature.settled(); ui.btn.click(); }
+    ui.feature.destroy(); ui.btn.hidden = true; ui.status.textContent = "successor";
+    if (late === "roster") peopleOf(ui.body).textContent = "successor people";
+    gate.resolve(late === "share" ? viewOf() : roster([selfSeat(),blue]));
+    await ui.feature.settled();
+    assert.equal(ui.btn.hidden,true); assert.equal(ui.status.textContent,"successor");
+    if (late === "roster") assert.equal(peopleOf(ui.body).textContent,"successor people");
+  }
+});
+
+test("retirement prevents late share mutations from changing successor controls", async () => {
+  for (const method of ["PUT","DELETE"]) for (const fail of [false,true]) {
+    const gate = deferred();
+    const ui = setup(call => {
+      if (call.path === "/api/team/servers") return {servers:[north]};
+      if (call.path.endsWith("/seats")) return roster([selfSeat(),blue]);
+      if (call.method === method) return gate.promise;
+      return viewOf();
+    });
+    ui.feature.select("node-1"); await ui.feature.settled(); ui.btn.click(); await ui.feature.settled();
+    if (method === "PUT") { const row=selects(ui.body)[0]; row.checked=false; row.emit("change"); ui.apply.click(); }
+    else { ui.stop.click(); ui.stop.click(); }
+    ui.feature.destroy();
+    ui.status.textContent="successor"; ui.note.textContent="successor note"; ui.live.textContent="successor live";
+    ui.apply.disabled=false; ui.stop.disabled=false; const calls=ui.calls.length;
+    if (fail) gate.reject(Object.assign(new Error("offline"),{status:502}));
+    else gate.resolve(method === "PUT" ? viewOf() : "");
+    await ui.feature.settled();
+    assert.equal(ui.status.textContent,"successor"); assert.equal(ui.note.textContent,"successor note");
+    assert.equal(ui.live.textContent,"successor live"); assert.equal(ui.apply.disabled,false); assert.equal(ui.stop.disabled,false);
+    assert.equal(ui.calls.length,calls); assert.equal(ui.closed.length,0);
+  }
+});
+
+test('reselect retains sharing controls while the real share refresh is pending', async () => {
+ let hold=false, release; const delayed=new Promise(resolve=>{release=resolve});
+ const ui=setup(call=>{
+  if(call.path==='/api/team/servers') return {servers:[north]};
+  if(hold) return delayed;
+  return viewOf();
+ });
+ ui.feature.select('node-1'); await ui.feature.settled();
+ assert.equal(ui.btn.hidden,false); assert.equal(ui.status.hidden,false);
+ hold=true; ui.feature.select('node-1');
+ assert.equal(ui.btn.hidden,false); assert.equal(ui.status.hidden,false);
+ release(viewOf()); await ui.feature.settled();
+ assert.equal(ui.status.textContent,'Shared with 1 · North');
+});
+
+test("membership-only save carries the viewed share identity and generation", async () => {
+  const ui = setup(call => {
+    if (call.path === "/api/team/servers") return {servers:[north]};
+    if (call.path.endsWith("/seats")) return roster([selfSeat(),blue,red]);
+    if (call.method === "PUT") return viewOf({generation:"generation-1",members:call.body.members});
+    return viewOf({generation:"generation-1",members:[{seat:blue.id,access:"write"}]});
+  });
+  ui.feature.select("node-1"); await ui.feature.settled();ui.btn.click();await ui.feature.settled();
+  const choices=ui.body.querySelectorAll("input").filter(x=>x.type==="checkbox");
+  choices[1].checked=true;choices[1].emit("change");ui.apply.click();await ui.feature.settled();
+  const sent=ui.calls.find(c=>c.method==="PUT").body;
+  assert.deepEqual(sent.membership_only,{uid:"share-1",generation:"generation-1",baseline:[blue.id]});
+});
+
+test("a stale generation conflict reports review without discarding choices", async () => {
+  const ui=setup(call=>{
+    if(call.path==="/api/team/servers") return {servers:[north]};
+    if(call.path.endsWith("/seats")) return roster([selfSeat(),blue,red]);
+    if(call.method==="PUT") return rejected(409, JSON.stringify({error:"share_changed"}));
+    return viewOf({generation:"generation-1"});
+  });
+  ui.feature.select("node-1");await ui.feature.settled();ui.btn.click();await ui.feature.settled();
+  const choices=ui.body.querySelectorAll("input").filter(x=>x.type==="checkbox");
+  choices[1].checked=true;choices[1].emit("change");ui.apply.click();await ui.feature.settled();
+  assert.equal(ui.note.textContent,"Sharing changed. Close this sheet and review it again.");
+  assert.equal(choices[1].checked,true);
+});
+
+test("stale write snapshot accepts current read returned by membership save", async () => {
+  let current=[{seat:blue.id,access:"write"}];
+  const puts=[];
+  const ui=setup(call=>{
+    if(call.path==="/api/team/servers")return {servers:[north]};
+    if(call.path.endsWith("/seats"))return roster([selfSeat(),blue,red]);
+    if(call.method==="PUT"){
+      puts.push(call.body);
+      current=call.body.members.map(m=>current.find(x=>x.seat===m.seat)||{seat:m.seat,access:"write"});
+      return viewOf({generation:"generation-1",members:current});
+    }
+    return viewOf({generation:"generation-1",members:current});
+  });
+  ui.feature.select("node-1");await ui.feature.settled();ui.btn.click();await ui.feature.settled();
+  let choices=ui.body.querySelectorAll("input").filter(x=>x.type==="checkbox");
+  current=[{seat:blue.id,access:"read"}];
+  choices[1].checked=true;choices[1].emit("change");ui.apply.click();await ui.feature.settled();
+  assert.deepEqual(puts[0].members,[{seat:blue.id,access:"write"},{seat:red.id,access:"write"}]);
+  assert.deepEqual(puts[0].membership_only.baseline,[blue.id]);
+  choices=ui.body.querySelectorAll("input").filter(x=>x.type==="checkbox");
+  choices[1].checked=false;choices[1].emit("change");ui.apply.click();await ui.feature.settled();
+  assert.deepEqual(puts[1].members,[{seat:blue.id,access:"read"}]);
+});
+
+test("generation change while a sheet is open requires review before saving", async () => {
+ let generation="generation-1";
+ const ui=setup(call=>{
+  if(call.path==="/api/team/servers")return {servers:[north]};
+  if(call.path.endsWith("/seats"))return roster([selfSeat(),blue,red]);
+  if(call.method==="PUT")return viewOf({generation,members:call.body.members});
+  return viewOf({generation});
+ });
+ ui.feature.select("node-1");await ui.feature.settled();ui.btn.click();await ui.feature.settled();
+ const choices=ui.body.querySelectorAll("input").filter(x=>x.type==="checkbox");
+ choices[1].checked=true;choices[1].emit("change");
+ generation="generation-2";ui.time.now=10000;ui.feature.tick();await ui.feature.settled();
+ ui.apply.click();await ui.feature.settled();
+ assert.equal(ui.calls.some(c=>c.method==="PUT"),false);
+ assert.equal(ui.note.textContent,CHANGED);
 });

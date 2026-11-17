@@ -106,11 +106,13 @@
  */
 
 import { esc as escDefault } from "./format.js";
+import { focusAtEnd } from "./caret.js";
 import {
   readPendingForwards,
   clearPendingForwards,
   readAwaitingForward,
   writeAwaitingForward,
+  addPromptSource, clearPromptSources, promptSourceKey, readPromptSources, readPromptFlights, writePromptFlights,
 } from "./storage.js";
 
 /* ---------- public constants ---------- */
@@ -205,6 +207,12 @@ export function attachmentInputKey(dataSrc){
  * Merge original send text with anything typed while the POST was in flight.
  * Original leads; identical newer text is not duplicated.
  */
+/* A distinct local token prevents another tab's replacement flight from
+   consuming this request's eventual result. It is not delivery evidence. */
+export function newPromptFlightID(now = Date.now(), random = Math.random){
+  return `${now}:${random()}:${random()}`;
+}
+
 export function mergeFailedDraft(text, newer){
   const t = text || "";
   const n = newer || "";
@@ -353,6 +361,13 @@ export function createComposerFeature(deps){
   let canAttach = false;
   let bound = false;
   let composerNode = "";
+  let destination = "agent";
+  let explicitAgent = false;
+  let contextKey = "";
+  let ownerChoice = false;
+  const peopleRevisions = new Map();
+  const agentRevisions = new Map();
+  const peopleSending = new Set();
   const sendingDestinations = new Set();
   const cleanups = [];
   /* dynamic remove buttons rebound on each renderStage */
@@ -362,6 +377,11 @@ export function createComposerFeature(deps){
   function nodeById(id){
     return typeof d.nodeById === "function" ? d.nodeById(id) : null;
   }
+  function peopleContext(){
+    return typeof d.peopleContext === "function" ? d.peopleContext() : null;
+  }
+  function peopleDraftKey(id){ return "scimux-people-draft:" + id; }
+  function isPeople(){ return destination === "people"; }
   function isPhoneTouch(){
     return typeof d.isPhoneTouch === "function" ? !!d.isPhoneTouch() : false;
   }
@@ -389,32 +409,40 @@ export function createComposerFeature(deps){
   function setComposerBusy(active){
     if (composerBusy === !!active) return; /* poll-safe: no DOM churn per tick */
     composerBusy = !!active;
-    const chrome = busyChrome(composerBusy);
+    const chrome = busyChrome(composerBusy && !isPeople());
     if (promptbar && promptbar.classList)
       promptbar.classList.toggle("busy", chrome.busy);
     if (sendbtn){
       if (sendbtn.classList) sendbtn.classList.toggle("stop", chrome.stopClass);
-      sendbtn.innerHTML = composerBusy
+      sendbtn.innerHTML = composerBusy && !isPeople()
         ? (icons.ICON_STOP || "")
         : (icons.ICON_SEND || "");
       if (typeof sendbtn.setAttribute === "function")
         sendbtn.setAttribute("aria-label", chrome.ariaLabel);
       sendbtn.title = chrome.title;
+      if (!isPeople() && ownerChoice && !composerBusy) {
+        sendbtn.setAttribute("aria-label", "Send message to agent");
+        sendbtn.title = "Send message to agent";
+      }
     }
   }
 
   function setComposerClosed(closed){
     if (composerClosed === !!closed) return;
     composerClosed = !!closed;
-    const chrome = closedChrome(composerClosed);
+    const context = peopleContext();
+    const chrome = closedChrome(isPeople() ? !(context && context.writable) : (composerClosed || (typeof d.agentAllowed === "function" && !d.agentAllowed())));
     if (promptbar && promptbar.classList)
       promptbar.classList.toggle("closed", chrome.closed);
     if (prompt){
       if (typeof prompt.setAttribute === "function")
         prompt.setAttribute("contenteditable", chrome.contentEditable);
-      if (prompt.dataset) prompt.dataset.placeholder = chrome.placeholder;
+      if (prompt.dataset) prompt.dataset.placeholder = isPeople() ? "Message people…" : chrome.placeholder;
     }
-    if (sendbtn) sendbtn.disabled = chrome.sendDisabled;
+    if (sendbtn) {
+      sendbtn.disabled = chrome.sendDisabled;
+      if (isPeople()) { sendbtn.setAttribute("aria-label", "Send message to people"); sendbtn.title = "Send message to people"; }
+    }
     if (attadd) attadd.disabled = chrome.attDisabled;
   }
 
@@ -431,11 +459,11 @@ export function createComposerFeature(deps){
     /* production: when already equal, still force hidden to match; when
        flipping off, close the source menu. */
     if (canAttach === on){
-      if (attadd) attadd.hidden = !on;
+      if (attadd) attadd.hidden = !on || isPeople();
       return;
     }
     canAttach = on;
-    if (attadd) attadd.hidden = !on;
+    if (attadd) attadd.hidden = !on || isPeople();
     if (!on) closeAttMenu();
   }
 
@@ -452,7 +480,7 @@ export function createComposerFeature(deps){
   function renderStage(){
     if (!attstage) return;
     const id = selId();
-    const items = id ? (stage[id] || []) : [];
+    const items = id && !isPeople() ? (stage[id] || []) : [];
     clearStageRemoveListeners();
     if (!items.length){
       attstage.hidden = true;
@@ -521,7 +549,7 @@ export function createComposerFeature(deps){
 
   function addFiles(files, dest){
     dest = dest || selId();
-    if (!canAttach || !dest || !files || !files.length) return;
+    if (isPeople() || !canAttach || !dest || dest.startsWith("team/") || !files || !files.length) return;
     const arr = staged(dest);
     const list = Array.from(files);
     for (const f of list){
@@ -555,16 +583,101 @@ export function createComposerFeature(deps){
     try { storage.removeItem(draftStorageKey(id)); } catch { /* stays until it can be */ }
   }
 
-  function onSelect(){
+  function onSelect({preferAgent = false} = {}){
     /* restore this node's draft and stage; hide + until chat confirms turns */
     const id = selId();
     if (composerNode && composerNode !== id && !promptText().trim() &&
         !sendingDestinations.has(composerNode) && !readAwaitingForward(storage, composerNode, nowFn()))
       clearPendingForwards(storage, composerNode);
     composerNode = id;
-    setPromptText(savedDraft(id));
+    const context = peopleContext();
+    contextKey = context?.key || "";
+    ownerChoice = !!context?.owner && !id.startsWith("team/");
+    explicitAgent = !!preferAgent && !id.startsWith("team/");
+    destination = !explicitAgent && (id.startsWith("team/") || contextKey) ? "people" : "agent";
+    setPromptText(isPeople() ? (storage.getItem(peopleDraftKey(id)) || "") : savedDraft(id));
+    refreshDestination();
     setAttachAvail(false);
     renderStage();
+  }
+
+  function refreshDestination(){
+    if (roots.destination) roots.destination.hidden = !ownerChoice;
+    if (roots.destinationPeople) roots.destinationPeople.setAttribute("aria-pressed", String(isPeople()));
+    if (roots.destinationAgent) roots.destinationAgent.setAttribute("aria-pressed", String(!isPeople()));
+    const busy = composerBusy; const closed = composerClosed;
+    composerBusy = null; composerClosed = null;
+    setComposerBusy(busy); setComposerClosed(closed);
+    if (attadd) attadd.hidden = !canAttach || isPeople();
+    if (isPeople()) closeAttMenu();
+    renderStage();
+  }
+
+  function contextChanged(){
+    const context = peopleContext();
+    const key = context?.key || "";
+    if (context?.owner && !selId().startsWith("team/")) ownerChoice = true;
+    if (key && key !== contextKey && !selId().startsWith("team/") && !explicitAgent) {
+      if (!isPeople()) keepDraft(selId(), promptText());
+      contextKey = key;
+      setDestination("people");
+    } else { contextKey = key; refreshDestination(); }
+  }
+
+  function setDestination(next){
+    const context = peopleContext();
+    if (next !== "agent" && next !== "people") return;
+    if (next === "agent" && context && !context.owner) return;
+    if (next === "agent" && (selId().startsWith("team/") || !nodeById(selId()))) return;
+    if (next === "people" && !context && !ownerChoice) return;
+    if (destination === next) { refreshDestination(); return; }
+    destination = next;
+    explicitAgent = next === "agent";
+    setPromptText(isPeople() ? (storage.getItem(peopleDraftKey(selId())) || "") : savedDraft(selId()));
+    refreshDestination();
+  }
+
+  function preparePrompt(text, source){
+    const id = selId();
+    if (!id || id.startsWith("team/") || !nodeById(id) || nodeById(id).ended_at || !promptSourceKey(source) ||
+        typeof d.canPreparePrompt !== "function" || !d.canPreparePrompt(source) || !String(text || "").trim()) return false;
+    const prior = isPeople() ? savedDraft(id) : promptText();
+    const merged = (prior ? prior + "\n\n" : "") + text;
+    keepDraft(id, merged);
+    addPromptSource(storage, id, source);
+    setDestination("agent");
+    setPromptText(merged);
+    if (prompt) focusAtEnd(prompt);
+    if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged();
+    return true;
+  }
+
+  function agentDraftText(id){
+    return selId() === id && !isPeople() ? promptText() : savedDraft(id);
+  }
+
+  function recoverPromptDraft(id, text, attachments = []){
+    const merged = mergeFailedDraft(text, savedDraft(id));
+    if (merged) keepDraft(id, merged);
+    const recovered = (Array.isArray(attachments) ? attachments : []).filter(item => item && item.ref && typeof item.name === "string")
+      .map(item => ({key:++stageKey, name:item.name, isImage:!!item.isImage, preview:"", ref:item.ref, status:"done"}));
+    if (recovered.length) stage[id] = restoreStageOnFailure(stage[id] || [], recovered);
+    if (selId() === id && !isPeople()) { setPromptText(merged); renderStage(); }
+  }
+
+  async function sendPeople(){
+    const context = peopleContext(); const id = selId(); const text = promptText();
+    if (!context || !context.writable || !text.trim() || new TextEncoder().encode(text).length > 16384 || peopleSending.has(id) || typeof d.sendPeople !== "function") return;
+    const revision = peopleRevisions.get(id) || 0;
+    peopleSending.add(id);
+    try {
+      await d.sendPeople(context.key, text);
+      if ((peopleRevisions.get(id) || 0) === revision && storage.getItem(peopleDraftKey(id)) === text) {
+        storage.removeItem(peopleDraftKey(id));
+        if (selId() === id && isPeople() && promptText() === text) clearPrompt();
+      }
+    } catch (err) { if (err) alertFn(err.message); }
+    finally { peopleSending.delete(id); }
   }
 
   async function interruptPrompt(){
@@ -602,28 +715,48 @@ export function createComposerFeature(deps){
   }
 
   async function sendPrompt(){
+    if (isPeople()) return sendPeople();
+    if (typeof d.agentAllowed === "function" && !d.agentAllowed()) return;
     const text = promptText().trim();
     const cur = selId();
-    if (!cur) return;
+    if (!cur || cur.startsWith("team/") || sendingDestinations.has(cur)) return;
     if (nodeById(cur)?.ended_at) return; /* closed thread: server would 409 */
     const dest = cur; /* capture: selection may change while send is in flight */
+    const draftRevision = agentRevisions.get(dest) || 0;
+    const originalStored = savedDraft(dest);
     const items = (stage[dest] || []).slice();
+    const sourceSnapshot = readPromptSources(storage, dest);
+    const turns = typeof d.getLastTurns === "function" ? d.getLastTurns() : [];
+    const last = turns?.length ? turns[turns.length-1] : null;
+    const boundary = last ? {uid:last.uid, segment:last.segment ?? 0, record:last.record} : null;
+    const flight = {id:newPromptFlightID(nowFn()), text, sources:sourceSnapshot, boundary, attachments:[], at:nowFn(), accepted:false};
+    sendingDestinations.add(dest);
+    writePromptFlights(storage, dest, [...readPromptFlights(storage, dest), flight]);
+    clearPromptSources(storage, dest);
+    if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged();
+    function restoreSources(){
+      sourceSnapshot.forEach(source => addPromptSource(storage, dest, source));
+      writePromptFlights(storage, dest, readPromptFlights(storage, dest).filter(item => item.id !== flight.id));
+      if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged();
+    }
     if (anyUploading(items)) await waitForUploads(items);
     const refs = completedRefs(items);
-    if (!hasSendPayload(text, refs)) return;
+    if (!hasSendPayload(text, refs)) { restoreSources(); sendingDestinations.delete(dest); return; }
     const destNode = nodeById(dest);
     if (destNode && String(destNode.agent || "").toLowerCase() === "claude" &&
         isClaudeNativeForkCommand(text)){
+      restoreSources();
+      sendingDestinations.delete(dest);
       alertFn("Claude /fork is not supported. Use scimux's Fork action to start a fresh chat that inherits launch configuration but not conversation history.");
       return;
     }
-    sendingDestinations.add(dest);
-    clearPrompt();
-    stage[dest] = []; /* clear optimistically; restore on failure */
+    flight.attachments = items.filter(item => item.status === "done" && item.ref).map(item => ({name:item.name, isImage:item.isImage, ref:item.ref}));
+    writePromptFlights(storage, dest, readPromptFlights(storage, dest).map(item => item.id === flight.id ? {...item, attachments:flight.attachments} : item));
+    if (selId() === dest && !isPeople() && (agentRevisions.get(dest) || 0) === draftRevision) clearPrompt();
+    stage[dest] = (stage[dest] || []).filter(item => !items.includes(item)); /* keep files added while uploads settled */
     if (selId() === dest) renderStage();
     /* optimistic echo, painted before the POST even resolves */
     const chatSig = typeof d.getChatSig === "function" ? d.getChatSig() : "";
-    const turns = typeof d.getLastTurns === "function" ? d.getLastTurns() : [];
     const echo = buildSentEcho({
       node: dest,
       text,
@@ -639,11 +772,12 @@ export function createComposerFeature(deps){
       if (typeof d.api === "function"){
         res = await d.api(`/api/nodes/${encodeURIComponent(dest)}/send`, {
           method: "POST",
-          body: JSON.stringify({ text, attachments: refs }),
+          body: JSON.stringify({ text, attachments: refs, trace: true }),
         });
       }
       /* 200 with status:"unconfirmed" is not-delivered — keep the draft */
       if (res && res.status === "unconfirmed") {
+        restoreSources();
         alertFn("not delivered — check the terminal");
         if (typeof d.clearSentEchoFor === "function") d.clearSentEchoFor(dest);
         const newer = savedDraft(dest);
@@ -652,7 +786,7 @@ export function createComposerFeature(deps){
           stage[dest] = restoreStageOnFailure(stage[dest] || [], items);
         /* On screen first: the composer is the copy the user can see, and a
            storage that refuses must not be the reason they never get it back. */
-        if (selId() === dest){
+        if (selId() === dest && !isPeople()){
           setPromptText(merged);
           renderStage();
         }
@@ -663,10 +797,11 @@ export function createComposerFeature(deps){
         sendingDestinations.delete(dest);
         return;
       }
+      writePromptFlights(storage, dest, readPromptFlights(storage, dest).map(item => item.id === flight.id ? {...item, accepted:true, address:res?.trace} : item));
       /* Delivered, so the saved copy is finally redundant. Removing it any
          earlier -- as this did, before the request was even made -- destroys
          the one copy that outlives the tab while the send can still fail. */
-      forgetDraft(dest);
+      if ((agentRevisions.get(dest) || 0) === draftRevision && savedDraft(dest) === originalStored) forgetDraft(dest);
       const pending = readPendingForwards(storage, dest);
       /* A successful POST proves acceptance, not the destination address.
          chat.js mints the permanent link only after this exact text appears
@@ -681,6 +816,7 @@ export function createComposerFeature(deps){
       if (typeof d.scheduleTick === "function") d.scheduleTick(400);
       else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
     } catch (err) {
+      restoreSources();
       /* surface every failure, including 409 (unconfirmed / in flight / closed) */
       if (err) alertFn(err && err.message);
       /* retract only this destination's echo */
@@ -689,7 +825,7 @@ export function createComposerFeature(deps){
       const merged = mergeFailedDraft(text, newer);
       if (items.length)
         stage[dest] = restoreStageOnFailure(stage[dest] || [], items);
-      if (selId() === dest){
+      if (selId() === dest && !isPeople()){
         setPromptText(merged);
         renderStage();
       }
@@ -703,7 +839,8 @@ export function createComposerFeature(deps){
   function onPromptInput(){
     resizePrompt();
     const id = selId();
-    if (id) keepDraft(id, promptText());
+    if (id && isPeople()) { peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1); storage.setItem(peopleDraftKey(id), promptText()); }
+    else if (id) { agentRevisions.set(id, (agentRevisions.get(id) || 0) + 1); keepDraft(id, promptText()); if (!promptText().trim()) { clearPromptSources(storage, id); if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(); } }
   }
 
   function onPromptPaste(e){
@@ -747,7 +884,7 @@ export function createComposerFeature(deps){
   }
 
   function onSendClick(){
-    if (composerBusy) interruptPrompt();
+    if (composerBusy && !isPeople()) interruptPrompt();
     else sendPrompt();
   }
 
@@ -848,6 +985,8 @@ export function createComposerFeature(deps){
     setComposerBusy(false);
     setComposerClosed(false);
 
+    listen(roots.destinationPeople, "click", () => setDestination("people"));
+    listen(roots.destinationAgent, "click", () => setDestination("agent"));
     listen(prompt, "input", onPromptInput);
     listen(prompt, "paste", onPromptPaste);
     listen(prompt, "keydown", onPromptKeydown);
@@ -888,6 +1027,13 @@ export function createComposerFeature(deps){
     resizePrompt,
     renderStage,
     onSelect,
+    preparePrompt,
+    recoverPromptDraft,
+    agentDraftText,
+    setDestination,
+    refreshDestination,
+    contextChanged,
+    destination: () => destination,
     sendPrompt,
     interruptPrompt,
     addFiles,

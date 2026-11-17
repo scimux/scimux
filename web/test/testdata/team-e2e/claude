@@ -1,0 +1,49 @@
+#!/usr/bin/python3
+import sys,os,json,subprocess,datetime,tty
+if '--version' in sys.argv:
+ print('2.1.278 (Claude Code)');sys.exit(0)
+args=sys.argv
+try:
+ sid=args[args.index('--session-id')+1]; settings=args[args.index('--settings')+1]
+except (ValueError,IndexError): sys.exit(2)
+tty.setraw(sys.stdin.fileno())
+with open(os.environ['SCIMUX_SYNTHETIC_COUNTER']+'.native-pids','a') as pids:pids.write(str(os.getpid())+'\n')
+if os.path.exists(os.path.join(os.environ['HOME'],'.scimux-e2e-no-hook')):
+ print('Synthetic stalled startup without SessionStart',flush=True)
+ while os.read(sys.stdin.fileno(),4096): pass
+ sys.exit(0)
+sys.stdout.write('\x1b[?2004h');sys.stdout.flush()
+config=json.load(open(settings)); root=os.path.join(os.environ['HOME'],'.claude','projects','-synthetic');os.makedirs(root,exist_ok=True);path=os.path.join(root,sid+'.jsonl')
+with open(path,'w') as f:f.write(json.dumps({'type':'summary','summary':'Synthetic fixture'})+'\n')
+def hook(name,payload):
+ command=config['hooks'][name][0]['hooks'][0]['command'];subprocess.run(command,shell=True,input=json.dumps(payload),text=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+def stamp():return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00','Z')
+hook('SessionStart',{'hook_event_name':'SessionStart','source':'startup','cwd':os.getcwd(),'session_id':sid,'transcript_path':path})
+print('Synthetic Claude ready',end='\r\n',flush=True)
+sequence=0
+def terminal_prompts():
+ wire=b'';typed=bytearray();pasting=False
+ begin=b'\x1b[200~';end=b'\x1b[201~'
+ while True:
+  chunk=os.read(sys.stdin.fileno(),4096)
+  if not chunk:return
+  wire+=chunk
+  while wire:
+   if wire.startswith(begin):pasting=True;wire=wire[len(begin):];continue
+   if wire.startswith(end):pasting=False;wire=wire[len(end):];continue
+   if begin.startswith(wire) or end.startswith(wire):break
+   byte=wire[0];wire=wire[1:]
+   if byte==13 and not pasting:
+    yield typed.decode('utf-8');typed.clear()
+   else:typed.append(10 if byte==13 and pasting else byte)
+for line in terminal_prompts():
+ text=line
+ if not text.strip(): continue
+ with open(os.environ['SCIMUX_SYNTHETIC_COUNTER']+'.attempts','a') as count:count.write(json.dumps({'text':text})+'\n')
+ sequence+=1
+ with open(path,'a') as f:
+  f.write(json.dumps({'type':'user','timestamp':stamp(),'message':{'role':'user','content':text}})+'\n');f.flush()
+  with open(os.environ['SCIMUX_SYNTHETIC_COUNTER'],'a') as count:count.write(json.dumps({'text':text})+'\n')
+  f.write(json.dumps({'type':'assistant','timestamp':stamp(),'message':{'role':'assistant','content':'Synthetic response '+str(sequence)}})+'\n');f.flush()
+ print('Synthetic response '+str(sequence),end='\r\n',flush=True)
+ hook('Stop',{'hook_event_name':'Stop','session_id':sid,'stop_hook_active':False})

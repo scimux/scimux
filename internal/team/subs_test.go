@@ -760,3 +760,36 @@ func TestSubsVersionTwoNeedsBothValidCounters(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnerFrontierRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	sub := sampleSub(1)
+	sub.Access = "owner"
+	sub.OwnerFrontier = &OwnerFrontier{Node: "local", Segment: 2, Record: 37}
+	if err := SaveSubs(dir, []Subscription{sub}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadSubs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got[0].OwnerFrontier, sub.OwnerFrontier) {
+		t.Fatalf("frontier = %+v", got[0].OwnerFrontier)
+	}
+	sub.Access = "read"
+	if err := SaveSubs(dir, []Subscription{sub}); err == nil {
+		t.Fatal("recipient frontier accepted")
+	}
+}
+
+func TestOwnerFrontierRejectsIncompleteOrForeignMetadata(t *testing.T) {
+	sub := sampleSub(1)
+	sub.Access = "owner"
+	raw := subsDocument(t, []Subscription{sub})
+	for _, value := range []string{`{}`, `{"node":"local","segment":0}`, `{"node":"local","record":1}`, `{"node":"../bad","segment":0,"record":1}`, `{"node":"local","segment":-1,"record":1}`} {
+		altered := bytes.Replace(raw, []byte(`"first_seen":`), []byte(`"owner_frontier":`+value+`,"first_seen":`), 1)
+		if _, err := parseSubs(altered); err == nil {
+			t.Fatalf("accepted %s", value)
+		}
+	}
+}

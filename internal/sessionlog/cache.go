@@ -532,6 +532,7 @@ func (c *LogCache) ingestRide(ev Event, s *rideSegAccum) {
 func (c *LogCache) snapshotProducts() {
 	// Segment
 	seg := Segment{
+		UID: c.uid, Index: c.recSeg,
 		PriorTurns: c.priorTurns,
 		StartTime:  c.rawStartTime,
 		Used:       c.used,

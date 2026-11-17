@@ -1913,6 +1913,11 @@ function sharedCardsFixture(sharedTab, initialTab = "current", nodes = [], pinne
   return { feature, handlers, doc, tabs, list, setTab(v) { tab = v; }, tab: () => tab, sig: () => sig, tabWrites: () => tabWrites, listWrites: () => listWrites };
 }
 
+const nativeShared = (tabHTML = () => '<button data-tab="shared">Shared with me</button>') => {
+  const view = {server:"s", owner:"o", chat:"c", generation:"g", title:"Shared", state:"live", access:"write", first_seen:"1"};
+  return {tabHTML, activities:()=>[view], groups:()=>[{key:"s/o",label:"Owner",items:[view]}], mineUnread:()=>false, selected:()=>"", open() {}};
+};
+
 test("cardTabsHTML appends an optional shared tab", () => {
   const args = { cardTab: "current", laneFilter: "", currentCount: 0, archivedCount: 0, pinnedCount: 0 };
   const base = cardTabsHTML(args);
@@ -1924,7 +1929,7 @@ test("empty shared tab preserves existing tab and list HTML", () => {
   const pinned = ["pinned-node"];
   for (const tab of ["current", "pinned", "archived"]) {
     const a = sharedCardsFixture(undefined, tab, nodes, pinned);
-    const b = sharedCardsFixture({ tabHTML: () => "", render: () => false }, tab, nodes, pinned);
+    const b = sharedCardsFixture({ tabHTML: () => "" }, tab, nodes, pinned);
     a.feature.render(); b.feature.render();
     assert.equal(a.tab(), tab);
     assert.equal(b.tab(), tab);
@@ -1937,34 +1942,31 @@ test("empty shared tab preserves existing tab and list HTML", () => {
   }
 });
 
-test("shared cards path keeps the list and refreshes only changed tabs", () => {
-  let badge = "1";
-  const f = sharedCardsFixture({ tabHTML: () => `<button data-tab="shared">${badge}</button>`, render: () => true }, "shared", [{ id: "n", attention: "approval" }]);
-  for (let i = 0; i < 10; i++) f.feature.render();
-  assert.equal(f.listWrites(), 0); assert.equal(f.tabWrites(), 1); assert.equal(f.sig(), ""); assert.equal(f.doc.title, "(1) scimux");
-  assert.match(f.tabs.innerHTML, /Archived.*data-tab="shared"/);
-  badge = "2"; f.feature.render(); assert.equal(f.tabWrites(), 2);
-  f.setTab("current"); f.feature.render(); assert.equal(f.listWrites(), 1);
+test("shared cards use native groups and retain the attention title", () => {
+  const f = sharedCardsFixture(nativeShared(), "shared", [{id:"n",attention:"approval"}]);
+  f.feature.render(); assert.match(f.list.innerHTML, /card-team\/s\/o\/c\/g/);
+  assert.match(f.tabs.innerHTML, /Archived.*data-tab="shared"/); assert.equal(f.doc.title,"(1) scimux");
+  const html = f.list.innerHTML; f.feature.render(); assert.equal(f.list.innerHTML,html);
 });
 
 test("shared cards fall back when unavailable", () => {
-  for (const tab of [undefined, { tabHTML: () => "", render: () => false }]) {
+  for (const tab of [undefined, { tabHTML: () => "", activities: () => [] }]) {
     const f = sharedCardsFixture(tab, "shared"); f.feature.render();
     assert.equal(f.tab(), "current"); assert.equal(f.listWrites(), 1);
   }
 });
 
 test("clicking the shared tab selects it", () => {
-  const f = sharedCardsFixture({ tabHTML: () => '<button data-tab="shared">Shared with me</button>', render: () => true });
+  const f = sharedCardsFixture(nativeShared());
   f.feature.bind();
   const button = { dataset: { tab: "shared" } };
   f.handlers.click({ target: { closest(sel) { if (sel === "[data-tab]") return button; return null; } } });
   assert.equal(f.tab(), "shared");
-  assert.equal(f.listWrites(), 0);
+  assert.match(f.list.innerHTML, /card-team\/s\/o\/c\/g/);
 });
 
 test("shared cards title has no waiting prefix when nobody is waiting", () => {
-  const f = sharedCardsFixture({ tabHTML: () => '<button data-tab="shared">Shared with me</button>', render: () => true }, "shared");
+  const f = sharedCardsFixture(nativeShared(), "shared");
   f.doc.title = "(1) scimux";
   f.feature.render();
   assert.equal(f.doc.title, "scimux");
@@ -1977,25 +1979,42 @@ test("archived tab active class follows the selected tab", () => {
 });
 
 
-test("shared cards clear the prior signature before returning to current", () => {
-  const nodes = [{ id: "node-1", title: "Synthetic", live: "active" }];
-  const shared = { tabHTML: () => '<button data-tab="shared">Shared with me</button>', render(list) { list.innerHTML = '<div class="glist"></div>'; return true; } };
-  const f = sharedCardsFixture(shared, "current", nodes);
-  f.feature.render();
-  const original = f.list.innerHTML;
-  assert.ok(original.includes('id="card-node-1"'));
-  assert.notEqual(f.sig(), "");
-  f.setTab("shared"); f.feature.render();
-  assert.equal(f.list.innerHTML, '<div class="glist"></div>');
-  f.setTab("current"); f.feature.render();
-  assert.equal(f.list.innerHTML, original);
+test("native shared cards switch back to the local activity list", () => {
+  const nodes = [{id:"node-1",title:"Synthetic",live:"active"}];
+  const f = sharedCardsFixture(nativeShared(), "current", nodes);
+  f.feature.render(); assert.match(f.list.innerHTML, /card-node-1/);
+  f.setTab("shared"); f.feature.render(); assert.match(f.list.innerHTML, /card-team\/s\/o\/c\/g/); assert.doesNotMatch(f.list.innerHTML, /card-node-1/);
+  f.setTab("current"); f.feature.render(); assert.match(f.list.innerHTML, /card-node-1/);
 });
 
 test("shared tab receives the active state for current and shared", () => {
   const activeValues = [];
-  const shared = { tabHTML(active) { activeValues.push(active); return '<button data-tab="shared">Shared with me</button>'; }, render() { return true; } };
+  const shared = nativeShared(active => { activeValues.push(active); return '<button data-tab="shared">Shared with me</button>'; });
   const f = sharedCardsFixture(shared);
   f.feature.render();
   f.setTab("shared"); f.feature.render();
   assert.deepEqual(activeValues, [false, true]);
+});
+
+test('unrelated card updates do not replace unchanged tab controls', () => {
+ const nodes=[{id:'n',title:'Before',live:'quiet'}];const f=sharedCardsFixture(nativeShared(),'shared',nodes,['n']);
+ f.feature.render();const writes=f.tabWrites();nodes[0].title='After';f.feature.invalidate();f.feature.render();
+ assert.equal(f.tabWrites(),writes,'unchanged tab controls retain their focus and horizontal position');f.feature.destroy();
+});
+
+test('tab selection reveals only inside its strip and count updates retain focus and scroll', () => {
+ let tab='current',sig='',badge=1,html='';const doc={title:'',activeElement:null};const buttons={};
+ const strip={scrollLeft:0,get innerHTML(){return html},set innerHTML(v){html=v;for(const key of Object.keys(buttons))delete buttons[key];for(const match of v.matchAll(/data-tab="([^"]+)"/g)){const id=match[1],left={current:0,pinned:90,archived:190,shared:300}[id],width=id==='shared'&&badge===3?120:90;buttons[id]={dataset:{tab:id},getBoundingClientRect(){return {left:left-strip.scrollLeft,right:left-strip.scrollLeft+width}},focus(){doc.activeElement=this}};}},querySelector(sel){return buttons[sel.match(/data-tab="([^"]+)"/)?.[1]]||null},contains(el){return Object.values(buttons).includes(el)},getBoundingClientRect(){return {left:0,right:200}},addEventListener(){},removeEventListener(){}};
+ const list={innerHTML:'',querySelectorAll:()=>[],addEventListener(){},removeEventListener(){}};
+ const shared=nativeShared(()=>`<button data-tab="shared">Shared ${badge}</button>`);
+ const feature=createCardsFeature({roots:{tabs:strip,list},document:doc,sharedTab:shared,nodes:()=>[{id:'n',title:'Node',live:'quiet'}],pinned:()=>['n'],archived:()=>[],expanded:()=>new Set(),cardTab:()=>tab,setCardTab:v=>tab=v,cardsSig:()=>sig,setCardsSig:v=>sig=v,setInterval:()=>0,clearInterval(){}});
+ feature.render();tab='shared';feature.invalidate();feature.render();assert.equal(strip.scrollLeft,190,'right edge is revealed in strip');
+ buttons.shared.focus();badge=2;feature.invalidate();feature.render();assert.equal(doc.activeElement,buttons.shared);assert.equal(strip.scrollLeft,190);
+ badge=3;feature.invalidate();feature.render();assert.equal(strip.scrollLeft,220,"a growing selected label remains visible");assert.equal(doc.activeElement,buttons.shared);
+ strip.scrollLeft=300;tab='current';feature.invalidate();feature.render();assert.equal(strip.scrollLeft,0,'left edge is revealed in strip');feature.destroy();
+});
+
+test('activity buttons expose the selected state without a tablist keyboard contract', () => {
+ const html=cardTabsHTML({cardTab:'pinned',laneFilter:'',currentCount:1,archivedCount:2,pinnedCount:1});
+ assert.match(html,/data-tab="current"[^>]*aria-pressed="false"/);assert.match(html,/data-tab="pinned"[^>]*aria-pressed="true"/);assert.match(html,/data-tab="archived"[^>]*aria-pressed="false"/);
 });

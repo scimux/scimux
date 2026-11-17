@@ -89,16 +89,18 @@
       <div class="toprow">
         <button class="backbtn" id="chatback">&#8249; Activities</button>
         <span class="dot" id="chatdot"></span>
-        <h2 id="chattitle">scimux</h2>
+        <h2 id="chattitle" tabindex="-1">scimux</h2>
         <button class="headtoggle" id="infobtn" aria-label="show details"></button>
         <button class="headtoggle" id="sharebtn" aria-label="share chat" title="Share chat" hidden></button>
+        <button class="headtoggle" id="guestremove" type="button" aria-label="Leave shared chat and remove local copy" title="Leave shared chat and remove local copy" hidden></button>
         <button class="headtoggle" id="bookmarksbtn" aria-label="open bookmarks"></button>
         <!-- dock only: closes the wall map's chat pop-out. Trailing, so it sits
              top-right where the bookmarks chevron does outside the dock. -->
         <button class="headtoggle" id="dockclose" aria-label="close chat">&#10005;</button>
       </div>
       <button id="sharestatus" hidden></button>
-      <div class="mission" id="chatmission"></div>
+      <div class="chat-subtitle"><div class="mission" id="chatmission"></div><div id="gueststate" hidden></div></div>
+      <div id="guestnote" role="status"></div>
       <div id="chatdetails" aria-hidden="true">
         <div class="detailmeta">
           <span class="agent-logo" id="chatagentlogo"></span>
@@ -116,6 +118,7 @@
       <!-- the scrim is a sibling, never the spinner's parent: see chat.css -->
       <div id="chatloading" hidden role="status" aria-live="polite" aria-label="loading chat"><div class="scrim"></div><div class="spin"></div></div>
     </div>
+    <button id="guestmore" hidden>Load more</button>
     <div id="keyrow"></div>
     <div id="convtools" hidden>
       <div class="convtools-start">
@@ -123,6 +126,10 @@
         <button type="button" id="autoapprove" class="autoapprove off" aria-pressed="false"
           title="Automatically selects the sole one-time approval option for the current turn. Resets when the turn finishes, when you stop it, or on /clear or /exit."
           aria-label="Auto-approve eligible tool requests this turn"></button>
+        <div id="destination" class="destination" role="group" aria-label="Message destination" hidden>
+          <button type="button" id="destinationpeople" aria-pressed="true">People</button>
+          <button type="button" id="destinationagent" aria-pressed="false">Agent</button>
+        </div>
       </div>
       <button id="scrollend" aria-label="scroll to latest message" title="scroll to latest"></button>
     </div>
@@ -232,30 +239,6 @@
   </div>
 </div>
 
-
-<div id="sharedview" hidden role="dialog" aria-modal="true" aria-labelledby="sv_title">
-  <div id="sv_scrim"></div>
-  <div id="sv_panel">
-    <div id="sv_head">
-      <button id="sv_back">&#8249; Shared</button>
-      <div class="phtext">
-        <div id="sv_title"></div>
-        <div id="sv_from"></div>
-        <div id="sv_state"></div>
-      </div>
-      <button id="sv_remove"></button>
-    </div>
-    <div id="sv_body" role="log" aria-label="Shared chat" tabindex="0"></div>
-    <button id="sv_more" hidden>Load more</button>
-    <div id="sv_compose" hidden>
-      <label class="sr-only" for="sv_text">Message to people</label>
-      <textarea id="sv_text" rows="2" placeholder="Message to people" aria-describedby="sv_hint"></textarea>
-      <button id="sv_send">Send</button>
-      <div id="sv_hint">People in this chat see this. The agent does not.</div>
-    </div>
-    <div id="sv_note" role="status"></div>
-  </div>
-</div>
 
 <!-- Notes workspace (sheets): a singleton synthesis surface, mounted once and
      OUTSIDE every polled render region, so the section editors are never rebuilt
@@ -371,7 +354,7 @@
 
 <!-- one send-to dialogue: a chat bubble's "send to…" and a bookmark long-press
      both fill it; only the title differs. Targets are live, open chats only. -->
-<div class="sheet" id="sendto">
+<div class="sheet" id="sendto" role="dialog" aria-labelledby="sendto_title">
   <div class="grab"></div>
   <h3 id="sendto_title">Send to&#8230;</h3>
   <div class="sect" id="sendto_list"></div>

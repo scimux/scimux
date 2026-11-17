@@ -96,6 +96,7 @@ import { createChatFeature, assetBubbleBodyHTML } from "./chat.js";
 import { createComposerFeature } from "./composer.js";
 import {
   createBookmarksFeature,
+  discloseQuoted,
   stampAddress as stampAddressMod,
   bookmarkLaneId as bookmarkLaneIdMod,
   bookmarkSortKey as bookmarkSortKeyMod,
@@ -219,6 +220,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
 
   let nodes = [];              // last /api/state nodes
   let sel = store.getItem("scimux-sel") || "";
+  let ownerPending = !!sel && !sel.startsWith("team/");
+  let ownerExpected = false;
+  let ownerShareUID = "";
+  let localLogIdentity = {node:"",uid:""};
+  let composerRestored = false;
   let readySeen = loadReadySeen(store);
   /* Where the user left off: a sleep/wake re-dial re-runs createApp() in a
      fresh module graph, so the pane comes back from storage or not at all. */
@@ -293,6 +299,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     <path d="M5 6l1.2 14a2 2 0 0 0 2 1.8h7.6a2 2 0 0 0 2-1.8L19 6"/>
     <path d="M10 11v6M14 11v6"/>
   </svg>`;
+  $("#guestremove").innerHTML = ICON_TRASH;
   const ICON_ARCHIVE = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none"
     stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M4 7h16l-1 13H5L4 7Z"/>
@@ -597,10 +604,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const laneModel = () => laneModelMod(nodes, getUI().lanes);
   const isArchived = id => isArchivedMod(id, getUI().archived);
 
-  const guestFeature = own(createGuestFeature({ api, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)), uiMutate: op => uiMutate(op), bookmarks: () => getUI().bookmarks, openSendTo: opts => bookmarksFeature.openSendTo(opts), people: () => getUI().people }));
+  const guestFeature = own(createGuestFeature({ api, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)), uiMutate: op => uiMutate(op), bookmarks: () => getUI().bookmarks, openSendTo: opts => bookmarksFeature.openSendTo(opts), people: () => getUI().people, storage: store, selectedNode: () => sel, selectedUID: () => localLogIdentity.node === sel ? localLogIdentity.uid : "", localAgentAvailable: () => { const node = nodeById(sel); return !!node && !node.ended_at; }, confirmRemove: confirm, panel: { promptIcon: ICON_INTO, preparePrompt: (capture, source) => composerFeature.preparePrompt(discloseQuoted(capture.text, capture), {...source, role:capture.role, who:capture.who, prov:capture.prov}), select: id => { select(id); if (!isDesktop()) setLevel(1); }, loaded: () => { if (sel.startsWith("team/") && guestFeature.hasActivity(sel) && guestFeature.tab.selected() !== sel) select(sel); }, changed: () => { if (composerFeature) composerFeature.refreshDestination(); }, ownerChanged: () => { ownerPending = ownerExpected && !guestFeature.peopleContext()?.owner; if (composerFeature) composerFeature.contextChanged(); if (chatFeature) { chatFeature.invalidate(); refreshChat(); } }, removed: () => { const first = orderedNodes()[0]; if (first) { select(first.id); $("#chattitle").focus(); } else { select(""); setLevel(2); $("#plusbtn").focus(); } } } }));
   /* Activities card feature factory — owns #cardtabs/#cardlist only. */
   const cardsFeature = own(createCardsFeature({
     sharedTab: guestFeature.tab,
+    storage: store,
     roots: { tabs: $("#cardtabs"), list: $("#cardlist") },
     document,
     CSS,
@@ -862,6 +870,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     openAttachmentSettings: openAttachmentSettings.bind(null, $("#burger"), $("#m_attachment_settings")),
     nodes: () => nodes,
     sel: () => sel,
+    ownerDiscussion: () => guestFeature.ownerSnapshots(),
+    canPreparePrompt: source => guestFeature.canPreparePrompt(source),
+    preparePrompt: (capture, source) => composerFeature.preparePrompt(discloseQuoted(capture.text, capture), {...source, role:capture.role, prov:capture.prov}),
+    onLogIdentity: (id, uid) => { if (sel !== id || (localLogIdentity.node === id && localLogIdentity.uid === uid)) return; localLogIdentity = {node:id,uid}; if (ownerShareUID && uid && ownerShareUID !== uid) { ownerExpected = false; ownerPending = false; } guestFeature.localIdentityChanged(); composerFeature.contextChanged(); },
     selGen: () => selGen,
     nodeById: id => nodeById(id),
     editingTitle: () => editingTitle,
@@ -894,14 +906,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     setAttachAvail: v => composerFeature.setAttachAvail(v),
     storage: store,
     foldStorage: foldStore,
+    recoverPromptDraft: (id, text, attachments) => composerFeature.recoverPromptDraft(id, text, attachments),
     composerText: () => (composerFeature && typeof composerFeature.promptText === "function")
       ? (composerFeature.promptText() || "") : "",
-    restoreDraft: (id, text) => {
-      store.setItem("scimux-draft:" + id, text);
-      if (sel === id && composerFeature && typeof composerFeature.setPromptText === "function"){
-        composerFeature.setPromptText(text);
-      }
-    },
+    agentDraftText: id => composerFeature.agentDraftText(id),
+    restoreDraft: (id, text) => composerFeature.recoverPromptDraft(id, text),
     setBookmarksBackLabel: t => bookmarksFeature.setBackLabel(t),
     updateLocalNode: n => updateLocalNode(n),
     invalidateCardsSig: () => { cardsSig = ""; },
@@ -918,8 +927,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     startTitleEdit: (id, scope) => startTitleEdit(id, scope),
     longpress: (container, selector, fn) => longpress(container, selector, fn),
   }));
-  function renderChatHead(){ chatFeature.renderHead(); }
-  async function refreshChat(){ return chatFeature.render(); }
+  function renderChatHead(){ if (!sel.startsWith("team/")) chatFeature.renderHead(); }
+  async function refreshChat(){ if (!sel.startsWith("team/")) return chatFeature.render(); }
   function loadChatHistory(id, st){ return chatFeature.loadHistory(id, st); }
   function jumpChatToNow(){ chatFeature.jumpToNow(); }
   function restartWorkPulse(){ chatFeature.restartWorkPulse(); }
@@ -929,6 +938,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   composerFeature = own(createComposerFeature({
     roots: {
       promptbar: $("#promptbar"),
+      destination: $("#destination"),
+      destinationPeople: $("#destinationpeople"),
+      destinationAgent: $("#destinationagent"),
       attstage: $("#attstage"),
       prompt: $("#prompt"),
       sendbtn: $("#sendbtn"),
@@ -941,6 +953,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     storage: store,
     sel: () => sel,
     nodeById: id => nodeById(id),
+    peopleContext: () => guestFeature.peopleContext(),
+    canPreparePrompt: source => guestFeature.canPreparePrompt(source),
+    promptSourcesChanged: () => { chatFeature.invalidate(); refreshChat(); },
+    agentAllowed: () => !ownerPending,
+    sendPeople: (key, text) => guestFeature.sendPeople(key, text),
     isPhoneTouch,
     esc,
     icons: { ICON_PLUS, ICON_IMAGE, ICON_FILE, ICON_SEND, ICON_STOP },
@@ -1253,7 +1270,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   }));
   const sharingSection = own(createSharingSection({
     api, doc: document,
-    onJoined: () => { if (sel) shareFeature.select(sel); },
+    onJoined: () => { if (sel && nodeById(sel)) shareFeature.select(sel); guestFeature.refresh(); },
   }));
   const shareFeature = own(createShareFeature({
     api,
@@ -1261,6 +1278,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     openSheet: (id) => sheetsFeature.openSheet(id),
     closeSheets: () => sheetsFeature.closeSheets(),
     now: () => Date.now(),
+    onChange: (node, share) => { ownerShareUID = share?.uid || ""; ownerExpected = !!(share && share.state === "active" && share.generation && (!localLogIdentity.uid || localLogIdentity.uid === ownerShareUID)); ownerPending = ownerExpected; guestFeature.setOwnerShare(node, share); if (guestFeature.peopleContext()?.owner) ownerPending = false; composerFeature.contextChanged(); },
   }));
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */
@@ -1410,14 +1428,15 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   function select(id, how){
     returnCtx = returnAfterSelection(returnCtx, how);
     renderChatBack();
-    if (sel !== id){ chatFeature.onSelectChange(); mapFeature.invalidate(); selGen++; }   /* history is per-visit, reloaded on demand */
+    const changed = sel !== id;
+    if (changed){ chatFeature.onSelectChange(); mapFeature.invalidate(); selGen++; }   /* history is per-visit, reloaded on demand */
     else {
       /* same node re-select still discards a pending "use as description" */
       chatFeature.onReselect();
     }
+    if (changed) { ownerPending = !!id && !id.startsWith("team/"); ownerExpected = false; ownerShareUID = ""; localLogIdentity = {node:"",uid:""}; }
     sel = id;
     store.setItem("scimux-sel", sel);
-    composerFeature.onSelect(); /* draft + stage restore; hide + until chat has turns */
     /* the selected node's card must be visible: opening an archived chat (map
        toolbar, notes jump) switches the Activities tab to where the card lives —
        same visibility rule as the renderCards filter */
@@ -1430,10 +1449,29 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
         saveReadySeen(store, readySeen);
       }
     }
+    const received = id.startsWith("team/");
+    guestFeature.selectActivity(received ? id : "");
+    if (changed) guestFeature.setOwnerShare(id, null);
+    composerFeature.onSelect({preferAgent: how === "agent-forward"}); composerRestored = true; /* draft + stage restore */
+    $("#gueststate").hidden = !received;
+    $("#guestremove").hidden = !received;
+    if (!received) { $("#guestmore").hidden = true; $("#guestnote").textContent = ""; }
+    if (received) {
+      composerFeature.setComposerBusy(false);
+      composerFeature.setComposerClosed(false);
+      $("#chatdetails").hidden = true;
+      $("#gauge").hidden = true;
+      $("#chatdot").className = "dot";
+      $("#keyrow").innerHTML = "";
+      $("#convtools").hidden = true;
+      $("#infobtn").hidden = true;
+      $("#sharebtn").hidden = true;
+      $("#sharestatus").hidden = true;
+    } else composerFeature.setComposerClosed(false);
     cardsSig = "";
     renderCards();
     renderChatHead();
-    shareFeature.select(id);
+    shareFeature.select(received ? "" : id);
     renderMap();   /* full-screen wall map: move the selection marker + action bar */
     refreshChat();
   }
@@ -1941,8 +1979,19 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     $("#m_hnote").textContent = note;
     $("#m_hnote").hidden = !note;
   }
+  let teamSettingOn = false;
   const settingsCtl = createSettingsController({
-    read: () => api("/api/settings"),
+    read: async () => {
+      const state = await api("/api/settings");
+      if (window[APP_SLOT] !== instance) return state;
+      const enabled = state.experimental_feature_team === true;
+      if (enabled && !teamSettingOn) {
+        if (sel && nodeById(sel)) shareFeature.select(sel);
+        guestFeature.refresh();
+      }
+      teamSettingOn = enabled;
+      return state;
+    },
     write: body => api("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
     render: state => {
       if (window[APP_SLOT] !== instance) return;
@@ -2052,6 +2101,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     ensureSelection: () => {
       /* a stored sel of "NOTES" (the retired pseudo-activity) falls through
          to the first real node here */
+      if (sel.startsWith("team/") && !guestFeature.loaded()) { guestFeature.tick(); return; }
+      if (sel.startsWith("team/") && guestFeature.hasActivity(sel)) { guestFeature.selectActivity(sel); return; }
       if (!sel || !nodeById(sel)){
         const first = orderedNodes()[0];
         if (first) select(first.id);
@@ -2059,6 +2110,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
            never left off in. Only level 1 lies about it; cards and map are
            already honest, and desktop has no pane stack. */
         if (!isDesktop() && level === 1) setLevel(2);
+      } else {
+        if (!composerRestored) { composerFeature.onSelect(); composerRestored = true; }
+        shareFeature.ensureSelected(sel);
       }
     },
     updateCardAges: () => updateCardAges(),

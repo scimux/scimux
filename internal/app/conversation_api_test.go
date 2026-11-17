@@ -3076,3 +3076,33 @@ func TestMuseChatPeekClearExitDelete(t *testing.T) {
 		t.Fatal("deleted muse node still published")
 	}
 }
+
+func TestHandleChatHistoryExposesEmptySeamIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	seedTmuxNode(a, "c1")
+	w := &sessionlog.Writer{Path: a.sessionLogPath("c1")}
+	meta := sessionlog.NewMeta("c1", "claude", "", "", a.home)
+	for _, ev := range []sessionlog.Event{meta, {T: "user", Text: "earlier"}, sessionlog.NewClearSource(""), sessionlog.NewClearSource(""), {T: "assistant", Text: "later"}} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := newTestHandler(t, a)
+	rec := routeRequest(h, http.MethodGet, "/api/nodes/c1/chat?history=1", "", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var body struct {
+		Segments []sessionlog.HistorySegment `json:"segments"`
+		Empty    []sessionlog.HistorySegment `json:"empty_segments"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Segments) != 2 || len(body.Empty) != 1 || body.Empty[0].Index != 1 || body.Empty[0].UID != meta.Meta.UID {
+		t.Fatalf("history %+v", body)
+	}
+}

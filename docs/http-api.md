@@ -195,7 +195,8 @@ memory.
 
 The conversation, rendered from the session-log store (the current segment —
 everything after the last `/clear` seam), plus turn mechanics. Common fields
-include `turns`, `last_change`, `chat_started`, `prior_turns`, context-gauge
+include `turns`, `last_change`, `chat_started`, `prior_turns`, `log_uid`,
+`segment_index`, context-gauge
 fields (`ctx_used`, `ctx_window`, `ctx_pct`), `live`, `attention`, `source`,
 `reason`, `fallback`, `pending`, `pending_calls`, `waiting_on`, `watermark`,
 `progress`, and `delivery` (state of the last tmux send).
@@ -227,7 +228,7 @@ has no PermissionRequest id; scimux does not claim exact request correlation.
 Structured-node turn failures may also set `error`.
 
 `GET /api/nodes/{id}/chat?history=1` returns the whole log as ordered read-only
-surfaces: `{"segments":[{"start","seam","reason","turns"}, …]}`. This is the
+surfaces: `{"segments":[{"start","seam","reason","turns","log_uid","segment_index"}, …], "empty_segments":[...]}`. Empty segment addresses are provided separately so owner discussion can attach to a clear seam without changing the ordinary history surfaces. This is the
 on-demand path behind "show earlier history" and earlier metro stops; normal
 polling stays current-segment only. The history branch does not participate in
 ETag short-circuiting.
@@ -635,6 +636,27 @@ to create a fresh node). Ordinary prose that merely contains the text
 `/fork` is accepted. Claude SessionStart sources accepted by the hook are
 `startup`, `clear`, `compact`, and `resume` only.
 
+An optional `"trace": true` on an owner follow-up asks for an exact
+prompt address in `trace: {uid, segment, record}`. The address is
+returned only when serialized admission and session-log readback identify one
+unambiguous new user row in the same log. It is not delivery confirmation;
+unsupported or ambiguous sends omit `trace`. Ordinary responses are unchanged.
+For owned Claude, scimux verifies the complete transcript and mirror frontier
+before the existing send, then waits briefly for one uniquely attributable
+mirrored user record with a later transcript timestamp. Mirror lag, changed
+bindings, ambiguous rows, missing timestamps and unconfirmed sends can omit
+the address; the worker remains the sole mirror writer. `/clear` does not
+provide a trace address. To inspect a returned
+address, `GET …/chat?trace_uid=<uid>&trace_segment=<n>&trace_record=<n>` adds
+`trace_outcome`: `pending`, `confirmed`, `rejected`, or `unknown`. An actual
+assistant response before a later user, source seam, or error is positive
+evidence; an error first is classified as rejected and an intervening boundary
+is unknown. The error classification does not prove the transport never
+accepted the prompt; it only reports the first error in that interval.
+A queue row, HTTP acknowledgment and matching text alone are not delivery
+evidence. Trace polling does not send or retry a prompt. This uses the same
+node ownership and security boundary as the existing send and chat routes.
+
 `attachments` is optional; each element is a reference returned by
 `POST …/attachments` (below). Every ref must point inside this node's own
 upload directory (others are rejected `400`). For each, a plain-text line
@@ -850,7 +872,9 @@ as `decisions` on the same response (and in `?history=1` segments).
 
 The shared UI document (`~/.scimux/ui.json`: groups, archived cards, bookmarks,
 Send-to `forward_links`, lanes). The browser retains the newest 500 Send-to
-links so this navigation index cannot grow without bound. GET sets an `ETag`
+links so this navigation index cannot grow without bound. Confirmed prompt
+links may contain a bounded submitted-prompt preview for display; navigation
+uses the exact destination UID, segment, and record, not that preview. GET sets an `ETag`
 and honors `If-None-Match`. PUT requires
 `If-Match` (the last ETag, or `*` to bootstrap) — `428` without it, `409` on
 mismatch — and replaces the document atomically. Bodies over the size limit
@@ -902,9 +926,10 @@ other browsers pick up the change when they next read settings.
 `experimental_feature_team` enables the experimental team feature when its
 JSON value is `true`. It can be edited in the file or set with PUT; changes
 take effect on the next team request or poll without a restart. Other values
-are off. The environment switch can also enable the feature. A browser page
-that observes the feature off must be reloaded after it is enabled to restore
-the team controls.
+are off. The environment switch can also enable the feature. An open browser
+refreshes the team controls after the setting changes or a server is joined;
+it also retries temporary unavailability without requiring a reload or a
+chat switch.
 
 The storage fields are non-negative integer byte counts. A zero global or
 per-node limit means unlimited; a zero minimum-free value disables that
@@ -1344,6 +1369,40 @@ error text contains it.
 All bodies are JSON. An error is `{"error":"<code>"}`. The routes sit
 behind the same request boundary as `/api/settings`.
 
+### Agent ownership boundary
+
+Team sharing never grants access to the sharer's agent controls. Recipients
+MUST NEVER send directly to that agent: `read` allows viewing, and `write`
+allows viewing and posting human comments only. A team token, share id or
+subscription id grants no authority to call the owner's node send, key,
+approval or other controller routes. This is a request-routing boundary,
+independent of which controls the browser displays.
+
+Human comments MUST NOT be forwarded to the agent automatically. In the
+unified shared-chat UI, **Use as prompt** and the Agent destination are
+owner-only. The owner selects Use as prompt to prepare an editable draft in
+their own chat and select Agent, then explicitly sends it to their own
+agent. Preparing the draft never sends it. Preserve author attribution and
+applicable AI provenance. Auto-approval, retries and reconnects cannot
+replace the owner's explicit selection and send.
+
+The unified UI marks the source bubble as soon as Use as prompt prepares a
+nonblank draft, using the existing bookmark marker presentation with a
+distinct prompt icon and label. Edits keep the source association; completely
+erasing the draft cancels the pending association. Preparing a draft must
+not be presented as agent delivery. After confirmed delivery, the source
+marker persists and links to the resulting prompt, including edited prompts.
+An awaiting marker is distinct from both prepared and confirmed. An HTTP
+acknowledgment, queue state, busy state or matching text alone does not prove
+delivery: confirmation requires assistant evidence at the exact queued address
+before a later user turn or error. Claude additionally requires a complete
+verified native frontier and a unique later user record in the same binding.
+Ambiguous or failed outcomes are never presented as sent. The browser keeps
+at most 32 unresolved prompt flights per node and at most 500 confirmed
+forward links; the latter navigate by exact address rather than their preview.
+Retained comments can be prepared after sharing ends or while offline only
+while the owner's local node is still open.
+
 ### List
 
 `GET /api/team/servers` answers `200` and
@@ -1462,7 +1521,7 @@ created when there are no shares.
 Neither call contacts a team server.
 
 ```json
-{"uid":"...","node":"...","server":"...","scope":"from_now",
+{"uid":"...","node":"...","server":"...","generation":"...","scope":"from_now",
  "state":"active","delivery":"ok","members":[{"seat":"...","access":"read"}],
  "shared_at":"2026-11-14T09:30:00Z"}
 ```
@@ -1481,11 +1540,27 @@ Before the first attempt it is `ok`. A word outside this list is reported
 as `ok`.
 
 `PUT /api/team/shares/{node}` takes
-`{"server","scope","members":[{"seat","access"}]}`, at most 64 KiB, with
+`{"server","scope","members":[{"seat","access"}]}`, optionally with
+`"membership_only":{"uid","generation","baseline":["seat",...]}`, at most 64 KiB, with
 no unknown fields. `scope` is `from_now` or `all`. `access` is `read` or
 `write`. `seat` is 32 lowercase hexadecimal characters, not this
 installation's id, and not repeated. At most 200 members. `members` may
 be `[]` and may not be null or absent.
+
+Here `write` means **Can comment**, never permission to prompt or control
+the owner's agent.
+
+The sharing UI chooses members without a permission dropdown. On an existing
+share it sends `membership_only` with the viewed chat UID, generation, and
+the previously selected visible seats. Under the shared mutation lock the
+server applies additions and removals to the current membership: retained
+seats keep their current access, seats newly selected since the sheet opened
+get `write`, and members added concurrently are retained. A baseline member
+removed concurrently stays absent unless explicitly re-invited from a fresh
+sheet; an unrelated save cannot restore that member. A changed or missing share identity
+returns `409` `share_changed`. The baseline must contain at most 200 distinct,
+valid seat identifiers. Requests without `membership_only` retain the explicit
+role-changing API behavior. Both access levels remain enforced.
 
 The node must still be in `nodes.jsonl`, and its session log must carry
 one chat id. Otherwise `404` `not_found` or `409` `no_history`.
@@ -1498,8 +1573,9 @@ is `502` `bad_server` and nothing is stored. A failure after the channel
 exists deletes it again, best effort, and stores nothing.
 
 A share for that chat: `server` and `scope` must equal the stored ones,
-otherwise `409` `share_fixed`. State `active` replaces the members and
-answers `200` and the view. The cursor, title, generation, and sharing
+otherwise `409` `share_fixed`. State `active` replaces the members for an
+ordinary request or applies the membership-only merge above, then answers
+`200` and the view. The cursor, title, generation, and sharing
 time stay as they were. Any other state is `409` `not_active`.
 
 | Status | Code | When |
@@ -1549,6 +1625,10 @@ guest, mirror entries are unseen. The owner's own mirror entries do not count.
 `truncated` says the 4096-entry
 limit prevented a new subscription from being stored. Delivery is `ok`,
 `offline`, `refused` or `changed` as in the share view, and starts at `ok`.
+An owned view may include `local_node` and `local_frontier` when its retained owner frontier still
+matches the UID in that local node’s session log. Owned views include `local_order`,
+the retained subscription order used when multiple generations share an anchor.
+Recipient views omit all three fields.
 Channels whose owner, chat or generation is not fixed-length lowercase hex
 are skipped.
 
@@ -1571,7 +1651,7 @@ sequence dealt with, including omitted entries; pass it as `after` to continue.
 When no entry was dealt with, `next` is `after`, capped at `last`. `more`
 is true when `next` is below `last` or the fetch stopped at its page limit. Known start, user,
 assistant and source bodies are projected with `seq` and `at`; unknown bodies
-remain in the copy and are omitted. A user entry may carry boolean `prov` to identify forwarded AI text and string `omitted` when the message is too large to share. Ended subscriptions and unavailable
+remain in the copy and are omitted. On owner subscriptions only, entries with a valid mirror record key include `local_segment` and `local_record`, the local session-log address used to place comments. Recipient reads omit these fields. A user entry may carry boolean `prov` to identify forwarded AI text and string `omitted` when the message is too large to share. Ended subscriptions and unavailable
 servers remain readable from the copy.
 
 Errors are `404` `not_found` for an invalid identity or unknown subscription,
@@ -1594,6 +1674,10 @@ read or write last-known names does not fail the comments read. A muxer restart
 while an author is still unnamed forgets that author until a read from the start
 of the copy, for example opening the view, shows the comment again. Unknown
 comment shapes remain in the copy but are skipped in the answer.
+An owner can receive an anchor-zero comment before the initial native mirror
+arrives. If its saved frontier predates the current seam and there are no
+earlier agent turns, the browser displays it as earlier discussion in the
+normal timeline; it does not add the comment to the agent's session log.
 
 `POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/comments`
 takes `{"text":"...","anchor":N,"key":"<16 lowercase hex>"}`, at most
@@ -1604,6 +1688,15 @@ messages are not queued or copied by the post. Errors are `400 bad_request`,
 `404 not_found`, `403 read_only`, `409 not_active`, `500 store_unavailable`,
 `500 copy_damaged`, `502 refused`, `502 unreachable`, `502 bad_server`,
 `507 server_full`, and `413 too_large`.
+
+A successful comment append has no agent side effects: it cannot send a
+prompt, answer a tool request or select the owner's Agent destination.
+When a comment response is uncertain, the browser keeps its text, anchor and
+idempotency key for an explicit retry. Retrying that same pending comment uses
+the same key, so a previously accepted append is not duplicated. People
+discussion is text-only. Its draft is separate from the owner's Agent draft;
+Agent attachments keep the existing staging behavior across destination
+changes and in-flight work.
 
 `PUT /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/seen`
 takes `{"mirror":N}`, `{"comments":N}`, or both, with no unknown fields

@@ -427,3 +427,27 @@ func TestReadHistoryRetainsAgentProvAcrossSeams(t *testing.T) {
 		t.Errorf("user turn after seam must not carry agent: %+v", segs[1].Turns[0])
 	}
 }
+
+func TestSegmentIdentitySurvivesEmptyClear(t *testing.T) {
+	seg := segmentOf([]Event{{T: "meta", Meta: &MetaEvent{UID: "synthetic"}}, {T: "user", Text: "earlier"}, {T: "source", Source: &SourceEvent{Reason: "clear"}}})
+	if seg.UID != "synthetic" || seg.Index != 1 || len(seg.Turns) != 0 {
+		t.Fatalf("segment %+v", seg)
+	}
+}
+
+func TestReadHistoryIncludingEmptyIdentifiesEmptyClear(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.jsonl")
+	w := &Writer{Path: path}
+	for _, ev := range []Event{{T: "meta", Time: "2026-01-01T00:00:00Z", Meta: &MetaEvent{UID: "abcdef0123456789"}}, {T: "user", Time: "2026-01-01T00:00:01Z", Text: "earlier"}, {T: "source", Time: "2026-01-01T00:00:02Z", Source: &SourceEvent{Reason: "clear"}}, {T: "source", Time: "2026-01-01T00:00:03Z", Source: &SourceEvent{Reason: "clear"}}, {T: "assistant", Time: "2026-01-01T00:00:04Z", Text: "later"}} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all := ReadHistoryIncludingEmpty(path)
+	if len(all) != 3 || all[1].Index != 1 || all[1].UID != "abcdef0123456789" || len(all[1].Turns) != 0 {
+		t.Fatalf("history %+v", all)
+	}
+	if len(ReadHistory(path)) != 2 {
+		t.Fatal("ordinary history must continue to omit empty segments")
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/scimux/scimux/internal/identity"
+	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/storagebudget"
 	"github.com/scimux/scimux/internal/team"
 )
@@ -56,21 +58,24 @@ type subKey struct {
 }
 
 type subscriptionView struct {
-	Server       string `json:"server"`
-	ServerName   string `json:"server_name"`
-	Owner        string `json:"owner"`
-	OwnerName    string `json:"owner_name"`
-	Chat         string `json:"chat"`
-	Generation   string `json:"generation"`
-	Title        string `json:"title"`
-	Access       string `json:"access"`
-	State        string `json:"state"`
-	MirrorLast   uint64 `json:"mirror_last"`
-	SeenMirror   uint64 `json:"seen_mirror"`
-	CommentsLast uint64 `json:"comments_last"`
-	SeenComments uint64 `json:"seen_comments"`
-	Unread       bool   `json:"unread"`
-	FirstSeen    string `json:"first_seen"`
+	Server        string              `json:"server"`
+	ServerName    string              `json:"server_name"`
+	Owner         string              `json:"owner"`
+	OwnerName     string              `json:"owner_name"`
+	Chat          string              `json:"chat"`
+	Generation    string              `json:"generation"`
+	Title         string              `json:"title"`
+	Access        string              `json:"access"`
+	State         string              `json:"state"`
+	MirrorLast    uint64              `json:"mirror_last"`
+	SeenMirror    uint64              `json:"seen_mirror"`
+	CommentsLast  uint64              `json:"comments_last"`
+	SeenComments  uint64              `json:"seen_comments"`
+	Unread        bool                `json:"unread"`
+	FirstSeen     string              `json:"first_seen"`
+	LocalNode     string              `json:"local_node,omitempty"`
+	LocalOrder    *int                `json:"local_order,omitempty"`
+	LocalFrontier *team.OwnerFrontier `json:"local_frontier,omitempty"`
 }
 
 type subscriptionServerView struct {
@@ -321,6 +326,9 @@ func (h *teamHandler) commitSubs(inst string, outcomes []subOutcome, seats []sea
 		outcomes[i].channels = channels
 	}
 	subs, truncation, changed := mergeSubs(subs, entries, outcomes, inst, now)
+	if h.captureOwnerFrontiers(subs, inst) {
+		changed = true
+	}
 	joined := entryMap(entries)
 	for _, outcome := range outcomes {
 		if _, ok := joined[outcome.entry.ID]; !ok {
@@ -597,12 +605,17 @@ func entryMap(entries []team.Entry) map[string]team.Entry {
 
 func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.Entry, truncated bool) subListResponse {
 	views := make([]subscriptionView, 0, len(subs))
-	for _, sub := range subs {
+	for i, sub := range subs {
+		var localOrder *int
+		if sub.Access == "owner" {
+			order := i
+			localOrder = &order
+		}
 		views = append(views, subscriptionView{
 			Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName,
 			Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State,
 			MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub),
-			FirstSeen: sub.FirstSeen,
+			FirstSeen: sub.FirstSeen, LocalNode: h.localOwnerNode(sub), LocalOrder: localOrder, LocalFrontier: h.localOwnerFrontier(sub),
 		})
 	}
 	sort.Slice(views, func(i, j int) bool { return subLess(views[i], views[j]) })
@@ -612,6 +625,27 @@ func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.
 	}
 	sort.Slice(servers, func(i, j int) bool { return servers[i].ID < servers[j].ID })
 	return subListResponse{Subscriptions: views, Servers: servers, Truncated: truncated}
+}
+
+// localOwnerNode verifies a retained mapping against the current log identity.
+func (h *teamHandler) localOwnerNode(sub team.Subscription) string {
+	if sub.Access != "owner" || sub.OwnerFrontier == nil {
+		return ""
+	}
+	path := filepath.Join(h.dataDir, "sessions", sub.OwnerFrontier.Node+".jsonl")
+	found := sessionlog.ReadLogIdentity(path)
+	if found.Status != sessionlog.IdentityOK || found.UID != sub.Chat {
+		return ""
+	}
+	return sub.OwnerFrontier.Node
+}
+
+// localOwnerFrontier exposes only a UID-verified owner frontier.
+func (h *teamHandler) localOwnerFrontier(sub team.Subscription) *team.OwnerFrontier {
+	if h.localOwnerNode(sub) == "" {
+		return nil
+	}
+	return sub.OwnerFrontier
 }
 
 func subUnread(sub team.Subscription) bool {
@@ -828,7 +862,7 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var out subscriptionReadResponse
-	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub), FirstSeen: sub.FirstSeen}
+	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub), FirstSeen: sub.FirstSeen, LocalNode: h.localOwnerNode(sub), LocalFrontier: h.localOwnerFrontier(sub)}
 	out.View.Delivery = delivery
 	out.Last = last
 	out.Entries = []map[string]any{}
@@ -838,7 +872,12 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 		out.Next = last
 	}
 	for _, record := range records {
-		entry, size, ok := projectSubRecord(record)
+		entry, size, ok := projectSubRecordForAccess(record, sub.Access)
+		if ok && sub.Access == "owner" && record.Key == "start" {
+			if segment, index, found := h.ownerStartAddress(id); found {
+				entry["local_segment"], entry["local_record"] = segment, index
+			}
+		}
 		if !ok {
 			out.Next = record.Seq
 			continue
@@ -857,6 +896,118 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSONStatus(w, 200, out)
+}
+
+// captureOwnerFrontiers runs under the team-state lock during subscription refresh.
+func (h *teamHandler) captureOwnerFrontiers(subs []team.Subscription, inst string) bool {
+	shares, err := team.LoadShares(h.dataDir)
+	if err != nil {
+		return false
+	}
+	changed := false
+	for i := range subs {
+		sub := &subs[i]
+		if sub.Access != "owner" || sub.Owner != inst || sub.OwnerFrontier != nil {
+			continue
+		}
+		for _, share := range shares {
+			if share.UID != sub.Chat || share.Server != sub.Server || share.Generation != sub.Generation {
+				continue
+			}
+			path := filepath.Join(h.dataDir, "sessions", share.Node+".jsonl")
+			id := sessionlog.ReadLogIdentity(path)
+			if id.Status != sessionlog.IdentityOK || id.UID != sub.Chat {
+				break
+			}
+			segment, record, ok := ownerStartPosition(sessionlog.ReadEvents(path), share.Start)
+			if ok {
+				sub.OwnerFrontier = &team.OwnerFrontier{Node: share.Node, Segment: segment, Record: record}
+				changed = true
+			}
+			break
+		}
+	}
+	return changed
+}
+
+// ownerStartPosition identifies the cursor immediately before a share starts.
+func ownerStartPosition(events []sessionlog.Event, start int) (int, int, bool) {
+	if start < 0 || start > len(events) {
+		return 0, 0, false
+	}
+	segment := 0
+	for _, ev := range events[:start] {
+		if ev.T == "source" {
+			segment++
+		}
+	}
+	return segment, start - 1, true
+}
+
+func (h *teamHandler) ownerStartAddress(id team.CopyID) (int, int, bool) {
+	inst, err := identity.LoadInstallation(h.dataDir)
+	if err != nil || string(inst) != id.Owner {
+		return 0, 0, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	subs, err := team.LoadSubs(h.dataDir)
+	if err != nil {
+		return 0, 0, false
+	}
+	for i := range subs {
+		sub := &subs[i]
+		if !sameCopy(*sub, id) || sub.Access != "owner" {
+			continue
+		}
+		if f := sub.OwnerFrontier; f != nil {
+			return f.Segment, f.Record, true
+		}
+		shares, err := team.LoadShares(h.dataDir)
+		if err != nil {
+			return 0, 0, false
+		}
+		for _, share := range shares {
+			if share.UID != id.Chat || share.Server != id.Server || share.Generation != id.Generation {
+				continue
+			}
+			path := filepath.Join(h.dataDir, "sessions", share.Node+".jsonl")
+			found := sessionlog.ReadLogIdentity(path)
+			if found.Status != sessionlog.IdentityOK || found.UID != id.Chat {
+				return 0, 0, false
+			}
+			segment, index, ok := ownerStartPosition(sessionlog.ReadEvents(path), share.Start)
+			if !ok {
+				return 0, 0, false
+			}
+			sub.OwnerFrontier = &team.OwnerFrontier{Node: share.Node, Segment: segment, Record: index}
+			if h.saveSubscriptionState(subs) != nil {
+				return 0, 0, false
+			}
+			return segment, index, true
+		}
+	}
+	return 0, 0, false
+}
+
+// projectSubRecordForAccess adds the original event address only for the owner.
+// Mirror keys identify that event without changing the relay contract.
+func projectSubRecordForAccess(record team.MirrorRecord, access string) (map[string]any, int, bool) {
+	entry, size, ok := projectSubRecord(record)
+	if !ok || access != "owner" {
+		return entry, size, ok
+	}
+	segmentText, recordText, found := strings.Cut(record.Key, "/")
+	if !found {
+		return entry, size, ok
+	}
+	segment, err1 := strconv.Atoi(segmentText)
+	index, err2 := strconv.Atoi(recordText)
+	if err1 != nil || err2 != nil || segment < 0 || index < 0 {
+		return entry, size, ok
+	}
+	entry["local_segment"], entry["local_record"] = segment, index
+	return entry, size, ok
 }
 
 func projectSubRecord(record team.MirrorRecord) (map[string]any, int, bool) {

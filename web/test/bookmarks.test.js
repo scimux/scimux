@@ -2218,3 +2218,44 @@ test("old send-to roles keep their original draft with or without provenance", (
     assert.equal(ctx.storage.getItem(DRAFT_KEY_PREFIX + "ok"), discloseAgentOutput("synthetic", role));
   }
 });
+
+test('quoted native user provenance discloses known AI text', () => {
+  assert.match(bookmarkModule.discloseQuoted('source', {role:'user',prov:true}), /AI-generated/);
+  assert.equal(bookmarkModule.discloseQuoted('source', {role:'user'}), 'source');
+});
+
+test('choice sheet focuses a choice and Escape restores its source control', () => {
+ const ctx=createFeature(),origin=el('button'),first=el('button');origin.isConnected=true;ctx.document.activeElement=origin;
+ ctx.roots.sendtoList._nodes=[first];ctx.roots.sendtoList.querySelector=()=>first;
+ ctx.feature.openChoiceList({title:'Sent as prompt',choices:[{label:'First'},{label:'Second'}]});
+ assert.equal(first._focused,true);let prevented=false,stopped=false;
+ ctx.roots.sendtoList.onkeydown({key:'Escape',preventDefault(){prevented=true},stopPropagation(){stopped=true}});
+ assert.equal(prevented,true);assert.equal(stopped,true);assert.equal(origin._focused,true);assert.equal(ctx.effects.closeSheets.length,1);ctx.feature.destroy();
+});
+
+test('choice Escape falls back from a removed source and tears down on reuse or destroy', () => {
+ const ctx=createFeature(),origin=el('button'),fallback=el('h2'),first=el('button');origin.isConnected=false;ctx.document.activeElement=origin;
+ const original=ctx.document.querySelector;ctx.document.querySelector=sel=>sel==='#chattitle'?fallback:original.call(ctx.document,sel);
+ ctx.roots.sendtoList.querySelector=()=>first;
+ ctx.feature.openChoiceList({choices:[{label:'One'}]});const key=ctx.roots.sendtoList.onkeydown;
+ key({key:'x'});assert.equal(ctx.effects.closeSheets.length,0);
+ key({key:'Escape',preventDefault(){},stopPropagation(){}});assert.equal(fallback._focused,true);
+ ctx.feature.openChoiceList({choices:[{label:'One'}]});ctx.feature.openSendTo({text:'draft'});assert.equal(ctx.roots.sendtoList.onkeydown,null);
+ ctx.feature.openChoiceList({choices:[{label:'One'}]});ctx.feature.destroy();assert.equal(ctx.roots.sendtoList.onkeydown,null);
+});
+
+test('choice Escape skips hidden controls and focuses a visible fallback', () => {
+ const ctx=createFeature(),origin=el('button'),hidden=el('h2'),visible=el('button');
+ origin.isConnected=true;origin.getClientRects=()=>[];hidden.getClientRects=()=>[];visible.getClientRects=()=>[{}];ctx.document.activeElement=origin;
+ ctx.document.querySelector=sel=>sel==='#chattitle'?hidden:sel==='#plusbtn'?visible:null;
+ ctx.feature.openChoiceList({choices:[{label:'One'}]});ctx.roots.sendtoList.onkeydown({key:'Escape',preventDefault(){},stopPropagation(){}});
+ assert.equal(visible._focused,true);ctx.feature.destroy();
+});
+
+test('replacing a choice sheet list removes the old keyboard handler', () => {
+ const ctx=createFeature({deps:{sendtoList:null}}),old=el('div'),next=el('div');let current=old;
+ ctx.document.querySelector=sel=>sel==='#sendto_list'?current:null;
+ ctx.feature.openChoiceList({choices:[{label:'One'}]});assert.equal(typeof old.onkeydown,'function');
+ current=next;ctx.feature.openChoiceList({choices:[{label:'Two'}]});assert.equal(old.onkeydown,null);assert.equal(old.onclick,null);assert.equal(typeof next.onkeydown,'function');
+ ctx.feature.destroy();assert.equal(next.onkeydown,null);
+});

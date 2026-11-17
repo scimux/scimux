@@ -86,3 +86,81 @@ test("permanent link truncates text only when the transcript has no address", ()
   assert.equal(link.destination.textPrefix, true);
   assert.equal(link.destination.turnTime, undefined);
 });
+
+test('prompt source identities distinguish local records and full shared generations', () => {
+  const local={uid:'u',segment:2,record:7};
+  const team={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:4};
+  assert.notEqual(links.promptSourceKey(local),links.promptSourceKey({...local,record:8}));
+  assert.notEqual(links.promptSourceKey(team),links.promptSourceKey({...team,generation:'g2'}));
+  assert.equal(links.promptSourceKey({...team,seq:0}),'');
+  const store=memory(); links.addPromptSource(store,'n1',local); links.addPromptSource(store,'n1',team);
+  links.addPromptSource(store,'n1',{...team});
+  assert.deepEqual(links.readPromptSources(store,'n1'),[local,team]);
+  links.clearPromptSources(store,'n1'); assert.deepEqual(links.readPromptSources(store,'n1'),[]);
+});
+
+test('asynchronous agent rejection restores only matching in-flight prompt sources', () => {
+  const storage=memory(); const first={uid:'u',segment:0,record:1}, other={uid:'u',segment:0,record:2};
+  links.writePromptFlights(storage,'n1',[{id:1,text:'rejected',sources:[first]},{id:2,text:'later',sources:[other]}]);
+  links.recoverPromptFlights(storage,'n1','rejected');
+  assert.deepEqual(links.readPromptSources(storage,'n1'),[first]);
+  assert.deepEqual(links.readPromptFlights(storage,'n1'),[{id:2,text:'later',sources:[other]}]);
+  links.recoverPromptFlights(storage,'n1','unrelated');
+  assert.equal(links.readPromptFlights(storage,'n1').length,1);
+});
+
+test('prompt source and flight stores reject malformed caches and tolerate storage refusal', () => {
+  const s=memory({'scimux-prompt-sources:n':'{}','scimux-prompt-flights:n':'{}'});
+  assert.deepEqual(links.readPromptSources(s,'n'),[]); assert.deepEqual(links.readPromptFlights(s,'n'),[]);
+  const broken={getItem(){throw Error('offline')},setItem(){throw Error('offline')},removeItem(){throw Error('offline')}};
+  assert.deepEqual(links.readPromptSources(broken,'n'),[]); assert.deepEqual(links.readPromptFlights(broken,'n'),[]);
+  assert.doesNotThrow(()=>links.writePromptFlights(broken,'n',[{sources:[]}]));
+  assert.doesNotThrow(()=>links.writePromptSources(broken,'n',[]));
+});
+
+test('rejection recovery only considers one accepted flight and a matching newer user row', () => {
+ const f={accepted:true,text:'draft',boundary:{uid:'u',segment:0,record:1},sources:[{uid:'u',segment:0,record:1}]};
+ const rows=[{uid:'u',segment:0,record:1,role:'assistant'},{uid:'u',segment:0,record:2,role:'user',text:'draft'}];
+ assert.equal(links.rejectedPromptFlight([f],rows),f);
+ assert.equal(links.rejectedPromptFlight([f,f],rows),null);
+ assert.equal(links.rejectedPromptFlight([{...f,accepted:false}],rows),null);
+ assert.equal(links.rejectedPromptFlight([f],rows.slice(1)),null);
+ assert.equal(links.rejectedPromptFlight([f],[rows[0],{...rows[1],text:'other'}]),null);
+});
+
+test('omitted zero segment in server JSON still identifies the exact first segment', () => {
+ const source={uid:'u',record:1};
+ assert.equal(links.promptSourceKey(source),links.promptSourceKey({...source,segment:0}));
+ const flight={accepted:true,text:'draft',boundary:source,sources:[source]};
+ assert.equal(links.rejectedPromptFlight([flight],[{...source,role:'assistant'},{uid:'u',record:2,role:'user',text:'draft'}]),flight);
+});
+
+test('rejection matching tolerates missing rows and missing prompt text', () => {
+ const f={accepted:true,text:'draft',boundary:{uid:'u',record:1},sources:[{uid:'u',record:1}]};
+ assert.equal(links.rejectedPromptFlight([f],null),null);
+ assert.equal(links.rejectedPromptFlight([f],[{uid:'u',record:1},{uid:'u',record:2,role:'user'}]),null);
+});
+
+test('prompt link stores full shared provenance and exact zero-segment destination', () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1,role:'person',who:'Alex',prov:true};
+ const link=links.makePromptLink(source,'n1',{uid:'u',record:4});
+ assert.equal(link.kind,'prompt');assert.deepEqual(link.source,source);assert.deepEqual(link.destination,{node:'n1',uid:'u',segment:0,record:4});
+});
+
+test('forward cache keys and legacy addresses tolerate missing identifiers', () => {
+  assert.equal(links.pendingForwardKey(), 'scimux-sendto-pending:');
+  assert.equal(links.awaitingForwardKey(), 'scimux-sendto-awaiting:');
+  assert.equal(links.sourceAddressKey({}), 'n::');
+});
+
+test('confirmed prompt display preview is separate from its exact address', () => {
+ const source={uid:'u',segment:0,record:1},link=links.makePromptLink(source,'n1',{uid:'u',segment:0,record:4},'Edited   prompt\nline');
+ assert.equal(link.preview,'Edited prompt line');assert.deepEqual(link.destination,{node:'n1',uid:'u',segment:0,record:4});
+ assert.equal('text' in link.destination,false);assert.equal('turnTime' in link.destination,false);
+});
+
+test('prompt preview is bounded and optional for older links', () => {
+ const source={uid:'u',record:1},address={uid:'u',record:2};
+ assert.equal(links.makePromptLink(source,'n',address).preview,undefined);
+ assert.equal(Array.from(links.makePromptLink(source,'n',address,'🙂'.repeat(110)).preview).length,100);
+});

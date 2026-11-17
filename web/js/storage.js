@@ -220,3 +220,79 @@ export function makeForwardLinkToTurn(source, destinationNode, turn = {}){
     sent_at: turn.time || "",
   };
 }
+
+export function makePromptLink(source, destinationNode, address, submitted = ""){
+  const destination = {node:destinationNode, uid:address.uid, segment:address.segment ?? 0, record:address.record};
+  const link = {kind:"prompt", id:`prompt:${promptSourceKey(source)}>${promptSourceKey(destination)}`, source:{...source}, destination};
+  const preview = Array.from(String(submitted || "").replace(/\s+/g, " ").trim()).slice(0, 100).join("");
+  if (preview) link.preview = preview;
+  return link;
+}
+
+/* Prompt preparation is independent of Send-to's legacy delivery latch. */
+export function promptSourceKey(source = {}){
+  if (source && typeof source.uid === "string" && source.uid &&
+      Number.isSafeInteger(source.segment ?? 0) && (source.segment ?? 0) >= 0 &&
+      Number.isSafeInteger(source.record) && source.record >= 0)
+    return JSON.stringify(["local", source.uid, source.segment ?? 0, source.record]);
+  if (source && [source.server, source.owner, source.chat, source.generation, source.log].every(x => typeof x === "string" && x) &&
+      Number.isSafeInteger(source.seq) && source.seq > 0)
+    return JSON.stringify(["shared", source.server, source.owner, source.chat, source.generation, source.log, source.seq]);
+  return "";
+}
+export function readPromptSources(storage, node){
+  try {
+    const value = JSON.parse(storage.getItem("scimux-prompt-sources:" + node) || "[]");
+    return Array.isArray(value) ? value.filter(source => promptSourceKey(source)) : [];
+  } catch { return []; }
+}
+export function writePromptSources(storage, node, sources){
+  try {
+    if (sources.length) storage.setItem("scimux-prompt-sources:" + node, JSON.stringify(sources));
+    else storage.removeItem("scimux-prompt-sources:" + node);
+  } catch { /* draft cache is best effort */ }
+}
+export function addPromptSource(storage, node, source){
+  const key = promptSourceKey(source);
+  const sources = readPromptSources(storage, node);
+  if (key && !sources.some(item => promptSourceKey(item) === key)) sources.push(source);
+  writePromptSources(storage, node, sources);
+}
+export function clearPromptSources(storage, node){ writePromptSources(storage, node, []); }
+
+export function readPromptFlights(storage, node){
+  try {
+    const value = JSON.parse(storage.getItem("scimux-prompt-flights:" + node) || "[]");
+    return Array.isArray(value) ? value.filter(item => item && Array.isArray(item.sources) && item.sources.every(promptSourceKey)) : [];
+  } catch { return []; }
+}
+export function writePromptFlights(storage, node, flights){
+  try {
+    if (flights.length) storage.setItem("scimux-prompt-flights:" + node, JSON.stringify(flights.slice(-32)));
+    else storage.removeItem("scimux-prompt-flights:" + node);
+  } catch { /* best effort, no replay */ }
+}
+
+export function recoverPromptFlights(storage, node, text){
+  const flights = readPromptFlights(storage, node);
+  const matches = flights.map((item, index) => item.text === text ? index : -1).filter(index => index >= 0);
+  if (matches.length !== 1) return;
+  const index = matches[0];
+  const [flight] = flights.splice(index, 1);
+  flight.sources.forEach(source => addPromptSource(storage, node, source));
+  writePromptFlights(storage, node, flights);
+}
+
+/* Conservative recovery only: this never asserts delivery or dispatches. */
+export function rejectedPromptFlight(flights, turns){
+  if (!Array.isArray(flights) || flights.length !== 1) return null;
+  const flight = flights[0], boundary = flight?.boundary;
+  if (!flight.accepted || !promptSourceKey(boundary) || !flight.text) return null;
+  const index = (turns || []).findIndex(turn => promptSourceKey(turn) === promptSourceKey(boundary));
+  if (index < 0) return null;
+  const prompt = turns[index + 1];
+  if (!prompt || prompt.uid !== boundary.uid || (prompt.segment ?? 0) !== (boundary.segment ?? 0) ||
+      prompt.role !== "user" || prompt.record <= boundary.record ||
+      !(prompt.text === flight.text || String(prompt.text || "").startsWith(flight.text + "\n\n"))) return null;
+  return flight;
+}

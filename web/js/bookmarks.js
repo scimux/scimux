@@ -405,7 +405,7 @@ export function discloseQuoted(text, { role, who, prov }){
     const ai = prov === true ? ", includes AI-generated text" : "";
     return `[Written by ${writer}${ai}, quoted from a shared chat — not written by me:]\n\n${text}`;
   }
-  return discloseAgentOutput(text, role);
+  return discloseAgentOutput(text, role === "user" && prov === true ? "assistant" : role);
 }
 
 /** Longpress send-to: merge bookmark text into an existing per-node draft. */
@@ -512,6 +512,7 @@ export function createBookmarksFeature(deps){
   let copyTimer = null;
   let sendtoListWithHandler = null;
   let sendtoClickHandler = null;
+  let choiceKeyHandler = null;
   const popMenu = createPopoverMenu(doc);
   let menuBookmarkT = "";
   let menuContext = "pane";
@@ -901,22 +902,37 @@ export function createBookmarksFeature(deps){
     listEl.innerHTML = choices.map((choice, i) =>
       `<button type="button" class="pos-item" data-choice="${i}" style="width:100%;text-align:left">${esc(choice.label || "Destination")}</button>`
     ).join("");
-    if (sendtoListWithHandler && sendtoListWithHandler !== listEl &&
-        sendtoListWithHandler.onclick === sendtoClickHandler)
-      sendtoListWithHandler.onclick = null;
+    if (sendtoListWithHandler && sendtoListWithHandler !== listEl) {
+      if (sendtoListWithHandler.onclick === sendtoClickHandler) sendtoListWithHandler.onclick = null;
+      if (sendtoListWithHandler.onkeydown === choiceKeyHandler) sendtoListWithHandler.onkeydown = null;
+    }
+    const origin = doc?.activeElement;
+    choiceKeyHandler = ev => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault(); ev.stopPropagation();
+      listEl.onkeydown = null;
+      if (typeof d.closeSheets === "function") d.closeSheets();
+      const visible = el => el && el.isConnected !== false && (!el.getClientRects || el.getClientRects().length);
+      const target = visible(origin) ? origin : [doc?.querySelector?.("#chattitle"), doc?.querySelector?.("#plusbtn")].find(visible);
+      target?.focus({preventScroll:true});
+    };
+    listEl.onkeydown = choiceKeyHandler;
     sendtoClickHandler = ev => {
       const button = ev.target.closest && ev.target.closest("[data-choice]");
       if (!button) return;
       const choice = choices[Number(button.dataset.choice)];
+      listEl.onkeydown = null;
       if (typeof d.closeSheets === "function") d.closeSheets();
       if (choice && typeof onChoose === "function") onChoose(choice);
     };
     listEl.onclick = sendtoClickHandler;
     sendtoListWithHandler = listEl;
     if (typeof d.openSheet === "function") d.openSheet("#sendto");
+    listEl.querySelector?.("[data-choice]")?.focus({preventScroll:true});
   }
 
   function openSendTo({ text = "", exceptId = "", title = "", role = "", who = "", prov, source = null } = {}){
+    if (sendtoListWithHandler?.onkeydown === choiceKeyHandler) sendtoListWithHandler.onkeydown = null;
     /* Disclose once, here, rather than at each of the four callers: the two
        branches below (seed a new chat, merge into a live draft) both carry the
        text onward, and a caller that forgot would fail silently. */
@@ -972,7 +988,7 @@ export function createBookmarksFeature(deps){
         storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, body));
       if (source) addPendingForward(storage, tgt, source);
       if (typeof d.closeSheets === "function") d.closeSheets();
-      if (typeof d.select === "function") d.select(tgt);
+      if (typeof d.select === "function") d.select(tgt, "agent-forward");
       if (typeof d.isDesktop === "function" && !d.isDesktop() && typeof d.setLevel === "function")
         d.setLevel(1);
       /* Draft is already in storage (above) and select() has run
@@ -1099,8 +1115,10 @@ export function createBookmarksFeature(deps){
     }
     if (sendtoListWithHandler && sendtoListWithHandler.onclick === sendtoClickHandler)
       sendtoListWithHandler.onclick = null;
+    if (sendtoListWithHandler?.onkeydown === choiceKeyHandler) sendtoListWithHandler.onkeydown = null;
     sendtoListWithHandler = null;
     sendtoClickHandler = null;
+    choiceKeyHandler = null;
     bound = false;
   }
 

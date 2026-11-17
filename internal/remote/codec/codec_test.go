@@ -302,3 +302,28 @@ func mustRoundTrip(t *testing.T, client *Conn, req *Request) *Response {
 	}
 	return resp
 }
+
+type failPayloadWriter struct {
+	calls int
+	err   error
+}
+
+func (w *failPayloadWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls == 2 {
+		return 0, w.err
+	}
+	return len(p), nil
+}
+
+func TestWriteFrameReturnsPayloadWriteError(t *testing.T) {
+	want := errors.New("synthetic payload failure")
+	w := &failPayloadWriter{err: want}
+	c := NewConn(strings.NewReader(""), w, RoleInitiator)
+	if err := c.writeFrame(typeBody, []byte("payload")); !errors.Is(err, want) {
+		t.Fatalf("writeFrame error = %v; want %v", err, want)
+	}
+	if w.calls != 2 {
+		t.Fatalf("writes = %d; want header and payload", w.calls)
+	}
+}

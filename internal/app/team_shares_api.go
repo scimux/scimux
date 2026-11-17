@@ -28,20 +28,28 @@ const (
 var errHelloMismatch = errors.New("team: hello named another server")
 
 type sharePutRequest struct {
-	Server  string         `json:"server"`
-	Scope   string         `json:"scope"`
-	Members *[]team.Member `json:"members"`
+	Server         string         `json:"server"`
+	Scope          string         `json:"scope"`
+	Members        *[]team.Member `json:"members"`
+	MembershipOnly *shareIdentity `json:"membership_only,omitempty"`
+}
+
+type shareIdentity struct {
+	UID        string    `json:"uid"`
+	Generation string    `json:"generation"`
+	Baseline   *[]string `json:"baseline"`
 }
 
 type teamShareView struct {
-	UID      string        `json:"uid"`
-	Node     string        `json:"node"`
-	Server   string        `json:"server"`
-	Scope    string        `json:"scope"`
-	State    string        `json:"state"`
-	Delivery string        `json:"delivery"`
-	Members  []team.Member `json:"members"`
-	SharedAt string        `json:"shared_at"`
+	UID        string        `json:"uid"`
+	Node       string        `json:"node"`
+	Server     string        `json:"server"`
+	Scope      string        `json:"scope"`
+	Generation string        `json:"generation"`
+	State      string        `json:"state"`
+	Delivery   string        `json:"delivery"`
+	Members    []team.Member `json:"members"`
+	SharedAt   string        `json:"shared_at"`
 }
 
 type teamSeatView struct {
@@ -67,8 +75,12 @@ func (h *teamHandler) serveShares(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.getShare(w, node)
 	case http.MethodPut:
+		h.shareOps.Lock()
+		defer h.shareOps.Unlock()
 		h.putShare(w, r, node)
 	case http.MethodDelete:
+		h.shareOps.Lock()
+		defer h.shareOps.Unlock()
 		h.stopShare(w, r, node)
 	default:
 		writeTeamError(w, http.StatusNotFound, "not_found")
@@ -165,7 +177,7 @@ func shareViewLess(a, b teamShareView) bool {
 
 func (h *teamHandler) shareAPI(s team.Share) teamShareView {
 	return teamShareView{
-		UID: s.UID, Node: s.Node, Server: s.Server, Scope: s.Scope,
+		UID: s.UID, Node: s.Node, Server: s.Server, Scope: s.Scope, Generation: s.Generation,
 		State: s.State, Delivery: h.deliveryOf(s.Server),
 		Members: s.Members, SharedAt: s.SharedAt,
 	}
@@ -200,6 +212,20 @@ func (h *teamHandler) putShare(w http.ResponseWriter, r *http.Request, node stri
 	if req.Members == nil || len(*req.Members) > maxShareRequestMembers {
 		writeTeamError(w, http.StatusBadRequest, "bad_request")
 		return
+	}
+	baseline := make(map[string]bool)
+	if req.MembershipOnly != nil {
+		if req.MembershipOnly.Baseline == nil || len(*req.MembershipOnly.Baseline) > maxShareRequestMembers {
+			writeTeamError(w, http.StatusBadRequest, "bad_request")
+			return
+		}
+		for _, seat := range *req.MembershipOnly.Baseline {
+			if !validShareSeat(seat) || baseline[seat] {
+				writeTeamError(w, http.StatusBadRequest, "bad_request")
+				return
+			}
+			baseline[seat] = true
+		}
 	}
 	seen := make(map[string]struct{}, len(*req.Members))
 	for _, m := range *req.Members {
@@ -248,7 +274,42 @@ func (h *teamHandler) putShare(w http.ResponseWriter, r *http.Request, node stri
 		return
 	}
 	if existing, ok := shareByUID(shares, uid); ok {
+		if req.MembershipOnly != nil {
+			if req.MembershipOnly.UID != existing.UID || req.MembershipOnly.Generation == "" || req.MembershipOnly.Generation != existing.Generation {
+				writeTeamError(w, http.StatusConflict, "share_changed")
+				return
+			}
+			roles := make(map[string]string, len(existing.Members))
+			for _, m := range existing.Members {
+				roles[m.Seat] = m.Access
+			}
+			members := make([]team.Member, 0, len(*req.Members))
+			for _, m := range *req.Members {
+				if role, found := roles[m.Seat]; found {
+					m.Access = role
+				} else if baseline[m.Seat] {
+					continue // A concurrent removal is not a new invitation.
+				} else {
+					m.Access = "write"
+				}
+				members = append(members, m)
+			}
+			*req.Members = members
+			for _, m := range existing.Members {
+				if _, chosen := seen[m.Seat]; !chosen && !baseline[m.Seat] {
+					*req.Members = append(*req.Members, m)
+				}
+			}
+			if len(*req.Members) > maxShareRequestMembers {
+				writeTeamError(w, http.StatusBadRequest, "bad_request")
+				return
+			}
+		}
 		h.updateShare(w, r, entry, string(inst), existing, req.Scope, *req.Members)
+		return
+	}
+	if req.MembershipOnly != nil {
+		writeTeamError(w, http.StatusConflict, "share_changed")
 		return
 	}
 	h.createShare(w, r, entry, string(inst), node, uid, title, records, req.Scope, *req.Members)
@@ -397,6 +458,21 @@ func (h *teamHandler) stopShare(w http.ResponseWriter, r *http.Request, node str
 }
 
 func (h *teamHandler) finishStop(w http.ResponseWriter, share team.Share) {
+	inst, identityErr := identity.LoadInstallation(h.dataDir)
+	if identityErr == nil {
+		id := team.CopyID{Server: share.Server, Owner: string(inst), Chat: share.UID, Generation: share.Generation}
+		sub, _, found, _, err := h.lookupSubscription(id)
+		if err != nil {
+			writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+			return
+		}
+		if found && sub.Access == "owner" {
+			if _, _, ok := h.ownerStartAddress(id); !ok {
+				writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+				return
+			}
+		}
+	}
 	err := h.deleteShareFile(share.UID, share.Generation)
 	if err == nil || errors.Is(err, team.ErrNotFound) {
 		w.WriteHeader(http.StatusNoContent)

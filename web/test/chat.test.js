@@ -38,6 +38,7 @@ import {
   splitAssetRefs,
   splitPermTitle,
   bubbleActionsHTML,
+  bubbleMarkersHTML,
   keyRowHTML,
   peekBlockHTML,
   echoBubbleHTML,
@@ -4292,9 +4293,10 @@ function makePeekSkipFeature(){
     id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
     live: "quiet", attention: "approval", lane_id: "L1", description: "d",
   }];
+  const doc = peekGrowingDocument(roots.msgs);
   const feature = createChatFeature({
     roots,
-    document: peekGrowingDocument(roots.msgs),
+    document: doc,
     window: {},
     CSS: { escape: s => String(s) },
     assetURL: path => path,
@@ -4335,7 +4337,7 @@ function makePeekSkipFeature(){
     ResizeObserver: class { constructor(){} observe(){} disconnect(){} },
   });
   return {
-    feature, roots,
+    feature, roots, doc,
     setPane: (v) => { paneText = v; },
   };
 }
@@ -4358,6 +4360,30 @@ test("P1 DOM 13: skip-path peek growth re-pins a reader who was at the bottom", 
     "fixture must grow past the near-bottom slack");
   assert.ok(atBottom(ctx.roots.msgs),
     `peek growth must not push a bottom-reader off; was st=${stBefore} sh=${shBefore}, now st=${ctx.roots.msgs.scrollTop} sh=${ctx.roots.msgs.scrollHeight}`);
+  ctx.feature.destroy();
+});
+
+test("an unchanged poll completes a deferred explicit jump to the bottom", async () => {
+  const ctx=makePeekSkipFeature();await ctx.feature.render();
+  ctx.roots.msgs.clientHeight=0;ctx.feature.jumpToNow();
+  await ctx.feature.render();
+  ctx.roots.msgs.clientHeight=600;ctx.roots.msgs.scrollTop=100;
+  await ctx.feature.render();
+  assert.equal(ctx.roots.msgs.scrollTop,ctx.roots.msgs.scrollHeight-600);
+  ctx.feature.destroy();
+});
+
+test("focused discussion editor keeps its anchor through a subsequent unchanged poll", async () => {
+  const ctx=makePeekSkipFeature(); await ctx.feature.render();
+  const turn={dataset:{gkey:'s/o/u/g',cseq:'1'},getBoundingClientRect:()=>({top:400})};
+  const input={selectionStart:2,selectionEnd:4,selectionDirection:'forward'};
+  const row={previousElementSibling:turn,contains:element=>element===input};
+  input.closest=()=>row; ctx.doc.activeElement=input;
+  const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+  ctx.roots.msgs.querySelector=selector=>selector==='[data-grename]'?input:query(selector);
+  const before=ctx.roots.msgs.scrollHeight-ctx.roots.msgs.clientHeight-76;
+  ctx.roots.msgs.scrollTop=before; await ctx.feature.render();
+  assert.equal(ctx.roots.msgs.scrollTop,before,'a later poll must not undo the editor anchor');
   ctx.feature.destroy();
 });
 
@@ -8355,4 +8381,593 @@ test("a fold answer restores focus from body or a removed transcript element", a
       ctx.feature.destroy();
     });
   }
+});
+
+test("an optimistic prompt survives a poll with no transcript turns", () => {
+  const echo = { text:"synthetic prompt", at:1000, base:0 };
+  const result = retireSentEcho(echo, null, 1100);
+  assert.equal(result.retired, false);
+  assert.equal(result.echo, echo);
+});
+
+test('history keeps an empty clear seam only when an owner comment anchors there', async () => {
+ const {historyForDiscussion}=await import('../js/chat.js');
+ const prior=[{segment_index:0,log_uid:'u',turns:[{uid:'u',segment:0,record:1}]}];
+ const empty=[{segment_index:1,log_uid:'u',turns:[],start:'T'},{segment_index:2,log_uid:'u',turns:[],start:'T'}];
+ const discussions=[{uid:'u',mirrors:[{seq:1,t:'source',local_segment:0,local_record:2}],comments:[{seq:1,anchor:1,text:'reply'}]}];
+ assert.deepEqual(historyForDiscussion(prior,empty,3,'',discussions).map(s=>s.segment_index),[0,1]);
+ assert.deepEqual(historyForDiscussion(prior,empty,3,'',[]).map(s=>s.segment_index),[0]);
+});
+
+test('loaded history renders a comment in its exact empty clear segment', async () => {
+ const copy={uid:'u',key:'s/o/u/g',view:{server:'s'},names:{p:'Person'},people:{},mirrors:[{seq:1,t:'source',local_segment:0,local_record:2}],comments:[{seq:1,anchor:1,text:'between clears',author:'p',at:'T'}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},api:async path=>{
+  if(path.includes('history=1')) return {segments:[{log_uid:'u',segment_index:0,start:'2026-01-01T00:00:00Z',turns:[{role:'assistant',uid:'u',segment:0,record:1,text:'before'}]}],empty_segments:[{log_uid:'u',segment_index:1,start:'2026-01-01T00:00:02Z',seam:'2026-01-01T00:00:02Z',reason:'clear',turns:[]}],assets:{}};
+  if(path.includes('/chat')) return {log_uid:'u',segment_index:2,turns:[{role:'assistant',uid:'u',segment:2,record:5,text:'after'}],prior_turns:1,chat_started:'2026-01-01T00:00:04Z',live:'quiet',source:'codex'};
+  return {};
+ }});
+ ctx.feature.bind(); await ctx.feature.loadHistory('n1',''); const body=ctx.roots.msgs.innerHTML;
+ assert.ok(body.indexOf('before')<body.indexOf('between clears')); assert.ok(body.indexOf('between clears')<body.indexOf('after')); ctx.feature.destroy();
+});
+
+test('history falls back for older payloads and ignores invalid or current empty seams', async () => {
+ const {historyForDiscussion}=await import('../js/chat.js');
+ const old=[{start:'2020-01-01T00:00:00Z',turns:[]}];
+ assert.deepEqual(historyForDiscussion(old,[],undefined,'2021-01-01T00:00:00Z',[]),old);
+ const indexed=[{segment_index:0,turns:[]}], empty=[{segment_index:1,log_uid:'u',turns:[]},{segment_index:2,log_uid:'u',turns:[]},{log_uid:'u',turns:[]}];
+ assert.deepEqual(historyForDiscussion(indexed,empty,2,'',[]),indexed);
+});
+
+test('history handles an empty server response and no discussion', async () => {
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>null},api:async path=>path.includes('history=1')?{}:{turns:[],live:'quiet',source:'codex'}});
+ ctx.feature.bind(); await ctx.feature.loadHistory('n1',''); assert.ok(ctx.roots.msgs.innerHTML); ctx.feature.destroy();
+ const {historyForDiscussion}=await import('../js/chat.js'); assert.deepEqual(historyForDiscussion([{segment_index:0}], [{segment_index:1,log_uid:'u'}],2,'',null).map(s=>s.segment_index),[0]);
+});
+
+test('received selection ignores forged native bubble controls', () => {
+ let previews=0; const ctx=makeFeature({sel:'team/s/o/c/g',deps:{openAssetPreview:()=>previews++}});
+ ctx.feature.bind(); const target={dataset:{},href:'forged',closest:selector=>selector==='[data-asset-preview]'?target:null};
+ firstListener(ctx.roots.msgs,'click')({target,preventDefault(){}}); assert.equal(previews,0); assert.equal(ctx.apiCalls.length,0); ctx.feature.destroy();
+});
+
+test('legacy owner comments without a recoverable frontier are visible with an honest label', async () => {
+ const copy={uid:'u',key:'s/o/u/g',view:{server:'s'},names:{p:'Person'},people:{},mirrors:[{seq:1,t:'start'}],comments:[{seq:1,anchor:1,text:'retained unplaced',author:'p',at:'T'}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},api:async path=>path.includes('/chat')?{turns:[{role:'assistant',uid:'u',segment:0,record:2,text:'later local'}],log_uid:'u',segment_index:0,live:'quiet',source:'codex'}:{}});
+ ctx.feature.bind();await ctx.feature.render();const body=ctx.roots.msgs.innerHTML; assert.match(body,/position unavailable/i);assert.equal((body.match(/retained unplaced/g)||[]).length,1);ctx.feature.destroy();
+});
+
+test('owner prompt action uses the direction opposite description', () => {
+  const html=bubbleActionsHTML({time:''},{iconInto:'glyph',prompt:true});
+  assert.match(html, /data-bact="prompt"><span class="rot90r">glyph<\/span>use as prompt/);
+  assert.match(html, /data-bact="desc"><span class="rot90l">glyph<\/span>/);
+  assert.doesNotMatch(bubbleActionsHTML({time:''},{iconInto:'glyph'}), /data-bact="prompt"/);
+});
+
+test('prepared prompt marker uses accessible opposite-facing prompt glyph', () => {
+  const html=bubbleMarkersHTML({prepared:true},{iconInto:'glyph'});
+  assert.match(html,/aria-label="Prepared as prompt"/);
+  assert.match(html,/<span class="rot90r">glyph<\/span>/);
+  assert.equal(bubbleMarkersHTML({}, {iconInto:'glyph'}),'');
+});
+
+
+test('native prompt bubble action checks capability again before preparation', async () => {
+  const prepared=[]; let allowed=true;
+  const turn={role:'user',text:'source',uid:'u',segment:0,record:1,prov:true};
+  const ctx=makeFeature({chatPayload:{turns:[turn],live:'quiet',delivery:'ok',source:'acp',chat_started:'T0',prior_turns:0,assets:{}},deps:{canPreparePrompt:()=>allowed,preparePrompt:(...args)=>prepared.push(args)}});
+  ctx.feature.bind(); await ctx.feature.render(); tapBubbleTurn(ctx,'i:0');
+  assert.match(bubActionRows(ctx)[0].innerHTML,/data-bact="prompt"/);
+  allowed=false; clickBact(ctx,'prompt'); assert.equal(prepared.length,0);
+  allowed=true; clickBact(ctx,'prompt'); assert.equal(prepared.length,1);
+  assert.equal(prepared[0][0].prov,true); assert.deepEqual(prepared[0][1],{uid:'u',segment:0,record:1}); ctx.feature.destroy();
+});
+
+test('owner discussion renders a prepared marker from the full shared address', async () => {
+ const copy={uid:'u',key:'s/o/u/g',view:{server:'s',owner:'o',chat:'u',generation:'g'},names:{p:'Person'},people:{},mirrors:[{seq:1,t:'user',local_segment:0,local_record:1}],comments:[{seq:1,anchor:1,text:'reply',author:'p',at:'T'}]};
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'comments',seq:1};
+ const storage={getItem:key=>key==='scimux-prompt-sources:n1'?JSON.stringify([source]):null,removeItem(){},setItem(){}};
+ const ctx=makeFeature({storage,deps:{ownerDiscussion:()=>[copy],icons:{}},api:async path=>path.includes('/chat')?{turns:[{role:'user',uid:'u',segment:0,record:1,text:'turn'}],log_uid:'u',segment_index:0,live:'quiet',source:'codex'}:{}});
+ ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/aria-label="Prepared as prompt"/);ctx.feature.destroy();
+});
+
+test('a local prompt source marker addresses the exact local record', async () => {
+ const source={uid:'u',segment:0,record:1};
+ const storage={getItem:key=>key==='scimux-prompt-sources:n1'?JSON.stringify([source]):null,removeItem(){},setItem(){}};
+ const ctx=makeFeature({storage,chatPayload:{turns:[{...source,role:'assistant',text:'answer'}],live:'quiet',source:'acp'}});
+ ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/aria-label="Prepared as prompt"/);ctx.feature.destroy();
+});
+
+test('an in-flight prompt source is marked awaiting delivery rather than confirmed', () => {
+ const html=bubbleMarkersHTML({awaiting:true},{iconInto:'glyph'});
+ assert.match(html,/aria-label="Awaiting prompt delivery"/);
+ assert.doesNotMatch(html,/Sent as prompt/);
+});
+
+test('a uniquely addressed rejected prompt restores sources and the Agent draft', async () => {
+ const source={uid:'u',segment:0,record:1}, flight={id:1,accepted:true,text:'draft',address:{uid:'u',segment:0,record:2},boundary:source,sources:[source]};
+ const values=new Map([['scimux-prompt-flights:n1',JSON.stringify([flight])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const recovered=[];
+ const ctx=makeFeature({storage,chatPayload:{turns:[{...source,role:'assistant'},{uid:'u',record:2,role:'user',text:'draft'}],log_uid:'u',trace_outcome:'rejected',error:'dispatch rejected',turn_in_flight:false,live:'quiet',source:'acp'},deps:{recoverPromptDraft:(...args)=>recovered.push(args)}});
+ ctx.feature.bind();await ctx.feature.render();assert.deepEqual(recovered,[['n1','draft',undefined]]);assert.equal(values.has('scimux-prompt-flights:n1'),false);assert.ok(values.has('scimux-prompt-sources:n1'));ctx.feature.destroy();
+});
+
+test('native prompt action recognizes an omitted zero segment', async () => {
+ const prepared=[]; const turn={role:'user',text:'source',uid:'u',record:1};
+ const ctx=makeFeature({chatPayload:{turns:[turn],live:'quiet',source:'acp'},deps:{canPreparePrompt:()=>true,preparePrompt:(...args)=>prepared.push(args)}});
+ ctx.feature.bind();await ctx.feature.render();tapBubbleTurn(ctx);clickBact(ctx,'prompt');assert.equal(prepared[0][1].segment,0);ctx.feature.destroy();
+});
+
+test('in-flight source keeps its exact local marker while awaiting delivery', async () => {
+ const source={uid:'u',segment:0,record:1}, flight={id:1,text:'queued',sources:[source]};
+ const storage={getItem:key=>key==='scimux-prompt-flights:n1'?JSON.stringify([flight]):null,setItem(){},removeItem(){}};
+ const ctx=makeFeature({storage,chatPayload:{turns:[{...source,role:'assistant',text:'answer'}],live:'quiet',source:'acp'}});
+ ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/Awaiting prompt delivery/);ctx.feature.destroy();
+});
+
+test('chat navigation cancels description editing and retracts its optimistic echo', () => {
+ const ctx=makeFeature();ctx.feature.setSentEcho({node:'n1',text:'queued'});ctx.feature.clearSentEchoFor('n1');ctx.feature.cancelEditorsForNav();ctx.feature.destroy();
+});
+
+test('poll restoration consults the Agent draft while People is selected', async () => {
+ const restored=[];
+ const ctx=makeFeature({chatPayload:{turns:[],live:'quiet',restore_draft:'failed Agent',error:'rejected',source:'acp'}, composerText:()=> 'People draft', deps:{agentDraftText:()=>'',restoreDraft:(id,text)=>restored.push([id,text])}});
+ ctx.feature.bind(); await ctx.feature.render();
+ assert.deepEqual(restored,[['n1','failed Agent']]); ctx.feature.destroy();
+});
+
+test('a positively evidenced trace persists the original source and exact destination', async () => {
+ const source={uid:'u',segment:0,record:1}, address={uid:'u',segment:0,record:3};
+ const values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'edited',sources:[source],address,accepted:true}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const ops=[];
+ const ctx=makeFeature({storage,deps:{uiMutate:op=>ops.push(op)},api:async path=>path.includes('trace_uid=')?{turns:[{...address,role:'user',text:'edited'}],log_uid:'u',trace_outcome:'confirmed',live:'quiet',source:'acp'}:{}});
+ ctx.feature.bind();await ctx.feature.render();
+ assert.equal(ops.length,1);assert.equal(ops[0].link.kind,'prompt');assert.deepEqual(ops[0].link.source,source);assert.equal(ops[0].link.destination.record,3);
+ assert.equal(values.has('scimux-prompt-flights:n1'),false);ctx.feature.destroy();
+});
+
+test('trace rejection restores only its captured sources and Agent text, preserving a newer source', async () => {
+ const first={uid:'u',segment:0,record:1}, second={uid:'u',segment:0,record:4}, address={uid:'u',segment:0,record:2};
+ const values=new Map([['scimux-prompt-sources:n1',JSON.stringify([second])],['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'first draft',sources:[first],address,accepted:true}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const recovered=[];
+ const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:'u',trace_outcome:'rejected',source:'acp',live:'quiet'},deps:{recoverPromptDraft:(...args)=>recovered.push(args)}});
+ ctx.feature.bind();await ctx.feature.render();assert.deepEqual(recovered,[['n1','first draft',undefined]]);assert.deepEqual(JSON.parse(values.get('scimux-prompt-sources:n1')),[second,first]);ctx.feature.destroy();
+});
+
+test('a stale log identity cannot confirm or recover an unrelated flight', async () => {
+ const address={uid:'old',segment:0,record:1},values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'old draft',sources:[],address,accepted:true}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const effects=[];
+ const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:'new',trace_outcome:'rejected',source:'acp',live:'quiet'},deps:{uiMutate:op=>effects.push(op),recoverPromptDraft:()=>effects.push('restore')}});
+ ctx.feature.bind();await ctx.feature.render();assert.deepEqual(effects,[]);ctx.feature.destroy();
+});
+
+test('a normal jump works when no clock dependency is supplied', async () => {
+ const ctx=makeFeature({chatPayload:{turns:[{uid:'u',segment:0,record:1,role:'user',text:'target'}],log_uid:'u',live:'quiet'},deps:{now:undefined}});
+ ctx.setPending({node:'n1',uid:'u',segment:0,record:1,ts:Date.now()});ctx.feature.bind();await ctx.feature.render();ctx.feature.destroy();
+});
+
+test('a replaced log leaves its old flight unconfirmed and stops polling it', async () => {
+ const address={uid:'old',segment:0,record:1},values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'draft',sources:[],address,accepted:true}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const effects=[];
+ const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:'new',trace_outcome:'unknown',source:'acp',live:'quiet'},deps:{uiMutate:op=>effects.push(op),recoverPromptDraft:()=>effects.push('restore')}});
+ ctx.feature.bind();await ctx.feature.render();assert.deepEqual(effects,[]);assert.equal(JSON.parse(values.get('scimux-prompt-flights:n1'))[0].terminalUnknown,true);ctx.feature.destroy();
+});
+
+test('prompt links keep full source identity and never appear as Send-to links', () => {
+ const source={uid:'u',segment:0,record:2}, shared={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const native={kind:'prompt',source,destination:{node:'n1',uid:'u',segment:0,record:5}};
+ const human={kind:'prompt',source:shared,destination:{node:'n1',uid:'u',segment:0,record:6}};
+ assert.deepEqual(chatmod.sentToMarkerModel(source,'n1',[native]),[]);
+ assert.deepEqual(chatmod.promptLinksForSource(source,[native,human,null]),[native]);
+ assert.deepEqual(chatmod.promptLinksForSource({...shared,generation:'other'},[human]),[]);
+ assert.deepEqual(chatmod.promptLinksForSource({},[native]),[]);
+  assert.match(bubbleMarkersHTML({promptLinks:[native]},{iconInto:'glyph'}),/aria-label="Sent as prompt"/);
+});
+
+test('native prompt markers jump to exact addresses and offer a chooser', async () => {
+ const source={uid:'u',segment:0,record:2}, jumps=[], choices=[], toasts=[];
+ let links=[{kind:'prompt',source,destination:{node:'n1',uid:'u',segment:1,record:9}}];
+ const ctx=makeFeature({chatPayload:{turns:[{...source,role:'assistant',text:'answer'}],live:'quiet',source:'acp'},deps:{forwardLinks:()=>links,jumpToChatAddress:a=>{jumps.push(a);return false},toast:m=>toasts.push(m),openChoiceList:o=>choices.push(o)}});
+ ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/Sent as prompt/);
+ clickBubbleMarker(ctx,'i:0','prompt');assert.deepEqual(jumps,[links[0].destination]);assert.equal(toasts.length,1);
+ links=[...links,{kind:'prompt',source,destination:{node:'gone',uid:'u',segment:2,record:7}}];
+ clickBubbleMarker(ctx,'i:0','prompt');assert.equal(choices[0].choices.length,2);choices[0].onChoose(choices[0].choices[1]);assert.deepEqual(jumps[1],links[1].destination);ctx.feature.destroy();
+});
+
+test('an unknown trace preserves its source while ceasing trace polling', async () => {
+ const source={uid:'u',record:1},address={uid:'u',record:2},values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'draft',sources:[source],address,accepted:true}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:'u',trace_outcome:'unknown',live:'quiet',source:'acp'}});
+ ctx.feature.bind();await ctx.feature.render();assert.equal(JSON.parse(values.get('scimux-prompt-flights:n1'))[0].terminalUnknown,true);assert.deepEqual(JSON.parse(values.get('scimux-prompt-flights:n1'))[0].sources,[source]);ctx.feature.destroy();
+});
+
+test('confirmation of T1 never consumes a newer T2 source', async () => {
+ const first={uid:'u',record:1,prov:true,role:'user'},second={uid:'u',record:3},address={uid:'u',record:2};
+ const values=new Map([['scimux-prompt-sources:n1',JSON.stringify([second])],['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'edited',sources:[first],address,accepted:true}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const ops=[];
+ const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:'u',trace_outcome:'confirmed',live:'quiet',source:'acp'},deps:{uiMutate:op=>ops.push(op)}});
+ ctx.feature.bind();await ctx.feature.render();assert.deepEqual(ops[0].link.source,first);assert.equal(ops[0].link.preview,'edited');assert.deepEqual(ops[0].link.destination,{node:'n1',uid:'u',segment:0,record:2});assert.deepEqual(JSON.parse(values.get('scimux-prompt-sources:n1')),[second]);ctx.feature.destroy();
+});
+
+test('prompt marker matching tolerates absent links and unavailable destinations', async () => {
+ const source={uid:'u',record:2};assert.deepEqual(chatmod.promptLinksForSource(source,null),[]);
+ const links=[{kind:'prompt',source}];const opened=[];
+ const ctx=makeFeature({chatPayload:{turns:[{...source,role:'assistant',text:'source'}],live:'quiet'},deps:{forwardLinks:()=>links,jumpToChatAddress:a=>{opened.push(a);return true}}});
+ ctx.feature.bind();await ctx.feature.render();clickBubbleMarker(ctx,'i:0','prompt');assert.deepEqual(opened,[]);clickBubbleMarker(ctx,'missing','prompt');ctx.feature.destroy();
+});
+
+test('human prompt marker opens the matching shared source destination', async () => {
+ const copy={uid:'u',key:'s/o/c/g',view:{server:'s',owner:'o',chat:'c',generation:'g'},names:{p:'Person'},people:{},mirrors:[{seq:1,t:'user',local_segment:0,local_record:1}],comments:[{seq:1,anchor:1,text:'reply',author:'p',at:'T'}]};
+ const source={...copy.view,log:'comments',seq:1},dest={node:'n1',uid:'u',segment:0,record:3}, jumps=[];
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy],forwardLinks:()=>[{kind:'prompt',source,destination:dest}],jumpToChatAddress:a=>jumps.push(a)},chatPayload:{turns:[{role:'user',uid:'u',record:1,text:'turn'}],log_uid:'u',live:'quiet'}});
+ ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/Sent as prompt/);
+ const turn=el('div',{className:'turn',dataset:{gkey:copy.key,cseq:'1'}}),marker=el('button',{dataset:{bmarker:'prompt'}});turn.appendChild(marker);ctx.roots.msgs.appendChild(turn);firstListener(ctx.roots.msgs,'click')({target:marker});assert.deepEqual(jumps,[dest]);ctx.feature.destroy();
+});
+
+test('legacy poll restoration reads stored Agent text if the visible composer is empty', async () => {
+ const values=new Map([['scimux-draft:n1','newer']]);const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)}, restored=[];
+ const ctx=makeFeature({storage,composerText:()=>'',restoreDraft:(...args)=>restored.push(args),chatPayload:{turns:[],restore_draft:'old',live:'quiet'}});
+ ctx.feature.bind();await ctx.feature.render();assert.deepEqual(restored,[]);assert.equal(values.get('scimux-draft:n1'),'newer');ctx.feature.destroy();
+});
+
+test('settling an unknown trace preserves other independent flights', async () => {
+ for(const uid of ['u','different']){
+  const address={uid:'u',record:2},other={id:2,text:'other',sources:[],address:{uid:'u',record:7},accepted:true};
+  const values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'one',sources:[],address,accepted:true},other])]]);
+  const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+  const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:uid,trace_outcome:'unknown',live:'quiet'}});ctx.feature.bind();await ctx.feature.render();
+  const flights=JSON.parse(values.get('scimux-prompt-flights:n1'));assert.equal(flights[0].terminalUnknown,true);assert.deepEqual(flights[1],other);ctx.feature.destroy();
+ }
+});
+
+test('confirmed prompt link remains navigable on an earlier history bubble', async () => {
+ const source={uid:'u',segment:0,record:1},dest={node:'n1',uid:'u',segment:1,record:4},jumps=[];
+ const ctx=makeFeature({histSegs:[{segment_index:0,turns:[{...source,role:'assistant',text:'old answer'}]}],chatPayload:{turns:[{uid:'u',segment:1,record:4,role:'user',text:'edited'}],prior_turns:1,live:'quiet'},deps:{forwardLinks:()=>[{kind:'prompt',source,destination:dest}],jumpToChatAddress:a=>jumps.push(a)}});
+ ctx.feature.bind();await ctx.feature.loadHistory('n1','');assert.match(markerChunk(ctx.roots.msgs.innerHTML,'h:0:0'),/Sent as prompt/);clickBubbleMarker(ctx,'h:0:0','prompt');assert.deepEqual(jumps,[dest]);ctx.feature.destroy();
+});
+
+test('prepared and confirmed prompt source bubbles remain visible when folded', async () => {
+ const turns=twoRangeTurns(),source={uid:'log-1',segment:0,record:3},link={kind:'prompt',source,destination:{node:'n1',uid:'log-1',record:1}};
+ const {ctx,html}=await renderFolded({turns,state:{all:true,turns:[],open:[]},echo:false,deps:{...twoRangeDeps(),forwardLinks:()=>[link]}});
+ assert.match(html(),/>left-a</);assert.match(html(),/Sent as prompt/);ctx.feature.destroy();
+});
+
+test('correlated interval error passes captured attachments to Agent recovery', async () => {
+ const attachments=[{name:'input.txt',ref:{path:'owned',mime:'text/plain'}}],values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'draft',sources:[],address:{uid:'u',record:1},accepted:true,attachments}])]]),recovered=[];
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:'u',trace_outcome:'rejected',live:'quiet'},deps:{recoverPromptDraft:(...args)=>recovered.push(args)}});
+ ctx.feature.bind();await ctx.feature.render();assert.deepEqual(recovered,[['n1','draft',attachments]]);ctx.feature.destroy();
+});
+
+test('a pending jump is consumed even when the transcript render is unchanged', async () => {
+ const target={uid:'u',segment:0,record:1,role:'user',text:'destination'};
+ const ctx=makeFeature({chatPayload:{turns:[target],log_uid:'u',live:'quiet'}});ctx.feature.bind();await ctx.feature.render();
+ const element=el('div',{className:'turn user',dataset:{i:'0'}});ctx.roots.msgs.appendChild(element);
+ ctx.setPending({node:'n1',uid:'u',segment:0,record:1,ts:1_000_000});await ctx.feature.render();
+ assert.equal(ctx.getPending(),null);assert.ok(element.classList.contains('jumpflash'));ctx.feature.destroy();
+});
+
+test('a 304 racing a new jump triggers a fresh body rather than dropping the jump', async () => {
+ let calls=0;const payload={turns:[{uid:'u',record:1,role:'user',text:'target'}],log_uid:'u',live:'quiet'};
+ const ctx=makeFeature({chatConditional:async()=>{calls++;return calls===2?{status:304}:{status:200,etag:'tag',data:payload}}});
+ ctx.feature.bind();await ctx.feature.render();ctx.setPending({node:'n1',uid:'u',record:1,ts:1_000_000});await ctx.feature.render();await new Promise(r=>setImmediate(r));
+ assert.equal(calls,3);assert.equal(ctx.getPending(),null);ctx.feature.destroy();
+});
+
+test('a startup restore cannot consume an unrelated identical in-flight source', async () => {
+ const source={uid:'old',record:1},values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'same text',sources:[source],accepted:true}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ const ctx=makeFeature({storage,chatPayload:{turns:[],log_uid:'new',restore_draft:'same text',live:'quiet'}});ctx.feature.bind();await ctx.feature.render();
+ assert.equal(values.has('scimux-prompt-sources:n1'),false);assert.ok(values.has('scimux-prompt-flights:n1'));ctx.feature.destroy();
+});
+// Independent coordinator regression: stale pending work must not starve a new log.
+test('coordinator stale trace cannot starve the new log flight', async()=>{
+ const old={id:1,text:'old draft',sources:[],address:{uid:'old',segment:0,record:1},accepted:true};
+ const current={id:2,text:'new edited prompt',sources:[{uid:'new',segment:0,record:1}],address:{uid:'new',segment:0,record:3},accepted:true};
+ const values=new Map([['scimux-prompt-flights:n1',JSON.stringify([old,current])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ const ops=[],restored=[],paths=[];
+ const ctx=makeFeature({storage,deps:{uiMutate:op=>ops.push(op),recoverPromptDraft:(...args)=>restored.push(args)},api:async path=>{paths.push(path);return {turns:[{uid:'new',segment:0,record:3,role:'user',text:'new edited prompt'}],log_uid:'new',live:'quiet',source:'acp',trace_outcome:path.includes('trace_uid=new')?'confirmed':'unknown'};}});
+ ctx.feature.bind();await ctx.feature.render();await ctx.feature.render();
+ assert.deepEqual(restored,[],'stale flight must never recover into the new chat');
+ assert.equal(ops.length,1,'a stale UID flight must not permanently prevent the current exact-address flight from confirming');
+ assert.equal(ops[0].link.destination.uid,'new');ctx.feature.destroy();
+});
+
+test('coordinator stale mismatch result cannot retire a reused flight id', async()=>{
+ const old={id:1,text:'old draft',sources:[],address:{uid:'old',segment:0,record:1},accepted:true};
+ const current={id:1,text:'new edited prompt',sources:[{uid:'new',segment:0,record:1}],address:{uid:'new',segment:0,record:3},accepted:true};
+ const values=new Map([['scimux-prompt-flights:n1',JSON.stringify([old])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ const ops=[],restored=[];let calls=0;
+ const ctx=makeFeature({storage,deps:{uiMutate:op=>ops.push(op),recoverPromptDraft:(...args)=>restored.push(args)},api:async path=>{
+  if(calls++===0)values.set('scimux-prompt-flights:n1',JSON.stringify([current]));
+  return {turns:[{uid:'new',segment:0,record:3,role:'user',text:'new edited prompt'}],log_uid:'new',live:'quiet',source:'acp',trace_outcome:path.includes('trace_uid=new')?'confirmed':'unknown'};
+ }});
+ ctx.feature.bind();await ctx.feature.render();await ctx.feature.render();
+ assert.deepEqual(restored,[]);assert.equal(ops.length,1,'a stale mismatched response must match address as well as reused id before retiring a flight');
+ assert.equal(ops[0].link.destination.uid,'new');ctx.feature.destroy();
+});
+
+test('coordinator trace ETag is scoped to the exact queried resource', async()=>{
+ const source={uid:'u',segment:0,record:1};
+ const flights=[{id:1,text:'one',sources:[source],address:{uid:'u',segment:0,record:3},accepted:true},{id:2,text:'two',sources:[source],address:{uid:'u',segment:0,record:5},accepted:true}];
+ const values=new Map([['scimux-prompt-flights:n1',JSON.stringify(flights)]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const ops=[];
+ const payload={turns:[{uid:'u',segment:0,record:3,role:'user',text:'one'},{uid:'u',segment:0,record:5,role:'user',text:'two'}],log_uid:'u',live:'quiet',source:'acp',trace_outcome:'confirmed'};
+ const ctx=makeFeature({storage,deps:{uiMutate:op=>ops.push(op),apiConditionalGet:async(path,held)=>held==='stable-body'?{status:304,etag:'stable-body'}:{status:200,etag:'stable-body',data:payload}}});
+ ctx.feature.bind();await ctx.feature.render();await ctx.feature.render();await ctx.feature.render();
+ assert.equal(ops.length,2,'an identical-body 304 across different trace addresses must not block the next confirmed flight');
+ assert.deepEqual(ops.map(op=>op.link.destination.record),[3,5]);ctx.feature.destroy();
+});
+
+test('an active discussion editor survives a changed timeline and keeps its anchor', async () => {
+ const {captureDiscussionEditor, restoreDiscussionEditor}=await import('../js/chat.js');
+ let focused=false, selection=null;
+ const input={selectionStart:3,selectionEnd:7,selectionDirection:'forward',focus(){focused=true},setSelectionRange(...v){selection=v}};
+ const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},getBoundingClientRect:()=>({top:120}),after(row){this.row=row}};
+ const row={previousElementSibling:turn,contains:x=>x===input}; input.closest=()=>row;
+ const doc={activeElement:input}; const body={scrollTop:80,querySelector:()=>input};
+ const saved=captureDiscussionEditor(body,doc);
+ const fresh={dataset:{gkey:'s/o/u/g',cseq:'2'},replaceWith(old){this.replaced=old}};
+ body.querySelectorAll=()=>[fresh]; turn.getBoundingClientRect=()=>({top:150});
+ assert.equal(restoreDiscussionEditor(body,saved),true);
+ assert.equal(fresh.replaced,turn); assert.equal(turn.row,row); assert.equal(focused,true);
+ assert.deepEqual(selection,[3,7,'forward']); assert.equal(body.scrollTop,110);
+});
+
+test('an exact source jump wins over an open editor anchor on a long rebuilt timeline', async () => {
+ let turns = [{uid:'u',segment:0,record:1,role:'user',text:'destination'}];
+ const doc = {activeElement:null, createElement:tag=>el(tag), querySelector:()=>null};
+ const ctx = makeFeature({deps:{document:doc},api:async()=>({turns,log_uid:'u',live:'quiet'})});
+ const body = ctx.roots.msgs; body.scrollHeight=10000; body.clientHeight=700;
+ ctx.feature.bind(); await ctx.feature.render(); body.scrollTop=4700;
+ let absoluteTop=5000, selected=null;
+ const input={value:'Editing person',selectionStart:3,selectionEnd:7,selectionDirection:'forward',closest:()=>row,
+   focus(){doc.activeElement=input},setSelectionRange(...args){selected=args}};
+ const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},getBoundingClientRect:()=>({top:absoluteTop-body.scrollTop}),after(value){this.row=value}};
+ const row={previousElementSibling:turn,contains:node=>node===input}; doc.activeElement=input;
+ const target=el('div',{className:'turn',dataset:{i:'0'}}); target.scrollIntoView=()=>{body.scrollTop=1000};
+ const fresh={dataset:{...turn.dataset},replaceWith(value){this.old=value}};
+ const query=body.querySelector.bind(body), all=body.querySelectorAll.bind(body);
+ body.querySelector=selector=>selector==='[data-grename]'?input:selector==='.turn[data-i="0"]'?target:query(selector);
+ body.querySelectorAll=selector=>selector==='[data-gkey][data-cseq]'?[fresh]:all(selector);
+ ctx.setPending({node:'n1',uid:'u',segment:0,record:1,ts:1_000_000});
+ turns=[...turns,{uid:'u',segment:0,record:2,role:'assistant',text:'new data'}]; absoluteTop+=100;
+ await ctx.feature.render();
+ assert.equal(ctx.getPending(),null); assert.equal(body.scrollTop,1000,'the explicitly requested destination stays in view');
+ assert.equal(fresh.old,turn); assert.equal(turn.row,row); assert.equal(input.value,'Editing person');
+ assert.equal(doc.activeElement,input); assert.deepEqual(selected,[3,7,'forward']); ctx.feature.destroy();
+});
+
+test('history navigation wins over an editor anchor, while polling and a different UID preserve it', async () => {
+ for (const mode of ['history','poll','different-uid']) {
+  let turns=[{uid:'u',segment:0,record:1,role:'user',text:'destination'}];
+  const doc={activeElement:null,createElement:tag=>el(tag),querySelector:()=>null};
+  const ctx=makeFeature({deps:{document:doc},api:async path=>path.includes('history=1')?{segments:[{segment_index:0,turns:[]}]}:{turns,log_uid:'u',live:'quiet'}});
+  const body=ctx.roots.msgs;body.scrollHeight=10000;body.clientHeight=700;
+  ctx.feature.bind();await ctx.feature.render();body.scrollTop=4700;
+  let absoluteTop=5000, selection=null;
+  const input={value:'unsaved',selectionStart:2,selectionEnd:5,selectionDirection:'forward',closest:()=>row,focus(){doc.activeElement=input},setSelectionRange(...v){selection=v}};
+  const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},getBoundingClientRect:()=>({top:absoluteTop-body.scrollTop}),after(r){this.row=r}};
+  const row={previousElementSibling:turn,contains:n=>n===input};doc.activeElement=input;
+  const fresh={dataset:{...turn.dataset},replaceWith(v){this.old=v}};
+  const target=el('div',{className:'turn',dataset:{i:'0'}});target.scrollIntoView=()=>{body.scrollTop=1000};
+  const query=body.querySelector.bind(body),all=body.querySelectorAll.bind(body);
+  body.querySelector=s=>s==='[data-grename]'?input:s==='.turn[data-i="0"]'||s==='.curseam'?target:query(s);
+  body.querySelectorAll=s=>s==='[data-gkey][data-cseq]'?[fresh]:all(s);
+  const html=Object.getOwnPropertyDescriptor(body,'innerHTML');
+  Object.defineProperty(body,'innerHTML',{configurable:true,get:html.get,set(value){absoluteTop+=100;html.set(value)}});
+  if(mode==='history') await ctx.feature.loadHistory('n1','seam');
+  else {
+   if(mode==='different-uid')ctx.setPending({node:'n1',uid:'other',segment:0,record:1,ts:1_000_000});
+   turns=[...turns,{uid:'u',segment:0,record:2,role:'assistant',text:'new'}];await ctx.feature.render();
+  }
+  assert.equal(body.scrollTop,mode==='history'?1000:4800,mode);
+  assert.equal(fresh.old,turn);assert.equal(turn.row,row);assert.equal(input.value,'unsaved');
+  assert.equal(doc.activeElement,input);assert.deepEqual(selection,[2,5,'forward']);
+  if(mode==='different-uid')assert.equal(target.classList.contains('jumpflash'),false);
+  ctx.feature.destroy();
+ }
+});
+
+test('an active exact jump survives rebuild only for its own address and original deadline', async () => {
+ const {activeJumpTarget}=await import('../js/chat.js');
+ const active={node:'n1',uid:'u',segment:1,record:4,expires:1600};
+ const turns=[{uid:'u',segment:1,record:3},{uid:'u',segment:1,record:4}];
+ assert.equal(activeJumpTarget(active,'n1',turns,1599),1);
+ assert.equal(activeJumpTarget(active,'n1',turns,1600),-1);
+ assert.equal(activeJumpTarget(active,'n2',turns,100),-1);
+ assert.equal(activeJumpTarget(active,'n1',[{uid:'other',segment:1,record:4}],100),-1);
+ assert.equal(activeJumpTarget(active,'n1',turns,100,'new-uid'),-1);
+});
+
+test('discussion editor restoration ignores absent or replaced comments and preserves other focused actions', async () => {
+ const {captureDiscussionEditor,restoreDiscussionEditor}=await import('../js/chat.js');
+ assert.equal(captureDiscussionEditor({querySelector:()=>null},{}),null);
+ assert.equal(restoreDiscussionEditor({},null),false);
+ const button={focused:false,focus(){this.focused=true}};
+ const turn={dataset:{gkey:'a',cseq:'4'},getBoundingClientRect:()=>({top:40}),after(){}};
+ const row={previousElementSibling:turn,contains:x=>x===button};
+ const input={closest:()=>row,selectionStart:1,selectionEnd:1,selectionDirection:'none'};
+ const body={scrollTop:20,querySelector:()=>input,querySelectorAll:()=>[]};
+ const saved=captureDiscussionEditor(body,{activeElement:button});
+ assert.equal(restoreDiscussionEditor(body,saved),false);
+ body.querySelectorAll=()=>[{dataset:{gkey:'b',cseq:'4'},replaceWith(){throw Error('wrong comment')}}];
+ assert.equal(restoreDiscussionEditor(body,saved),false);
+ body.querySelectorAll=()=>[{dataset:{gkey:'a',cseq:'4'},replaceWith(){}}];
+ assert.equal(restoreDiscussionEditor(body,saved),true); assert.equal(button.focused,true);
+ const noFocus=captureDiscussionEditor(body,{activeElement:{}});
+ assert.equal(restoreDiscussionEditor(body,noFocus),true);
+});
+
+test('a changed timeline reapplies an exact active jump to its replacement turn', async () => {
+ let turns=[{uid:'u',segment:0,record:1,role:'user',text:'target'}];
+ const ctx=makeFeature({api:async path=>path.includes('/chat')?{turns,log_uid:'u',live:'quiet'}:{}});
+ let target=el('div',{className:'turn',dataset:{i:'0'}});
+ const originalQuery=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+ ctx.roots.msgs.querySelector=selector=>selector==='.turn[data-i="0"]'?target:originalQuery(selector);
+ ctx.feature.bind(); await ctx.feature.render();
+ ctx.setPending({node:'n1',uid:'u',segment:0,record:1,ts:1_000_000}); await ctx.feature.render();
+ assert.ok(target.classList.contains('jumpflash'));
+ target=el('div',{className:'turn',dataset:{i:'0'}});
+ turns=[...turns,{uid:'u',segment:0,record:2,role:'assistant',text:'new'}];
+ await ctx.feature.render(); assert.ok(target.classList.contains('jumpflash'));
+ ctx.feature.destroy();
+});
+
+test('discussion editor anchor accounts for the actual post-render scroll offset', async () => {
+ const {captureDiscussionEditor,restoreDiscussionEditor}=await import('../js/chat.js');
+ for (const [before, after, insertion] of [[80,120,30],[80,0,30],[80,200,-20]]) {
+  let top=200, selection, focused=false;
+  const body={scrollTop:before};
+  const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},getBoundingClientRect:()=>({top:top-body.scrollTop}),after(row){this.row=row}};
+  const input={value:'Editing person',selectionStart:3,selectionEnd:7,selectionDirection:'forward',closest:()=>row,focus(){focused=true},setSelectionRange(...args){selection=args}};
+  const row={previousElementSibling:turn,contains:x=>x===input};
+  body.querySelector=()=>input;
+  const visualTop=turn.getBoundingClientRect().top;
+  const saved=captureDiscussionEditor(body,{activeElement:input});
+  body.scrollTop=after; top+=insertion;
+  const fresh={dataset:{...turn.dataset},replaceWith(value){this.replaced=value}};
+  body.querySelectorAll=()=>[fresh];
+  assert.equal(restoreDiscussionEditor(body,saved),true);
+  assert.equal(body.scrollTop,before+insertion);
+  assert.equal(turn.getBoundingClientRect().top,visualTop);
+  assert.equal(fresh.replaced,turn); assert.equal(turn.row,row); assert.equal(row.previousElementSibling,turn);
+  assert.equal(input.value,'Editing person'); assert.ok(focused); assert.deepEqual(selection,[3,7,'forward']);
+ }
+});
+
+test('highlight ignores empty turn lists and a text-only jump is never retained', async () => {
+ const {activeJumpTarget}=await import('../js/chat.js');
+ assert.equal(activeJumpTarget({node:'n1',uid:'u',record:1,expires:10},'n1',null,1),-1);
+ const ctx=makeFeature({chatPayload:{turns:[{role:'user',text:'target'}],live:'quiet'}});
+ const target=el('div',{className:'turn',dataset:{i:'0'}}); const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+ ctx.roots.msgs.querySelector=s=>s==='.turn[data-i="0"]'?target:query(s);
+ ctx.feature.bind(); await ctx.feature.render(); ctx.setPending({node:'n1',text:'target',ts:1_000_000}); await ctx.feature.render();
+ assert.ok(target.classList.contains('jumpflash')); ctx.feature.destroy();
+});
+
+test('history jumps retain their exact highlight through a timeline rebuild', async () => {
+ let turns=[{uid:'u',segment:1,record:4,role:'user',text:'old'}];
+ const ctx=makeFeature({histSegs:[{segment_index:0,turns:[{uid:'u',segment:0,record:1,role:'assistant',text:'old'}]}],api:async path=>path.includes('history=1')?{segments:[{segment_index:0,turns:[{uid:'u',segment:0,record:1,role:'assistant',text:'old'}]}]}:{turns,log_uid:'u',prior_turns:1,live:'quiet'}});
+ let hist=el('div',{className:'turn hist',dataset:{uid:'u',segment:'0',record:'1'}});
+ const all=ctx.roots.msgs.querySelectorAll.bind(ctx.roots.msgs);
+ ctx.roots.msgs.querySelectorAll=s=>s==='.turn.hist'?[hist]:all(s);
+ ctx.feature.bind(); await ctx.feature.loadHistory('n1',''); ctx.setPending({node:'n1',uid:'u',segment:0,record:1,ts:1_000_000}); await ctx.feature.render();
+ assert.ok(hist.classList.contains('jumpflash'), 'same text in the live segment must not replace the exact history address');
+ hist=el('div',{className:'turn hist',dataset:{uid:'u',segment:'0',record:'1'}});
+ turns=[...turns,{uid:'u',segment:1,record:5,role:'assistant',text:'later'}]; await ctx.feature.render();
+ assert.ok(hist.classList.contains('jumpflash'));ctx.feature.destroy();
+});
+
+test('expired, replaced and missing exact highlight targets are not revived', async () => {
+ for (const scenario of ['expired','new-uid','missing','clock']) {
+  let time=1_000_000, turns=[{uid:'u',segment:0,record:1,role:'user',text:'target'}], uid='u';
+  const ctx=makeFeature({deps:{now:scenario==='clock'?null:()=>time},api:async path=>path.includes('/chat')?{turns,log_uid:uid,live:'quiet'}:{}});
+  let target=el('div',{className:'turn',dataset:{i:'0'}}); const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+  ctx.roots.msgs.querySelector=s=>s==='.turn[data-i="0"]'?target:query(s);
+  ctx.feature.bind();await ctx.feature.render();
+  ctx.setPending({node:'n1',uid:'u',segment:0,record:1,ts:scenario==='clock'?Date.now():time});await ctx.feature.render();
+  if(scenario==='expired') time+=1601;
+  if(scenario==='new-uid') uid='other';
+  if(scenario==='missing') turns=[];
+  if(scenario==='clock') turns=[...turns,{uid:'u',record:2,role:'assistant',text:'new'}];
+  if(scenario==='new-uid') turns=[{uid:'other',record:1,role:'user',text:'replacement'}];
+  if(scenario==='expired') turns=[...turns,{uid:'u',record:2,role:'assistant',text:'later'}];
+  target=el('div',{className:'turn',dataset:{i:'0'}}); await ctx.feature.render();
+  assert.equal(target.classList.contains('jumpflash'),scenario==='clock');ctx.feature.destroy();
+ }
+});
+
+test('a time-only history jump flashes without retaining an exact address', async () => {
+ const ctx=makeFeature({histSegs:[{segment_index:0,turns:[{role:'assistant',time:'old',text:'old'}]}],chatPayload:{turns:[{role:'user',text:'new'}],prior_turns:1,live:'quiet'}});
+ const hist=el('div',{className:'turn hist',dataset:{uid:'',segment:'0',record:'0',time:'old'}});
+ const all=ctx.roots.msgs.querySelectorAll.bind(ctx.roots.msgs);
+ ctx.roots.msgs.querySelectorAll=s=>s==='.turn.hist'?[hist]:all(s);
+ ctx.feature.bind();await ctx.feature.loadHistory('n1','');ctx.setPending({node:'n1',turnTime:'old',ts:1_000_000});await ctx.feature.render();
+ assert.ok(hist.classList.contains('jumpflash'));assert.equal(ctx.getPending(),null);ctx.feature.destroy();
+});
+
+test('multiple prompt destinations advertise their count and dialog', () => {
+  const one = bubbleMarkersHTML({promptLinks: [{}]}, {iconInto: 'glyph'});
+  const two = bubbleMarkersHTML({promptLinks: [{}, {}]}, {iconInto: 'glyph'});
+  assert.match(one, /rot90r[^>]*>glyph/);
+  assert.doesNotMatch(one, /aria-haspopup|bmarkercount/);
+  assert.match(two, /aria-haspopup="dialog"/);
+  assert.match(two, /rot90r[^>]*>glyph/);
+  assert.match(two, /bmarkercount[^>]*>2</);
+});
+
+test('shared owner timeline distinguishes Agent prompts from People comments', async () => {
+ const copy={uid:'u',key:'s/o/u/g',view:{server:'s'},names:{},people:{},mirrors:[{seq:1,local_segment:0,local_record:1}],comments:[{seq:1,anchor:1,text:'human comment',author:'o',mine:true}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},chatPayload:{turns:[{role:'user',uid:'u',segment:0,record:1,text:'agent prompt'}],log_uid:'u',live:'quiet'}});
+ ctx.feature.bind();await ctx.feature.loadHistory('n1','');
+ assert.match(ctx.roots.msgs.innerHTML,/You · Agent/);assert.match(ctx.roots.msgs.innerHTML,/You · People/);ctx.feature.destroy();
+});
+
+test('another shared log does not label an unrelated owner prompt', async () => {
+ const copy={uid:'different',key:'s/o/d/g',view:{server:'s'},names:{},people:{},mirrors:[],comments:[]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},chatPayload:{turns:[{role:'user',uid:'u',segment:0,record:1,text:'ordinary prompt'}],log_uid:'u',live:'quiet'}});
+ ctx.feature.bind();await ctx.feature.loadHistory('n1','');assert.doesNotMatch(ctx.roots.msgs.innerHTML,/You · Agent/);ctx.feature.destroy();
+});
+
+test('ordinary unshared prompt has no shared destination caption', async () => {
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>null},chatPayload:{turns:[{role:'user',uid:'u',segment:0,record:1,text:'ordinary prompt'}],log_uid:'u',live:'quiet'}});
+ ctx.feature.bind();await ctx.feature.loadHistory('n1','');assert.match(ctx.roots.msgs.innerHTML,/ordinary prompt/);assert.doesNotMatch(ctx.roots.msgs.innerHTML,/You · Agent/);ctx.feature.destroy();
+});
+
+test('same-source same-chat confirmed uses offer distinct edited prompt choices and exact addresses', async () => {
+ const source={uid:'u',segment:0,record:2}, jumps=[],choices=[];
+ const links=[{kind:'prompt',source,preview:'Edited first prompt',destination:{node:'n1',uid:'u',segment:0,record:5}},{kind:'prompt',source,preview:'Edited second prompt',destination:{node:'n1',uid:'u',segment:0,record:9}}];
+ const ctx=makeFeature({chatPayload:{turns:[{...source,role:'assistant',text:'source'}],live:'quiet'},deps:{forwardLinks:()=>links,jumpToChatAddress:a=>jumps.push(a),openChoiceList:o=>choices.push(o)}});
+ ctx.feature.bind();await ctx.feature.render();clickBubbleMarker(ctx,'i:0','prompt');
+ assert.match(choices[0].choices[0].label,/Edited first prompt/);assert.match(choices[0].choices[1].label,/Edited second prompt/);
+ choices[0].onChoose(choices[0].choices[0]);choices[0].onChoose(choices[0].choices[1]);assert.deepEqual(jumps,links.map(x=>x.destination));ctx.feature.destroy();
+});
+
+test('old prompt links get distinct honest labels and never fall back to text for navigation', async () => {
+ const source={uid:'u',record:2},jumps=[],choices=[],toasts=[];
+ const links=[{kind:'prompt',source,destination:{node:'n1',uid:'u',record:5}},{kind:'prompt',source,destination:{node:'n1',text:'do not match'}}];
+ const ctx=makeFeature({chatPayload:{turns:[{...source,role:'assistant',text:'source'}],live:'quiet'},deps:{forwardLinks:()=>links,jumpToChatAddress:a=>jumps.push(a),toast:m=>toasts.push(m),openChoiceList:o=>choices.push(o)}});
+ ctx.feature.bind();await ctx.feature.render();clickBubbleMarker(ctx,'i:0','prompt');
+ assert.notEqual(choices[0].choices[0].label,choices[0].choices[1].label);assert.match(choices[0].choices[0].label,/^1\./);assert.match(choices[0].choices[1].label,/^2\./);
+ choices[0].onChoose(choices[0].choices[0]);choices[0].onChoose(choices[0].choices[1]);assert.deepEqual(jumps,[{node:'n1',uid:'u',segment:0,record:5}]);assert.equal(toasts.length,1);ctx.feature.destroy();
+});
+
+test('early accepted owner comment in an empty previous segment stays visible', async () => {
+ const copy={uid:'u',key:'server/owner/u/7',view:{server:'server',owner:'owner',chat:'u',generation:7},names:{p:'Person'},people:{},mirrors:[{seq:0,t:'start',local_segment:0,local_record:-1}],comments:[{seq:1,anchor:0,text:'early human reply',author:'p',at:'T'}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},api:async path=>path.includes('/chat')?{turns:[],log_uid:'u',segment_index:1,prior_turns:0,chat_started:'2026-01-01T00:00:00Z',live:'quiet',source:'claude'}:{}});
+ ctx.feature.bind(); await ctx.feature.render(); const body=ctx.roots.msgs.innerHTML;
+ assert.match(body,/early human reply/); assert.match(body,/Person/); assert.match(body,/server\/owner\/u\/7/); assert.equal((body.match(/early human reply/g)||[]).length,1); ctx.feature.destroy();
+});
+
+test('early discussion projection respects local identity and real history', async () => {
+ const comment={seq:1,anchor:0,text:'older reply',author:'p',at:'T'};
+ const makeCopy=uid=>({uid,key:'server/owner/'+uid+'/7',view:{server:'server'},names:{p:'Person'},people:{},mirrors:[{seq:0,t:'start',local_segment:0,local_record:-1}],comments:[comment]});
+ for (const [uid,prior,visible] of [['other',0,false],['u',1,false],['u',0,true]]) {
+  const ctx=makeFeature({deps:{ownerDiscussion:()=>[makeCopy(uid)]},api:async path=>path.includes('/chat')?{turns:[],log_uid:'u',segment_index:1,prior_turns:prior,live:'quiet',source:'claude'}:{}});
+  ctx.feature.bind();await ctx.feature.render();assert.equal(ctx.roots.msgs.innerHTML.includes('older reply'),visible);if(prior)assert.match(ctx.roots.msgs.innerHTML,/histload/);ctx.feature.destroy();
+ }
+});
+
+test('empty earlier history without discussion renders normally', async () => {
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>null},api:async path=>path.includes('/chat')?{turns:[],log_uid:'u',segment_index:1,prior_turns:0,live:'quiet',source:'claude'}:{}});
+ ctx.feature.bind();await ctx.feature.render();assert.doesNotMatch(ctx.roots.msgs.innerHTML,/Earlier discussion/);ctx.feature.destroy();
+});
+
+test('a poll captures the focused editor scroll and selection after its response arrives', async () => {
+ const response=deferred();let calls=0,selection;
+ const doc={activeElement:null,createElement:tag=>el(tag),querySelector:()=>null};
+ const ctx=makeFeature({deps:{document:doc},api:async path=>path.includes('/chat')?(++calls===1?{turns:[],log_uid:'u',live:'quiet'}:response.promise):{}});
+ const body=ctx.roots.msgs;body.scrollHeight=10000;body.clientHeight=700;
+ ctx.feature.bind();await ctx.feature.render();
+ let absoluteTop=5000;
+ const input={value:'latest edit',selectionStart:1,selectionEnd:2,selectionDirection:'forward',closest:()=>row,focus(){doc.activeElement=this},setSelectionRange(...v){selection=v}};
+ const turn={dataset:{gkey:'s/o/u/g',cseq:'1'},getBoundingClientRect:()=>({top:absoluteTop-body.scrollTop}),after(){}};
+ const row={previousElementSibling:turn,contains:x=>x===input};doc.activeElement=input;
+ const fresh={dataset:{...turn.dataset},replaceWith(){absoluteTop+=100}};
+ const query=body.querySelector.bind(body),all=body.querySelectorAll.bind(body);
+ body.querySelector=s=>s==='[data-grename]'?input:query(s);body.querySelectorAll=s=>s==='[data-gkey][data-cseq]'?[fresh]:all(s);
+ const pending=ctx.feature.render();body.scrollTop=4500;input.selectionStart=3;input.selectionEnd=6;
+ response.resolve({turns:[{role:'assistant',text:'new data',uid:'u',segment:0,record:0}],log_uid:'u',live:'quiet'});await pending;
+ assert.equal(body.scrollTop,4600);assert.deepEqual(selection,[3,6,'forward']);assert.equal(input.value,'latest edit');ctx.feature.destroy();
 });

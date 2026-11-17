@@ -356,6 +356,11 @@ function makeTimers(){
 
 function makeFeature(overrides = {}){
   const roots = makeRoots();
+  if (overrides.controls) {
+    roots.destination = el("div", {hidden:true});
+    roots.destinationPeople = el("button");
+    roots.destinationAgent = el("button");
+  }
   const storage = overrides.storage || makeStorage(overrides.drafts || {});
   let sel = overrides.sel ?? "n1";
   const nodes = overrides.nodes || [{ id: "n1", title: "A", ended_at: "" }];
@@ -1451,4 +1456,437 @@ test("stage restore concatenates when operator staged more during flight", async
   const aAt = ctx.roots.attstage.innerHTML.lastIndexOf("a.png");
   assert.ok(bAt >= 0 && aAt > bAt, ctx.roots.attstage.innerHTML);
   ctx.feature.destroy();
+});
+
+test("received selection cannot send, interrupt, or upload even through forged calls", async () => {
+  const ctx = makeFeature({sel:"team/s/o/c/g"});
+  ctx.feature.bind();
+  ctx.feature.setPromptText("forged prompt");
+  ctx.feature.setAttachAvail(true);
+  ctx.feature.addFiles([{name:"x.txt",type:"text/plain"}]);
+  await ctx.feature.sendPrompt();
+  await ctx.feature.interruptPrompt();
+  assert.deepEqual(ctx.apiCalls, []);
+  assert.deepEqual(ctx.fetchCalls, []);
+});
+
+test("People destination sends only comments while agent is busy and preserves newer typing", async () => {
+  let finish; const posts=[];
+  const ctx=makeFeature({sel:"team/s/o/c/g",deps:{peopleContext:()=>({key:"s/o/c/g",writable:true}),sendPeople:(key,text)=>{posts.push({key,text}); return new Promise(resolve=>{finish=resolve});}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setComposerBusy(true);
+  ctx.feature.setPromptText("hello people");
+  const sending=ctx.feature.sendPrompt();
+  assert.deepEqual(posts,[{key:"s/o/c/g",text:"hello people"}]);
+  assert.equal(ctx.apiCalls.length,0); assert.equal(ctx.fetchCalls.length,0);
+  ctx.feature.setPromptText("newer"); ctx.roots.prompt.firstListener("input")();
+  finish(); await sending;
+  assert.equal(ctx.feature.promptText(),"newer");
+  assert.equal(ctx.storage.getItem("scimux-people-draft:team/s/o/c/g"),"newer");
+});
+
+test("People destination refuses readonly or ended sends and keeps its saved draft", async () => {
+  let writable=false; let sends=0;
+  const ctx=makeFeature({sel:"team/s/o/c/g",deps:{peopleContext:()=>({key:"s/o/c/g",writable}),sendPeople:()=>{sends++;}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText("keep"); ctx.roots.prompt.firstListener("input")();
+  await ctx.feature.sendPrompt(); assert.equal(sends,0);
+  assert.equal(ctx.storage.getItem("scimux-people-draft:team/s/o/c/g"),"keep");
+  writable=true; await ctx.feature.sendPrompt(); assert.equal(sends,1);
+  assert.equal(ctx.apiCalls.length,0);
+});
+
+test("owner switches People and Agent drafts without exposing attachments to People", async () => {
+  let context={key:"s/o/c/g",writable:true,owner:true};
+  const ctx=makeFeature({deps:{peopleContext:()=>context,sendPeople:async()=>{}}});
+  ctx.storage.setItem("scimux-draft:n1","agent draft");
+  ctx.feature.bind(); ctx.feature.onSelect();
+  assert.equal(ctx.feature.destination(),"people");
+  ctx.feature.setPromptText("people draft"); ctx.roots.prompt.firstListener("input")();
+  ctx.feature.setDestination("agent"); assert.equal(ctx.feature.promptText(),"agent draft");
+  ctx.feature.setAttachAvail(true); ctx.feature.addFiles([{name:"a.png",type:"image/png"}]);
+  ctx.feature.setDestination("people"); assert.equal(ctx.feature.promptText(),"people draft");
+  assert.equal(ctx.roots.attstage.hidden,true); assert.equal(ctx.roots.attadd.hidden,true);
+  ctx.feature.setDestination("agent"); assert.equal(ctx.roots.attstage.hidden,false);
+  assert.equal(ctx.feature.promptText(),"agent draft");
+});
+
+test("received chat rejects a forged Agent destination", () => {
+  const ctx=makeFeature({sel:"team/s/o/c/g",deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:false})}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setDestination("agent");
+  assert.equal(ctx.feature.destination(),"people");
+});
+
+test("successful older Agent send does not erase newer Agent typing", async () => {
+  let resolve; const ctx=makeFeature({sendHandler:()=>new Promise(r=>{resolve=r})});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText("old"); ctx.roots.prompt.firstListener("input")();
+  const sent=ctx.feature.sendPrompt(); ctx.feature.setPromptText("new"); ctx.roots.prompt.firstListener("input")();
+  resolve({delivery:"ok"}); await sent;
+  assert.equal(ctx.storage.getItem("scimux-draft:n1"),"new");
+  assert.equal(ctx.feature.promptText(),"new");
+});
+
+test("failed Agent send restores its draft without overwriting People during the request", async () => {
+  let reject; const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true})},sendHandler:()=>new Promise((_r,j)=>{reject=j})});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setDestination("agent"); ctx.feature.setPromptText("agent"); ctx.roots.prompt.firstListener("input")();
+  const sending=ctx.feature.sendPrompt(); ctx.feature.setDestination("people"); ctx.feature.setPromptText("people"); ctx.roots.prompt.firstListener("input")();
+  reject(Error("failed")); await sending;
+  assert.equal(ctx.feature.promptText(),"people"); assert.equal(ctx.storage.getItem("scimux-draft:n1"),"agent");
+});
+
+test("ending sharing keeps People visible and requires an explicit Agent choice", async () => {
+  let context={key:"s/o/c/g",writable:true,owner:true}; let sends=0;
+  const ctx=makeFeature({controls:true,deps:{peopleContext:()=>context,sendPeople:()=>{sends++}}});
+  ctx.storage.setItem("scimux-draft:n1","agent draft"); ctx.feature.bind(); ctx.feature.onSelect();
+  ctx.feature.setPromptText("people draft"); ctx.roots.prompt.firstListener("input")();
+  context=null; ctx.feature.contextChanged();
+  assert.equal(ctx.feature.destination(),"people"); assert.equal(ctx.feature.promptText(),"people draft");
+  assert.equal(ctx.roots.destination.hidden,false); assert.equal(ctx.roots.prompt.getAttribute("contenteditable"),"false");
+  await ctx.feature.sendPrompt(); assert.equal(sends,0); assert.equal(ctx.apiCalls.length,0);
+  ctx.feature.setDestination("agent"); assert.equal(ctx.feature.promptText(),"agent draft");
+  assert.equal(ctx.roots.sendbtn.getAttribute("aria-label"),"Send message to agent");
+  ctx.feature.setDestination("people"); assert.equal(ctx.feature.promptText(),"people draft");
+  assert.equal(ctx.roots.prompt.getAttribute("contenteditable"),"false");
+});
+
+test("ended recipient cannot select Agent or route a forged send", async () => {
+  let context={key:"s/o/c/g",writable:true,owner:false}; let sends=0;
+  const ctx=makeFeature({controls:true,sel:"team/s/o/c/g",deps:{peopleContext:()=>context,sendPeople:()=>{sends++}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText("draft"); ctx.roots.prompt.firstListener("input")();
+  context=null; ctx.feature.contextChanged(); ctx.feature.setDestination("agent"); await ctx.feature.sendPrompt();
+  assert.equal(ctx.feature.destination(),"people"); assert.equal(ctx.feature.promptText(),"draft");
+  assert.equal(ctx.roots.destination.hidden,true); assert.equal(sends,0); assert.equal(ctx.apiCalls.length,0);
+});
+
+test("shared owner Send labels describe the chosen destination", () => {
+  const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true})}});
+  ctx.feature.bind(); ctx.feature.onSelect();
+  assert.equal(ctx.roots.sendbtn.getAttribute('aria-label'),'Send message to people');
+  ctx.feature.setDestination('agent');
+  assert.equal(ctx.roots.sendbtn.getAttribute('aria-label'),'Send message to agent');
+});
+
+test("late owner share activation preserves an Agent draft and defaults to People", () => {
+  let context=null, allowed=false;
+  const ctx=makeFeature({deps:{peopleContext:()=>context,agentAllowed:()=>allowed}});
+  ctx.storage.setItem('scimux-draft:n1','prior agent text'); ctx.feature.bind(); ctx.feature.onSelect();
+  assert.equal(ctx.roots.prompt.getAttribute('contenteditable'),'false');
+  context={key:'s/o/c/g',writable:true,owner:true}; allowed=true; ctx.feature.contextChanged();
+  assert.equal(ctx.feature.destination(),'people'); assert.equal(ctx.roots.prompt.getAttribute('contenteditable'),'true');
+  ctx.feature.setDestination('agent'); assert.equal(ctx.feature.promptText(),'prior agent text');
+});
+
+test("successful Agent send retains a draft written by another feature while awaiting delivery", async () => {
+  let resolve; const ctx=makeFeature({sendHandler:()=>new Promise(r=>{resolve=r})});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText('old'); ctx.roots.prompt.firstListener('input')();
+  const sent=ctx.feature.sendPrompt(); ctx.storage.setItem('scimux-draft:n1','draft from another feature');
+  resolve({delivery:'ok'}); await sent;
+  assert.equal(ctx.storage.getItem('scimux-draft:n1'),'draft from another feature');
+});
+
+test('local team node supports prompt, interrupt and attachment routes', async () => {
+  const ctx=makeFeature({sel:'team',nodes:[{id:'team',title:'Team'}]});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setAttachAvail(true);
+  ctx.feature.addFiles([{name:'example.txt',type:'text/plain'}]);
+  await new Promise(r=>setImmediate(r));
+  ctx.feature.setPromptText('hello'); await ctx.feature.sendPrompt();
+  await ctx.feature.interruptPrompt();
+  assert.ok(ctx.fetchCalls.some(call=>call.path==='/api/nodes/team/attachments'));
+  assert.ok(ctx.apiCalls.some(call=>call.path==='/api/nodes/team/send'));
+  assert.ok(ctx.apiCalls.some(call=>call.path==='/api/nodes/team/send/interrupt'));
+});
+
+test('People success clears only its original unchanged destination after editing another chat', async () => {
+  let finish; const ctx=makeFeature({sel:'team/s/o/a/g',deps:{peopleContext:()=>({key:'s/o/a/g',writable:true}),sendPeople:()=>new Promise(r=>{finish=r})}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText('original'); ctx.roots.prompt.firstListener('input')();
+  const request=ctx.feature.sendPrompt(); ctx.setSel('team/s/o/b/g'); ctx.feature.onSelect();
+  ctx.feature.setPromptText('different chat'); ctx.roots.prompt.firstListener('input')(); finish(); await request;
+  assert.equal(ctx.storage.getItem('scimux-people-draft:team/s/o/a/g'),null);
+  assert.equal(ctx.storage.getItem('scimux-people-draft:team/s/o/b/g'),'different chat');
+  assert.equal(ctx.feature.promptText(),'different chat');
+});
+
+test('explicit Send-to Agent draft stays Agent when shared context arrives later', () => {
+  let context=null;
+  const ctx=makeFeature({deps:{peopleContext:()=>context}});
+  ctx.storage.setItem('scimux-draft:n1','forwarded source');
+  ctx.feature.bind(); ctx.feature.onSelect({preferAgent:true});
+  context={key:'s/o/c/g',writable:true,owner:true}; ctx.feature.contextChanged();
+  assert.equal(ctx.feature.destination(),'agent');
+  assert.equal(ctx.feature.promptText(),'forwarded source');
+});
+
+test('People and Agent destination guards reject invalid choices and pending owner sends', async () => {
+  let context=null, allowed=false, sends=0;
+  const ctx=makeFeature({deps:{peopleContext:()=>context,agentAllowed:()=>allowed,sendPeople:()=>{sends++;}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setDestination('invalid'); ctx.feature.setDestination('people');
+  ctx.feature.setPromptText('prompt'); await ctx.feature.sendPrompt(); assert.equal(ctx.apiCalls.length,0);
+  context={key:'s/o/c/g',writable:true,owner:true}; allowed=true; ctx.feature.contextChanged(); ctx.feature.setDestination('people');
+  ctx.feature.setPromptText('  '); await ctx.feature.sendPrompt(); ctx.feature.setPromptText('x'.repeat(16385)); await ctx.feature.sendPrompt(); assert.equal(sends,0);
+});
+
+test('People send failure preserves the draft and reports an error', async () => {
+  const ctx=makeFeature({sel:'team/s/o/c/g',deps:{peopleContext:()=>({key:'s/o/c/g',writable:true}),sendPeople:async()=>{throw Error('offline')}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText('keep'); ctx.roots.prompt.firstListener('input')(); await ctx.feature.sendPrompt();
+  assert.equal(ctx.storage.getItem('scimux-people-draft:team/s/o/c/g'),'keep'); assert.deepEqual(ctx.alerts,['offline']);
+});
+
+test('People send accepts no second send while the first is in flight', async () => {
+  let resolve, sends=0; const ctx=makeFeature({sel:'team/s/o/c/g',deps:{peopleContext:()=>({key:'s/o/c/g',writable:true}),sendPeople:()=>{sends++; return new Promise(r=>resolve=r)}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText('once'); ctx.roots.prompt.firstListener('input')();
+  const pending=ctx.feature.sendPrompt(); await ctx.feature.sendPrompt(); assert.equal(sends,1); resolve(); await pending;
+});
+
+test('an Agent destination requires an owned local node even with an owner-shaped context', () => {
+ const ctx=makeFeature({sel:'missing',deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true})}});
+ ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setDestination('agent'); assert.equal(ctx.feature.destination(),'people');
+});
+
+test('People send handles a draft set by a preparation seam without an input event', async () => {
+ let sent; const ctx=makeFeature({sel:'team/s/o/c/g',deps:{peopleContext:()=>({key:'s/o/c/g',writable:true}),sendPeople:async(_key,text)=>{sent=text}}});
+ ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText('prepared'); await ctx.feature.sendPrompt();
+ assert.equal(sent,'prepared'); assert.equal(ctx.feature.promptText(),'prepared');
+});
+
+test('explicit Send-to Agent draft remains Agent when owner context is already known', () => {
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true})}});
+ ctx.storage.setItem('scimux-draft:n1','forwarded'); ctx.feature.bind(); ctx.feature.onSelect({preferAgent:true});
+ assert.equal(ctx.feature.destination(),'agent'); assert.equal(ctx.feature.promptText(),'forwarded');
+});
+
+test('permission downgrade keeps People draft and rejects busy sends', async () => {
+  let context={key:'s/o/c/g',writable:true,owner:true}; let sends=0;
+  const ctx=makeFeature({deps:{peopleContext:()=>context,sendPeople:()=>{sends++}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setComposerBusy(true);
+  ctx.feature.setPromptText('keep'); ctx.roots.prompt.firstListener('input')();
+  context={...context,writable:false}; ctx.feature.contextChanged();
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.feature.destination(),'people'); assert.equal(ctx.feature.promptText(),'keep');
+  assert.equal(ctx.roots.prompt.getAttribute('contenteditable'),'false');
+  assert.equal(sends,0); assert.equal(ctx.apiCalls.length,0);
+});
+
+test('late People completion after ending and navigation does not change the new chat', async () => {
+  let context={key:'s/o/c/g',writable:true,owner:true}, finish;
+  const ctx=makeFeature({controls:true,nodes:[{id:'n1'},{id:'n2'}],deps:{peopleContext:()=>context,sendPeople:()=>new Promise(r=>{finish=r})}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText('old'); ctx.roots.prompt.firstListener('input')();
+  const sent=ctx.feature.sendPrompt(); context=null; ctx.feature.contextChanged();
+  ctx.feature.setPromptText('newer'); ctx.roots.prompt.firstListener('input')();
+  ctx.setSel('n2'); ctx.feature.onSelect(); ctx.feature.setPromptText('other'); ctx.roots.prompt.firstListener('input')();
+  finish(); await sent;
+  assert.equal(ctx.feature.destination(),'agent'); assert.equal(ctx.feature.promptText(),'other');
+  assert.equal(ctx.storage.getItem('scimux-people-draft:n1'),'newer');
+  assert.equal(ctx.roots.destination.hidden,true); assert.equal(ctx.apiCalls.length,0);
+});
+
+test('owner prepares a shared source into the Agent draft without dispatch and clears its marker only on erasure', () => {
+  let context={key:'s/o/c/g',writable:true,owner:true};
+  const ctx=makeFeature({deps:{peopleContext:()=>context,canPreparePrompt:()=>true}});
+  ctx.storage.setItem('scimux-draft:n1','earlier'); ctx.feature.bind(); ctx.feature.onSelect();
+  ctx.feature.setPromptText('people text'); ctx.roots.prompt.firstListener('input')();
+  const source={uid:'u',segment:0,record:1};
+  assert.equal(ctx.feature.preparePrompt('quoted',source),true);
+  assert.equal(ctx.feature.destination(),'agent'); assert.equal(ctx.feature.promptText(),'earlier\n\nquoted');
+  assert.equal(ctx.storage.getItem('scimux-people-draft:n1'),'people text');
+  assert.equal(ctx.apiCalls.length,0);
+  assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-prompt-sources:n1')),[source]);
+  ctx.feature.setPromptText('partly edited'); ctx.roots.prompt.firstListener('input')();
+  ctx.feature.setDestination('people'); ctx.feature.setDestination('agent');
+  assert.notEqual(ctx.storage.getItem('scimux-prompt-sources:n1'),null);
+  ctx.feature.setPromptText(''); ctx.roots.prompt.firstListener('input')();
+  ctx.feature.setPromptText('unrelated'); ctx.roots.prompt.firstListener('input')();
+  assert.equal(ctx.storage.getItem('scimux-prompt-sources:n1'),null);
+});
+
+test('forged prompt preparation from a received chat or without owner capability does nothing', () => {
+  const source={uid:'u',segment:0,record:1};
+  for (const [id,allowed] of [['team/s/o/c/g',true],['n1',false]]) {
+    const ctx=makeFeature({sel:id,deps:{peopleContext:()=>({key:'s/o/c/g',owner:false,writable:true}),canPreparePrompt:()=>allowed}});
+    ctx.feature.bind(); ctx.feature.onSelect();
+    assert.equal(ctx.feature.preparePrompt('text',source),false);
+    assert.equal(ctx.apiCalls.length,0); assert.equal(ctx.storage.getItem('scimux-prompt-sources:'+id),null);
+  }
+});
+
+test('in-flight prompt sources are isolated from a newer prepared draft and restored on failure', async () => {
+  let reject; const ctx=makeFeature({deps:{canPreparePrompt:()=>true},sendHandler:()=>new Promise((_r,j)=>{reject=j})});
+  const a={uid:'u',segment:0,record:1}, b={uid:'u',segment:0,record:2};
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.preparePrompt('first',a);
+  const sending=ctx.feature.sendPrompt(); ctx.feature.preparePrompt('second',b);
+  assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-prompt-sources:n1')),[b]);
+  reject(Error('no delivery')); await sending;
+  assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-prompt-sources:n1')),[b,a]);
+  assert.match(ctx.feature.promptText(),/first/); assert.match(ctx.feature.promptText(),/second/);
+});
+
+test('prompt preparation rejects empty text and emits source-change callbacks', async () => {
+ let changes=0; const source={uid:'u',segment:0,record:1};
+ const ctx=makeFeature({deps:{canPreparePrompt:()=>true,promptSourcesChanged:()=>changes++}});
+ ctx.feature.bind(); ctx.feature.onSelect(); assert.equal(ctx.feature.preparePrompt(' ',source),false); assert.equal(ctx.feature.preparePrompt(null,source),false);
+ assert.equal(ctx.feature.preparePrompt('quoted',source),true); assert.equal(changes,1);
+ ctx.feature.setPromptText(''); ctx.roots.prompt.firstListener('input')(); assert.equal(changes,2);
+ ctx.feature.preparePrompt('delivered',source); await ctx.feature.sendPrompt();
+ const flight=JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'))[0];
+ assert.equal(flight.accepted,true); assert.equal(flight.sources[0].uid,'u');
+});
+
+test('a successful send leaves another in-flight source snapshot intact', async () => {
+ const ctx=makeFeature({deps:{canPreparePrompt:()=>true}}); const source={uid:'u',segment:0,record:1};
+ ctx.storage.setItem('scimux-prompt-flights:n1',JSON.stringify([{id:4,text:'prior',sources:[source],accepted:true},{text:'legacy',sources:[source]}]));
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.preparePrompt('new',source);await ctx.feature.sendPrompt();
+ const flights=JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'));assert.equal(flights.length,3);assert.equal(flights[0].id,4);assert.equal(flights[2].accepted,true);
+});
+
+test('asynchronous rejection restores an Agent draft without overwriting People editing', () => {
+ const context={key:'s/o/c/g',writable:true,owner:true};
+ const ctx=makeFeature({deps:{peopleContext:()=>context}}); ctx.feature.bind();ctx.feature.onSelect();
+ ctx.feature.setPromptText('people ongoing');ctx.roots.prompt.firstListener('input')();
+ ctx.feature.recoverPromptDraft('n1','agent rejected');
+ assert.equal(ctx.feature.promptText(),'people ongoing');assert.equal(ctx.storage.getItem('scimux-draft:n1'),'agent rejected');
+ ctx.feature.setDestination('agent');assert.equal(ctx.feature.promptText(),'agent rejected');
+});
+
+test('Agent recovery updates the selected Agent composer and failure notifies source changes', async () => {
+ let changes=0;const ctx=makeFeature({deps:{canPreparePrompt:()=>true,promptSourcesChanged:()=>changes++},sendHandler:async()=>{throw Error('rejected')}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.recoverPromptDraft('n1','recovered');assert.equal(ctx.feature.promptText(),'recovered');
+ ctx.feature.preparePrompt('source',{uid:'u',segment:0,record:1});await ctx.feature.sendPrompt();assert.ok(changes>=3);
+});
+
+test('blocked or empty Agent sends preserve prepared source identities', async () => {
+ const source={uid:'u',record:1};const ctx=makeFeature({nodes:[{id:'n1',agent:'claude'}],deps:{canPreparePrompt:()=>true}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.preparePrompt('/fork',source);await ctx.feature.sendPrompt();
+ assert.equal(ctx.apiCalls.length,0);assert.ok(ctx.storage.getItem('scimux-prompt-sources:n1'));
+ ctx.feature.setPromptText('');await ctx.feature.sendPrompt();assert.ok(ctx.storage.getItem('scimux-prompt-sources:n1'));
+});
+
+test('Agent draft lookup follows destination and node without changing People text', () => {
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',owner:true,writable:true})}});
+ ctx.storage.setItem('scimux-draft:n1','saved Agent');
+ ctx.storage.setItem('scimux-draft:n2','other Agent');
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('People');
+ assert.equal(ctx.feature.agentDraftText('n1'),'saved Agent');
+ assert.equal(ctx.feature.agentDraftText('n2'),'other Agent');
+ assert.equal(ctx.feature.promptText(),'People');
+ ctx.feature.setDestination('agent');ctx.feature.setPromptText('new Agent');
+ assert.equal(ctx.feature.agentDraftText('n1'),'new Agent');
+ assert.equal(ctx.feature.agentDraftText('n2'),'other Agent');
+ ctx.feature.destroy();
+});
+
+test('manual Agent send records an exact trace even without prompt sources', async () => {
+ const ctx=makeFeature({sendHandler:async()=>({status:'acknowledged',trace:{uid:'u',segment:0,record:4}})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('manual');await ctx.feature.sendPrompt();
+ const request=JSON.parse(ctx.apiCalls[0].opts.body);assert.equal(request.trace,true);
+ const flights=JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'));
+ assert.deepEqual(flights[0].address,{uid:'u',segment:0,record:4});assert.deepEqual(flights[0].sources,[]);
+ ctx.feature.destroy();
+});
+
+test('late Agent recovery preserves blank People and newer Agent editing across chat selection', () => {
+ const ctx=makeFeature({nodes:[{id:'n1'},{id:'n2'}],deps:{peopleContext:()=>({key:'s/o/c/g',owner:true,writable:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setDestination('agent');ctx.feature.setPromptText('newer Agent');ctx.roots.prompt.firstListener('input')();
+ ctx.feature.setDestination('people');ctx.feature.setPromptText('');ctx.roots.prompt.firstListener('input')();ctx.feature.recoverPromptDraft('n1','failed Agent');
+ assert.equal(ctx.feature.destination(),'people');assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.storage.getItem('scimux-draft:n1'),'failed Agent\n\nnewer Agent');
+ ctx.setSel('n2');ctx.feature.onSelect();ctx.feature.setPromptText('other People');ctx.feature.recoverPromptDraft('n1','failed Agent');
+ assert.equal(ctx.feature.promptText(),'other People');assert.equal(ctx.feature.destination(),'people');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('late Agent error restores captured attachments alongside newer files without painting People', async () => {
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',owner:true,writable:true})}});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setDestination('agent');ctx.feature.setAttachAvail(true);
+ ctx.feature.addFiles([{name:'newer.txt',type:'text/plain'}]);await Promise.resolve();await Promise.resolve();
+ ctx.feature.setDestination('people');ctx.feature.setPromptText('human text');
+ ctx.feature.recoverPromptDraft('n1','failed',[{name:'old.txt',isImage:false,ref:{path:'old-ref',mime:'text/plain'}}]);
+ assert.equal(ctx.feature.promptText(),'human text');assert.equal(ctx.feature.destination(),'people');
+ ctx.feature.setDestination('agent');assert.match(ctx.roots.attstage.innerHTML,/newer.txt/);assert.match(ctx.roots.attstage.innerHTML,/old.txt/);ctx.feature.destroy();
+});
+
+test('traced send snapshots uploaded attachment references for asynchronous recovery', async () => {
+ const ctx=makeFeature({sendHandler:async()=>({status:'acknowledged',trace:{uid:'u',segment:0,record:4}})});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);ctx.feature.addFiles([{name:'input.txt',type:'text/plain'}]);await Promise.resolve();await Promise.resolve();ctx.feature.setPromptText('prompt');await ctx.feature.sendPrompt();
+ const flight=JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'))[0];assert.equal(flight.attachments[0].name,'input.txt');assert.equal(flight.attachments[0].ref.path,'deadbeef-input.txt');assert.equal(flight.attachments[0].isImage,false);ctx.feature.destroy();
+});
+
+test('recovery ignores malformed stored attachment lists', () => {
+ const ctx=makeFeature();ctx.feature.bind();ctx.feature.onSelect();ctx.feature.recoverPromptDraft('n1','recover',null);assert.equal(ctx.feature.promptText(),'recover');ctx.feature.destroy();
+});
+
+test('a recovered attachment is available after recreating the composer', () => {
+ const ctx=makeFeature();ctx.feature.bind();ctx.feature.onSelect();ctx.feature.recoverPromptDraft('n1','restored',[{name:'report.txt',ref:{path:'owned',mime:'text/plain'}}]);
+ assert.match(ctx.roots.attstage.innerHTML,/report.txt/);assert.equal(ctx.feature.promptText(),'restored');ctx.feature.destroy();
+});
+
+test('an upload-delayed send preserves newer Agent text and staged attachment', async () => {
+ let finish;const ctx=makeFeature({uploadHandler:()=>new Promise(resolve=>{finish=resolve})});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ ctx.feature.addFiles([{name:'first.txt',type:'text/plain'}]);ctx.feature.setPromptText('first');ctx.roots.prompt.firstListener('input')();const pending=ctx.feature.sendPrompt();
+ ctx.feature.setPromptText('newer');ctx.roots.prompt.firstListener('input')();ctx.feature.addFiles([{name:'newer.txt',type:'text/plain'}]);
+ finish({ok:true,json:async()=>({attachments:[{path:'newer-ref'}]})});await new Promise(r=>setImmediate(r));ctx.timers.runTimeouts(12000);await pending;
+ assert.equal(ctx.feature.promptText(),'newer');assert.match(ctx.roots.attstage.innerHTML,/newer.txt/);ctx.feature.destroy();
+});
+
+test('overlapping tabs cannot attach an old response to a replacement flight', async () => {
+ const storage=makeStorage();let finishFirst,finishSecond;
+ const a=makeFeature({storage,sendHandler:()=>new Promise(resolve=>{finishFirst=resolve})});
+ const b=makeFeature({storage,sendHandler:()=>new Promise(resolve=>{finishSecond=resolve})});
+ a.feature.bind();a.feature.onSelect();a.feature.setPromptText('first');const one=a.feature.sendPrompt();
+ const first=JSON.parse(storage.getItem('scimux-prompt-flights:n1'))[0];storage.removeItem('scimux-prompt-flights:n1');
+ b.feature.bind();b.feature.onSelect();b.feature.setPromptText('second');const two=b.feature.sendPrompt();const second=JSON.parse(storage.getItem('scimux-prompt-flights:n1'))[0];
+ assert.notEqual(first.id,second.id);
+ finishFirst({status:'acknowledged',trace:{uid:'u',segment:0,record:1}});await one;
+ assert.equal(JSON.parse(storage.getItem('scimux-prompt-flights:n1'))[0].accepted,false);
+ finishSecond({status:'acknowledged',trace:{uid:'u',segment:0,record:2}});await two;a.feature.destroy();b.feature.destroy();
+});
+test('coordinator selected source remains associated while send waits for upload', async()=>{
+ const source={uid:'u',segment:0,record:1};
+ const ctx=makeFeature({uploadHandler:()=>new Promise(()=>{}),deps:{canPreparePrompt:()=>true}});
+ ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.feature.preparePrompt('selected source',source),true);ctx.feature.setAttachAvail(true);
+ ctx.feature.addFiles([{name:'slow.txt',type:'text/plain'}]);const sending=ctx.feature.sendPrompt();
+ try{
+  const prepared=JSON.parse(ctx.storage.getItem('scimux-prompt-sources:n1')||'[]');
+  const inFlight=JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1')||'[]').flatMap(f=>f.sources);
+  assert.equal([...prepared,...inFlight].some(s=>s.uid===source.uid&&s.record===source.record),true,'nonblank selected source cannot disappear from both prepared and in-flight associations during upload wait');
+ }finally{ctx.timers.runTimeouts(12000);await sending;ctx.feature.destroy();}
+});
+
+test('upload wait reserves one send and keeps T1 sources separate from newer edits and navigation', async () => {
+ let finish; const first={uid:'u',record:1}, second={uid:'u',record:2};
+ const ctx=makeFeature({uploadHandler:()=>new Promise(resolve=>{finish=resolve}),deps:{canPreparePrompt:()=>true}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.preparePrompt('first',first);ctx.feature.setAttachAvail(true);
+ ctx.feature.addFiles([{name:'slow.txt',type:'text/plain'}]);const pending=ctx.feature.sendPrompt();
+ await ctx.feature.sendPrompt();assert.equal(ctx.apiCalls.length,0);
+ ctx.feature.setPromptText('');ctx.roots.prompt.firstListener('input')();ctx.feature.preparePrompt('second',second);
+ ctx.setSel('n2');ctx.feature.onSelect();
+ finish({ok:true,json:async()=>({attachments:[{path:'first-ref'}]})});await new Promise(r=>setImmediate(r));ctx.timers.runIntervals();await pending;
+ assert.equal(ctx.apiCalls.length,1);assert.deepEqual(JSON.parse(ctx.apiCalls[0].opts.body).attachments,[{path:'first-ref'}]);
+ const flights=JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'));assert.deepEqual(flights[0].sources,[first]);assert.deepEqual(flights[0].attachments[0].ref,{path:'first-ref'});
+ assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-prompt-sources:n1')),[second]);ctx.setSel('n1');ctx.feature.onSelect();assert.match(ctx.feature.promptText(),/second/);ctx.feature.destroy();
+});
+
+test('upload wait releases reservation on empty timeout and blocked Claude fork', async () => {
+ const ctx=makeFeature({uploadHandler:()=>new Promise(()=>{}),nodes:[{id:'n1',agent:'claude'}]});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ ctx.feature.addFiles([{name:'slow.txt',type:'text/plain'}]);let pending=ctx.feature.sendPrompt();ctx.timers.runTimeouts(12000);await pending;
+ assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.storage.getItem('scimux-prompt-flights:n1'),null);
+ ctx.feature.setPromptText('/fork');pending=ctx.feature.sendPrompt();ctx.timers.runTimeouts(12000);await pending;
+ assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.storage.getItem('scimux-prompt-flights:n1'),null);
+ ctx.feature.setPromptText('ordinary');pending=ctx.feature.sendPrompt();ctx.timers.runTimeouts(12000);await pending;assert.equal(ctx.apiCalls.length,1);ctx.feature.destroy();
+});
+
+test('the upload reservation retains the exact pre-send boundary', async () => {
+ const ctx=makeFeature({lastTurns:[{uid:'log',segment:2,record:7,role:'assistant'}],uploadHandler:()=>new Promise(()=>{})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);ctx.feature.addFiles([{name:'slow.txt',type:'text/plain'}]);ctx.feature.setPromptText('intent');
+ const pending=ctx.feature.sendPrompt();const flight=JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'))[0];assert.deepEqual(flight.boundary,{uid:'log',segment:2,record:7});
+ ctx.timers.runTimeouts(12000);await pending;ctx.feature.destroy();
+});
+
+test('failed upload releases the captured send without losing its selected source', async () => {
+ let fail;const source={uid:'u',record:3};const ctx=makeFeature({uploadHandler:()=>new Promise((_,reject)=>{fail=reject}),deps:{canPreparePrompt:()=>true}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.preparePrompt('selected',source);ctx.feature.setAttachAvail(true);ctx.feature.addFiles([{name:'bad.txt',type:'text/plain'}]);
+ const pending=ctx.feature.sendPrompt();assert.equal(ctx.apiCalls.length,0);fail(new Error('upload failed'));await new Promise(r=>setImmediate(r));ctx.timers.runIntervals();await pending;
+ assert.equal(ctx.apiCalls.length,1);assert.deepEqual(JSON.parse(ctx.apiCalls[0].opts.body).attachments,[]);assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'))[0].sources,[source]);ctx.feature.destroy();
+});
+
+test('a first prompt has no pre-send boundary', async () => {
+ const ctx=makeFeature({lastTurns:[]});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('first');await ctx.feature.sendPrompt();
+ assert.equal(JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'))[0].boundary,null);ctx.feature.destroy();
+});
+
+test('a composer without a transcript reader still captures a first prompt', async () => {
+ const ctx=makeFeature({deps:{getLastTurns:undefined}});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('first');await ctx.feature.sendPrompt();
+ assert.equal(JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'))[0].boundary,null);ctx.feature.destroy();
 });

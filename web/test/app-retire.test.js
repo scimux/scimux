@@ -206,3 +206,405 @@ test("app: legacy media resolution runs the composed bookmark and Notes refresh 
   await flush();
   app.retire();
 });
+
+test("app restores the selected chat's sharing header without switching chats", async () => {
+  const host = installHost({});
+  host.window.localStorage.setItem("scimux-sel", "n1");
+  const calls = [];
+  const fetchImpl = async (path, opts) => {
+    calls.push(String(path));
+    if (String(path).startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"One",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
+    if (String(path) === "/api/team/servers") return jsonResponse({servers:[{id:"server",name:"Team"}]});
+    if (String(path) === "/api/team/shares/n1") return jsonResponse({state:"active",server:"server",members:[],delivery:"ok"});
+    return host.trapFetch(path, opts);
+  };
+  const { createApp } = await import("../js/app.js?graph=successor");
+  const app = await createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  await flush(100); await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(calls.includes("/api/team/shares/n1"), calls.join(","));
+  assert.equal(host.byId.get("sharebtn").hidden, false);
+  app.retire();
+});
+
+test("app refreshes the current share and subscriptions when settings enable team and after join", async () => {
+  const host = installHost({}); host.window.localStorage.setItem("scimux-sel", "n1");
+  let enabled = false; const calls = [];
+  const fetchImpl = async (path, opts = {}) => {
+    path = String(path); calls.push({path, method:opts.method || "GET"});
+    if (path.startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"One",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
+    if (path === "/api/settings") return jsonResponse({experimental_feature_team:enabled});
+    if (path === "/api/team/servers" && opts.method === "POST") return jsonResponse({id:"server",name:"Team"});
+    if (path === "/api/team/servers") return jsonResponse({servers:[{id:"server",name:"Team"}]});
+    if (path === "/api/team/shares/n1") return jsonResponse({state:"active",server:"server",members:[],delivery:"ok"});
+    if (path === "/api/team/subscriptions") return jsonResponse({subscriptions:[],servers:[],truncated:false});
+    return host.trapFetch(path,opts);
+  };
+  const app = await (await import("../js/app.js?graph=successor")).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
+  let before = calls.filter(c=>c.path === "/api/team/shares/n1").length;
+  let subs = calls.filter(c=>c.path === "/api/team/subscriptions").length;
+  enabled = true; await host.byId.get("burger").click(); await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(calls.filter(c=>c.path === "/api/team/shares/n1").length > before);
+  assert.ok(calls.filter(c=>c.path === "/api/team/subscriptions").length > subs);
+  before = calls.filter(c=>c.path === "/api/team/shares/n1").length;
+  subs = calls.filter(c=>c.path === "/api/team/subscriptions").length;
+  host.byId.get("m_team_link").value = "http://127.0.0.1/join#synthetic";
+  host.byId.get("m_team_name").value = "Synthetic";
+  await host.byId.get("m_team_join").click(); await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(calls.filter(c=>c.path === "/api/team/shares/n1").length > before);
+  assert.ok(calls.filter(c=>c.path === "/api/team/subscriptions").length > subs);
+  app.retire();
+});
+
+test("retired app ignores a late settings activation", async () => {
+  const host = installHost({}); let resolveSettings; const calls = [];
+  const fetchImpl = async (path, opts) => {
+    calls.push(String(path));
+    if (String(path) === "/api/settings") return new Promise(resolve => { resolveSettings = resolve; });
+    return host.trapFetch(path,opts);
+  };
+  const app = await (await import("../js/app.js?graph=successor")).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  await flush(100); app.retire();
+  const before = calls.filter(c=>c.startsWith("/api/team/")).length;
+  resolveSettings(jsonResponse({experimental_feature_team:true})); await flush(100);
+  assert.equal(calls.filter(c=>c.startsWith("/api/team/")).length,before);
+});
+
+test("app restores a received selection without substituting an owned chat", async () => {
+  const host = installHost({});
+  for (const id of ["sharedview", "sv_text", "sv_send"]) assert.equal(host.byId.has(id), false, `obsolete ${id} must be absent`);
+  const received = "team/s/o/c/g";
+  host.window.localStorage.setItem("scimux-sel", received);
+  const calls = []; const posts = [];
+  const msgs = host.byId.get("msgs");
+  msgs.insertAdjacentHTML = (_where, html) => { msgs.innerHTML += html; };
+  const fetchImpl = async (path, opts) => {
+    calls.push(String(path));
+    if (opts?.method === "POST") posts.push({path:String(path),body:opts.body});
+    if (String(path).endsWith("/comments") && opts?.method === "POST") return jsonResponse({seq:1});
+    if (String(path).startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"Local",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
+    if (String(path) === "/api/team/subscriptions") return jsonResponse({subscriptions:[{server:"s",owner:"o",chat:"c",generation:"g",access:"write",state:"live",title:"Received",server_name:"Team",owner_name:"Owner"}],servers:[],truncated:false});
+    if (String(path).includes("/comments?")) return jsonResponse({entries:[{seq:1,anchor:1,text:"A reply",author:"p",at:"T"}],names:{p:"Person"},next:1,more:false});
+    if (String(path).includes("/c/g?")) return jsonResponse({view:{server:"s",owner:"o",chat:"c",generation:"g",access:"write",state:"live",title:"Received",server_name:"Team",owner_name:"Owner"},entries:[{t:"assistant",seq:1,text:"An answer"}],next:1,more:false});
+    return host.trapFetch(path, opts);
+  };
+  const app = await (await import("../js/app.js?graph=successor")).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  try {
+    await flush(100); await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(host.window.localStorage.getItem("scimux-sel"), received);
+    assert.ok(calls.some(path => path.startsWith("/api/team/subscriptions/s/o/c/g?")), calls.join(","));
+    assert.equal(host.byId.has("sharedview"), false);
+    assert.match(msgs.innerHTML, /An answer/);
+    assert.match(msgs.innerHTML, /A reply/);
+    assert.equal(host.byId.get("chattitle").textContent, "Received");
+    assert.equal(host.byId.get("prompt").getAttribute("contenteditable"), "true");
+    const prompt = host.byId.get("prompt"); prompt.innerText="Hello people"; prompt.dispatchEvent({type:"input",target:prompt});
+    await host.byId.get("sendbtn").click(); await flush(30);
+    assert.equal(posts.filter(p => p.path.endsWith("/comments")).length,1);
+    assert.equal(posts.filter(p => p.path.includes("/api/nodes/")).length,0);
+    assert.ok(!calls.some(path => path.startsWith("/api/nodes/team")));
+  } finally { app.retire(); }
+});
+
+test("received card opens the normal panel and survives a fresh app graph", async () => {
+  const host = installHost({});
+  assert.equal(host.byId.has("sharedview"), false);
+  const calls = [];
+  const view = {server:"s",owner:"o",chat:"c",generation:"g",access:"read",state:"live",title:"Received",server_name:"Team",owner_name:"Owner",first_seen:"1",seen_mirror:0,seen_comments:0};
+  const fetchImpl = async (path, opts) => {
+    calls.push({path:String(path),method:opts?.method || "GET"});
+    if (String(path).startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"Local",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
+    if (String(path) === "/api/team/subscriptions") return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+    if (String(path).includes("/comments?")) return jsonResponse({entries:[],names:{},next:0,more:false});
+    if (String(path).includes("/c/g?")) return jsonResponse({view,entries:[],next:0,more:false});
+    return host.trapFetch(path,opts);
+  };
+  let app = await (await import("../js/app.js")).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  try {
+    await flush(100); await new Promise(resolve => setTimeout(resolve, 10));
+    const card = {dataset:{open:"team/s/o/c/g"},closest:selector => selector === "[data-open]" ? card : null};
+    host.byId.get("cardlist").dispatchEvent({type:"click",target:card,preventDefault(){},stopPropagation(){}});
+    await flush(100);
+    assert.equal(host.window.localStorage.getItem("scimux-sel"), "team/s/o/c/g");
+    assert.equal(host.byId.get("chattitle").textContent,"Received");
+    assert.equal(host.byId.has("sharedview"),false);
+    const key = {dataset:{key:"y"},closest:selector => selector === "[data-key]" ? key : null};
+    host.byId.get("keyrow").dispatchEvent({type:"click",target:key,preventDefault(){},stopPropagation(){}});
+    await host.byId.get("autoapprove").click();
+    await host.byId.get("infobtn").click();
+    await host.byId.get("termtoggle").click();
+    await host.byId.get("sendbtn").click();
+    assert.equal(host.byId.get("chattitle").textContent,"Received");
+    assert.equal(host.byId.get("prompt").getAttribute("contenteditable"),"false");
+    await flush(20);
+    assert.equal(calls.filter(c => c.path.startsWith("/api/nodes/team") && c.method !== "GET").length,0);
+    app.retire();
+    app = await (await import("../js/app.js?graph=successor")).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+    await flush(100); await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(host.window.localStorage.getItem("scimux-sel"), "team/s/o/c/g");
+    assert.equal(host.byId.get("chattitle").textContent,"Received");
+    assert.equal(host.byId.has("sharedview"),false);
+  } finally { app.retire(); }
+});
+
+test("late subscription metadata cannot replace a newer local selection", async () => {
+  const host = installHost({});
+  host.window.localStorage.setItem("scimux-sel", "team/s/o/c/g");
+  let resolveList;
+  const fetchImpl = async (path, opts) => {
+    if (String(path).startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"Local",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
+    if (String(path) === "/api/team/subscriptions") return new Promise(resolve => { resolveList = resolve; });
+    return host.trapFetch(path,opts);
+  };
+  const app = await (await import("../js/app.js")).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  try {
+    await flush(100);
+    assert.equal(typeof resolveList,"function");
+    const card = {dataset:{open:"n1"},closest:selector => selector === "[data-open]" ? card : null};
+    host.byId.get("cardlist").dispatchEvent({type:"click",target:card,preventDefault(){},stopPropagation(){}});
+    resolveList(jsonResponse({subscriptions:[{server:"s",owner:"o",chat:"c",generation:"g",access:"read",state:"live",title:"Received",server_name:"Team",owner_name:"Owner",first_seen:"1"}],servers:[],truncated:false}));
+    await flush(100);
+    assert.equal(host.window.localStorage.getItem("scimux-sel"), "n1");
+    assert.equal(host.byId.get("chattitle").textContent,"Local");
+  } finally { app.retire(); }
+});
+
+test("owner local chat retains its authoritative turn and shows an anchored human reply once", async () => {
+  const host=installHost({}); host.window.localStorage.setItem("scimux-sel","n1"); host.window.localStorage.setItem("scimux-draft:n1","earlier agent draft");
+  const promptHost=host.byId.get("prompt"); Object.defineProperty(promptHost,"innerText",{get(){return this.textContent},set(value){this.textContent=value},configurable:true});
+  const view={server:"s",owner:"o",chat:"c",generation:"g",access:"owner",state:"live",title:"Chat",server_name:"Team",owner_name:"Owner",first_seen:"1",seen_comments:0,seen_mirror:0};
+  const calls=[]; const posts=[];
+  const fetchImpl=async(path,opts)=>{
+    path=String(path); calls.push(path); if(opts?.method === "POST") posts.push({path, body:opts.body});
+    if(path.endsWith("/comments") && opts?.method === "POST") return jsonResponse({seq:1});
+    if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+    if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+    if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
+    if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+    if(path.includes('/comments?')) return jsonResponse({entries:[{seq:1,anchor:1,text:'Human reply',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false});
+    if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[{seq:1,t:'assistant',text:'Local answer',local_segment:0,local_record:4}],next:1,more:false});
+    if(path.startsWith('/api/nodes/n1/chat')) return jsonResponse({turns:[{role:'assistant',text:'Local answer',uid:'c',record:4}],decisions:[],source:'codex',live:'working',turn_in_flight:true});
+    return host.trapFetch(path,opts);
+  };
+  const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  try { await flush(200); await new Promise(r=>setTimeout(r,20));
+    const body=host.byId.get('msgs').innerHTML;
+    assert.equal((body.match(/Local answer/g)||[]).length,1);
+    assert.equal((body.match(/Human reply/g)||[]).length,1);
+    assert.match(body,/Person/);
+    assert.equal(host.byId.get('destination').hidden,false);
+    assert.equal(host.byId.get('destinationpeople').getAttribute('aria-pressed'),'true');
+    const prompt=host.byId.get('prompt'); prompt.innerText='Human message'; prompt.dispatchEvent({type:'input',target:prompt});
+    await host.byId.get('sendbtn').click(); await flush(100);
+    assert.equal(posts.filter(p=>p.path.endsWith('/comments')).length,1);
+    assert.equal(posts.filter(p=>p.path.includes('/api/nodes/')).length,0);
+    const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,insertAdjacentHTML(_where,html){this.rowHTML=html;this.nextElementSibling={remove(){}}}};
+    const bubble={closest:s=>s==='.bubble'?bubble:(s==='[data-cseq]'||s==='[data-seq], [data-cseq]')?turn:null};
+    host.byId.get('msgs').dispatchEvent({type:'click',target:bubble});
+    const action={dataset:{gact:'prompt'},closest:s=>s==='[data-gact]'?action:null};
+    host.byId.get('msgs').dispatchEvent({type:'click',target:action});
+    await flush(50); assert.match(prompt.textContent,/Human reply/); assert.match(prompt.textContent,/earlier agent draft/);
+    assert.equal(posts.filter(p=>p.path.includes('/api/nodes/')).length,0);
+    await host.byId.get('destinationagent').click();
+    assert.match(prompt.textContent,/earlier agent draft/);
+    assert.equal(host.byId.get('destinationagent').getAttribute('aria-pressed'),'true');
+    await host.byId.get('destinationpeople').click();
+    assert.equal(host.byId.get('destinationpeople').getAttribute('aria-pressed'),'true');
+  } finally { app.retire(); }
+});
+
+test('owner from-now frontier places anchor zero and start comments before a new mirrored turn', async () => {
+  const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
+  const view={server:'s',owner:'o',chat:'c',generation:'g',access:'owner',state:'live',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
+  const fetchImpl=async(path,opts)=>{
+    path=String(path);
+    if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+    if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+    if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
+    if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+    if(path.includes('/comments?')) return jsonResponse({entries:[{seq:1,anchor:0,text:'zero reply',author:'p',at:'T'},{seq:2,anchor:1,text:'start reply',author:'p',at:'T'}],names:{p:'Person'},next:2,more:false});
+    if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[{seq:1,t:'start',local_segment:0,local_record:1},{seq:2,t:'assistant',local_segment:0,local_record:2,text:'new turn'}],next:2,more:false});
+    if(path.startsWith('/api/nodes/n1/chat')) return jsonResponse({turns:[{role:'assistant',text:'earlier turn',uid:'c',record:1},{role:'assistant',text:'new turn',uid:'c',record:2}],decisions:[],source:'codex',live:'quiet'});
+    return host.trapFetch(path,opts);
+  };
+  const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  try { await flush(200); await new Promise(r=>setTimeout(r,20)); const body=host.byId.get('msgs').innerHTML;
+    assert.ok(body.indexOf('earlier turn') < body.indexOf('zero reply')); assert.ok(body.indexOf('zero reply') < body.indexOf('start reply')); assert.ok(body.indexOf('start reply') < body.indexOf('new turn'));
+  } finally { app.retire(); }
+});
+
+test('owner timeline includes an ended retained generation beside the current generation', async () => {
+  const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
+  const base={server:'s',owner:'o',chat:'c',access:'owner',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0,local_node:'n1'};
+  const old={...base,generation:'old',state:'ended'}, live={...base,generation:'new',state:'live'};
+  const fetchImpl=async(path,opts)=>{path=String(path);
+    if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+    if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+    if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'new',state:'active',members:[]});
+    if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[old,live],servers:[],truncated:false});
+    if(path.includes('/comments?')) return jsonResponse({entries:[{seq:1,anchor:1,text:path.includes('/old/')?'Earlier discussion':'Current discussion',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false});
+    if(path.includes('/subscriptions/s/o/c/')) return jsonResponse({view:path.includes('/old?')?old:live,entries:[{seq:1,t:'assistant',text:'answer',local_segment:0,local_record:4}],next:1,more:false});
+    if(path.startsWith('/api/nodes/n1/chat')) return jsonResponse({turns:[{role:'assistant',text:'answer',uid:'c',record:4}],decisions:[],source:'codex',live:'quiet'});
+    return host.trapFetch(path,opts);
+  };
+  const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+  try { await flush(200); await new Promise(r=>setTimeout(r,20)); const body=host.byId.get('msgs').innerHTML;
+    assert.equal((body.match(/Earlier discussion/g)||[]).length,1); assert.equal((body.match(/Current discussion/g)||[]).length,1); assert.equal((body.match(/>answer</g)||[]).length,1);
+  } finally { app.retire(); }
+});
+
+test('ended retained owner discussion appears after recreation without an active share', async () => {
+ const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
+ const view={server:'s',owner:'o',chat:'c',generation:'old',access:'owner',state:'ended',local_node:'n1',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+  if(path==='/api/team/shares/n1') return new Response('{"error":"not_found"}',{status:404});
+  if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+  if(path.includes('/comments?')) return jsonResponse({entries:[{seq:1,anchor:1,text:'retained reply',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false});
+  if(path.includes('/subscriptions/s/o/c/old?')) return jsonResponse({view,entries:[{seq:1,t:'start',local_segment:0,local_record:1}],next:1,more:false});
+  if(path.startsWith('/api/nodes/n1/chat')) return jsonResponse({turns:[{role:'assistant',text:'prior answer',uid:'c',record:1}],decisions:[],source:'codex',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try { await flush(200); await new Promise(r=>setTimeout(r,20)); const body=host.byId.get('msgs').innerHTML;
+  assert.equal((body.match(/retained reply/g)||[]).length,1); assert.ok(body.indexOf('prior answer')<body.indexOf('retained reply'));
+  assert.equal(host.byId.get('destination').hidden,true);
+ } finally {app.retire()}
+});
+
+test('owner reply anchored after clear appears in an empty current segment', async () => {
+ const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
+ const view={server:'s',owner:'o',chat:'c',generation:'g',access:'owner',state:'live',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+  if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
+  if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+  if(path.includes('/comments?')) return jsonResponse({entries:[{seq:1,anchor:1,text:'after clear',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false});
+  if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[{seq:1,t:'source',local_segment:0,local_record:6}],next:1,more:false});
+  if(path.startsWith('/api/nodes/n1/chat')) return jsonResponse({turns:[],log_uid:'c',segment_index:1,prior_turns:1,chat_started:'T',decisions:[],source:'codex',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try { await flush(200); await new Promise(r=>setTimeout(r,20)); assert.match(host.byId.get('msgs').innerHTML,/after clear/); } finally {app.retire()}
+});
+
+test('local node named team can read and send through the real app routing', async () => {
+ const host=installHost({}); host.window.localStorage.setItem('scimux-sel','team'); const calls=[];
+ const fetchImpl=async(path,opts)=>{path=String(path);calls.push({path,method:opts?.method||'GET'});
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'team',title:'Team',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers') return jsonResponse({servers:[]});
+  if(path==='/api/team/shares/team') return new Response('{"error":"not_found"}',{status:404});
+  if(path.startsWith('/api/nodes/team/chat')) return jsonResponse({turns:[{role:'assistant',text:'local'}],live:'quiet',source:'codex'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200); await new Promise(r=>setTimeout(r,10));
+  const prompt=host.byId.get('prompt'); prompt.innerText='hello'; prompt.dispatchEvent({type:'input',target:prompt}); await host.byId.get('sendbtn').click(); await flush(30);
+  assert.ok(calls.some(c=>c.path==='/api/nodes/team/chat')); assert.ok(calls.some(c=>c.path==='/api/nodes/team/send' && c.method==='POST'));
+ } finally {app.retire()}
+});
+
+test('owner anchor zero is visible at the saved frontier before any mirror arrives', async () => {
+ const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
+ const view={server:'s',owner:'o',chat:'c',generation:'g',access:'owner',state:'live',local_node:'n1',local_frontier:{node:'n1',segment:0,record:1},title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+  if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
+  if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+  if(path.includes('/comments?')) return jsonResponse({entries:[{seq:1,anchor:0,text:'before mirror',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false});
+  if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[],next:0,more:false});
+  if(path.startsWith('/api/nodes/n1/chat')) return jsonResponse({turns:[{role:'assistant',text:'private earlier',uid:'c',record:1},{role:'assistant',text:'local later',uid:'c',record:2}],log_uid:'c',segment_index:0,decisions:[],source:'codex',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200);await new Promise(r=>setTimeout(r,20));const body=host.byId.get('msgs').innerHTML;assert.ok(body.indexOf('private earlier')<body.indexOf('before mirror'));assert.ok(body.indexOf('before mirror')<body.indexOf('local later'));} finally {app.retire()}
+});
+
+test('stale share for a reused node slug cannot become the new chat People context', async () => {
+ const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1'); const calls=[];
+ const old={server:'s',owner:'o',chat:'old',generation:'g',access:'owner',state:'live',title:'Old',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
+ const fetchImpl=async(path,opts)=>{path=String(path);calls.push({path,method:opts?.method||'GET'});
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'New',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+  if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'old',server:'s',generation:'g',state:'active',members:[]});
+  if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[old],servers:[],truncated:false});
+  if(path.includes('/comments?')) return jsonResponse({entries:[],names:{},next:0,more:false});
+  if(path.includes('/subscriptions/s/o/old/g?')) return jsonResponse({view:old,entries:[],next:0,more:false});
+  if(path.startsWith('/api/nodes/n1/chat')) return jsonResponse({log_uid:'new',segment_index:0,turns:[{role:'assistant',uid:'new',record:1,text:'new chat'}],decisions:[],source:'codex',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try { await flush(200); await new Promise(r=>setTimeout(r,20)); assert.equal(host.byId.get('destination').hidden,true); assert.ok(!calls.some(c=>c.path.includes('/subscriptions/s/o/old/g?'))); } finally {app.retire()}
+});
+
+test('received metadata that arrives before a delayed state response still restores received selection', async () => {
+ const host=installHost({}); host.window.localStorage.setItem('scimux-sel','team/s/o/c/g'); let resolveState;
+ const view={server:'s',owner:'o',chat:'c',generation:'g',access:'read',state:'live',title:'Received',server_name:'Team',owner_name:'Owner',first_seen:'1'};
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state')) return new Promise(resolve=>{resolveState=resolve});
+  if(path==='/api/settings') return jsonResponse({experimental_feature_team:true});
+  if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+  if(path.includes('/comments?')) return jsonResponse({entries:[],names:{},next:0,more:false});
+  if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[],next:0,more:false});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(150); assert.equal(typeof resolveState,'function');
+  resolveState(jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}}));
+  await flush(150); assert.equal(host.window.localStorage.getItem('scimux-sel'),'team/s/o/c/g'); assert.equal(host.byId.get('chattitle').textContent,'Received');
+ } finally {app.retire()}
+});
+
+test('phone received card opens chat and back returns to Activities', async () => {
+ const host=installHost({}); const phone=()=>({matches:false,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){}}); globalThis.matchMedia=phone; host.window.matchMedia=phone;
+ const view={server:'s',owner:'o',chat:'c',generation:'g',access:'read',state:'live',title:'Received',server_name:'Team',owner_name:'Owner',first_seen:'1'};
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+  if(path.includes('/comments?')) return jsonResponse({entries:[],names:{},next:0,more:false});
+  if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[],next:0,more:false});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200); await new Promise(r=>setTimeout(r,10)); const card={dataset:{open:'team/s/o/c/g'},closest:s=>s==='[data-open]'?card:null};
+  host.byId.get('cardlist').dispatchEvent({type:'click',target:card,preventDefault(){},stopPropagation(){}}); await flush(50);
+  assert.equal(host.document.body.classList.contains('cards-open'),false); assert.equal(host.byId.get('scrim').classList.contains('on'),false);
+  await host.byId.get('chatback').click(); assert.equal(host.document.body.classList.contains('cards-open'),true);
+ } finally {app.retire()}
+});
+
+test('late local UID mismatching an already loaded share releases the new chat without adopting it', async () => {
+ const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1'); let resolveChat, requested=false;
+ const old={server:'s',owner:'o',chat:'old',generation:'g',access:'owner',state:'live',title:'Old',server_name:'Team',owner_name:'Owner',first_seen:'1'};
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'New',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
+  if(path==='/api/team/shares/n1'){requested=true;return jsonResponse({node:'n1',uid:'old',server:'s',generation:'g',state:'active',members:[]})}
+  if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[old],servers:[],truncated:false});
+  if(path.startsWith('/api/nodes/n1/chat')) return new Promise(resolve=>{resolveChat=resolve});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200); assert.ok(requested);assert.equal(typeof resolveChat,'function');
+  resolveChat(jsonResponse({log_uid:'new',segment_index:0,turns:[{role:'assistant',uid:'new',record:1,text:'new chat'}],decisions:[],source:'codex',live:'quiet'}));
+  await flush(200); assert.equal(host.byId.get('destination').hidden,true); assert.equal(host.byId.get('prompt').getAttribute('contenteditable'),'true');
+ } finally {app.retire()}
+});
+
+test('app restores a rejected in-flight Agent prompt without dispatching a retry', async () => {
+ const host=installHost({});host.window.localStorage.setItem('scimux-sel','n1');
+ const source={uid:'u',segment:0,record:1};
+ host.window.localStorage.setItem('scimux-prompt-flights:n1',JSON.stringify([{id:1,accepted:true,text:'rejected draft',address:{uid:'u',segment:0,record:2},boundary:source,sources:[source]}]));
+ const prompt=host.byId.get('prompt');Object.defineProperty(prompt,'innerText',{get(){return this.textContent},set(value){this.textContent=value},configurable:true});
+ const posts=[];const fetchImpl=async(path,opts)=>{
+  path=String(path);if(opts?.method==='POST')posts.push(path);
+  if(path.startsWith('/api/state'))return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path.startsWith('/api/nodes/n1/chat'))return jsonResponse({turns:[{uid:'u',record:1,role:'assistant',text:'old'},{uid:'u',record:2,role:'user',text:'rejected draft'}],log_uid:'u',segment_index:0,trace_outcome:'rejected',error:'dispatch rejected',turn_in_flight:false,source:'acp',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try{await flush(200);assert.match(prompt.textContent,/rejected draft/);assert.ok(host.window.localStorage.getItem('scimux-prompt-sources:n1'));assert.equal(posts.filter(p=>p.includes('/api/nodes/')).length,0);}finally{app.retire();}
+});

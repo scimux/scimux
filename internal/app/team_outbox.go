@@ -52,7 +52,8 @@ type shareOutbox struct {
 	statLog func(path string) (os.FileInfo, error)
 	// files is the process lock for team-shares.json, shared with the routes.
 	// A test that builds an outbox alone leaves it nil.
-	files *sync.Mutex
+	files    *sync.Mutex
+	shareOps *sync.Mutex
 
 	mu      sync.Mutex
 	running bool
@@ -165,6 +166,26 @@ func (o *shareOutbox) tick(ctx context.Context) {
 }
 
 func (o *shareOutbox) one(ctx context.Context, entries []team.Entry, owner string, share team.Share, nodes map[string]nodeSnap) {
+	if o.shareOps != nil {
+		o.shareOps.Lock()
+		defer o.shareOps.Unlock()
+		// The tick may have waited behind a share mutation after taking its
+		// snapshot. Refresh under the gate before doing any network work.
+		var current team.Share
+		found := false
+		err := o.withFiles(func() error {
+			shares, err := team.LoadShares(o.dataDir)
+			if err != nil {
+				return err
+			}
+			current, found = shareByUID(shares, share.UID)
+			return nil
+		})
+		if err != nil || !found || current.Generation != share.Generation || current.Server != share.Server || current.Node != share.Node {
+			return
+		}
+		share = current
+	}
 	entry, ok := serverFor(entries, share.Server)
 	if !ok {
 		o.deleteStored(share.UID)
@@ -412,8 +433,53 @@ func (o *shareOutbox) withFiles(fn func() error) error {
 	return fn()
 }
 
+// preserveOwnerFrontiers runs with the shared team-file lock held.
+func (o *shareOutbox) preserveOwnerFrontiers(share team.Share) error {
+	subs, err := team.LoadSubs(o.dataDir)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, sub := range subs {
+		if sub.Access == "owner" && sub.Server == share.Server && sub.Chat == share.UID && sub.Generation == share.Generation {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	inst, err := identity.LoadInstallation(o.dataDir)
+	if err != nil {
+		return err
+	}
+	helper := &teamHandler{dataDir: o.dataDir}
+	changed := helper.captureOwnerFrontiers(subs, string(inst))
+	for _, sub := range subs {
+		if sub.Access == "owner" && sub.Owner == string(inst) && sub.Server == share.Server && sub.Chat == share.UID && sub.Generation == share.Generation && sub.OwnerFrontier == nil {
+			return errors.New("owner frontier unavailable")
+		}
+	}
+	if changed {
+		return team.SaveSubs(o.dataDir, subs)
+	}
+	return nil
+}
+
 func (o *shareOutbox) deleteStored(uid string) {
 	_ = o.withFiles(func() error {
+		shares, err := team.LoadShares(o.dataDir)
+		if err != nil {
+			return err
+		}
+		for _, share := range shares {
+			if share.UID == uid {
+				if err := o.preserveOwnerFrontiers(share); err != nil {
+					return err
+				}
+				break
+			}
+		}
 		return team.RemoveShare(o.dataDir, uid)
 	})
 }
@@ -427,6 +493,9 @@ func (o *shareOutbox) deleteStoredGeneration(share team.Share) {
 		}
 		for _, stored := range shares {
 			if stored.UID == share.UID && stored.Generation == share.Generation {
+				if err := o.preserveOwnerFrontiers(stored); err != nil {
+					return err
+				}
 				return team.RemoveShare(o.dataDir, share.UID)
 			}
 		}
@@ -902,7 +971,7 @@ func installShareOutbox(a *app, dataDir string, now func() time.Time) {
 	client := newTeamClient()
 	h := newTeamHandler(dataDir, now, client)
 	th := h.(*teamHandler)
-	box := &shareOutbox{dataDir: dataDir, now: now, client: client, files: &th.mu}
+	box := &shareOutbox{dataDir: dataDir, now: now, client: client, files: &th.mu, shareOps: &th.shareOps}
 	th.shareDelivery = box.delivery
 	a.teamHandler = h
 	a.shareOutbox = box

@@ -22,23 +22,31 @@ const (
 	maxSubsFile = 16 << 20
 )
 
+// OwnerFrontier retains the local share-start boundary for an owned copy.
+type OwnerFrontier struct {
+	Node    string `json:"node"`
+	Segment int    `json:"segment"`
+	Record  int    `json:"record"`
+}
+
 // Subscription is one generation of a channel this seat is a member of.
 // It holds no chat content and no token.
 type Subscription struct {
-	Server       string `json:"server"`
-	Owner        string `json:"owner"`
-	Chat         string `json:"chat"`
-	Generation   string `json:"generation"`
-	ServerName   string `json:"server_name"`
-	OwnerName    string `json:"owner_name"`
-	Title        string `json:"title"`
-	Access       string `json:"access"`
-	State        string `json:"state"`
-	MirrorLast   uint64 `json:"mirror_last"`
-	SeenMirror   uint64 `json:"seen_mirror"`
-	CommentsLast uint64 `json:"comments_last"`
-	SeenComments uint64 `json:"seen_comments"`
-	FirstSeen    string `json:"first_seen"`
+	Server        string         `json:"server"`
+	Owner         string         `json:"owner"`
+	Chat          string         `json:"chat"`
+	Generation    string         `json:"generation"`
+	ServerName    string         `json:"server_name"`
+	OwnerName     string         `json:"owner_name"`
+	Title         string         `json:"title"`
+	Access        string         `json:"access"`
+	State         string         `json:"state"`
+	MirrorLast    uint64         `json:"mirror_last"`
+	SeenMirror    uint64         `json:"seen_mirror"`
+	CommentsLast  uint64         `json:"comments_last"`
+	SeenComments  uint64         `json:"seen_comments"`
+	FirstSeen     string         `json:"first_seen"`
+	OwnerFrontier *OwnerFrontier `json:"owner_frontier,omitempty"`
 }
 
 // Sentinel errors from the subscription file. None of them quote a title or a token.
@@ -57,21 +65,28 @@ type subsFile struct {
 
 // subWire keeps fields whose zero value is valid as pointers, so a missing
 // or null value is damage and an empty name or a zero count is not.
+type ownerFrontierWire struct {
+	Node    *string `json:"node"`
+	Segment *int    `json:"segment"`
+	Record  *int    `json:"record"`
+}
+
 type subWire struct {
-	Server       string  `json:"server"`
-	Owner        string  `json:"owner"`
-	Chat         string  `json:"chat"`
-	Generation   string  `json:"generation"`
-	ServerName   string  `json:"server_name"`
-	OwnerName    *string `json:"owner_name"`
-	Title        *string `json:"title"`
-	Access       string  `json:"access"`
-	State        string  `json:"state"`
-	MirrorLast   *uint64 `json:"mirror_last"`
-	SeenMirror   *uint64 `json:"seen_mirror"`
-	CommentsLast *uint64 `json:"comments_last"`
-	SeenComments *uint64 `json:"seen_comments"`
-	FirstSeen    string  `json:"first_seen"`
+	Server        string             `json:"server"`
+	Owner         string             `json:"owner"`
+	Chat          string             `json:"chat"`
+	Generation    string             `json:"generation"`
+	ServerName    string             `json:"server_name"`
+	OwnerName     *string            `json:"owner_name"`
+	Title         *string            `json:"title"`
+	Access        string             `json:"access"`
+	State         string             `json:"state"`
+	MirrorLast    *uint64            `json:"mirror_last"`
+	SeenMirror    *uint64            `json:"seen_mirror"`
+	CommentsLast  *uint64            `json:"comments_last"`
+	SeenComments  *uint64            `json:"seen_comments"`
+	FirstSeen     string             `json:"first_seen"`
+	OwnerFrontier *ownerFrontierWire `json:"owner_frontier,omitempty"`
 }
 
 type subID struct {
@@ -171,6 +186,12 @@ func subFromWire(w subWire, version int) (Subscription, bool) {
 		MirrorLast: *w.MirrorLast, SeenMirror: *w.SeenMirror,
 		FirstSeen: w.FirstSeen,
 	}
+	if w.OwnerFrontier != nil {
+		if w.OwnerFrontier.Node == nil || w.OwnerFrontier.Segment == nil || w.OwnerFrontier.Record == nil {
+			return Subscription{}, false
+		}
+		s.OwnerFrontier = &OwnerFrontier{Node: *w.OwnerFrontier.Node, Segment: *w.OwnerFrontier.Segment, Record: *w.OwnerFrontier.Record}
+	}
 	if version == 2 {
 		if w.CommentsLast == nil || w.SeenComments == nil {
 			return Subscription{}, false
@@ -203,6 +224,9 @@ func validSubs(subs []Subscription) bool {
 // path can use it as a directory name. The protocol allows a wider chat id;
 // those channels are not stored.
 func validSub(s Subscription) bool {
+	if f := s.OwnerFrontier; f != nil && (s.Access != "owner" || !validNodeID(f.Node) || f.Segment < 0 || f.Record < -1) {
+		return false
+	}
 	if !validHex(s.Server, 32) || !validHex(s.Owner, 32) || !validHex(s.Chat, 16) || !validHex(s.Generation, 16) {
 		return false
 	}
