@@ -43,7 +43,7 @@ export function teamErrorText(code) {
   return ERROR_TEXT[code] || "That did not work. Try again.";
 }
 
-export function createSharingSection({ api, doc }) {
+export function createSharingSection({ api, doc, onJoined = () => {} }) {
   const $ = (sel) => doc.querySelector(sel);
 
   let rows = [];
@@ -244,6 +244,7 @@ export function createSharingSection({ api, doc }) {
       $("#m_team_live").textContent = "Joined " + joined + ".";
       hideForm();
       await refreshNow();
+      onJoined();
     } catch (err) {
       setNote(teamErrorText(errorCode(err.message)));
     } finally {

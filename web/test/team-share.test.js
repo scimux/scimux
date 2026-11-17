@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createShareFeature, shareErrorText, shareStatusText } from "../js/team-share.js";
+import { createSheetsFeature } from "../js/sheets.js";
 
 const north = { id: "server-north", name: "North", url: "https://north.example/team", seat_name: "Blue" };
 const south = { id: "server-south", name: "South", url: "https://south.example/team", seat_name: "Red" };
@@ -297,6 +298,12 @@ function setup(handler) {
   const closed = [];
   const time = { now: 0 };
   const ui = mount();
+  const backdrop = slot(ui.doc, "backdrop", "div");
+  ui.sheet.className = "sheet";
+  const sheets = createSheetsFeature({
+    document: ui.doc,
+    querySelectorAll: () => [ui.sheet],
+  });
   const api = async (path, opts) => {
     const call = {
       path,
@@ -309,13 +316,36 @@ function setup(handler) {
   const feature = createShareFeature({
     api,
     doc: ui.doc,
-    openSheet: (id) => opened.push(id),
-    closeSheets: () => closed.push("closed"),
+    openSheet: (id) => { opened.push(id); sheets.openSheet(id); },
+    closeSheets: () => { closed.push("closed"); sheets.closeSheets(); },
     now: () => time.now,
   });
   feature.bind();
-  return { ...ui, calls, opened, closed, time, feature };
+  return { ...ui, calls, opened, closed, time, feature, sheets, backdrop };
 }
+
+test("share controls open an interactive sheet through the real sheet controller", async () => {
+  for (const control of ["btn", "status"]) {
+    const ui = setup((call) => {
+      if (call.path === "/api/team/servers") return { servers: [north] };
+      if (call.path.endsWith("/seats")) return { self: selfId, seats: [blue] };
+      return viewOf();
+    });
+    ui.feature.select("node-1");
+    await ui.feature.settled();
+    assert.equal(ui[control].hidden, false);
+    ui[control].click();
+    await ui.feature.settled();
+    assert.match(ui.sheet.className, /\bopen\b/);
+    assert.equal(Boolean(ui.sheet.inert), false);
+    assert.match(ui.backdrop.className, /\bon\b/);
+    assert.equal(selects(ui.body)[0].disabled, false);
+    ui.sheets.closeSheets();
+    assert.doesNotMatch(ui.sheet.className, /\bopen\b/);
+    assert.equal(ui.sheet.inert, true);
+    assert.doesNotMatch(ui.backdrop.className, /\bon\b/);
+  }
+});
 
 function peopleOf(body) {
   return body.querySelector("#sh_people");
@@ -616,7 +646,7 @@ test("tick updates the header and leaves the sheet, the note, and the focus", as
   assert.equal(note.textContent, "keep");
   assert.equal(note.hidden, false);
   assert.equal(doc.activeElement, focused);
-  assert.deepEqual(opened, ["sharesheet"]);
+  assert.deepEqual(opened, ["#sharesheet"]);
 });
 
 test("a server name with markup is text on the status line", async () => {
@@ -651,7 +681,7 @@ test("opening and choosing send no share request", async () => {
   const before = calls.length;
   btn.click();
   await feature.settled();
-  assert.deepEqual(opened, ["sharesheet"]);
+  assert.deepEqual(opened, ["#sharesheet"]);
   const chosen = calls.slice(before);
   assert.deepEqual(chosen.map((call) => call.path), ["/api/team/servers/server-north/seats"]);
   assert.equal(calls.some((call) => call.method === "PUT"), false);
@@ -1198,7 +1228,7 @@ test("the status button opens the same sheet", async () => {
   await ui.feature.settled();
   ui.status.click();
   await ui.feature.settled();
-  assert.deepEqual(ui.opened, ["sharesheet"]);
+  assert.deepEqual(ui.opened, ["#sharesheet"]);
   assert.equal(ui.apply.textContent, "Save people");
 });
 

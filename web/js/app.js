@@ -1251,7 +1251,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     doc: document,
     onUnlinked: () => { deviceList.refresh(); pairControl.refresh(); },
   }));
-  const sharingSection = own(createSharingSection({ api, doc: document }));
+  const sharingSection = own(createSharingSection({
+    api, doc: document,
+    onJoined: () => { if (sel) shareFeature.select(sel); },
+  }));
   const shareFeature = own(createShareFeature({
     api,
     doc: document,

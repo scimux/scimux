@@ -238,7 +238,7 @@ function apiError(code, status) {
   return err;
 }
 
-function harness(handler) {
+function harness(handler, onJoined) {
   const calls = [];
   const api = async (path, opts) => {
     const call = { path, method: (opts && opts.method) || "GET", body: opts && opts.body };
@@ -246,10 +246,31 @@ function harness(handler) {
     return handler(call, calls);
   };
   const ui = mount();
-  const section = createSharingSection({ api, doc: ui.doc });
+  const section = createSharingSection({ api, doc: ui.doc, onJoined });
   section.bind();
   return { ...ui, api, calls, section };
 }
+
+test("joining notifies the open chat only after success", async () => {
+  for (const success of [true, false]) {
+    const gate = deferred();
+    let joined = 0;
+    const ui = harness((call) => {
+      if (call.method === "POST") return gate.promise;
+      if (call.path === "/api/team/servers") return { servers: [relay] };
+      return { status: "connected" };
+    }, () => { joined++; });
+    ui.add.click();
+    ui.link.value = "https://relay.example/join#CODE";
+    ui.name.value = "Ada";
+    ui.join.click();
+    assert.equal(joined, 0);
+    if (success) gate.resolve(relay);
+    else gate.reject(apiError("join_refused", 403));
+    await ui.section.settled();
+    assert.equal(joined, success ? 1 : 0);
+  }
+});
 
 test("status and error text cover every listed value and an unknown one", () => {
   for (const [status, text] of STATUS) assert.equal(teamStatusText(status), text);

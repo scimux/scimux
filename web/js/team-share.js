@@ -459,7 +459,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now }) {
   function onOpen() {
     sheetNode = selected;
     showSheet();
-    openSheet("sharesheet");
+    openSheet("#sharesheet");
   }
 
   function onSheetChange(ev) {
