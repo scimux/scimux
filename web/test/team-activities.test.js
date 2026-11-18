@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { sharedActivityId, sharedActivityGroups, sharedPinnedOrder, readActivityFolds, toggleActivityFold } from '../js/team-guest.js';
 
 const sub = (server, owner, chat, extra={}) => ({server, owner, chat, generation:'g', owner_name:'Alex', server_name:'Lab', title:chat, first_seen:'1', state:'live', access:'write', unread:false, ...extra});
+test('activity section headers are flat warm labels with a perforated separator',()=>{
+ const css=readFileSync(new URL('../css/cards.css',import.meta.url),'utf8');
+ const rule=css.match(/#cardlist \.activity-group\s*\{([^}]*)\}/)?.[1] || '';
+ assert.match(rule,/background:\s*var\(--bg\)/);assert.match(rule,/border:\s*0/);
+ assert.match(rule,/border-bottom:\s*1px dashed var\(--perf\)/);assert.match(rule,/min-height:\s*44px/);
+});
 test('shared identities are namespaced and group by server and owner, never by name', () => {
   const a=sub('s1','o1','a'), b=sub('s2','o1','b'), c=sub('s1','o2','c'), mine=sub('s1','self','m',{access:'owner'});
   assert.notEqual(sharedActivityId(a),sharedActivityId(b));
@@ -26,15 +33,36 @@ test('fold storage tolerates malformed and refused storage and persists changes'
 });
 
 import { createCardsFeature } from '../js/cards.js';
-function cardsFixture({nodes=[],views=[],pinned=[],tab='current',storage: suppliedStorage, selected='', actionCard='', icons={}}={}) {
+function cardsFixture({nodes=[],views=[],pinned=[],archived=[],tab='current',storage: suppliedStorage, selected='', actionCard='', editingTitle='', icons={}}={}) {
  const handlers={}; let sig=''; let foldStore=new Map(); const changes=[]; const calls=[];
  const list={innerHTML:'',querySelectorAll:()=>[],addEventListener:(n,f)=>{handlers[n]=f},removeEventListener(){}};
  const tabs={innerHTML:'',querySelectorAll:()=>[],addEventListener(){},removeEventListener(){}};
  const storage=suppliedStorage || {getItem:k=>foldStore.get(k)||null,setItem:(k,v)=>foldStore.set(k,v)};
- const sharedTab={tabHTML:()=>'<button data-tab="shared">Shared with me</button>', activities:()=>views, groups:()=>sharedActivityGroups(views,[],{}), mineUnread:()=>views.some(v=>v.access==='owner' && v.unread), selected:()=>selected, open:id=>calls.push(['open',id])};
- const feature=createCardsFeature({roots:{tabs,list},document:{title:'',querySelector:()=>null},CSS:{escape:s=>s},sharedTab,storage,icons,actionCard:()=>actionCard,nodes:()=>nodes,cardTab:()=>tab,setCardTab:v=>{tab=v},cardsSig:()=>sig,setCardsSig:v=>{sig=v},pinned:()=>pinned,archived:()=>[],expanded:()=>new Set(),uiMutate:x=>changes.push(x),api:(...x)=>{calls.push(['api',...x]);},exitThread:id=>calls.push(['exit',id]),selectNode:id=>calls.push(['local',id]),setInterval:()=>0,clearInterval:()=>{}});
+ const sharedTab={tabHTML:()=>'<button data-tab="shared">Shared with me</button>', activities:()=>views, groups:()=>sharedActivityGroups(views,[],{}), mineUnread:()=>views.some(v=>v.access==='owner' && v.unread), mineUnknown:()=>views.some(v=>v.access==='owner' && v.unreadStatus==='unknown'), ownerUnread:id=>views.some(v=>v.access==='owner' && v.local_node===id && v.unread), ownerUnreadStatus:id=>views.find(v=>v.access==='owner' && v.local_node===id)?.unreadStatus || 'read', selected:()=>selected, open:id=>calls.push(['open',id])};
+ const feature=createCardsFeature({roots:{tabs,list},document:{title:'',querySelector:()=>null},CSS:{escape:s=>s},sharedTab,storage,icons,actionCard:()=>actionCard,editingTitle:()=>editingTitle,editingTitleScope:()=>"cards",nodes:()=>nodes,cardTab:()=>tab,setCardTab:v=>{tab=v},cardsSig:()=>sig,setCardsSig:v=>{sig=v},pinned:()=>pinned,archived:()=>archived,expanded:()=>new Set(),uiMutate:x=>changes.push(x),api:(...x)=>{calls.push(['api',...x]);},exitThread:id=>calls.push(['exit',id]),selectNode:id=>calls.push(['local',id]),setInterval:()=>0,clearInterval:()=>{}});
  feature.bind(); return {feature,list,tabs,handlers,changes,calls,storage,setTab:v=>{tab=v},tab:()=>tab};
 }
+test('owner unread is shown on the matching local card even when Mine is already unread',()=>{
+ const views=[sub('s','self','a',{access:'owner',local_node:'a',unread:true}),sub('s','self','b',{access:'owner',local_node:'b',unread:false})];
+ const f=cardsFixture({nodes:[{id:'a',title:'A'},{id:'b',title:'B'}],views}); f.feature.render();
+ const card=id=>f.list.innerHTML.split('id="card-'+id+'"')[1].split('</div>')[0];
+ assert.match(card('a'),/activity-unread[^]*<button class="chev"/);
+ assert.doesNotMatch(card('b'),/activity-unread/);
+ views[1].unread=true; f.feature.render(); assert.match(card('b'),/activity-unread[^]*<button class="chev"/);
+});
+test('owner card announces unavailable unread status without showing an unread dot',()=>{
+ const f=cardsFixture({nodes:[{id:'a',title:'A'}],views:[sub('s','self','a',{access:'owner',local_node:'a',unreadStatus:'unknown'})]}); f.feature.render();
+ const card=f.list.innerHTML.split('id="card-a"')[1].split('</div>')[0];
+ assert.match(card,/Unread status unavailable/); assert.doesNotMatch(card,/activity-unread/);
+});
+test('unknown shared and owner statuses remain visible through folds and local card controls',async()=>{
+ const other=sub('s','o','c',{unreadUnknown:true}), owner=sub('s','self','a',{access:'owner',local_node:'a',unreadStatus:'unknown'});
+ const f=cardsFixture({nodes:[{id:'a',title:'Edit me'},{id:'b',title:'Ended',ended_at:'t'}],views:[other,owner],editingTitle:'a'});f.feature.render();
+ assert.match(f.list.innerHTML,/data-title-input="a"/);assert.match(f.list.innerHTML,/Unread status unavailable/);
+ await f.handlers.click({target:target('[data-activity-group]',{activityGroup:'owner/s/o'})});assert.match(f.list.innerHTML,/Unread status unavailable/);
+ const archived=cardsFixture({nodes:[{id:'b',title:'Ended',ended_at:'t'}],archived:['b'],tab:'archived'});archived.feature.render();
+ assert.match(archived.list.innerHTML,/aria-label="restore"/);assert.doesNotMatch(archived.list.innerHTML,/aria-label="close thread/);
+});
 test('All uses local cards and grouped received cards while Shared omits owner copies',()=>{
  const mine=sub('s','self','copy',{access:'owner'}), other=sub('s','o','received',{unread:true});
  const f=cardsFixture({nodes:[{id:'local',title:'Local',live:'quiet'}],views:[mine,other]}); f.feature.render();
@@ -98,6 +126,11 @@ test('shared cards show truthful ended/read status and mixed pinned control',()=
  const f=cardsFixture({views:[view],pinned:[id],tab:'pinned'}); f.feature.render();
  assert.match(f.list.innerHTML,/Untitled chat/); assert.match(f.list.innerHTML,/Sharing ended/); assert.match(f.list.innerHTML,/aria-label="unpin"/);
  assert.doesNotMatch(f.list.innerHTML,/working|approval|data-exit|data-trash|data-title/);
+});
+test('received activity uses the common vendor-logo slot and no inferred member count',()=>{
+ const view=sub('s','o','c',{members:42});const f=cardsFixture({views:[view],icons:{ICON_USERS:'<svg data-icon="users"></svg>'}});
+ f.feature.render();assert.match(f.list.innerHTML,/<span class="agent-logo"[^>]*><svg data-icon="users"><\/svg><\/span>/);
+ assert.doesNotMatch(f.list.innerHTML,/42 (?:people|members)/);
 });
 test('group fold state survives re-instantiation with a shared storage adapter',async()=>{
  const f=cardsFixture({views:[sub('s','o','c',{unread:true})]}); f.feature.render();

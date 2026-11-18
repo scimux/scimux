@@ -171,6 +171,10 @@ export function fmtBubbleTime(t, now = new Date(), locales = undefined) {
   return d.toLocaleString(loc, { dateStyle: "medium", timeStyle: "short" });
 }
 
+export function bubbleTimeHTML(time, { format = fmtBubbleTime, escape = esc } = {}) {
+  return time ? `<div class="bubwhen">${escape(format(time))}</div>` : "";
+}
+
 /* Bookmark / note / chat "when" stamp. Optional locales seam. */
 export function fmtWhen(t, locales = undefined) {
   const d = new Date(t);
@@ -182,6 +186,12 @@ export function fmtWhen(t, locales = undefined) {
 export function fmtNoteMeta(c, locales = undefined) {
   const n = c.section_count || 0;
   return `${n} section${n === 1 ? "" : "s"} · ${fmtWhen(c.edited_at || c.created_at || "", locales)}`;
+}
+
+/* Shared and ordinary timelines use the same human and harness labels. */
+export function bubbleSpeaker({ mine = false, name = "", agent = "" } = {}) {
+  if (agent) return `${agent} · agent`;
+  return mine ? "You" : (name || "Unknown person");
 }
 
 /* bubble hover title: the colour already tells you who spoke, so the tooltip

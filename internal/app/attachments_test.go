@@ -3,13 +3,140 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestUploadRejectsStaleChatIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	var n Node
+	if err := json.Unmarshal([]byte(`{"id":"n1","instance_id":"replacement"}`), &n); err != nil {
+		t.Fatal(err)
+	}
+	a.byID[n.ID] = &n
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("files", "old.txt")
+	_, _ = fw.Write([]byte("old synthetic upload"))
+	_ = mw.Close()
+	req := httptest.NewRequest("POST", "/api/nodes/n1/attachments", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-Scimux-Chat-Instance", "old")
+	req.SetPathValue("id", "n1")
+	rec := httptest.NewRecorder()
+	a.handleUploadAttachments(rec, req)
+	if rec.Code != 409 {
+		t.Fatalf("stale upload status = %d, want 409", rec.Code)
+	}
+}
+
+func TestSendRejectsStaleChatIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	var n Node
+	if err := json.Unmarshal([]byte(`{"id":"n1","instance_id":"replacement"}`), &n); err != nil {
+		t.Fatal(err)
+	}
+	a.byID[n.ID] = &n
+	req := httptest.NewRequest("POST", "/api/nodes/n1/send", strings.NewReader(`{"text":"old synthetic prompt"}`))
+	req.Header.Set("X-Scimux-Chat-Instance", "old")
+	req.SetPathValue("id", "n1")
+	rec := httptest.NewRecorder()
+	a.handleSend(rec, req)
+	if rec.Code != 409 {
+		t.Fatalf("stale send status = %d, want 409", rec.Code)
+	}
+}
+
+func TestInterruptRejectsStaleChatIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{ID: "n1", InstanceID: "replacement"}
+	a.byID[n.ID] = n
+	req := httptest.NewRequest("POST", "/api/nodes/n1/send/interrupt", nil)
+	req.Header.Set("X-Scimux-Chat-Instance", "old")
+	req.SetPathValue("id", "n1")
+	rec := httptest.NewRecorder()
+	a.handleSendInterrupt(rec, req)
+	if rec.Code != 409 {
+		t.Fatalf("stale interrupt status = %d, want 409", rec.Code)
+	}
+}
+
+func TestInterruptCanProceedWhileSendGateIsHeld(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{ID: "n1", InstanceID: "current"}
+	a.byID[n.ID] = n
+	req := httptest.NewRequest("POST", "/api/nodes/n1/send/interrupt", nil)
+	req.Header.Set("X-Scimux-Chat-Instance", "current")
+	req.SetPathValue("id", "n1")
+	rec := httptest.NewRecorder()
+	gate := a.chatGate(n.ID)
+	gate.Lock()
+	done := make(chan struct{})
+	go func() { a.handleSendInterrupt(rec, req); close(done) }()
+	select {
+	case <-done:
+		gate.Unlock()
+	case <-time.After(time.Second):
+		gate.Unlock()
+		<-done
+		t.Fatal("interrupt was blocked by the send gate")
+	}
+	if rec.Code != 200 {
+		t.Fatalf("current interrupt status = %d, want 200", rec.Code)
+	}
+}
+
+type signalingReadCloser struct {
+	io.ReadCloser
+	started chan struct{}
+	once    sync.Once
+}
+
+func (r *signalingReadCloser) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+	return r.ReadCloser.Read(p)
+}
+
+func TestUploadRechecksIdentityAfterBodyWait(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	var n, replacement Node
+	_ = json.Unmarshal([]byte(`{"id":"n1","instance_id":"old"}`), &n)
+	_ = json.Unmarshal([]byte(`{"id":"n1","instance_id":"new"}`), &replacement)
+	a.byID[n.ID] = &n
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("files", "old.txt")
+	_, _ = fw.Write([]byte("synthetic"))
+	_ = mw.Close()
+	rd, wr := io.Pipe()
+	started := make(chan struct{})
+	req := httptest.NewRequest("POST", "/api/nodes/n1/attachments", &signalingReadCloser{ReadCloser: rd, started: started})
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-Scimux-Chat-Instance", "old")
+	req.SetPathValue("id", "n1")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { a.handleUploadAttachments(rec, req); close(done) }()
+	<-started
+	// The handler has looked up the original node and is now reading the body.
+	// Replace it before completing the multipart upload.
+	a.mu.Lock()
+	a.byID[n.ID] = &replacement
+	a.mu.Unlock()
+	_, _ = wr.Write(buf.Bytes())
+	_ = wr.Close()
+	<-done
+	if rec.Code != 409 {
+		t.Fatalf("stale delayed upload status = %d, want 409", rec.Code)
+	}
+}
 
 func TestUploadAttachmentStoresFileAndRef(t *testing.T) {
 	f := &fakeTmux{}
@@ -286,6 +413,52 @@ func TestResolveAttachmentsContainment(t *testing.T) {
 	} {
 		if _, err := a.resolveAttachments("n1", []Attachment{bad}); err == nil {
 			t.Errorf("expected rejection for %q", bad.Path)
+		}
+	}
+}
+
+func TestQueryChatInstanceRejectsReplacement(t *testing.T) {
+	for _, path := range []string{"/api/nodes/n1/send?chat_instance=old", "/api/nodes/n1/send/interrupt?chat_instance=old"} {
+		a := newTestApp(t, &fakeTmux{})
+		n := &Node{ID: "n1", InstanceID: "new"}
+		a.byID[n.ID] = n
+		req := httptest.NewRequest("POST", path, strings.NewReader(`{"text":"synthetic"}`))
+		req.SetPathValue("id", "n1")
+		rec := httptest.NewRecorder()
+		if strings.Contains(path, "interrupt") {
+			a.handleSendInterrupt(rec, req)
+		} else {
+			a.handleSend(rec, req)
+		}
+		if rec.Code != 409 {
+			t.Errorf("%s: got %d, want 409", path, rec.Code)
+		}
+	}
+}
+
+func TestUpdateRejectsRecreatedChatIdentity(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := &Node{ID: "n1", InstanceID: "new", Description: "replacement"}
+	a.byID[n.ID] = n
+	req := httptest.NewRequest("PATCH", "/api/nodes/n1?chat_instance=old", strings.NewReader(`{"description":"old synthetic"}`))
+	req.SetPathValue("id", "n1")
+	rec := httptest.NewRecorder()
+	a.handleUpdateNode(rec, req)
+	if rec.Code != 409 || n.Description != "replacement" {
+		t.Fatalf("status=%d description=%q", rec.Code, n.Description)
+	}
+}
+
+func TestIdentityQueryRejectsEmptyOrAmbiguousPrecondition(t *testing.T) {
+	for _, query := range []string{"chat_instance=", "chat_instance=current&chat_instance=old"} {
+		a := newTestApp(t, &fakeTmux{})
+		a.byID["n1"] = &Node{ID: "n1", InstanceID: "current"}
+		req := httptest.NewRequest("POST", "/api/nodes/n1/send/interrupt?"+query, nil)
+		req.SetPathValue("id", "n1")
+		rec := httptest.NewRecorder()
+		a.handleSendInterrupt(rec, req)
+		if rec.Code != 409 {
+			t.Errorf("%s: status=%d", query, rec.Code)
 		}
 	}
 }

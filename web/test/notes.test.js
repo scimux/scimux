@@ -3639,6 +3639,61 @@ test("Packet D: inbox jump miss toasts when the chat is gone", async () => {
   assert.ok(effects.toast.includes("That chat is no longer available."));
 });
 
+test('inbox shared bookmark jump uses its exact shared source', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2},calls=[];
+ const ctx=createFeature({bookmarks:[{t:'1',text:'same',team:source}],deps:{jumpToSharedSource:s=>{calls.push(s);return true}}});ctx.feature.bind();ctx.feature.open();await settle();
+ const row=el('div',{dataset:{t:'1'}}),jump=el('button',{dataset:{bmact:'jump'}});jump.closest=s=>s==='[data-bmact]'?jump:s==='.wsibookmark'?row:null;
+ ctx.roots.wsinboxlist.dispatch('click',{target:jump});assert.deepEqual(calls,[source]);assert.deepEqual(ctx.effects.jump,[]);
+});
+
+test('inbox shared bookmark reports unavailable source without losing its copy', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ for (const jumpToSharedSource of [undefined,()=>false]) {
+  const ctx=createFeature({bookmarks:[{t:'1',text:'retained',team:source}],deps:{jumpToSharedSource}});ctx.feature.bind();ctx.feature.open();await settle();
+  const row=el('div',{dataset:{t:'1'}}),jump=el('button',{dataset:{bmact:'jump'}});jump.closest=s=>s==='[data-bmact]'?jump:s==='.wsibookmark'?row:null;
+  ctx.roots.wsinboxlist.dispatch('click',{target:jump});assert.match(ctx.effects.toast[0],/unavailable/i);assert.deepEqual(ctx.effects.jump,[]);
+ }
+});
+
+test('inbox shared bookmark supports ordinary copy and explicit overflow removal', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2},mutations=[];
+ const ctx=createFeature({bookmarks:[{t:'1',text:'retained',team:source}],deps:{uiMutate:op=>mutations.push(op)}});ctx.feature.bind();ctx.feature.open();await settle();
+ const row=el('div',{dataset:{t:'1'}});
+ for (const kind of ['copy','del']) {
+  const action=el('button',{dataset:{bmact:kind}});action.closest=s=>s==='[data-bmact]'?action:s==='.wsibookmark'?row:null;
+  ctx.roots.wsinboxlist.dispatch('click',{target:action});
+ }
+ assert.deepEqual(ctx.effects.copy,['retained']);assert.deepEqual(mutations,[{k:'bookmark-del',t:'1'}]);
+});
+
+test('inbox shared bookmark overflow offers secondary controls', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ const ctx=createFeature({bookmarks:[{t:'1',text:'retained',team:source}]});ctx.feature.bind();ctx.feature.open();await settle();
+ const row=el('div',{dataset:{t:'1'}}),more=el('button',{dataset:{bmact:'more'}});
+ more.closest=s=>s==='[data-bmact]'?more:s==='.wsibookmark'?row:null;
+ more.getBoundingClientRect=()=>({top:40,left:40,bottom:84,right:84,width:44,height:44});ctx.roots.wspanel.getBoundingClientRect=()=>({top:0,left:0,width:400,height:600});
+ ctx.roots.wsinboxlist.dispatch('click',{target:more});
+ const menu=ctx.roots.wspanel.children.find(c=>(c.className||'').includes('popmenu'));assert.ok(menu);assert.match(menu.innerHTML,/Delete/);
+});
+
+test('inbox shared bookmark can expand its saved text and repeat a copy', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ const ctx=createFeature({bookmarks:[{t:'1',text:'',team:source}]});ctx.feature.bind();ctx.feature.open();await settle();
+ const bubble=el('div');bubble.scrollHeight=900;const row=el('div',{dataset:{t:'1'}});row.querySelector=s=>s==='.wsibubble'?bubble:null;
+ const more=el('button');more.closest=s=>s==='[data-wsimore]'?more:s==='.wsibookmark'?row:null;
+ ctx.roots.wsinboxlist.dispatch('click',{target:more});assert.equal(more.textContent,'Show less');
+ ctx.roots.wsinboxlist.dispatch('click',{target:more});assert.equal(more.textContent,'Show more');
+ const copy=el('button',{dataset:{bmact:'copy'}});copy.closest=s=>s==='[data-bmact]'?copy:s==='.wsibookmark'?row:null;
+ ctx.roots.wsinboxlist.dispatch('click',{target:copy});ctx.roots.wsinboxlist.dispatch('click',{target:copy});assert.deepEqual(ctx.effects.copy,['','']);
+});
+
+test('inbox shared bookmark send-to keeps exact identity and requires an existing local target', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2},calls=[];
+ const ctx=createFeature({bookmarks:[{t:'1',text:'same',team:source}],deps:{openSendTo:opts=>calls.push(opts)}});ctx.feature.bind();ctx.feature.open();await settle();
+ const row=el('div',{dataset:{t:'1'}}),send=el('button',{dataset:{bmact:'sendto'}});send.closest=s=>s==='[data-bmact]'?send:s==='.wsibookmark'?row:null;
+ ctx.roots.wsinboxlist.dispatch('click',{target:send});assert.deepEqual(calls[0].source,source);assert.equal(calls[0].allowNew,false);
+});
+
 /* ---------- AI disclosure on send-to ----------
    bookmarks.js owns the marker; notes.js owns two of the four callers, and a
    caller that hands over no role disables the disclosure silently. */

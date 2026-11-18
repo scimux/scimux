@@ -211,6 +211,16 @@ your People comments and Agent prompts have distinct labels. A recipient can use
 the header action to leave a shared chat and remove its local copy after
 confirmation; the owner’s chat remains intact.
 
+People discussion is text-only for now. Files pasted, dropped or picked for
+the owner's Agent stay with that Agent draft; attempting to add files while
+People is selected explains the limitation instead of changing destinations.
+Choosing Agent arms one send: when a send attempt is dispatched, the composer
+returns to People. Pre-dispatch validation leaves the draft and Agent selection
+in place. Disarming does not confirm delivery; a failed or unconfirmed Agent
+send keeps its input for the owner to review before retrying. Drafts from a
+removed chat can be reviewed separately when available; they are not inserted
+into a replacement chat.
+
 All puts Mine first, with your own chats together, followed by a separate
 group for each sharer and server. Sharers with identical display names stay
 distinct. Shared with me shows received groups only. Group folds and unread
@@ -226,6 +236,11 @@ to the exact resulting prompt, even if it was edited. A failed or uncertain
 send does not claim delivery, and missing evidence can leave an outcome
 unconfirmed. Confirmed links use the existing bounded navigation history;
 repeated uses show numbered choices with short submitted-prompt previews.
+
+Shared messages use the same bubble actions and timestamp display as ordinary
+chats. A saved shared bookmark jumps to its exact message, loading earlier
+history when needed; its comments are local annotations. If the source is no
+longer available, the saved content remains and the jump reports that status.
 
 Two optional operations can spend account quota and therefore default off:
 the Claude usage probe and the Muse approval judge. Their switches are

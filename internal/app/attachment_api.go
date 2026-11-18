@@ -272,6 +272,13 @@ func (a *app) handleUploadAttachments(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
+	gate := a.chatGate(n.ID)
+	gate.Lock()
+	defer gate.Unlock()
+	if !a.currentChatInstance(n, r) {
+		http.Error(w, "chat identity changed", http.StatusConflict)
+		return
+	}
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
 		http.Error(w, "no files in upload (expected multipart field \"files\")", 400)

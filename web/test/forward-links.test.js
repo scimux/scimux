@@ -99,6 +99,62 @@ test('prompt source identities distinguish local records and full shared generat
   links.clearPromptSources(store,'n1'); assert.deepEqual(links.readPromptSources(store,'n1'),[]);
 });
 
+test('send-to retains an exact shared source across drafts and confirmed links', () => {
+  const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:4},other={...source,seq:5},storage=memory();
+  links.addPendingForward(storage,'dest',source);links.addPendingForward(storage,'dest',{...source});links.addPendingForward(storage,'dest',other);
+  assert.deepEqual(links.readPendingForwards(storage,'dest'),[source,other]);
+  const link=links.makeForwardLinkToTurn(source,'dest',{uid:'u',segment:0,record:1,time:'then'});
+  assert.deepEqual(link.source,source);assert.notEqual(links.sourceAddressKey(source),links.sourceAddressKey(other));
+});
+
+test('an incomplete shared source cannot replace a pending durable source', () => {
+  const storage=memory(),source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:4};
+  links.addPendingForward(storage,'dest',source);
+  assert.deepEqual(links.addPendingForward(storage,'dest',{...source,generation:''}),[source]);
+  assert.deepEqual(links.addPendingForward(storage,'dest',null),[source]);
+});
+
+test('draft identity retains retired and unattributed data without merging it into a new chat', () => {
+ const storage=memory({'scimux-draft-owner:n1':'old','scimux-draft:n1':'old text','scimux-people-draft:n1':'old discussion','scimux-prompt-sources:n1':'[{"uid":"old"}]'});
+ assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);
+ assert.equal(storage.getItem('scimux-draft:n1'),null);assert.equal(storage.getItem('scimux-people-draft:n1'),null);
+ const archived=JSON.parse(storage.getItem('scimux-retired-drafts:n1:old'));assert.equal(archived[0]['scimux-draft:'],'old text');assert.equal(archived[0]['scimux-people-draft:'],'old discussion');
+ storage.setItem('scimux-draft:n1','new text');assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);assert.equal(storage.getItem('scimux-draft:n1'),'new text');
+ const legacy=memory({'scimux-draft:n1':'unattributed'});assert.equal(links.bindDraftIdentity(legacy,'n1','fresh'),true);assert.equal(JSON.parse(legacy.getItem('scimux-retired-drafts:n1:unknown'))[0]['scimux-draft:'],'unattributed');
+ assert.equal(links.bindDraftIdentity(legacy,'n1',''),true);
+});
+
+test('draft identity fails closed when it cannot archive or read prior data', () => {
+ const storage=memory({'scimux-draft-owner:n1':'old','scimux-draft:n1':'keep','scimux-retired-drafts:n1:old':'{}'});
+ assert.equal(links.bindDraftIdentity(storage,'n1','new'),false);assert.equal(storage.getItem('scimux-draft:n1'),'keep');
+ assert.equal(links.bindDraftIdentity({getItem(){throw Error('unavailable')}},'n1','new'),false);
+});
+
+test('unattributed and retired drafts can be listed for explicit local review', () => {
+ const storage=memory({'scimux-draft:n1':'legacy text','scimux-prompt-sources:n1':'[{"uid":"u","record":1}]'});
+ assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);
+ const entries=links.readRetiredDrafts(storage,'n1');
+ assert.equal(entries.length,1);assert.equal(entries[0].owner,'unknown');
+ assert.equal(entries[0].values['scimux-draft:'],'legacy text');
+ assert.equal(JSON.parse(entries[0].values['scimux-prompt-sources:'])[0].uid,'u');
+ assert.equal(links.archiveRetiredDraft(storage,'n1','old',{'scimux-draft:':'interrupted send','scimux-prompt-sources:':'[{"uid":"v","record":2}]'}),true);
+ const added=links.readRetiredDrafts(storage,'n1').find(entry=>entry.owner==='old');
+ assert.equal(added.values['scimux-draft:'],'interrupted send');
+ assert.equal(JSON.parse(added.values['scimux-prompt-sources:'])[0].uid,'v');
+});
+
+test('damaged recovery entries are ignored without hiding intact saved drafts', () => {
+ const storage=memory({'scimux-retired-index:n1':'["bad","wrong","missing","good"]','scimux-retired-drafts:n1:bad':'not json','scimux-retired-drafts:n1:wrong':'{}','scimux-retired-drafts:n1:good':'[null,[],{"scimux-draft:":"safe"}]'});
+ assert.deepEqual(links.readRetiredDrafts(storage,'n1'),[{owner:'good',values:{'scimux-draft:':'safe'}}]);
+ storage.setItem('scimux-retired-index:n1','{}');assert.deepEqual(links.readRetiredDrafts(storage,'n1'),[]);
+ assert.deepEqual(links.readRetiredDrafts({getItem(){throw Error('offline')}},'n1'),[]);
+ assert.equal(links.archiveRetiredDraft(storage,'n1','good',{}),false);
+ assert.equal(links.archiveRetiredDraft({getItem(){throw Error('offline')}},'n1','old',{}),false);
+ storage.setItem('scimux-retired-index:n1','["good"]');
+ assert.equal(links.archiveRetiredDraft(storage,'n1','good',{'scimux-draft:':'another'}),true);
+ assert.deepEqual(links.readRetiredDrafts(storage,'n1').map(entry=>entry.values['scimux-draft:']),['safe','another']);
+});
+
 test('asynchronous agent rejection restores only matching in-flight prompt sources', () => {
   const storage=memory(); const first={uid:'u',segment:0,record:1}, other={uid:'u',segment:0,record:2};
   links.writePromptFlights(storage,'n1',[{id:1,text:'rejected',sources:[first]},{id:2,text:'later',sources:[other]}]);

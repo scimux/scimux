@@ -82,13 +82,14 @@
  */
 
 import {
-  esc, md, fmtWhen, fmtBubbleTime, bubbleTitle,
+  esc, md, fmtWhen, fmtBubbleTime, bubbleTitle, bubbleSpeaker, bubbleTimeHTML,
   ASSET_REF_RE, stripAssetRefs,
 } from "./format.js";
 import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
 import { ownerCommentAnchors, ownerUnplacedComments, guestMessageHTML } from "./team-guest.js";
+import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
 import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
 import {
   interactionSignature,
@@ -350,11 +351,20 @@ export function bookmarkMarkerModel(turn, nodeId, bookmarks = [], usages = []){
   return { bookmark, destinations };
 }
 
+export function sharedBookmarkMarkerModel(source, bookmarks = []){
+  const key = promptSourceKey(source);
+  if (!key || !source?.server) return null;
+  const bookmark = bookmarks.find(item => item.team && promptSourceKey(item.team) === key);
+  return bookmark ? {bookmark, destinations:[]} : null;
+}
+
 export function sentToMarkerModel(turn, nodeId, links = []){
   const key = durableSourceKey(turn);
+  const sharedKey = turn?.server ? promptSourceKey(turn) : "";
   return (links || []).filter(link => {
     if (link?.kind === "prompt") return false;
     const source = (link && link.source) || {};
+    if (sharedKey) return promptSourceKey(source) === sharedKey;
     return (key && durableSourceKey(source) === key) || legacySourceMatches(turn, nodeId, source);
   });
 }
@@ -392,12 +402,19 @@ export function bubbleMarkersHTML(model = {}, { iconBookmark = "", iconInto = ""
     buttons.push(`<button type="button" class="bmarker" data-bmarker="prompt" aria-label="Sent as prompt" title="Sent as prompt"${n > 1 ? ` aria-haspopup="dialog"` : ""}><span class="rot90r">${iconInto}</span>${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
   }
   if (model.awaiting) buttons.push(`<span class="bmarker" role="img" aria-label="Awaiting prompt delivery" title="Awaiting prompt delivery"><span class="rot90r">${iconInto}</span></span>`);
+  if (model.accepted) buttons.push(`<span class="bmarker" role="img" aria-label="Accepted; awaiting confirmation" title="Accepted; awaiting confirmation"><span class="rot90r">${iconInto}</span></span>`);
+  if (model.unavailable) buttons.push(`<span class="bmarker" role="img" aria-label="Accepted; confirmation unavailable" title="Accepted; confirmation unavailable"><span class="rot90r">${iconInto}</span></span>`);
   if (model.prepared) buttons.push(`<span class="bmarker" role="img" aria-label="Prepared as prompt" title="Prepared as prompt"><span class="rot90r">${iconInto}</span></span>`);
   if (model.sentTo && model.sentTo.length){
     const n = model.sentTo.length;
     buttons.push(`<button type="button" class="bmarker" data-bmarker="sendto" aria-label="Open sent-to destination"${n > 1 ? ` aria-haspopup="menu"` : ""}><span class="rot180">${iconInto}</span>${n > 1 ? `<span class="bmarkercount">${n}</span>` : ""}</button>`);
   }
   return buttons.length ? `<div class="bubblemarkers">${buttons.join("")}</div>` : "";
+}
+
+export function sharedBubbleMarkersHTML(source, {bookmarks = [], links = [], state = {}, iconBookmark = "", iconInto = ""} = {}){
+  return bubbleMarkersHTML({...(sharedBookmarkMarkerModel(source, bookmarks) || {}),
+    sentTo:sentToMarkerModel(source, "", links), ...state, promptLinks:promptLinksForSource(source, links)}, {iconBookmark, iconInto});
 }
 
 /* Agent and provenance are not part of hashTurns (role+text only). Include
@@ -822,21 +839,17 @@ export function splitPermTitle(title){
 export function bubbleActionsHTML(turn, {
   escape = esc, fmtTime = fmtBubbleTime,
   iconBranch = "", iconInto = "", iconCopy = "",
-  fold = null, prompt = false,
+  fold = null, prompt = false, shared = false,
 } = {}){
-  const html = `<div class="bubwhen">${escape(fmtTime(turn && turn.time))}</div>` +
+  let html = bubbleTimeHTML(turn && turn.time, {format:fmtTime, escape}) +
     `<button data-bact="fork"><span>${iconBranch}</span>fork from here</button>` +
-    /* send-to sits beside fork — both take this text elsewhere, fork into a new
-       chat, send-to into an existing one. The ellipsis is the HIG signal that a
-       picker follows; "copy" would collide with the clipboard action below. */
     `<button data-bact="sendto"><span class="rot180">${iconInto}</span>send to&#8230;</button>` +
     `<button data-bact="desc"><span class="rot90l">${iconInto}</span>use as description</button>` +
     (prompt ? `<button data-bact="prompt"><span class="rot90r">${iconInto}</span>use as prompt</button>` : "") +
     `<button data-bact="bookmark"><span>${iconInto}</span>bookmark</button>` +
     `<button data-bact="copy"><span>${iconCopy}</span>copy</button>`;
-  if (!fold) return html;
-  return html +
-    `<button data-bact="fold" aria-label="Fold intermediate agent bubbles" title="Fold intermediate agent bubbles"><span>${fold.icon || ""}</span></button>`;
+  if (fold) html += `<button data-bact="fold" aria-label="Fold intermediate agent bubbles" title="Fold intermediate agent bubbles"><span>${fold.icon || ""}</span></button>`;
+  return shared ? html.replaceAll('data-bact=', 'data-gact=') : html;
 }
 
 /* Kind → CSS class. Underscores become hyphens; empty → "unknown". */
@@ -1314,26 +1327,35 @@ export function decisionRowHTML(surface, {
 
 /* ---------- feature factory ---------- */
 
-/* A name editor belongs to the guest feature, but lives in the owner's
-   polled timeline. Keep that exact row when its comment still exists. */
+/* A discussion action row belongs to the shared source adapter, but lives in
+   the owner's polled timeline. Keep it when its exact comment still exists. */
 export function captureDiscussionEditor(body, doc){
   const input = body?.querySelector('[data-grename]');
-  const row = input?.closest('[data-gactions]');
+  const row = input?.closest('[data-gactions]') || body?.querySelector('[data-gactions]');
   const turn = row?.previousElementSibling;
   if (!turn?.dataset.gkey || turn.dataset.cseq === undefined) return null;
   const active = row.contains(doc?.activeElement) ? doc.activeElement : null;
-  return {row, turn, active, input, start:input.selectionStart, end:input.selectionEnd,
-    direction:input.selectionDirection, top:turn.getBoundingClientRect().top};
+  const bubbleFocus = turn.contains?.(doc?.activeElement) ? doc.activeElement : null;
+  const marker = ["bookmark", "sendto", "prompt"].includes(bubbleFocus?.dataset?.bmarker) ? bubbleFocus.dataset.bmarker : "";
+  const bubble = !!bubbleFocus?.classList?.contains("bubble");
+  return {row, turn, active, input, start:input?.selectionStart, end:input?.selectionEnd,
+    direction:input?.selectionDirection, marker, bubble, top:turn.getBoundingClientRect().top};
 }
 
-export function restoreDiscussionEditor(body, saved, preserveAnchor = true){
+export function restoreDiscussionEditor(body, saved, preserveAnchor = true, viewport = createBubbleActionController()){
   if (!saved) return false;
   const target = [...body.querySelectorAll('[data-gkey][data-cseq]')].find(el =>
     el.dataset.gkey === saved.turn.dataset.gkey && el.dataset.cseq === saved.turn.dataset.cseq);
   if (!target) return false;
+  // The retained action row points at the original turn. Refresh its bubble
+  // from the newly rendered turn so settled source markers and labels are not
+  // frozen at the moment the row was opened.
+  if (typeof target.innerHTML === "string") saved.turn.innerHTML = target.innerHTML;
   target.replaceWith(saved.turn);
   saved.turn.after(saved.row);
-  if (preserveAnchor) body.scrollTop += saved.turn.getBoundingClientRect().top - saved.top;
+  if (preserveAnchor) viewport.restoreViewport({body, top:saved.top}, {anchor:saved.turn});
+  if (saved.marker) saved.turn.querySelector(`[data-bmarker="${saved.marker}"]`)?.focus({preventScroll:true});
+  else if (saved.bubble) saved.turn.querySelector('.bubble')?.focus({preventScroll:true});
   if (saved.active) {
     saved.active.focus({preventScroll:true});
     if (saved.active === saved.input && saved.start !== null)
@@ -1344,6 +1366,7 @@ export function restoreDiscussionEditor(body, saved, preserveAnchor = true){
 
 export function createChatFeature(deps){
   const d = deps || {};
+  const bubbleController = d.bubbleController || createBubbleActionController();
   if (typeof d.assetURL !== "function") {
     throw new Error("createChatFeature: assetURL is required");
   }
@@ -1432,6 +1455,9 @@ export function createChatFeature(deps){
   let tappedTurn = "";
   let chatDetailsOpen = false;
   let editingChatDesc = false;
+  let descriptionEditGeneration = 0;
+  let descriptionEditor = null;
+  const descriptionSaves = new Map();
   let chatDetailSavedUntil = 0;
   let chatCtxPct = { node: "", pct: null };
   /* Per-node "show all" for the approval ask. Only meaningful while this node
@@ -1448,9 +1474,11 @@ export function createChatFeature(deps){
   const renderedCleanups = [];
   /* Bottom-pin re-assert: rAF + ResizeObserver, both via deps (no-op headless). */
   let pinObserver = null;
+  let pinEpoch = 0;
   /* Approval "show all": a second, separate observer — it waits for .permask to
      gain a box, which is a different question from the scroller's geometry. */
   let permMoreObserver = null;
+  let permMoreEpoch = 0;
   let pinRafQueued = false;
 
   function g(name, fallback){
@@ -1620,28 +1648,30 @@ export function createChatFeature(deps){
     autoapprove.innerHTML = autoApproveButtonInnerHTML(model, icons, { escape });
   }
 
-  function renderTurnHTML(t, { bk, hist = false, nodeId, assets, externalAllowed = false, shared = false } = {}){
-    const a = splitAssetRefs(t.text, nodeId, assets, tileDeps());
-	const blocked = splitImportRefs(a.clean, nodeId, { ...tileDeps(), externalAllowed });
+  function turnMarkerHTML(t, nodeId){
     const bookmarkMarker = bookmarkMarkerModel(t, nodeId, g("bookmarks", []), g("noteUsages", []));
     const sentTo = sentToMarkerModel(t, nodeId, g("forwardLinks", []));
-    const {prepared, awaiting} = promptMarkerState(nodeId, t);
+    const {prepared, awaiting, accepted, unavailable} = promptMarkerState(nodeId, t);
     const promptLinks = promptLinksForSource(t, g("forwardLinks", []));
-    const marker = { ...(bookmarkMarker || {}), sentTo, prepared, awaiting, promptLinks };
-    const markers = (bookmarkMarker || sentTo.length || prepared || awaiting || promptLinks.length) ? bubbleMarkersHTML(marker, {
+    const marker = { ...(bookmarkMarker || {}), sentTo, prepared, awaiting, accepted, unavailable, promptLinks };
+    return (bookmarkMarker || sentTo.length || prepared || awaiting || accepted || unavailable || promptLinks.length) ? bubbleMarkersHTML(marker, {
       iconBookmark: icons.ICON_BUBBLE_BOOKMARK || "",
       iconInto: icons.ICON_INTO || "",
     }) : "";
-    const destination = shared && t.role === "user" ? '<div class="gwho">You · Agent</div>' : "";
+  }
+
+  function renderTurnHTML(t, { bk, hist = false, nodeId, assets, externalAllowed = false, shared = false } = {}){
+    const a = splitAssetRefs(t.text, nodeId, assets, tileDeps());
+	const blocked = splitImportRefs(a.clean, nodeId, { ...tileDeps(), externalAllowed });
+    const markers = turnMarkerHTML(t, nodeId);
+    const speaker = t.role === "user" ? bubbleSpeaker({mine:true}) : t.role === "assistant" ? bubbleSpeaker({agent:t.agent || nodeById(nodeId)?.agent || "Agent"}) : "";
     bubbleTurns[bk] = t;
     const cls = turnRoleClass(t.role, { hist, media: !!((a.html || blocked.html) && !blocked.clean) });
     const dataAttrs = hist
       ? `data-bk="${bk}" data-time="${escape(t.time || "")}" data-uid="${escape(t.uid || "")}" data-segment="${t.segment || 0}" data-record="${t.record || 0}"`
       : `data-i="${bk.startsWith("i:") ? bk.slice(2) : ""}" data-bk="${bk}"`;
-    return `
-      <div class="${cls}" ${dataAttrs}>
-		<div class="bubble" title="${escape(titleFn(t.role, t.time))}">${markers}${destination}${renderMissingImportText(renderMissingImportText(markdown(blocked.clean), blocked.missing), a.labels)}${a.html}${blocked.html}</div>
-      </div>`;
+    return renderBubbleTurn({turnClass:cls, turnAttributes:dataAttrs, bubbleAttributes:`title="${escape(titleFn(t.role, t.time))}" tabindex="0"`, markers, speakerName:shared ? speaker : "", indented:true,
+      text:blocked.clean, formatText:text => renderMissingImportText(renderMissingImportText(markdown(text), blocked.missing), a.labels), suffix:a.html + blocked.html});
   }
 
   function confirmDeferredForward(nodeId, turns){
@@ -1677,23 +1707,54 @@ export function createChatFeature(deps){
      marker. A note usage is part of the bookmark marker. */
   function agentBubbleProtected(turn, nodeId){
     if (bookmarkMarkerModel(turn, nodeId, g("bookmarks", []), g("noteUsages", []))) return true;
-    return sentToMarkerModel(turn, nodeId, g("forwardLinks", [])).length > 0 || promptLinksForSource(turn, g("forwardLinks", [])).length > 0 || promptMarkerState(nodeId, turn).prepared || promptMarkerState(nodeId, turn).awaiting;
+    const state = promptMarkerState(nodeId, turn);
+    return sentToMarkerModel(turn, nodeId, g("forwardLinks", [])).length > 0 || promptLinksForSource(turn, g("forwardLinks", [])).length > 0 || state.prepared || state.awaiting || state.accepted || state.unavailable;
   }
 
   function promptMarkerState(nodeId, source){
     const key = promptSourceKey(source);
-    if (!key) return {prepared:false, awaiting:false};
+    if (!key) return {prepared:false, awaiting:false, accepted:false, unavailable:false};
     const prepared = readPromptSources(d.storage, nodeId).some(item => promptSourceKey(item) === key);
-    const awaiting = readPromptFlights(d.storage, nodeId).some(flight => flight.sources.some(item => promptSourceKey(item) === key));
-    return {prepared, awaiting};
+    const flights = readPromptFlights(d.storage, nodeId).filter(flight => flight.sources.some(item => promptSourceKey(item) === key));
+    const awaiting = flights.some(flight => !flight.accepted);
+    const accepted = flights.some(flight => flight.accepted && !flight.terminalUnknown);
+    const unavailable = flights.some(flight => flight.accepted && flight.terminalUnknown);
+    return {prepared, awaiting, accepted, unavailable};
   }
 
   function discussionHTML(comment, copy, nodeId){
     const source = {...copy.view, log:"comments", seq:comment.seq};
-    const state = promptMarkerState(nodeId, source);
     discussionSources[`${copy.key}/${comment.seq}`] = source;
-    const markers = bubbleMarkersHTML({...state, promptLinks:promptLinksForSource(source, g("forwardLinks", []))}, {iconInto:icons.ICON_INTO || ""});
+    const markers = discussionMarkerHTML(source, nodeId);
     return guestMessageHTML(comment, copy.names, copy.view.server, copy.people, copy.key, markers);
+  }
+
+  function discussionMarkerHTML(source, nodeId){
+    return sharedBubbleMarkersHTML(source, {bookmarks:g("bookmarks", []), links:g("forwardLinks", []),
+      state:promptMarkerState(nodeId, source), iconBookmark:icons.ICON_BUBBLE_BOOKMARK || "", iconInto:icons.ICON_INTO || ""});
+  }
+
+  function refreshPromptMarkers(nodeId){
+    if (!nodeId || g("sel", "") !== nodeId || renderedNode !== nodeId || !msgs) return;
+    function update(turn, html){
+      const bubble = q(turn, ".bubble");
+      if (!bubble) return;
+      const old = q(bubble, ".bubblemarkers");
+      const active = doc.activeElement;
+      const marker = old && old.contains(active) && active?.dataset?.bmarker;
+      const restoreFocus = ["bookmark", "prompt", "sendto"].includes(marker);
+      if (old) old.remove();
+      if (html) bubble.insertAdjacentHTML("afterbegin", html);
+      if (restoreFocus) q(bubble, `[data-bmarker="${marker}"]`)?.focus({preventScroll:true});
+    }
+    for (const turn of qa(msgs, ".turn[data-bk]")) {
+      const source = bubbleTurns[turn.dataset.bk];
+      if (source) update(turn, turnMarkerHTML(source, nodeId));
+    }
+    for (const turn of qa(msgs, ".gmsg[data-gkey][data-cseq]")) {
+      const source = discussionSources[`${turn.dataset.gkey}/${turn.dataset.cseq}`];
+      if (source) update(turn, discussionMarkerHTML(source, nodeId));
+    }
   }
 
   function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets, externalAllowed = false, discussion = null, emptySegment = null } = {}){
@@ -1950,7 +2011,8 @@ export function createChatFeature(deps){
     const RO = d.ResizeObserver;
     if (!RO || !msgs || pinObserver) return;
     try {
-      pinObserver = new RO(() => { reassertPin(); });
+      const epoch = pinEpoch;
+      pinObserver = new RO(() => { if (epoch === pinEpoch) reassertPin(); });
       pinObserver.observe(msgs);
     } catch {
       pinObserver = null;
@@ -1962,7 +2024,9 @@ export function createChatFeature(deps){
     const raf = d.requestAnimationFrame;
     if (typeof raf !== "function" || pinRafQueued) return;
     pinRafQueued = true;
+    const epoch = pinEpoch;
     raf(() => {
+      if (epoch !== pinEpoch) return;
       pinRafQueued = false;
       reassertPin();
     });
@@ -1979,6 +2043,7 @@ export function createChatFeature(deps){
   }
 
   function clearPinObserver(){
+    pinEpoch++;
     if (pinObserver && typeof pinObserver.disconnect === "function"){
       try { pinObserver.disconnect(); } catch { /* ignore */ }
     }
@@ -2008,10 +2073,28 @@ export function createChatFeature(deps){
   }
 
   function onSelectChange(){
+    ++descriptionEditGeneration;
+    descriptionEditor = null;
+    bubbleController.clear();
     interactionCard.retire();
+    ++chatLoadToken;
+    clearChatLoad();
+    setWorkPulse(false);
+    if (typeof d.setComposerBusy === "function") d.setComposerBusy(false);
+    if (keyrow) keyrow.innerHTML = "";
+    if (convtools) convtools.hidden = true;
+    if (autoapprove) autoapprove.hidden = true;
+    if (gauge) gauge.hidden = true;
+    clearRenderedListeners();
+    clearPinObserver();
+    clearPermMoreObserver();
+    if (msgs) msgs.innerHTML = "";
+    renderedNode = "";
+    peekHost = null;
+    peekSig = "";
     activeHighlight = null;
     chatSig = "";
-    syncMuseSchemaWarning(nodeById(g("sel", "")));
+    syncMuseSchemaWarning(null);
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
     chatETag = { node: "", etag: "" };
     lastAutoView = null;
@@ -2031,6 +2114,8 @@ export function createChatFeature(deps){
   }
 
   function onReselect(){
+    ++descriptionEditGeneration;
+    descriptionEditor = null;
     editingChatDesc = false;
     chatDetailSavedUntil = 0;
     chatSig = "";
@@ -2058,19 +2143,20 @@ export function createChatFeature(deps){
 
   async function loadHistory(id, scrollTo, { preserveScroll = false } = {}){
     const savedScrollTop = preserveScroll && msgs ? msgs.scrollTop : null;
+    const gen = g("selGen", 0);
     try {
       const data = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
-      if (g("sel", "") !== id) return;
+      if (g("sel", "") !== id || g("selGen", 0) !== gen) return;
       chatHist = { node: id, segs: data.segments || [], emptySegs: data.empty_segments || [], scrollTo: scrollTo || "", assets: data.assets || {} };
       chatScrollBottom = false;
       chatSig = "";
       await refreshChat();
-      if (savedScrollTop != null && g("sel", "") === id && msgs){
+      if (savedScrollTop != null && g("sel", "") === id && g("selGen", 0) === gen && msgs){
         msgs.scrollTop = savedScrollTop;
         clampChatScroll(msgs);
       }
     } catch (err) {
-      if (typeof d.alert === "function") d.alert(err.message);
+      if (g("sel", "") === id && g("selGen", 0) === gen && typeof d.alert === "function") d.alert(err.message);
     }
   }
 
@@ -2108,7 +2194,7 @@ export function createChatFeature(deps){
         ? laneColor(n.lane_id) : "";
     }
     if (typeof d.setComposerClosed === "function")
-      d.setComposerClosed(!!(n && n.ended_at));
+      d.setComposerClosed(!n || !!n.ended_at);
     if (!n) return;
     const saved = now < chatDetailSavedUntil;
     if (toggle){
@@ -2159,13 +2245,26 @@ export function createChatFeature(deps){
     const sel = g("sel", "");
     if (!sel || !nodeById(sel)) return;
     const id = sel;
-    const description = (chatdescinput && chatdescinput.value || "").trim();
+    const instance = nodeById(id).instance_id || "";
+    if (!instance && d.requireChatIdentity) { d.alert?.("This chat's identity is unavailable. Reconnect before editing its description."); return; }
+    const visit = g("selGen", 0), edit = descriptionEditGeneration;
+    if (!descriptionEditor || descriptionEditor.id !== id || descriptionEditor.instance !== instance || descriptionEditor.visit !== visit) {
+      d.alert?.("This chat changed while the description was open. Copy your text before closing the editor.");
+      return;
+    }
+    const sameChat = () => (nodeById(id)?.instance_id || "") === instance && !!nodeById(id);
+    const draft = chatdescinput && chatdescinput.value || "";
+    const currentEditor = () => descriptionSaves.get(saveKey) === saveToken && sameChat() && g("sel", "") === id && g("selGen", 0) === visit && descriptionEditGeneration === edit && editingChatDesc && (chatdescinput && chatdescinput.value || "") === draft;
+    const description = draft.trim();
+    const saveKey = JSON.stringify([id, instance]), saveToken = {};
+    descriptionSaves.set(saveKey, saveToken);
     try {
-      const n = await api(`/api/nodes/${encodeURIComponent(id)}`, {
+      const n = await api(`/api/nodes/${encodeURIComponent(id)}${instance ? `?chat_instance=${encodeURIComponent(instance)}` : ""}`, {
         method: "PATCH",
         body: JSON.stringify({ description }),
       });
-      if (typeof d.updateLocalNode === "function") d.updateLocalNode(n);
+      if (descriptionSaves.get(saveKey) === saveToken && sameChat() && typeof n?.description === "string" && (!n.instance_id || n.instance_id === instance) && typeof d.updateLocalNode === "function") d.updateLocalNode({id, description:n.description});
+      if (!currentEditor()) return;
       editingChatDesc = false;
       chatDetailsOpen = true;
       chatDetailSavedUntil = (typeof d.now === "function" ? d.now() : Date.now()) + CHAT_DETAIL_SAVED_MS;
@@ -2176,6 +2275,7 @@ export function createChatFeature(deps){
       renderChatHead();
       if (typeof d.renderMap === "function") d.renderMap();
       setTimeoutFn(() => {
+        if (!sameChat() || g("sel", "") !== id || g("selGen", 0) !== visit || descriptionEditGeneration !== edit) return;
         const now = typeof d.now === "function" ? d.now() : Date.now();
         if (now >= chatDetailSavedUntil){
           chatDetailSavedUntil = 0;
@@ -2183,14 +2283,19 @@ export function createChatFeature(deps){
         }
       }, CHAT_DETAIL_SAVED_MS);
     } catch (err) {
-      if (typeof d.alert === "function") d.alert(err.message);
+      if (currentEditor() && typeof d.alert === "function") d.alert(err.message);
+    } finally {
+      if (descriptionSaves.get(saveKey) === saveToken) descriptionSaves.delete(saveKey);
     }
   }
 
   function useTurnAsDescription(text){
     const n = nodeById(g("sel", ""));
     if (!n) return;
+    if (!n.instance_id && d.requireChatIdentity) { d.alert?.("This chat's identity is unavailable. Reconnect before editing its description."); return; }
     chatDetailsOpen = true;
+    const edit = ++descriptionEditGeneration, visit = g("selGen", 0), instance = n.instance_id || "";
+    descriptionEditor = {id:n.id, instance, visit};
     editingChatDesc = true;
     if (chatdescinput){
       chatdescinput.value = text || "";
@@ -2199,38 +2304,23 @@ export function createChatFeature(deps){
     chatSig = "";
     renderChatHead();
     setTimeoutFn(() => {
-      if (!chatdescinput) return;
+      if (!chatdescinput || !editingChatDesc || descriptionEditGeneration !== edit || g("selGen", 0) !== visit || g("sel", "") !== n.id || (nodeById(n.id)?.instance_id || "") !== instance) return;
       focusAtEnd(chatdescinput);
     }, 0);
-  }
-
-  /* Whether this click was the end of a drag that selected text. A click-drag
-     still fires `click` on mouseup, so without this the bubble tap toggles the
-     action bar out from under someone who was only marking a passage to copy.
-     A leftover selection cannot cause a false positive: pressing down collapses
-     one, so anything still selected when the click arrives was selected by this
-     very gesture. */
-  function justSelectedText(){
-    const sel = doc && typeof doc.getSelection === "function"
-      ? doc.getSelection()
-      : (win && typeof win.getSelection === "function" ? win.getSelection() : null);
-    if (!sel || sel.isCollapsed) return false;
-    const text = typeof sel.toString === "function" ? sel.toString() : "";
-    return text.trim() !== "";
   }
 
   function renderBubbleActions(){
     if (!msgs) return;
     qa(msgs, ".bubactions").forEach(x => x.remove());
-    if (!tappedTurn) return;
+    if (!tappedTurn) {
+      if (bubbleController.current()?.kind === "local") bubbleController.clear();
+      return;
+    }
     const turnEl = q(msgs, `.turn[data-bk="${tappedTurn}"]`);
     const turn = bubbleTurns[tappedTurn];
     if (!turnEl || !turn){ tappedTurn = ""; return; }
-    const row = (doc && doc.createElement) ? doc.createElement("div") : null;
-    if (!row) return;
-    row.className = "bubactions";
     const foldEntry = foldByBK[tappedTurn];
-    row.innerHTML = bubbleActionsHTML(turn, {
+    const html = bubbleActionsHTML(turn, {
       escape, fmtTime: bubTimeFn,
       iconBranch: icons.ICON_BRANCH || "",
       iconInto: icons.ICON_INTO || "",
@@ -2238,8 +2328,7 @@ export function createChatFeature(deps){
       fold: foldEntry ? { icon: icons.ICON_FOLD || "" } : null,
       prompt: typeof d.canPreparePrompt === "function" && d.canPreparePrompt(turn),
     });
-    if (typeof turnEl.after === "function") turnEl.after(row);
-    else if (turnEl.parentNode) turnEl.parentNode.insertBefore(row, turnEl.nextSibling);
+    renderActionRow({doc, turn:turnEl, html});
   }
 
   function scrollAndFlash(target){
@@ -2263,8 +2352,31 @@ export function createChatFeature(deps){
     const pendingJump = getPendingJump();
     const sel = g("sel", "");
     if (!pendingJump || pendingJump.node !== sel) return false;
+    if (pendingJump.visit !== undefined && pendingJump.visit !== g("selGen", 0)) { setPendingJump(null); return false; }
     const now = typeof d.now === "function" ? d.now() : Date.now();
     if (now - pendingJump.ts > PENDING_JUMP_TTL_MS){ setPendingJump(null); return false; }
+    if (pendingJump.team?.log === "mirror" && promptSourceKey(pendingJump.team)) {
+      const source = pendingJump.team;
+      const key = [source.server, source.owner, source.chat, source.generation].join("/");
+      const copy = (typeof d.ownerDiscussion === "function" ? d.ownerDiscussion() : []).find(item => item.key === key && item.uid === source.chat);
+      const entry = copy?.mirrors?.find(item => item.seq === source.seq);
+      if (!entry) return false;
+      if (!Number.isSafeInteger(entry.local_segment) || entry.local_segment < 0 || !Number.isSafeInteger(entry.local_record) || entry.local_record < 0) {
+        setPendingJump(null); if (typeof d.toast === "function") d.toast("This shared message is unavailable — the saved bookmark remains."); return false;
+      }
+      setPendingJump({node:sel, uid:copy.uid, segment:entry.local_segment, record:entry.local_record, ts:pendingJump.ts, visit:pendingJump.visit});
+      return consumePendingJump(el, turns, priorTurns);
+    }
+    if (pendingJump.team?.log === "comments" && promptSourceKey(pendingJump.team)) {
+      const source = pendingJump.team;
+      const key = [source.server, source.owner, source.chat, source.generation].join("/");
+      const target = q(el, `[data-gkey="${CSSRef.escape(key)}"][data-cseq="${source.seq}"]`);
+      if (target) { setPendingJump(null); scrollAndFlash(target); return true; }
+      if (priorTurns > 0 && !(chatHist.node === sel && chatHist.segs) && !pendingJump.histLoading) {
+        pendingJump.histLoading = true; setPendingJump(pendingJump); loadHistory(sel, "");
+      }
+      return false;
+    }
     const idx = matchPendingJumpInTurns(pendingJump, turns);
     if (idx >= 0){
       setPendingJump(null);
@@ -2701,7 +2813,7 @@ export function createChatFeature(deps){
     clampChatScroll(el);
     if (shouldRestoreFoldFocus) restoreFoldFocus(el, pendingFoldFocus);
     /* Keep the live editor on poll rebuilds, but never undo explicit navigation. */
-    restoreDiscussionEditor(el, editor, !historyScrolled && !jumpScrolled);
+    restoreDiscussionEditor(el, editor, !historyScrolled && !jumpScrolled, bubbleController);
     if (previousHighlight && activeHighlight === previousHighlight){
       const now = typeof d.now === "function" ? d.now() : Date.now();
       const sameLog = !data.log_uid || data.log_uid === previousHighlight.uid;
@@ -2796,7 +2908,9 @@ export function createChatFeature(deps){
     const RO = d.ResizeObserver;
     if (typeof RO !== "function") return false;
     try {
+      const epoch = permMoreEpoch;
       const obs = new RO(() => {
+        if (epoch !== permMoreEpoch) return;
         /* Still no box: keep waiting. Re-entering while unmeasurable would
            disconnect and re-observe, and observe() always delivers an initial
            callback — that is a spin, not a retry. */
@@ -2813,6 +2927,7 @@ export function createChatFeature(deps){
   }
 
   function clearPermMoreObserver(){
+    permMoreEpoch++;
     if (permMoreObserver && typeof permMoreObserver.disconnect === "function"){
       try { permMoreObserver.disconnect(); } catch { /* ignore */ }
     }
@@ -2894,6 +3009,7 @@ export function createChatFeature(deps){
        or refreshing the UI. Never re-read a newer global request id after the
        async action begins (P1: bind decision to the exact pending request). */
     const dest = sel;
+    const gen = g("selGen", 0);
     const key = b.dataset.key;
     const requestId = b.dataset.requestId || "";
     const dialogId = b.dataset.dialogId || "";
@@ -2905,16 +3021,93 @@ export function createChatFeature(deps){
         if (dialogId) body.dialog_id = dialogId;
         await api(`/api/nodes/${encodeURIComponent(dest)}/key`,
           { method: "POST", body: JSON.stringify(body) });
+        if (g("sel", "") !== dest || g("selGen", 0) !== gen) return;
         chatSig = "";
         if (typeof d.scheduleTick === "function") d.scheduleTick(400);
-        else if (typeof d.tick === "function") setTimeoutFn(() => d.tick(), 400);
+        else if (typeof d.tick === "function") setTimeoutFn(() => { if (g("sel", "") === dest && g("selGen", 0) === gen) d.tick(); }, 400);
       } catch (err) {
+        if (g("sel", "") !== dest || g("selGen", 0) !== gen) return;
         delete suppressAttentionUntil[dest];
         chatSig = "";
         refreshChat();
         if (typeof d.alert === "function") d.alert(err.message);
       }
     })();
+  }
+
+  function openBubbleMarker(source, turn, kind){
+  const bookmarkModel = turn ? bookmarkMarkerModel(
+    turn, g("sel", ""), g("bookmarks", []), g("noteUsages", [])) : sharedBookmarkMarkerModel(source, g("bookmarks", []));
+  const sentTo = source ? sentToMarkerModel(source, g("sel", ""), g("forwardLinks", [])) : [];
+  const promptLinks = promptLinksForSource(source, g("forwardLinks", []));
+  const model = { ...(bookmarkModel || {}), sentTo };
+  if (kind === "prompt" && promptLinks.length){
+    const openLink = link => {
+      const dest = link.destination || {};
+      const valid = typeof dest.node === "string" && dest.node && promptSourceKey(dest);
+      const exact = valid ? {node:dest.node, uid:dest.uid, segment:dest.segment ?? 0, record:dest.record} : null;
+      if ((!exact || (typeof d.jumpToChatAddress === "function" && d.jumpToChatAddress(exact) === false)) && typeof d.toast === "function") d.toast("This destination chat is no longer available.");
+    };
+    if (promptLinks.length === 1) openLink(promptLinks[0]);
+    else if (typeof d.openChoiceList === "function") d.openChoiceList({title:"Sent as prompt", choices:promptLinks.map((link, i) => ({id:String(i), label:`${i + 1}. ${nodeById(link.destination?.node)?.title || "Chat"}${link.preview ? " · " + Array.from(String(link.preview).replace(/\s+/g, " ").trim()).slice(0, 100).join("") : ""}`, link})), onChoose:choice => openLink(choice.link)});
+  } else if (kind === "bookmark"){
+    if (!bookmarkModel) return;
+    if (!model.destinations.length){
+      if (typeof d.openBookmark === "function") d.openBookmark(model.bookmark.t);
+    } else if (model.destinations.length === 1){
+      if (typeof d.openNoteUsage === "function") d.openNoteUsage(model.destinations[0]);
+    } else if (typeof d.openChoiceList === "function"){
+      d.openChoiceList({
+        title: "Used in…",
+        choices: model.destinations.map((u, i) => ({
+          id: String(i), label: `${u.note_title || "Note"} › ${u.section_title || "Section"}`,
+          usage: u,
+        })),
+        onChoose: choice => d.openNoteUsage(choice.usage),
+      });
+    }
+  } else if (kind === "sendto" && sentTo.length){
+    const openLink = link => {
+      if (typeof d.jumpToChatAddress !== "function") return;
+      if (d.jumpToChatAddress(link.destination || {}) === false && typeof d.toast === "function")
+        d.toast("This destination chat is no longer available.");
+    };
+    if (sentTo.length === 1) openLink(sentTo[0]);
+    else if (typeof d.openChoiceList === "function"){
+      d.openChoiceList({
+        title: "Sent to…",
+        choices: sentTo.map((link, i) => {
+          const dest = (link && link.destination) || {};
+          const node = nodeById(dest.node);
+          return {
+            id: String(i), link,
+            label: `${(node && node.title) || "Chat"}${link.sent_at ? " · " + bubTimeFn(link.sent_at) : ""}`,
+          };
+        }),
+        onChoose: choice => openLink(choice.link),
+      });
+    }
+  }
+  }
+
+  function toggleLocalTurn(turnEl){
+    const k = turnEl.dataset.bk;
+    const selected = bubbleController.toggle({key:"local/" + k, target:turnEl, kind:"local", close:() => {
+      tappedTurn = "";
+      qa(msgs, ".bubactions").forEach(x => x.remove());
+    }});
+    tappedTurn = selected ? k : "";
+    renderBubbleActions();
+    if (tappedTurn){
+      const row = q(msgs, ".bubactions");
+      if (row && typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }
+
+  function onMsgsKeydown(e){
+    const turn = e.target?.closest?.(".turn");
+    if (!turn?.dataset?.bk) return;
+    activateBubbleKey(e, {doc, win, activate:() => toggleLocalTurn(turn)});
   }
 
   function onMsgsClick(e){
@@ -2993,59 +3186,8 @@ export function createChatFeature(deps){
     if (marker){
       const turnEl = marker.closest && marker.closest(".turn");
       const turn = turnEl && turnEl.dataset ? bubbleTurns[turnEl.dataset.bk] : null;
-      const bookmarkModel = turn && bookmarkMarkerModel(
-        turn, g("sel", ""), g("bookmarks", []), g("noteUsages", []));
-      const sentTo = turn ? sentToMarkerModel(turn, g("sel", ""), g("forwardLinks", [])) : [];
       const source = turn || (turnEl?.dataset?.gkey && discussionSources[`${turnEl.dataset.gkey}/${turnEl.dataset.cseq}`]);
-      const promptLinks = promptLinksForSource(source, g("forwardLinks", []));
-      const model = { ...(bookmarkModel || {}), sentTo };
-      if (marker.dataset.bmarker === "prompt" && promptLinks.length){
-        const openLink = link => {
-          const dest = link.destination || {};
-          const valid = typeof dest.node === "string" && dest.node && promptSourceKey(dest);
-          const exact = valid ? {node:dest.node, uid:dest.uid, segment:dest.segment ?? 0, record:dest.record} : null;
-          if ((!exact || (typeof d.jumpToChatAddress === "function" && d.jumpToChatAddress(exact) === false)) && typeof d.toast === "function") d.toast("This destination chat is no longer available.");
-        };
-        if (promptLinks.length === 1) openLink(promptLinks[0]);
-        else if (typeof d.openChoiceList === "function") d.openChoiceList({title:"Sent as prompt", choices:promptLinks.map((link, i) => ({id:String(i), label:`${i + 1}. ${nodeById(link.destination?.node)?.title || "Chat"}${link.preview ? " · " + Array.from(String(link.preview).replace(/\s+/g, " ").trim()).slice(0, 100).join("") : ""}`, link})), onChoose:choice => openLink(choice.link)});
-      } else if (marker.dataset.bmarker === "bookmark"){
-        if (!bookmarkModel) return;
-        if (!model.destinations.length){
-          if (typeof d.openBookmark === "function") d.openBookmark(model.bookmark.t);
-        } else if (model.destinations.length === 1){
-          if (typeof d.openNoteUsage === "function") d.openNoteUsage(model.destinations[0]);
-        } else if (typeof d.openChoiceList === "function"){
-          d.openChoiceList({
-            title: "Used in…",
-            choices: model.destinations.map((u, i) => ({
-              id: String(i), label: `${u.note_title || "Note"} › ${u.section_title || "Section"}`,
-              usage: u,
-            })),
-            onChoose: choice => d.openNoteUsage(choice.usage),
-          });
-        }
-      } else if (marker.dataset.bmarker === "sendto" && sentTo.length){
-        const openLink = link => {
-          if (typeof d.jumpToChatAddress !== "function") return;
-          if (d.jumpToChatAddress(link.destination || {}) === false && typeof d.toast === "function")
-            d.toast("This destination chat is no longer available.");
-        };
-        if (sentTo.length === 1) openLink(sentTo[0]);
-        else if (typeof d.openChoiceList === "function"){
-          d.openChoiceList({
-            title: "Sent to…",
-            choices: sentTo.map((link, i) => {
-              const dest = (link && link.destination) || {};
-              const node = nodeById(dest.node);
-              return {
-                id: String(i), link,
-                label: `${(node && node.title) || "Chat"}${link.sent_at ? " · " + bubTimeFn(link.sent_at) : ""}`,
-              };
-            }),
-            onChoose: choice => openLink(choice.link),
-          });
-        }
-      }
+      openBubbleMarker(source, turn, marker.dataset.bmarker);
       return;
     }
     const foldBtn = e.target.closest && e.target.closest("[data-fold]");
@@ -3053,8 +3195,12 @@ export function createChatFeature(deps){
       onFoldToggle(foldBtn);
       return;
     }
-    const ba = e.target.closest && e.target.closest("[data-bact]");
-    if (ba){
+    routeBubbleClick({target:e.target, actionSelector:"[data-bact]", doc, win,
+      findTurn:target => { const turn = target.closest(".turn"); return turn?.dataset?.bk ? turn : null; },
+      onAction:onLocalAction, onTurn:toggleLocalTurn});
+  }
+
+  function onLocalAction(ba){
       const turn = bubbleTurns[tappedTurn];
       if (ba.dataset.bact === "fold"){
         const entry = foldByBK[tappedTurn];
@@ -3068,13 +3214,14 @@ export function createChatFeature(deps){
         return;
       }
       if (ba.dataset.bact === "prompt") {
-        if (turn && typeof d.canPreparePrompt === "function" && d.canPreparePrompt(turn) && typeof d.preparePrompt === "function") {
-          d.preparePrompt({text:stripAssetRefs(turn.text), role:turn.role, prov:turn.prov}, {uid:turn.uid, segment:turn.segment ?? 0, record:turn.record});
-        }
+        if (turn) dispatchBubbleAction("prompt", {text:turn.text, source:{uid:turn.uid, segment:turn.segment ?? 0, record:turn.record}}, {
+          canPrepare:() => typeof d.canPreparePrompt === "function" && d.canPreparePrompt(turn),
+          prepare:typeof d.preparePrompt === "function" ? (text,source) => d.preparePrompt({text,role:turn.role,prov:turn.prov},source) : null,
+        });
         return;
       }
       if (ba.dataset.bact === "copy"){
-        if (turn && typeof d.copyText === "function") d.copyText(turn.text || "");
+        if (turn) dispatchBubbleAction("copy", turn, {copy:d.copyText});
         ba.innerHTML = "&#10003; copied";
         setTimeoutFn(() => renderBubbleActions(), 900);
         return;
@@ -3082,97 +3229,46 @@ export function createChatFeature(deps){
       if (ba.dataset.bact === "bookmark"){
         if (!turn) return;
         const sel = g("sel", "");
-        const bookmarks = g("bookmarks", []) || [];
-        const dup = bookmarks.some(nt =>
-          nt.node === sel && nt.turnTime === (turn.time || "") && nt.text === (turn.text || ""));
-        if (!dup){
-          const node = nodeById(sel);
-          const bookmark = {
-            t: new Date().toISOString(), text: turn.text || "",
-            node: sel, lane: node?.lane_id || "", turnTime: turn.time || "",
-          };
-          /* Whose turn this was, recorded now because nothing downstream can
-             recover it: the bookmark outlives the segment it was taken from.
-             It is what lets send-to disclose an Output as AI-generated
-             (bookmarks.js discloseAgentOutput) and what fills the speaker in a
-             note's frozen snapshot. Written only when the transcript said so —
-             a guessed role is worse than none. */
-          if (turn.role === "user" || turn.role === "assistant")
-            bookmark.role = turn.role;
-          if (turn.agent) bookmark.agent = turn.agent;
-          if (Object.prototype.hasOwnProperty.call(turn, "prov") && turn.prov !== undefined){
-            const cloned = cloneJSONValue(turn.prov);
-            if (cloned !== undefined) bookmark.prov = cloned;
-          }
-          if (typeof d.stampAddress === "function") d.stampAddress(bookmark, turn);
-          const commit = captured => {
-            if (g("sel", "") !== sel) return;
-            const exists = (g("bookmarks", []) || []).some(nt =>
-              captured.uid && nt.uid === captured.uid && nt.segment === captured.segment && nt.record === captured.record);
-            if (exists) return;
-            if (typeof d.uiMutate === "function") d.uiMutate({ k: "bookmark-add", bookmark: captured });
-            chatSig = "";
-            ba.innerHTML = "&#10003; noted";
-            setTimeoutFn(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
-          };
-          let captured = bookmark;
-          try {
-            if (typeof d.captureBookmark === "function") captured = d.captureBookmark(bookmark, turn);
-          } catch (_err) {
-            if (typeof d.toast === "function") d.toast("Bookmark capture failed — try again.");
-            return;
-          }
-          if (captured && typeof captured.then === "function") {
-            ba.textContent = "capturing…";
-            captured.then(commit, () => {
-              if (g("sel", "") === sel && typeof d.toast === "function") d.toast("Bookmark capture failed — try again.");
-            });
-            return;
-          }
-          commit(captured);
-          return;
+        const visit = g("selGen", 0), node = nodeById(sel);
+        const bookmark = {t:new Date().toISOString(),text:turn.text || "",node:sel,lane:node?.lane_id || "",turnTime:turn.time || ""};
+        if (turn.role === "user" || turn.role === "assistant") bookmark.role = turn.role;
+        if (turn.agent) bookmark.agent = turn.agent;
+        if (Object.prototype.hasOwnProperty.call(turn, "prov") && turn.prov !== undefined){
+          const cloned = cloneJSONValue(turn.prov);
+          if (cloned !== undefined) bookmark.prov = cloned;
         }
-        ba.innerHTML = "&#10003; noted";
-        setTimeoutFn(() => { tappedTurn = ""; renderBubbleActions(); }, 700);
+        if (typeof d.stampAddress === "function") d.stampAddress(bookmark, turn);
+        const noted = () => { ba.innerHTML = "&#10003; noted"; setTimeoutFn(() => { tappedTurn = ""; renderBubbleActions(); }, 700); };
+        dispatchBubbleAction("bookmark", bookmark, {
+          exists:(value,phase) => (g("bookmarks", []) || []).some(nt => phase === "before"
+            ? nt.node === sel && nt.turnTime === (turn.time || "") && nt.text === (turn.text || "")
+            : value.uid && nt.uid === value.uid && nt.segment === value.segment && nt.record === value.record),
+          isCurrent:() => g("sel", "") === sel && g("selGen", 0) === visit,
+          capture:value => typeof d.captureBookmark === "function" ? d.captureBookmark(value,turn) : value,
+          duplicate:noted, pending:() => { ba.textContent = "capturing…"; },
+          error:() => { if (typeof d.toast === "function") d.toast("Bookmark capture failed — try again."); },
+          commit:value => { if (typeof d.uiMutate === "function") d.uiMutate({k:"bookmark-add",bookmark:value}); chatSig = ""; noted(); },
+        });
         return;
       }
       tappedTurn = "";
       renderBubbleActions();
       if (!turn) return;
       if (ba.dataset.bact === "fork" && typeof d.forkFromTurn === "function")
-        d.forkFromTurn(stripAssetRefs(turn.text));
+        dispatchBubbleAction("fork", turn, {fork:text => d.forkFromTurn(stripAssetRefs(text))});
       else if (ba.dataset.bact === "sendto" && typeof d.openSendTo === "function")
-        /* strip for the same reason fork does: scimux-asset: markers are
-           node-scoped and would land as dead markdown in the target */
-        d.openSendTo({
-          text: stripAssetRefs(turn.text),
-          exceptId: g("sel", ""),
-          title: "Send to chat…",
-          role: turn.role || "",
+        dispatchBubbleAction("sendto", {
+          text:stripAssetRefs(turn.text), role:turn.role, exceptId:g("sel", ""), prov:turn.prov,
           source: {
             node: g("sel", ""), turnTime: turn.time || "",
             ...(turn.uid ? {
               uid: turn.uid, segment: Number(turn.segment) || 0, record: Number(turn.record) || 0,
             } : {}),
           },
-        });
+        }, {sendTo:opts => d.openSendTo({...opts, role:turn.role})});
       else if (ba.dataset.bact === "desc")
-        useTurnAsDescription(turn.text);
+        dispatchBubbleAction("desc",turn,{describe:(_id,capture) => useTurnAsDescription(capture.text)});
       return;
-    }
-    const turnEl = e.target.closest && e.target.closest(".turn");
-    if (turnEl && turnEl.dataset && turnEl.dataset.bk &&
-        !(e.target.closest && e.target.closest("a, button"))){
-      if (justSelectedText()) return;
-      const k = turnEl.dataset.bk;
-      tappedTurn = tappedTurn === k ? "" : k;
-      renderBubbleActions();
-      if (tappedTurn){
-        const row = q(msgs, ".bubactions");
-        if (row && typeof row.scrollIntoView === "function")
-          row.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      }
-    }
   }
 
   function onMsgsTouchEnd(e){
@@ -3205,6 +3301,7 @@ export function createChatFeature(deps){
   async function onAutoApproveClick(){
     if (!autoapprove || autoapprove.disabled) return;
     const id = g("sel", "");
+    const gen = g("selGen", 0);
     const n = nodeById(id);
     if (!id || !n) return;
     const pressed = typeof autoapprove.getAttribute === "function"
@@ -3217,20 +3314,20 @@ export function createChatFeature(deps){
         method: "POST",
         body: JSON.stringify({ enabled: enable }),
       });
-      if (autoApproveInFlight !== id || g("sel", "") !== id) return;
+      if (autoApproveInFlight !== id || g("sel", "") !== id || g("selGen", 0) !== gen) return;
       // Invalidate only this node's chat validator; never borrow another's ETag.
       if (chatETag.node === id) chatETag = { node: "", etag: "" };
       paintAutoApprove(view, n);
       chatSig = "";
       await refreshChat();
     } catch (err){
-      if (autoApproveInFlight !== id || g("sel", "") !== id) return;
+      if (autoApproveInFlight !== id || g("sel", "") !== id || g("selGen", 0) !== gen) return;
       // Retain last authoritative server state; surface a concise error.
       const msg = (err && err.message) ? String(err.message) : "auto-approve failed";
       const base = lastAutoView || { supported: true, enabled: false, phase: "off", count: 0 };
       paintAutoApprove({ ...base, error: msg.replace(/\s+/g, " ").trim().slice(0, 160) }, n);
     } finally {
-      if (autoApproveInFlight === id) autoApproveInFlight = "";
+      if (autoApproveInFlight === id && g("selGen", 0) === gen) autoApproveInFlight = "";
     }
   }
 
@@ -3248,23 +3345,31 @@ export function createChatFeature(deps){
 
   function onDescLongpress(){
     if (!g("sel", "") || !nodeById(g("sel", ""))) return;
+    const n = nodeById(g("sel", ""));
+    if (!n.instance_id && d.requireChatIdentity) { d.alert?.("This chat's identity is unavailable. Reconnect before editing its description."); return; }
     chatDetailsOpen = true;
+    const edit = ++descriptionEditGeneration, visit = g("selGen", 0), instance = n.instance_id || "";
+    descriptionEditor = {id:n.id, instance, visit};
     editingChatDesc = true;
     chatSig = "";
     renderChatHead();
     setTimeoutFn(() => {
-      if (!chatdescinput) return;
+      if (!chatdescinput || !editingChatDesc || descriptionEditGeneration !== edit || g("selGen", 0) !== visit || g("sel", "") !== n.id || (nodeById(n.id)?.instance_id || "") !== instance) return;
       focusAtEnd(chatdescinput);
     }, 0);
   }
 
   function cancelDescEdit(){
+    ++descriptionEditGeneration;
+    descriptionEditor = null;
     editingChatDesc = false;
     chatSig = "";
     renderChatHead();
   }
 
   function cancelEditorsForNav(){
+    ++descriptionEditGeneration;
+    descriptionEditor = null;
     editingChatDesc = false;
     chatSig = "";
   }
@@ -3283,7 +3388,8 @@ export function createChatFeature(deps){
     on(msgs, "scroll", onMsgsScroll);
     on(msgs, "load", onMsgsLoad, true);
     on(msgs, "error", onMsgsError, true);
-    on(msgs, "click", onMsgsClick);
+    if (msgs && typeof msgs.addEventListener === "function")
+      cleanups.push(bubbleController.listen(msgs, {click:onMsgsClick, keydown:onMsgsKeydown}));
     on(msgs, "touchend", onMsgsTouchEnd, { passive: true });
     on(keyrow, "click", onKeyrowClick);
     on(termtoggle, "click", onTermToggle);
@@ -3301,6 +3407,10 @@ export function createChatFeature(deps){
   }
 
   function destroy(){
+    ++descriptionEditGeneration;
+    descriptionEditor = null;
+    editingChatDesc = false;
+    descriptionSaves.clear();
     interactionCard.destroy();
     while (cleanups.length){
       try { cleanups.pop()(); } catch { /* ignore */ }
@@ -3321,8 +3431,11 @@ export function createChatFeature(deps){
     setSentEcho,
     clearSentEchoFor,
     invalidate,
+    refreshPromptMarkers,
+    openSharedMarker: (source, kind) => openBubbleMarker(source, null, kind),
     onSelectChange,
     onReselect,
+    useTurnAsDescription,
     restartWorkPulse,
     cancelDescEdit,
     cancelEditorsForNav,

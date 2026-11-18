@@ -794,6 +794,16 @@ func (m *workerManager) RecoverUnknown(a *app) error {
 		if node.Description == "" {
 			node.Description = node.Prompt
 		}
+		instance, err := newUUID()
+		if err != nil {
+			m.mu.Lock()
+			delete(m.entries, locator.NodeID)
+			m.mu.Unlock()
+			_ = client.Close()
+			errs = append(errs, fmt.Errorf("recover worker %s identity: %w", locator.NodeID, err))
+			continue
+		}
+		node.InstanceID = instance
 		if node.Transport == "" {
 			switch node.Agent {
 			case "pi", "opencode", "grok", "cursor", "dsh", "vibe":

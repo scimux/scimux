@@ -24,10 +24,18 @@ for line in sys.stdin:
             if '[delay-dispatch]' in text: time.sleep(3)
             emit({'id':req['id'],'error':{'code':-32603,'message':'Synthetic dispatch refusal'}})
             continue
+        if '[hold-dispatch]' in text:
+            release=os.environ['SCIMUX_SYNTHETIC_COUNTER']+'.release-dispatch'
+            deadline=time.monotonic()+45
+            while not os.path.exists(release) and time.monotonic()<deadline: time.sleep(.05)
         if '[delay-dispatch]' in text: time.sleep(3)
         with open(os.environ['SCIMUX_SYNTHETIC_COUNTER'],'a') as out: out.write(json.dumps({'method':method,'text':text})+'\n')
         emit({'id':req['id'],'result':{'turn':{'id':tid}}})
         note('turn/started',{'threadId':params['threadId'],'turn':{'id':tid}})
+        if '[hold-active]' in text:
+            release=os.environ['SCIMUX_SYNTHETIC_COUNTER']+'.release-active'
+            deadline=time.monotonic()+45
+            while not os.path.exists(release) and time.monotonic()<deadline: time.sleep(.05)
         note('item/completed',{'threadId':params['threadId'],'turnId':tid,'item':{'type':'agentMessage','id':'msg-'+str(turn),'text':'Synthetic response '+str(turn)}})
         note('turn/completed',{'threadId':params['threadId'],'turn':{'id':tid,'status':'completed'}})
         continue

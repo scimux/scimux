@@ -1151,6 +1151,16 @@ test("new-chat Send-to waits for the confirmed initial turn and keeps modified t
   assert.ok(created.at > 0, "the latch is stamped so it can expire");
 });
 
+test('new chat binds its source intent to the newly created instance before selection', async () => {
+ const source={node:'source',uid:'u1',segment:0,record:1};
+ const ctx=createFeature({storageInit:{'scimux-draft-owner:created-1':'old','scimux-draft:created-1':'retired'}});
+ ctx.setApi(async(path,opts={})=>path==='/api/nodes'&&opts.method==='POST'?{id:'created-1',instance_id:'new'}:{});
+ ctx.feature.bind();ctx.feature.openNewActivity({prompt:'forwarded',forwardSources:[source]});ctx.byId.nc_title.value='Destination';ctx.byId.nc_lane.value='lane-a';ctx.byId.nc_start.dispatch('click');
+ await Promise.resolve();await Promise.resolve();await Promise.resolve();
+ assert.equal(ctx.storage.getItem('scimux-draft-owner:created-1'),'new');assert.equal(ctx.storage.getItem('scimux-draft:created-1'),null);
+ assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-sendto-pending:created-1')),[source]);
+});
+
 test("new-chat cancel drops Send-to intent; not_sent transfers it to the recovery draft", async () => {
   const source = { node: "source", turnTime: "t", text: "original" };
   const cancel = createFeature();
@@ -1779,6 +1789,25 @@ test("P4 openNewActivity({ prompt, focusTitle }) prefills prompt and focuses tit
     "focusTitle reuses caret-at-end path, not select-all");
 });
 
+test('a fresh shared-source fork requires an explicit start-and-send action', async () => {
+  const ctx=createFeature({sel:'team/s/o/c/g'});ctx.feature.bind();
+  const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+  ctx.feature.openNewActivity({prompt:'Quoted shared text',forwardSources:[source],explicitSend:true});
+  assert.equal(ctx.byId.nc_prompt.value,'Quoted shared text');assert.match(ctx.byId.nc_start.innerHTML,/Start &amp; send/);
+  assert.equal(ctx.apiCalls.filter(c=>c.path==='/api/nodes').length,0);
+  ctx.byId.nc_title.value='Fresh local';ctx.byId.nc_start.dispatch('click');await settle();
+  const create=ctx.apiCalls.find(c=>c.path==='/api/nodes');const body=JSON.parse(create.opts.body);
+  assert.equal(body.parent,'');assert.equal(body.prompt,'Quoted shared text');
+});
+
+test('erasing a shared fork quote cancels its source association', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1},ctx=createFeature();ctx.feature.bind();
+ ctx.feature.openNewActivity({prompt:'Quoted shared text',forwardSources:[source],explicitSend:true});
+ ctx.byId.nc_prompt.value='';ctx.byId.nc_prompt.dispatch('input');ctx.byId.nc_prompt.value='Unrelated text';ctx.byId.nc_prompt.dispatch('input');
+ ctx.byId.nc_title.value='Fresh';ctx.byId.nc_start.dispatch('click');await settle();
+ assert.equal(ctx.storage.getItem('scimux-sendto-pending:created-1'),null);
+});
+
 test("P4 plusbtn click leaves nc_prompt empty (openNewActivity ignores the Event)", () => {
   /* Trap: on(plusbtn, "click", openNewActivity) would pass the MouseEvent as
      the first argument. With options destructuring that becomes a silent
@@ -2039,6 +2068,12 @@ test("LI-C1: a started activity echoes its launch prompt before the chat opens",
   assert.deepEqual(ctx.effects.select, ["created-1"]);
 });
 
+test('a new activity accepts absent forward-source metadata', () => {
+ const ctx=createFeature();ctx.feature.bind();
+ assert.doesNotThrow(()=>ctx.feature.openNewActivity({prompt:'synthetic',forwardSources:null}));
+ assert.equal(ctx.byId.nc_prompt.value,'synthetic');
+});
+
 test("LI-C2: the echo is set before the selection, so the first render already has it", async () => {
   const order = [];
   const ctx = createFeature({
@@ -2081,6 +2116,19 @@ test("LI-C3: an undelivered launch prompt is never echoed as delivered", async (
       "a delivery that did not happen");
     assert.equal(ctx.storage.getItem("scimux-draft:n1"), "p", "recovery draft still kept");
   }
+});
+
+test('a created chat is not created again when draft identity binding fails', async () => {
+ const ctx=createFeature({storageInit:{'scimux-draft-owner:n1':'old','scimux-draft:n1':'old draft','scimux-retired-drafts:n1:old':'{}'}});
+ let creates=0;
+ ctx.setApi(async (path,opts)=>{
+  if(path==='/api/nodes' && opts.method==='POST'){creates++;return {id:'n1',instance_id:'new',initial_delivery:'not_sent'};}
+  return {};
+ });
+ ctx.feature.bind();ctx.byId.plusbtn.dispatch('click');ctx.byId.nc_title.value='New';ctx.byId.nc_prompt.value='undelivered';ctx.byId.nc_lane.value='lane-a';
+ ctx.byId.nc_start.dispatch('click');await settle();
+ assert.deepEqual(ctx.effects.select,['n1']);assert.equal(ctx.byId.nc_prompt.value,'undelivered');
+ ctx.byId.nc_start.dispatch('click');await settle();assert.equal(creates,1);
 });
 
 test("LI-C4: an edit or a rejected start never mints an echo", async () => {
@@ -3088,4 +3136,13 @@ test("a catalog tier change revokes acknowledgment and a removed model cannot la
   assert.equal(ctx.byId.nc_muse_ack.checked, false);
   assert.equal(ctx.byId.nc_muse_privacy.hidden, true);
   assert.doesNotMatch(ctx.byId.nc_model.innerHTML, /synth-disc/);
+});
+
+test('closing a sheet handles a backdrop without classList or a class name', () => {
+ const ctx=createFeature();ctx.roots.backdrop.classList=null;ctx.roots.backdrop.className='';ctx.feature.closeSheets();assert.equal(ctx.roots.backdrop.className,'');ctx.feature.destroy();
+});
+
+test('sheet close forwards the action owner and backdrop closes without it', () => {
+ const seen=[],owner={};const ctx=createFeature({deps:{onCloseSheets:value=>seen.push(value)}});ctx.feature.bind();
+ ctx.feature.closeSheets(owner);assert.equal(seen.at(-1),owner);ctx.byId.backdrop.dispatch('click');assert.notEqual(seen.at(-1),owner);ctx.feature.destroy();
 });

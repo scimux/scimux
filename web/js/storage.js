@@ -89,6 +89,59 @@ export function createStorage(raw){
 /* Send-to provenance follows draft lifetime: source intents stay device-local
  * until the sent text appears as a real destination transcript turn. */
 export const PENDING_FORWARD_PREFIX = "scimux-sendto-pending:";
+
+// Index archived draft owners without putting any retired text into a live
+// composer. The contents remain local and are only exposed for review.
+export function readRetiredDrafts(storage, nodeId){
+  try {
+    const owners = JSON.parse(storage.getItem("scimux-retired-index:" + nodeId) || "[]");
+    if (!Array.isArray(owners)) return [];
+    return owners.flatMap(owner => {
+      try {
+        const values = JSON.parse(storage.getItem("scimux-retired-drafts:" + nodeId + ":" + owner) || "[]");
+        return Array.isArray(values) ? values.filter(item => item && typeof item === "object" && !Array.isArray(item)).map(item => ({owner, values:item})) : [];
+      } catch { return []; }
+    });
+  } catch { return []; }
+}
+
+export function archiveRetiredDraft(storage, nodeId, owner, values){
+  try {
+    const key = "scimux-retired-drafts:" + nodeId + ":" + owner;
+    const saved = JSON.parse(storage.getItem(key) || "[]");
+    if (!Array.isArray(saved)) return false;
+    const indexKey = "scimux-retired-index:" + nodeId;
+    const owners = JSON.parse(storage.getItem(indexKey) || "[]");
+    if (!Array.isArray(owners)) return false;
+    storage.setItem(key, JSON.stringify([...saved, values]));
+    if (!owners.includes(owner)) storage.setItem(indexKey, JSON.stringify([...owners, owner]));
+    return true;
+  } catch { return false; }
+}
+
+// Preserve slug-keyed data separately when its chat ownership is unknown or
+// retired. Archive first; a storage error leaves the original data intact.
+export function bindDraftIdentity(storage, nodeId, instance){
+  if (!instance) return true;
+  const ownerKey = "scimux-draft-owner:" + nodeId;
+  const prefixes = ["scimux-draft:", "scimux-people-draft:", "scimux-prompt-sources:", "scimux-prompt-flights:", "scimux-sendto-pending:", "scimux-sendto-awaiting:"];
+  try {
+    const old = storage.getItem(ownerKey);
+    if (old === instance) return true;
+    const values = {};
+    for (const prefix of prefixes) {
+      const value = storage.getItem(prefix + nodeId);
+      if (value !== null) values[prefix] = value;
+    }
+    if (Object.keys(values).length) {
+      const owner = old || "unknown";
+      if (!archiveRetiredDraft(storage, nodeId, owner, values)) return false;
+      for (const prefix of prefixes) storage.removeItem(prefix + nodeId);
+    }
+    storage.setItem(ownerKey, instance);
+    return true;
+  } catch { return false; }
+}
 export const AWAITING_FORWARD_PREFIX = "scimux-sendto-awaiting:";
 export const FORWARD_TEXT_FALLBACK_MAX = 256;
 /* A latch only clears when its text lands as a destination turn, and both the
@@ -108,6 +161,8 @@ export function awaitingForwardKey(nodeId){
 }
 
 export function sourceAddressKey(source = {}){
+  if (source.server && source.owner && source.chat && source.generation && source.log)
+    return promptSourceKey(source);
   if (source.uid)
     return `u:${source.uid}:${Number(source.segment) || 0}:${Number(source.record) || 0}`;
   return `n:${source.node || ""}:${source.turnTime || ""}`;
@@ -130,7 +185,7 @@ export function writePendingForwards(storage, nodeId, sources){
 }
 
 export function addPendingForward(storage, nodeId, source){
-  if (!source || (!source.uid && !source.node)) return readPendingForwards(storage, nodeId);
+  if (!source || (!source.uid && !source.node && !promptSourceKey(source))) return readPendingForwards(storage, nodeId);
   const list = readPendingForwards(storage, nodeId);
   const key = sourceAddressKey(source);
   if (!list.some(item => sourceAddressKey(item) === key)) list.push(source);
@@ -184,6 +239,8 @@ export function clearAwaitingForward(storage, nodeId){
 }
 
 function compactAddress(value = {}){
+  if (value.server && value.owner && value.chat && value.generation && value.log && promptSourceKey(value))
+    return {server:value.server, owner:value.owner, chat:value.chat, generation:value.generation, log:value.log, seq:value.seq};
   const out = { node: value.node || "" };
   if (value.uid){
     out.uid = value.uid;

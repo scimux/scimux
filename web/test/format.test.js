@@ -10,6 +10,8 @@ import {
   fmtDur,
   fmtStamp,
   fmtBubbleTime,
+  bubbleTimeHTML,
+  bubbleSpeaker,
   fmtWhen,
   fmtNoteMeta,
   bubbleTitle,
@@ -27,6 +29,16 @@ import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const formatSrc = readFileSync(join(__dirname, "../js/format.js"), "utf8");
+
+test("common bubble labels and timestamps preserve missing and escaped values", () => {
+  assert.equal(bubbleSpeaker(), "Unknown person");
+  assert.equal(bubbleSpeaker({ mine: true, name: "Ada" }), "You");
+  assert.equal(bubbleSpeaker({ name: "Ada" }), "Ada");
+  assert.equal(bubbleSpeaker({ mine: true, agent: "Harness" }), "Harness · agent");
+  assert.equal(bubbleTimeHTML(""), "");
+  assert.equal(bubbleTimeHTML("invalid"), '<div class="bubwhen">invalid</div>');
+  assert.equal(bubbleTimeHTML("now", { format: () => "<time>", escape: esc }), '<div class="bubwhen">&lt;time&gt;</div>');
+});
 
 /* ---------- purity / no browser globals ---------- */
 test("format.js has no browser globals or implicit app state", () => {

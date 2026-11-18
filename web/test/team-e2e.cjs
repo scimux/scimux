@@ -8,6 +8,11 @@ const net = require('node:net');
 const assert = require('node:assert/strict');
 const { spawn, execFileSync } = require('node:child_process');
 const { retire } = require('./testdata/team-e2e/tmux-cleanup.cjs');
+const { selectSharedSubscription } = require('./testdata/team-e2e/share-select.cjs');
+const { retireCompletedContexts } = require('./testdata/team-e2e/browser-lifecycle.cjs');
+const { contrastSample } = require('./testdata/team-e2e/contrast.cjs');
+const { createCleanupOnce } = require('./testdata/team-e2e/cleanup-once.cjs');
+const { createPageCapture } = require('./testdata/team-e2e/capture-once.cjs');
 
 function prerequisite(name) {
   const value = process.env[name];
@@ -29,9 +34,13 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scimux-team-e2e-'));
 fs.chmodSync(root, 0o700);
 const manifest = {version:1, scope:'implemented synthetic browser acceptance scenarios', assertions:[], artifacts:[], counters:{}, cleanup:[]};
 const seats = [], children = [], pages = [], contexts = [];
+const coverageArchive = [];
 const pending = new Set();
 const heldReleases = new Set();
 let browser, relay, shutting = false, signalCode = 0;
+let cleanupProbeGate, cleanupProbeRelease;
+let captureProbeGate, captureProbeRelease, captureProbeStarted=false;
+const launchBrowser=()=>playwright.chromium.launch({handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false});
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const assertID = (id, condition) => { assert.ok(condition, id); manifest.assertions.push({id, result:'pass'}); };
 const record = () => fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify(manifest, null, 2));
@@ -81,8 +90,9 @@ async function restartRelay() {
   let out='';c.stdout.on('data',x=>{out+=x;});relay.child=c;
   await until(()=>{if(c.exitCode!==null)throw Error('restarted relay exited');return out.includes('scimux-team listening on '+relay.url);},20000,'relay restart');
 }
-async function makeSeat(name) {
+async function makeSeat(name, legacyClosed=false) {
   const data=artifacts(name); fs.mkdirSync(data,{mode:0o700});
+  if(legacyClosed)fs.writeFileSync(path.join(data,'nodes.jsonl'),JSON.stringify({type:'node',node:{id:'Synthetic-legacy-closed',title:'Synthetic legacy closed',agent:'codex',dir:data,created_at:'1999-01-01T00:00:00Z',ended_at:'2000-01-01T00:00:00Z'}})+'\n',{mode:0o600});
   const tmuxDir=path.join(data,'tmux');fs.mkdirSync(tmuxDir,{mode:0o700});
   const socket='e2e-'+name+'-'+process.pid;
   const env={...baseEnv, HOME:data, TMUX_TMPDIR:tmuxDir, SCIMUX_SYNTHETIC_COUNTER:path.join(data,'counter')};
@@ -216,8 +226,8 @@ async function receivedOfflineRetry(mode,ownerSeat,readerSeat) {
   const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid),30000,'offline subscription');
   const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');const owner=await pageFor(ownerSeat,mode,'offline-owner-'+mode),reader=await pageFor(readerSeat,mode,'offline-reader-'+mode);
   await open(owner,chat.id);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await open(reader,'team/'+key);
-  await reader.getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
-  const seed='Synthetic owner discussion '+mode;await owner.locator('#prompt').fill(seed);await owner.locator('#sendbtn').click();await reader.getByText(seed,{exact:true}).waitFor({timeout:30000});
+  await reader.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
+  const seed='Synthetic owner discussion '+mode;await owner.locator('#prompt').fill(seed);await owner.locator('#sendbtn').click();await reader.locator('#msgs').getByText(seed,{exact:true}).waitFor({timeout:30000});
   const human=reader.locator('#msgs .gmsg').filter({hasText:seed});const preAuthor=(await human.locator('.gwho').innerText()).trim();
   const preComments=await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0');const preHuman=preComments.entries.find(x=>x.text===seed);
   const preMirror=await readerSeat.api('/api/team/subscriptions/'+key+'?after=0');const preAssistant=preMirror.entries.find(x=>x.t==='assistant'&&x.text==='Synthetic response 1');
@@ -228,28 +238,91 @@ async function receivedOfflineRetry(mode,ownerSeat,readerSeat) {
   try {
     if(mode==='phone')await reader.locator('#chatback').click();await open(reader,readerSeat.node.id);
     await reader.reload({waitUntil:'networkidle'});if(mode==='phone'&&await reader.locator('#cards').evaluate(el=>el.getBoundingClientRect().right<=1))await reader.locator('#chatback').click();
-    await open(reader,'team/'+key);await reader.getByText(seed,{exact:true}).waitFor({timeout:30000});await reader.getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
+    await open(reader,'team/'+key);await reader.locator('#msgs').getByText(seed,{exact:true}).waitFor({timeout:30000});await reader.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
     const author=reader.locator('#msgs .gmsg').filter({hasText:seed}).locator('.gwho');
     const saved=await readerSeat.api('/api/team/subscriptions/'+key+'?after=0');
     const assistant=saved.entries.find(x=>x.t==='assistant'&&x.text==='Synthetic response 1');
     const savedComments=await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0');const savedHuman=savedComments.entries.find(x=>x.text===seed);
     const agentBubble=reader.locator('#msgs [data-seq]').filter({hasText:'Synthetic response 1'}).first();
     assertID('received-offline-saved-copy-and-draft-'+mode,(await reader.locator('#prompt').innerText())===draft&&(await author.innerText()).trim()===preAuthor&&(await author.getAttribute('data-seat'))===preHuman.author&&!!savedHuman&&savedHuman.author===preHuman.author&&savedHuman.seq===preHuman.seq&&savedHuman.anchor===preHuman.anchor&&Number(await author.locator('..').locator('..').getAttribute('data-cseq'))===preHuman.seq&&!!assistant&&assistant.seq===preAssistant.seq&&assistant.agent===preAssistant.agent&&(await agentBubble.locator('.gwho').innerText()).trim()===preAgentAuthor&&Number(await agentBubble.getAttribute('data-seq'))===preAssistant.seq&&[saved.view.server,saved.view.owner,saved.view.chat,saved.view.generation].join('/')===key);
-    const dialog=reader.waitForEvent('dialog');await reader.locator('#sendbtn').click();const failure=await dialog;await failure.accept();
+    const dialog=reader.waitForEvent('dialog').then(failure=>failure.accept());await reader.locator('#sendbtn').click();await dialog;
     assertID('received-offline-failed-send-keeps-draft-'+mode,(await reader.locator('#prompt').innerText())===draft&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
   } finally {await restartRelay();}
   await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
   let attemptedKey, retryKey;const pattern='**/api/team/subscriptions/'+key+'/comments';
   await reader.route(pattern,async route=>{if(route.request().method()!=='POST'){await route.continue();return;}attemptedKey=route.request().postDataJSON().key;await route.fetch();await route.abort('failed');});
   try {
-    const dialog=reader.waitForEvent('dialog');await reader.locator('#sendbtn').click();const failure=await dialog;await failure.accept();
+    const dialog=reader.waitForEvent('dialog').then(failure=>failure.accept());await reader.locator('#sendbtn').click();await dialog;
     assertID('received-retry-uncertain-keeps-draft-'+mode,(await reader.locator('#prompt').innerText())===draft);
   } finally {await reader.unroute(pattern);}
   await reader.route(pattern,route=>{if(route.request().method()==='POST')retryKey=route.request().postDataJSON().key;return route.continue();});
-  try {await reader.locator('#sendbtn').click();await reader.getByText(draft,{exact:true}).waitFor({timeout:30000});} finally {await reader.unroute(pattern);}
+  try {await reader.locator('#sendbtn').click();await reader.locator('#msgs').getByText(draft,{exact:true}).waitFor({timeout:30000});} finally {await reader.unroute(pattern);}
   const entries=await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0');
   assertID('received-explicit-retry-idempotent-'+mode,!!attemptedKey&&attemptedKey===retryKey&&entries.entries.filter(x=>x.text===draft).length===1&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
   manifest['received-offline-'+mode]={key,preAuthor,preAgentAuthor,human:{author:preHuman.author,seq:preHuman.seq,anchor:preHuman.anchor},assistant:{seq:preAssistant.seq,agent:preAssistant.agent||'Agent'},before,after:counts(ownerSeat),sequence:entries.entries.find(x=>x.text===draft)?.seq};await screenshot(reader,'received-offline-retry-'+mode+'.png');
+}
+async function deleteRecreationIsolation(mode,seat) {
+  const title='Delayed deletion '+mode,old=await node(seat,'codex',title,'Synthetic old deletion target');
+  const page=await pageFor(seat,mode,'delete-recreation-'+mode);await open(page,old.id);if(mode==='phone')await page.locator('#chatback').click();
+  let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
+  await page.route('**/api/nodes/'+old.id+'*',async route=>{if(route.request().method()!=='DELETE'||new URL(route.request().url()).pathname!=='/api/nodes/'+old.id){await route.continue();return;}try{ready();await held;if(!page.isClosed())await route.continue();}catch(e){if(!released&&!shutting&&!page.isClosed())throw e;}});
+  try {
+    const card=page.locator('#card-'+old.id);await card.scrollIntoViewIfNeeded();
+    if(mode==='desktop')await card.hover();else {const box=await card.boundingBox(),cdp=await page.context().newCDPSession(page);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:box.x+box.width-20,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x+box.width-120,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+    const confirmation=page.waitForEvent('dialog');await Promise.all([confirmation.then(dialog=>dialog.accept()),card.locator('[data-trash]').click()]);await Promise.race([requested,delay(15000).then(()=>{throw Error('old deletion request not held');})]);
+    await open(page,seat.node.id);await seat.api('/api/nodes/'+old.id,'DELETE');seat.nodes=seat.nodes.filter(id=>id!==old.id);
+    const fresh=await node(seat,'codex',title,'Synthetic replacement deletion target');assertID('delete-recreation-same-id-'+mode,fresh.id===old.id&&fresh.instance_id!==old.instance_id);
+    const before=counts(seat),response=page.waitForResponse(r=>r.request().method()==='DELETE'&&new URL(r.url()).pathname==='/api/nodes/'+old.id,{timeout:30000});
+    const feedback=page.waitForEvent('dialog');released=true;release();heldReleases.delete(release);const rejected=await response;assertID('delete-recreation-stale-rejected-'+mode,rejected.status()===409);const warning=await feedback;assertID('delete-recreation-stale-feedback-'+mode,/chat identity changed/i.test(warning.message()));await warning.accept();
+    const live=await until(async()=>(await seat.api('/api/state')).nodes.find(n=>n.id===fresh.id&&n.instance_id===fresh.instance_id),30000,'replacement survives stale deletion');
+    assertID('delete-recreation-selection-and-counter-'+mode,!!live&&(await page.evaluate(()=>localStorage.getItem('scimux-sel')))===seat.node.id&&JSON.stringify(before)===JSON.stringify(counts(seat)));
+    manifest['delete-recreation-'+mode]={before,after:counts(seat),old:old.instance_id,fresh:fresh.instance_id};await screenshot(page,'delete-recreation-'+mode+'.png');
+  } finally {released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
+}
+async function legacyClosedRecreation(mode) {
+  const seat=await makeSeat('legacy-closed-'+mode,true),id='Synthetic-legacy-closed',title='Synthetic legacy closed';
+  const initial=(await seat.api('/api/state')).nodes.find(n=>n.id===id);
+  assertID('legacy-closed-migrated-'+mode,!!initial?.instance_id&&!!initial.ended_at);
+  const page=await pageFor(seat,mode,'legacy-closed-'+mode);await page.reload({waitUntil:'networkidle'});
+  const reloaded=(await seat.api('/api/state')).nodes.find(n=>n.id===id);
+  assertID('legacy-closed-identity-stable-'+mode,reloaded?.instance_id===initial.instance_id&&reloaded.ended_at===initial.ended_at);
+  const card=page.locator('#card-'+id);await card.waitFor({timeout:30000});
+  if(mode==='desktop')await card.hover();else {const box=await card.boundingBox(),cdp=await page.context().newCDPSession(page);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:box.x+box.width-20,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x+box.width-120,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+  let held,ready,release;const requested=new Promise(resolve=>ready=resolve),hold=new Promise(resolve=>release=resolve);heldReleases.add(release);
+  await page.route(url=>url.pathname==='/api/nodes/'+id,async route=>{if(route.request().method()!=='DELETE'){await route.continue();return;}held=route;ready();await hold;if(!page.isClosed())await route.continue();});
+  try {
+    const confirmation=page.waitForEvent('dialog');await Promise.all([confirmation.then(dialog=>dialog.accept()),card.locator('[data-trash]').click()]);await Promise.race([requested,delay(15000).then(()=>{throw Error('legacy deletion was not held');})]);
+    const sent=new URL(held.request().url()).searchParams.get('chat_instance');await seat.api('/api/nodes/'+id,'DELETE');
+    const replacement=await node(seat,'codex',title,'Synthetic replacement must survive');
+    assertID('legacy-closed-reused-id-'+mode,replacement.id===id&&replacement.instance_id!==initial.instance_id);
+    const before=counts(seat),response=page.waitForResponse(r=>r.request().method()==='DELETE'&&new URL(r.url()).pathname==='/api/nodes/'+id);
+    const feedback=page.waitForEvent('dialog');release();heldReleases.delete(release);const stale=await response;const warning=await feedback;assertID('legacy-closed-stale-feedback-'+mode,/chat identity changed/i.test(warning.message()));await warning.accept();
+    const state=await seat.api('/api/state'),chat=await seat.api('/api/nodes/'+id+'/chat');
+    const survives=state.nodes.some(n=>n.id===id&&n.instance_id===replacement.instance_id)&&chat.turns?.some(t=>t.role==='assistant');
+    assertID('legacy-closed-stale-delete-rejected-'+mode,sent===initial.instance_id&&stale.status()===409&&survives&&JSON.stringify(before)===JSON.stringify(counts(seat)));
+    manifest['legacy-closed-'+mode]={before,after:counts(seat),status:stale.status(),replacementSurvives:survives};await screenshot(page,'legacy-closed-recreation-'+mode+'.png');
+  } finally {release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
+}
+async function noSelection(mode,seat) {
+  const page=await pageFor(seat,mode,'no-selection-'+mode);const initial=counts(seat);
+  assertID('no-selection-no-borrowed-activity-'+mode,(await page.evaluate(()=>localStorage.getItem('scimux-sel')||''))===''&&!(await page.locator('#workpulse').evaluate(el=>el.classList.contains('on')))&&!(await page.locator('#convtools').isVisible())&&!(await page.locator('#autoapprove').isVisible()));
+  assertID('no-selection-zero-dispatch-'+mode,JSON.stringify(counts(seat))===JSON.stringify(initial)&&(mode!=='desktop'||(initial.attempted===0&&initial.accepted===0&&initial.controls===0)));
+  const chat=await node(seat,'codex','Remove active '+mode,'Synthetic remove setup');await open(page,chat.id);
+  const releasePath=path.join(seat.data,'counter.release-active');try{fs.unlinkSync(releasePath);}catch(e){if(e.code!=='ENOENT')throw e;}
+  const before=counts(seat);await page.locator('#prompt').fill('Synthetic active removal '+mode+' [hold-active]');await page.locator('#sendbtn').click();await page.locator('#workpulse.on').waitFor({timeout:30000});
+  let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
+  await page.route('**/api/nodes/'+chat.id+'/chat*',async route=>{try{const headers={...route.request().headers()};delete headers['if-none-match'];const response=await route.fetch({headers});ready();await held;if(!page.isClosed())await route.fulfill({response});}catch(e){if(!released&&!shutting&&!page.isClosed())throw e;}});
+  try {
+    await Promise.race([requested,delay(15000).then(()=>{throw Error('active removal response not held');})]);
+    if(mode==='phone')await page.locator('#chatback').click();const card=page.locator('#card-'+chat.id);await card.scrollIntoViewIfNeeded();
+    if(mode==='desktop')await card.hover();else {const box=await card.boundingBox(),cdp=await page.context().newCDPSession(page);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:box.x+box.width-20,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x+box.width-120,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+    page.once('dialog',dialog=>dialog.accept());await card.locator('[data-trash]').click();await card.waitFor({state:'detached',timeout:30000});seat.nodes=seat.nodes.filter(id=>id!==chat.id);
+    await page.locator('#workpulse.on').waitFor({state:'detached',timeout:10000});
+    assertID('no-selection-active-retired-'+mode,!(await page.locator('#workpulse').evaluate(el=>el.classList.contains('on')))&&!(await page.locator('#convtools').isVisible())&&!(await page.locator('#autoapprove').isVisible()));
+    released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});await delay(500);
+    assertID('no-selection-stale-response-isolated-'+mode,!(await page.locator('#workpulse').evaluate(el=>el.classList.contains('on')))&&!(await page.locator('#convtools').isVisible())&&!(await page.locator('#autoapprove').isVisible()));
+    const after=counts(seat);assertID('no-selection-explicit-send-only-'+mode,after.attempted===before.attempted+1&&after.accepted===before.accepted+1&&after.controls===before.controls);manifest['no-selection-'+mode]={initial,before,after};await screenshot(page,'no-selection-'+mode+'.png');
+  } finally {released=true;release();heldReleases.delete(release);fs.writeFileSync(releasePath,'release');await page.unrouteAll({behavior:'wait'});}
 }
 async function heldChatLoading(mode,seat) {
   const chat=await node(seat,'codex','Held chat loading '+mode,'Synthetic loading initial');
@@ -263,9 +336,495 @@ async function heldChatLoading(mode,seat) {
     await delay(250);animation.second=await spinner.evaluate(el=>getComputedStyle(el).transform);
     assertID('held-chat-loading-reduced-motion-'+mode,animation.name!=='none'&&animation.state==='running'&&animation.first!==animation.second);
     manifest['held-chat-animation-'+mode]=animation;await screenshot(page,'held-chat-loading-'+mode+'.png');
-    released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});await page.getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
+    released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});await page.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
   } finally {released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
 }
+async function stage1Scanner(mode,ownerSeat,readerSeat) {
+  const local=await node(readerSeat,'codex','Scanner local '+mode,'Synthetic scanner setup');
+  const share=await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid),30000,'scanner received subscription');
+  const received='team/'+[sub.server,sub.owner,sub.chat,sub.generation].join('/');
+  const page=await pageFor(readerSeat,mode,'stage1-scanner-'+mode);await page.emulateMedia({reducedMotion:'reduce'});
+  await open(page,local.id);await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+  const releasePath=path.join(readerSeat.data,'counter.release-active');try{fs.unlinkSync(releasePath);}catch(e){if(e.code!=='ENOENT')throw e;}
+  const before=counts(readerSeat);await page.locator('#prompt').fill('Synthetic active '+mode+' [hold-active]');await page.locator('#sendbtn').click();
+  await page.locator('#workpulse.on').waitFor({timeout:30000});
+  let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
+  await page.route('**/api/nodes/'+local.id+'/chat*',async route=>{try{const headers={...route.request().headers()};delete headers['if-none-match'];const response=await route.fetch({headers});ready();await held;if(!page.isClosed())await route.fulfill({response});}catch(e){if(!released&&!shutting&&!page.isClosed())throw e;}});
+  try {
+    await Promise.race([requested,delay(15000).then(()=>{throw Error('active response not held');})]);
+    if(mode==='phone')await page.locator('#chatback').click();await open(page,received);
+    await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+    assertID('stage1-scanner-received-off-'+mode,!(await page.locator('#workpulse').evaluate(el=>el.classList.contains('on')))&&!(await page.locator('#convtools').isVisible()));
+    released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});await delay(500);
+    assertID('stage1-stale-active-response-isolated-'+mode,!(await page.locator('#workpulse').evaluate(el=>el.classList.contains('on')))&&!(await page.locator('#autoapprove').isVisible()));
+    await screenshot(page,'stage1-scanner-received-'+mode+'.png');
+    if(mode==='phone')await page.locator('#chatback').click();await open(page,local.id);await page.locator('#workpulse.on').waitFor({timeout:20000});
+    assertID('stage1-scanner-local-restored-'+mode,true);
+    await page.reload({waitUntil:'networkidle'});await page.locator('#workpulse.on').waitFor({timeout:20000});
+    assertID('stage1-scanner-active-reload-'+mode,true);
+    let releaseOld,oldReady,oldDone,oldCaptured=false,oldReleased=false;
+    const oldHeld=new Promise(resolve=>releaseOld=resolve),oldRequested=new Promise(resolve=>oldReady=resolve),oldSettled=new Promise(resolve=>oldDone=resolve);heldReleases.add(releaseOld);
+    await page.route('**/api/nodes/'+local.id+'/chat*',async route=>{
+      if(oldCaptured){await route.continue();return;}
+      oldCaptured=true;
+      try {const headers={...route.request().headers()};delete headers['if-none-match'];const response=await route.fetch({headers});oldReady();await oldHeld;if(!page.isClosed())await route.fulfill({response});}
+      catch(e){if(!oldReleased&&!shutting&&!page.isClosed())throw e;}finally{oldDone();}
+    });
+    try {
+      await Promise.race([oldRequested,delay(15000).then(()=>{throw Error('rapid-switch old chat response not held');})]);
+      if(mode==='phone')await page.locator('#chatback').click();await open(page,received);
+      fs.writeFileSync(releasePath,'release');await until(async()=>{const chat=await readerSeat.api('/api/nodes/'+local.id+'/chat');return chat.turn_in_flight===false&&(chat.turns||[]).some(turn=>turn.role==='assistant'&&turn.text==='Synthetic response 2');},30000,'active response completed');
+      if(mode==='phone')await page.locator('#chatback').click();await open(page,local.id);
+      await page.locator('#msgs .bubble').getByText('Synthetic response 2',{exact:true}).waitFor({timeout:30000});
+      await page.locator('#workpulse.on').waitFor({state:'detached',timeout:30000});
+      oldReleased=true;releaseOld();heldReleases.delete(releaseOld);await oldSettled;await delay(500);
+      assertID('stage1-scanner-rapid-aba-stale-isolated-'+mode,!(await page.locator('#workpulse').evaluate(el=>el.classList.contains('on'))));
+      await page.context().setOffline(true);await delay(1000);const online=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/state'&&[200,304].includes(r.status()),{timeout:30000});await page.context().setOffline(false);await online;
+      assertID('stage1-scanner-idle-reconnect-'+mode,!(await page.locator('#workpulse').evaluate(el=>el.classList.contains('on'))));
+    } finally {oldReleased=true;releaseOld();heldReleases.delete(releaseOld);await page.unrouteAll({behavior:'wait'});}
+    const after=counts(readerSeat);assertID('stage1-scanner-explicit-dispatch-only-'+mode,after.attempted===before.attempted+1&&after.accepted===before.accepted+1&&after.controls===before.controls);
+    manifest['stage1-scanner-'+mode]={before,after};await screenshot(page,'stage1-scanner-idle-'+mode+'.png');
+  } finally {released=true;release();heldReleases.delete(release);fs.writeFileSync(releasePath,'release');await page.unrouteAll({behavior:'wait'});}
+  const owner=await pageFor(ownerSeat,mode,'stage1-scanner-owner-'+mode);await open(owner,ownerSeat.node.id);
+  await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await owner.locator('#destinationagent').click();
+  const ownerRelease=path.join(ownerSeat.data,'counter.release-active');try{fs.unlinkSync(ownerRelease);}catch(e){if(e.code!=='ENOENT')throw e;}
+  try {
+    const beforeOwner=counts(ownerSeat);await owner.locator('#prompt').fill('Synthetic owner active '+mode+' [hold-active]');await owner.locator('#sendbtn').click();
+    await owner.locator('#workpulse.on').waitFor({timeout:30000});assertID('stage1-shared-owner-active-'+mode,(await owner.locator('#destinationpeople').getAttribute('aria-pressed'))==='true');
+    fs.writeFileSync(ownerRelease,'release');await owner.locator('#workpulse.on').waitFor({state:'detached',timeout:30000});
+    const afterOwner=counts(ownerSeat);assertID('stage1-shared-owner-idle-'+mode,afterOwner.attempted===beforeOwner.attempted+1&&afterOwner.accepted===beforeOwner.accepted+1&&afterOwner.controls===beforeOwner.controls);
+    manifest['stage1-scanner-owner-'+mode]={beforeOwner,afterOwner};await screenshot(owner,'stage1-scanner-owner-'+mode+'.png');
+  } finally {fs.writeFileSync(ownerRelease,'release');}
+}
+async function stage1Unread(mode,ownerSeat,readerSeat) {
+  const chats=[];
+  for(let i=0;i<5;i++){
+    const chat=await node(ownerSeat,'codex','Unread owner '+mode+' '+i,'Synthetic unread setup');
+    await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+    const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+    const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid),30000,'unread recipient subscription');
+    await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===share.uid&&x.local_node===chat.id),30000,'verified owner node identity');
+    chats.push({chat,share,sub,key:[sub.server,sub.owner,sub.chat,sub.generation].join('/')});
+  }
+  const beforeOwner=counts(ownerSeat),beforeReader=counts(readerSeat);
+  const owner=await pageFor(ownerSeat,mode,'stage1-unread-owner-'+mode),reader=await pageFor(readerSeat,mode,'stage1-unread-reader-'+mode);
+  await open(owner,ownerSeat.node.id);if(mode==='phone')await owner.locator('#chatback').click();
+  for(let i=0;i<2;i++){
+    if(i&&mode==='phone')await reader.locator('#chatback').click();
+    await open(reader,'team/'+chats[i].key);await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+    const text='Incoming '+mode+' '+i;await reader.locator('#prompt').fill(text);await reader.locator('#sendbtn').click();
+    await reader.locator('#msgs .bubble').getByText(text,{exact:true}).waitFor({timeout:30000});
+    const card=owner.locator('#card-'+chats[i].chat.id);await card.locator('.activity-unread').waitFor({timeout:40000});
+    assertID('stage1-unread-specific-card-'+mode+'-'+i,await card.locator('.activity-unread').evaluate(el=>el.nextElementSibling?.matches('button.chev')));
+  }
+  assertID('stage1-unread-two-cards-'+mode,await owner.locator('#card-'+chats[0].chat.id+' .activity-unread').count()===1&&await owner.locator('#card-'+chats[1].chat.id+' .activity-unread').count()===1);
+  await screenshot(owner,'stage1-unread-cards-'+mode+'.png');
+  // A second owner view sends while the first view holds its tail classifier.
+  // Blocking the second view's read acknowledgements keeps the earlier
+  // collaborator message genuinely unseen in the shared installation.
+  const watched=chats[0], writer=await pageFor(ownerSeat,mode,'stage1-unread-writer-'+mode);
+  let releaseTail,tailReady,tailReleased=false;
+  const tailHeld=new Promise(resolve=>releaseTail=resolve),tailRequested=new Promise(resolve=>tailReady=resolve);heldReleases.add(releaseTail);
+  await writer.route('**/api/team/subscriptions/'+watched.key+'/seen',route=>route.abort());
+  await owner.route('**/api/team/subscriptions/'+watched.key+'/comments?after=*',async route=>{try{const response=await route.fetch();tailReady();await tailHeld;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!tailReleased&&!shutting&&!owner.isClosed())throw e;}});
+  try {
+    await open(writer,watched.chat.id);await writer.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
+    const own='Later owner append '+mode;await writer.locator('#prompt').fill(own);await writer.locator('#sendbtn').click();
+    await writer.locator('#msgs .bubble').getByText(own,{exact:true}).waitFor({timeout:30000});
+    await until(async()=>{const v=(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===watched.share.uid&&x.access==='owner');return v?.comments_last===2&&v.seen_comments===0;},40000,'own append with unread cursor unchanged');
+    await Promise.race([tailRequested,delay(40000).then(()=>{throw Error('new tail classification not held');})]);
+    assertID('stage1-known-incoming-survives-held-tail-'+mode,await owner.locator('#card-'+watched.chat.id+' .activity-unread').count()===1);
+    await screenshot(owner,'stage1-unread-held-tail-'+mode+'.png');
+  } finally {tailReleased=true;releaseTail();heldReleases.delete(releaseTail);await owner.unrouteAll({behavior:'wait'});await captureCoverage([{page:writer,label:'stage1-unread-writer-'+mode}]);await writer.close();}
+  const afterWriter=(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===watched.share.uid&&x.access==='owner');
+  assertID('stage1-unread-writer-retirement-preserves-cursor-'+mode,afterWriter?.comments_last===2&&afterWriter.seen_comments===0);
+  await owner.locator('[data-activity-group="mine"]').click();
+  assertID('stage1-unread-folded-mine-'+mode,await owner.locator('[data-activity-group="mine"] .activity-unread').count()===1);
+  await owner.reload({waitUntil:'networkidle'});
+  if(mode==='phone'&&await owner.locator('#cards').evaluate(el=>el.getBoundingClientRect().right<=1))await owner.locator('#chatback').click();
+  await owner.locator('[data-activity-group="mine"] .activity-unread').waitFor({timeout:40000});
+  assertID('stage1-unread-fold-reload-'+mode,(await owner.locator('[data-activity-group="mine"]').getAttribute('aria-expanded'))==='false');
+  await owner.context().setOffline(true);await delay(1500);await owner.context().setOffline(false);
+  await owner.locator('[data-activity-group="mine"] .activity-unread').waitFor({timeout:40000});
+  assertID('stage1-unread-fold-reconnect-'+mode,true);await owner.locator('[data-activity-group="mine"]').click();
+  const pinnedCard=owner.locator('#card-'+chats[0].chat.id);await pinnedCard.scrollIntoViewIfNeeded();
+  if(mode==='desktop')await pinnedCard.hover();else {const box=await pinnedCard.boundingBox(),cdp=await owner.context().newCDPSession(owner);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:box.x+box.width-20,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x+box.width-120,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+  await owner.locator('[data-pin-action="'+chats[0].chat.id+'"]').click();await owner.locator('[data-tab=pinned]').click();
+  assertID('stage1-unread-pinned-card-'+mode,await owner.locator('#card-'+chats[0].chat.id+' .activity-unread').count()===1);
+  await screenshot(owner,'stage1-unread-pinned-'+mode+'.png');await owner.locator('[data-tab=current]').click();
+  const third=chats[2],ownerView=await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===third.share.uid&&x.access==='owner'),30000,'self comment owner subscription');
+  const ownerKey=[ownerView.server,ownerView.owner,ownerView.chat,ownerView.generation].join('/');
+  await open(owner,third.chat.id);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
+  let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
+  await owner.route('**/api/team/subscriptions/'+ownerKey+'/comments',async route=>{try{const response=await route.fetch();ready();await held;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!released&&!shutting&&!owner.isClosed())throw e;}});
+  try {
+    await owner.locator('#prompt').fill('Own pending '+mode);await owner.locator('#sendbtn').click();
+    await Promise.race([requested,delay(20000).then(()=>{throw Error('own comment not posted');})]);
+    if(mode==='phone')await owner.locator('#chatback').click();await open(owner,ownerSeat.node.id);if(mode==='phone')await owner.locator('#chatback').click();
+    const classified=owner.waitForResponse(async response=>{
+      if(!response.url().includes('/api/team/subscriptions/'+ownerKey+'/comments?after=0')||response.status()!==200)return false;
+      try{return (await response.json()).entries.some(entry=>entry.mine===true&&entry.text==='Own pending '+mode);}catch{return false;}
+    },{timeout:40000});
+    released=true;release();heldReleases.delete(release);await owner.unrouteAll({behavior:'wait'});
+    await until(async()=>{const v=(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===third.share.uid&&x.access==='owner');return v?.comments_last===1&&v.seen_comments===0;},40000,'own publication without read advance');
+    await classified;
+    const card=owner.locator('#card-'+third.chat.id);
+    await until(async()=>await card.locator('[aria-label="Unread status unavailable"]').count()===0&&await card.locator('.activity-unread').count()===0,40000,'self comment classification');
+    assertID('stage1-own-comment-no-unread-'+mode,true);
+    assertID('stage1-discussion-zero-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(beforeOwner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(beforeReader));
+    manifest['stage1-unread-'+mode]={beforeOwner,afterOwner:counts(ownerSeat),beforeReader,afterReader:counts(readerSeat)};await screenshot(owner,'stage1-unread-own-'+mode+'.png');
+  } finally {released=true;release();heldReleases.delete(release);await owner.unrouteAll({behavior:'wait'});}
+  const fourth=chats[3],fourthView=await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===fourth.share.uid&&x.access==='owner'),30000,'concurrent owner subscription');
+  const fourthKey=[fourthView.server,fourthView.owner,fourthView.chat,fourthView.generation].join('/');
+  let releaseRead,readReady,readReleased=false,reads=0;const heldRead=new Promise(resolve=>releaseRead=resolve),requestedRead=new Promise(resolve=>readReady=resolve);heldReleases.add(releaseRead);
+  await owner.route('**/api/team/subscriptions/'+fourthKey+'/comments?after=*',async route=>{try{if(++reads===1){const response=await route.fetch();readReady();await heldRead;if(!owner.isClosed())await route.fulfill({response});}else await route.continue();}catch(e){if(!readReleased&&!shutting&&!owner.isClosed())throw e;}});
+  try {
+    await open(owner,fourth.chat.id);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
+    await Promise.race([requestedRead,delay(20000).then(()=>{throw Error('owner comment read not held');})]);
+    if(mode==='phone')await reader.locator('#chatback').click();await open(reader,'team/'+fourth.key);await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+    const incoming='Concurrent incoming '+mode;await reader.locator('#prompt').fill(incoming);await reader.locator('#sendbtn').click();
+    await reader.locator('#msgs .bubble').getByText(incoming,{exact:true}).waitFor({timeout:30000});
+    const ownDone=owner.waitForResponse(response=>response.request().method()==='POST'&&response.url().endsWith('/api/team/subscriptions/'+fourthKey+'/comments')&&response.status()===200,{timeout:30000});
+    await owner.locator('#prompt').fill('Own after incoming '+mode);await owner.locator('#sendbtn').click();await ownDone;
+    if(mode==='phone')await owner.locator('#chatback').click();await open(owner,ownerSeat.node.id);if(mode==='phone')await owner.locator('#chatback').click();
+    readReleased=true;releaseRead();heldReleases.delete(releaseRead);await owner.unrouteAll({behavior:'wait'});
+    await until(async()=>{const v=(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===fourth.share.uid&&x.access==='owner');return v?.comments_last===2&&v.seen_comments===0;},40000,'concurrent comments remain unseen');
+    await owner.locator('#card-'+fourth.chat.id+' .activity-unread').waitFor({timeout:40000});
+    assertID('stage1-incoming-before-own-stays-unread-'+mode,true);
+    assertID('stage1-concurrent-discussion-zero-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(beforeOwner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(beforeReader));
+    await screenshot(owner,'stage1-unread-concurrent-'+mode+'.png');
+  } finally {readReleased=true;releaseRead();heldReleases.delete(releaseRead);await owner.unrouteAll({behavior:'wait'});}
+  const fifth=chats[4],received='team/'+fifth.key,group='owner/'+fifth.sub.server+'/'+fifth.sub.owner;
+  if(mode==='phone')await reader.locator('#chatback').click();await open(reader,received);await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+  await until(async()=>{const v=(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===fifth.share.uid&&x.generation===fifth.share.generation);return v&&!v.unread;},40000,'recipient initial copy read');
+  if(mode==='phone')await reader.locator('#chatback').click();await open(reader,'team/'+fourth.key);if(mode==='phone')await reader.locator('#chatback').click();
+  await open(owner,fifth.chat.id);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
+  const recipientIncoming='Owner discussion '+mode;await owner.locator('#prompt').fill(recipientIncoming);await owner.locator('#sendbtn').click();
+  await owner.locator('#msgs .bubble').getByText(recipientIncoming,{exact:true}).waitFor({timeout:30000});
+  await reader.locator('[data-tab=shared] [aria-label$="unread"]').waitFor({timeout:40000});
+  await reader.locator('[data-tab=shared]').click();
+  await reader.locator('[data-activity-group="'+group+'"] .activity-unread').waitFor({timeout:40000});
+  const receivedCard=reader.locator('.card:has([data-open="'+received+'"])');await receivedCard.locator('.activity-unread').waitFor({timeout:40000});
+  assertID('stage1-recipient-unread-tab-group-card-'+mode,true);
+  await reader.locator('[data-activity-group="'+group+'"]').click();
+  assertID('stage1-recipient-unread-folded-'+mode,await reader.locator('[data-activity-group="'+group+'"] .activity-unread').count()===1);
+  await reader.reload({waitUntil:'networkidle'});
+  if(mode==='phone'&&await reader.locator('#cards').evaluate(el=>el.getBoundingClientRect().right<=1))await reader.locator('#chatback').click();
+  await reader.locator('[data-tab=shared]').click();await reader.locator('[data-activity-group="'+group+'"] .activity-unread').waitFor({timeout:40000});
+  assertID('stage1-recipient-unread-fold-reload-'+mode,(await reader.locator('[data-activity-group="'+group+'"]').getAttribute('aria-expanded'))==='false');
+  await reader.locator('[data-activity-group="'+group+'"]').click();await receivedCard.scrollIntoViewIfNeeded();
+  if(mode==='desktop')await receivedCard.hover();else {const box=await receivedCard.boundingBox(),cdp=await reader.context().newCDPSession(reader);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:box.x+box.width-20,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x+box.width-120,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+  await reader.locator('[data-pin-action="'+received+'"]').click();await reader.locator('[data-tab=pinned]').click();
+  assertID('stage1-recipient-unread-pinned-'+mode,await receivedCard.locator('.activity-unread').count()===1);
+  assertID('stage1-recipient-discussion-zero-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(beforeOwner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(beforeReader));
+  await screenshot(reader,'stage1-recipient-unread-pinned-'+mode+'.png');
+}
+async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat) {
+  await otherSeat.api('/api/team/shares/'+otherSeat.node.id,'PUT',{server:otherSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation),30000,'stage2 shared subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),received='team/'+key;
+  const reader=await pageFor(readerSeat,mode,'stage2-reader-'+mode),owner=await pageFor(ownerSeat,mode,'stage2-owner-'+mode);
+  const beforeReader=counts(readerSeat),beforeOwner=counts(ownerSeat),beforeOther=counts(otherSeat);
+  await reader.locator('[data-tab=shared]').click();await reader.locator('.shared-card .agent-logo svg[data-icon="users"]').first().waitFor({timeout:30000});
+  const header=reader.locator('[data-activity-group]').first(),headerStyle=await header.evaluate(el=>({height:el.getBoundingClientRect().height,border:getComputedStyle(el).borderBottomStyle,expanded:el.getAttribute('aria-expanded')}));
+  assertID('stage2-group-glyph-'+mode,headerStyle.height>=44&&headerStyle.border==='dashed'&&headerStyle.expanded==='true'&&await reader.locator('[data-activity-group^="owner/"]').count()>=2);
+  await header.focus();await header.press('Enter');assertID('stage2-group-keyboard-'+mode,(await header.getAttribute('aria-expanded'))==='false');await header.press('Enter');
+  for(const scheme of ['light','dark']){
+    await reader.emulateMedia({colorScheme:scheme,contrast:'more'});
+    const colors=await header.evaluate(el=>({text:getComputedStyle(el).color,background:getComputedStyle(el).backgroundColor}));
+    const lum=color=>{const rgb=color.match(/[\d.]+/g).slice(0,3).map(x=>Number(x)/255).map(v=>v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4);return rgb[0]*0.2126+rgb[1]*0.7152+rgb[2]*0.0722;};
+    const a=lum(colors.text),b=lum(colors.background),ratio=(Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);assertID('stage2-group-contrast-'+mode+'-'+scheme,ratio>=4.5);
+    manifest['stage2-group-contrast-'+mode+'-'+scheme]={...colors,ratio};await screenshot(reader,'stage2-groups-'+mode+'-'+scheme+'.png');
+  }
+  await reader.emulateMedia({colorScheme:'light',contrast:'no-preference'});
+  await screenshot(reader,'stage2-groups-'+mode+'.png');await open(reader,received);await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+  const text='Identical shared message '+mode;
+  for(let i=0;i<2;i++){await reader.locator('#prompt').fill(text);await reader.locator('#sendbtn').click();await until(async()=>await reader.locator('#msgs .gmsg .bubble').filter({hasText:text}).count()===i+1,30000,'duplicate publication');}
+  const duplicate=reader.locator('#msgs .gmsg').filter({hasText:text}).last(),seq=Number(await duplicate.getAttribute('data-cseq'));const bubble=duplicate.locator('.bubble');
+  await bubble.focus();await bubble.press('Enter');const actions=reader.locator('#msgs [data-gactions]');
+  const order=await actions.locator('[data-gact]').evaluateAll(els=>els.map(el=>el.dataset.gact).filter(x=>['fork','sendto','desc','bookmark','copy'].includes(x)));
+  assertID('stage2-shared-actions-time-'+mode,JSON.stringify(order)===JSON.stringify(['fork','sendto','desc','bookmark','copy'])&&await actions.locator('.bubwhen').count()===1&&await duplicate.locator('.gwho').innerText()==='You');
+  await actions.locator('[data-gact=bookmark]').click();const saved=await until(async()=>{const ui=await readerSeat.api('/api/ui');return (ui.bookmarks||[]).find(x=>x.team?.chat===sub.chat&&x.team?.generation===sub.generation&&x.team?.log==='comments'&&x.team.seq===seq);},30000,'exact shared bookmark');
+  assertID('stage2-bookmark-exact-identity-'+mode,saved.text===text&&seq>1);
+  await duplicate.locator('[data-bmarker=bookmark]').waitFor({timeout:30000});assertID('stage2-bookmark-marker-'+mode,await reader.locator('#msgs .gmsg').filter({hasText:text}).first().locator('[data-bmarker=bookmark]').count()===0);
+  await actions.locator('[data-gact=fork]').click();await reader.locator('#newchat.open').waitFor({timeout:10000});
+  const draft=await reader.locator('#nc_prompt').inputValue();assertID('stage2-fork-explicit-send-'+mode,draft.includes(text)&&await reader.locator('#nc_start').getAttribute('aria-label')==='Start and send'&&JSON.stringify(counts(readerSeat))===JSON.stringify(beforeReader));
+  await reader.locator('#nc_title').fill('Fresh shared fork '+mode);await reader.locator('#nc_agent').selectOption('codex');await reader.locator('#nc_dir').fill(readerSeat.data);
+  const createdResponse=reader.waitForResponse(response=>response.request().method()==='POST'&&response.url().endsWith('/api/nodes')&&response.status()===200,{timeout:30000});
+  await reader.locator('#nc_start').click();const response=await createdResponse,body=response.request().postDataJSON(),created=await response.json();readerSeat.nodes.push(created.id);
+  await until(()=>counts(readerSeat).accepted===beforeReader.accepted+1,30000,'fresh local fork explicit send');
+  const afterFork=counts(readerSeat);assertID('stage2-fork-fresh-local-'+mode,!body.parent&&body.prompt.includes(text)&&afterFork.attempted===beforeReader.attempted+1&&afterFork.controls===beforeReader.controls);
+  const forwarded=await until(async()=>{const ui=await readerSeat.api('/api/ui');return (ui.forward_links||[]).find(x=>x.source?.server===sub.server&&x.source?.owner===sub.owner&&x.source?.chat===sub.chat&&x.source?.generation===sub.generation&&x.source?.log==='comments'&&x.source?.seq===seq&&x.destination?.node===created.id);},40000,'confirmed shared source link');
+  assertID('stage2-fork-source-link-'+mode,forwarded.source.seq===seq);
+  if(mode==='phone')await reader.locator('#chatback').click();await reader.locator('[data-tab=current]').click();await open(reader,readerSeat.node.id);await reader.locator('#bookmarksbtn').click();
+  const bookmark=reader.locator('#bookmarklist .bookmark').filter({hasText:text}).last();await bookmark.locator('.nbubble').click();await bookmark.locator('[data-bmact=jump]').click();
+  await reader.locator('#msgs [data-cseq="'+seq+'"].jumpflash').waitFor({timeout:30000});
+  assertID('stage2-bookmark-exact-jump-'+mode,await reader.locator('#msgs [data-cseq="'+seq+'"].jumpflash').count()===1);
+  await duplicate.locator('[data-bmarker=sendto]').waitFor({timeout:30000});assertID('stage2-source-marker-'+mode,await duplicate.locator('[data-bmarker=sendto]').count()===1);
+  await screenshot(reader,'stage2-bookmark-jump-'+mode+'.png');
+  await reader.context().grantPermissions(['clipboard-read','clipboard-write']);await duplicate.locator('.bubble').click();await reader.locator('[data-gact=copy]').click();
+  assertID('stage2-copy-shared-'+mode,(await reader.evaluate(()=>navigator.clipboard.readText()))===text);
+  const destination=(await readerSeat.api('/api/state')).nodes.find(n=>n.id===readerSeat.node.id&&n.instance_id===readerSeat.node.instance_id);
+  assert.ok(destination?.title,'selected local destination instance still exists');
+  await reader.locator('[data-gact=desc]').click();await reader.locator('#sendto_list').getByRole('button',{name:destination.title,exact:true}).click();
+  await reader.locator('#chatdescinput').waitFor({state:'visible',timeout:30000});
+  assertID('stage2-description-local-choice-'+mode,await reader.evaluate(()=>localStorage.getItem('scimux-sel'))===destination.id&&(await reader.locator('#chattitle').innerText())===destination.title&&(await reader.locator('#chatdescinput').inputValue()).includes(text)&&JSON.stringify(counts(readerSeat))===JSON.stringify(afterFork));
+  if((await reader.locator('#bookmarksbtn').getAttribute('aria-label'))==='open bookmarks')await reader.locator('#bookmarksbtn').click();
+  if(!await bookmark.locator('[data-bmact=jump]').isVisible())await bookmark.locator('.nbubble').click();await bookmark.locator('[data-bmact=jump]').click();await reader.locator('#msgs [data-cseq="'+seq+'"].jumpflash').waitFor({timeout:30000});
+  const relayBefore=(await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0')).entries.length;
+  if((await reader.locator('#bookmarksbtn').getAttribute('aria-label'))==='open bookmarks')await reader.locator('#bookmarksbtn').click();
+  if(!await bookmark.locator('[data-bmact=comment]').isVisible())await bookmark.locator('.nbubble').click();await bookmark.locator('[data-bmact=comment]').click();
+  const annotation='Local annotation '+mode;await reader.locator('#bookmarkprompt').fill(annotation);await reader.locator('#bookmarksend').click();
+  const localComment=await until(async()=>{const ui=await readerSeat.api('/api/ui');return (ui.bookmarks||[]).find(x=>x.text===annotation&&x.anchor===saved.t);},30000,'local bookmark annotation');
+  assertID('stage2-bookmark-comment-local-'+mode,!!localComment&&(await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0')).entries.length===relayBefore);
+  await open(owner,ownerSeat.node.id);const source=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] .bubble');await source.waitFor({timeout:40000});await source.click();
+  await owner.locator('[data-gact=bookmark]').click();const ownerSaved=await until(async()=>{const ui=await ownerSeat.api('/api/ui');return (ui.bookmarks||[]).find(x=>x.team?.chat===sub.chat&&x.team?.generation===sub.generation&&x.team?.log==='comments'&&x.team.seq===seq);},30000,'owner shared bookmark');
+  await owner.locator('#bookmarksbtn').click();const ownerBookmark=owner.locator('#bookmarklist .bookmark').filter({hasText:text}).last();await ownerBookmark.locator('.nbubble').click();await ownerBookmark.locator('[data-bmact=jump]').click();
+  await owner.locator('#msgs .gmsg[data-gkey="'+key+'"][data-cseq="'+seq+'"].jumpflash').waitFor({timeout:30000});assertID('stage2-owner-bookmark-exact-jump-'+mode,ownerSaved.team.seq===seq);
+  await source.click();
+  await owner.locator('[data-gact=prompt]').click();assertID('stage2-prompt-prepares-only-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(beforeOwner)&&(await owner.locator('#prompt').innerText()).includes(text));
+  const submitted='Explicit shared prompt '+mode;await owner.locator('#prompt').fill(submitted);await owner.locator('#sendbtn').click();await until(()=>counts(ownerSeat).accepted===beforeOwner.accepted+1,30000,'explicit owner send');
+  assertID('stage2-prompt-one-dispatch-'+mode,counts(ownerSeat).attempted===beforeOwner.attempted+1&&counts(ownerSeat).controls===beforeOwner.controls&&JSON.stringify(counts(readerSeat))===JSON.stringify(afterFork)&&JSON.stringify(counts(otherSeat))===JSON.stringify(beforeOther));
+  await owner.locator('#destinationpeople').click();const ownText='Owner discussion source '+mode;
+  await owner.locator('#prompt').fill(ownText);await owner.locator('#sendbtn').click();
+  const ownTurn=owner.locator('#msgs .gmsg').filter({hasText:ownText}).last();await ownTurn.waitFor({timeout:30000});
+  assertID('stage2-own-source-label-'+mode,(await ownTurn.locator('.gwho').innerText())==='You');
+  const ownSeq=Number(await ownTurn.getAttribute('data-cseq'));await ownTurn.locator('.bubble').click();await owner.locator('[data-gact=prompt]').click();
+  const ownSource=await owner.evaluate(id=>JSON.parse(localStorage.getItem('scimux-prompt-sources:'+id)||'[]'),ownerSeat.node.id);
+  assertID('stage2-own-source-provenance-'+mode,ownSource.some(source=>source.seq===ownSeq&&source.role==='user'&&!source.who));
+  assertID('stage2-own-source-no-dispatch-'+mode,counts(ownerSeat).attempted===beforeOwner.attempted+1&&counts(ownerSeat).controls===beforeOwner.controls);
+  manifest['stage2-shared-'+mode]={key,seq,bookmark:saved.team,beforeReader,afterReader:counts(readerSeat),beforeOwner,afterOwner:counts(ownerSeat),beforeOther,afterOther:counts(otherSeat)};
+}
+
+async function stage2BookmarkPages(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Bookmark pages '+mode,'Synthetic shared pagination setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation),30000,'pagination subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');
+  for(let i=0;i<257;i++)await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{text:i===0||i===256?'Identical page boundary '+mode:'Synthetic page '+mode+' '+i,anchor:0,key:(mode==='desktop'?'aced1000':'aced2000')+i.toString(16).padStart(8,'0')});
+  const reader=await pageFor(readerSeat,mode,'stage2-pages-'+mode),before=counts(readerSeat),pages=[];
+  reader.on('response',response=>{if(response.url().includes('/api/team/subscriptions/'+key+'/comments?after='))pages.push(response.url());});
+  await open(reader,'team/'+key);const target=reader.locator('#msgs .gmsg[data-cseq="257"]');await target.waitFor({timeout:60000});
+  await target.locator('.bubble').click();await reader.locator('[data-gact=bookmark]').click();
+  await until(async()=>(await readerSeat.api('/api/ui')).bookmarks?.some(x=>x.team?.chat===share.uid&&x.team?.generation===share.generation&&x.team?.log==='comments'&&x.team.seq===257),30000,'page boundary bookmark');
+  if(mode==='phone')await reader.locator('#chatback').click();await open(reader,readerSeat.node.id);
+  pages.length=0;await reader.reload({waitUntil:'networkidle'});await reader.locator('#bookmarksbtn').click();
+  const bookmark=reader.locator('#bookmarklist .bookmark').filter({hasText:'Identical page boundary '+mode}).last();await bookmark.locator('.nbubble').click();await bookmark.locator('[data-bmact=jump]').click();
+  await reader.locator('#msgs .gmsg[data-cseq="257"].jumpflash').waitFor({timeout:60000});
+  assertID('stage2-bookmark-pagination-'+mode,pages.some(url=>url.includes('after=256'))&&await reader.locator('#msgs .gmsg[data-cseq="1"].jumpflash').count()===0&&JSON.stringify(counts(readerSeat))===JSON.stringify(before));
+  await screenshot(reader,'stage2-bookmark-pagination-'+mode+'.png');manifest['stage2-pages-'+mode]={key,pages,before,after:counts(readerSeat)};
+}
+
+async function stage1OwnerFiles(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Owner files '+mode,'Synthetic owner file setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const page=await pageFor(ownerSeat,mode,'stage1-owner-files-'+mode);await open(page,chat.id);
+  await page.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await page.locator('#prompt').fill('People draft '+mode);
+  await page.locator('#destinationagent').click();await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  await page.locator('#attadd').click();const picker=page.waitForEvent('filechooser');await page.locator('#attmenu [data-src=file]').click();
+  await (await picker).setFiles({name:'owner-file.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic delivered file')});
+  await page.locator('#attstage .stagechip.done').waitFor({timeout:30000});
+  await page.locator('#prompt').evaluate(el=>{const data=new DataTransfer();const bytes=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX6sAAAAASUVORK5CYII='),c=>c.charCodeAt(0));data.items.add(new File([bytes],'paste.png',{type:'image/png'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+  await page.locator('#attstage .stagechip.done[title="paste.png"] img').waitFor({timeout:30000});
+  await page.locator('#promptbar').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['drop'],'drop.txt',{type:'text/plain'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));});
+  await page.locator('#attstage .stagechip.done[title="drop.txt"]').waitFor({timeout:30000});
+  assertID('stage1-owner-paste-drop-preview-'+mode,await page.locator('#attstage .stagechip.done').count()===3);
+  await page.locator('#attstage .stagechip[title="paste.png"] .sx').click();await page.locator('#attstage .stagechip[title="drop.txt"] .sx').click();
+  assertID('stage1-owner-attachment-removal-'+mode,await page.locator('#attstage .stagechip').count()===1);
+  const uploadPath='**/api/nodes/'+chat.id+'/attachments?*';await page.route(uploadPath,route=>route.fulfill({status:413,body:'Synthetic upload limit'}));
+  const beforeFailure=counts(ownerSeat);await page.locator('#attfile').setInputFiles({name:'rejected.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic rejection')});
+  const rejected=page.locator('#attstage .stagechip.err[title="rejected.txt"]');await rejected.locator('[role=status]').waitFor({timeout:30000});
+  assertID('stage1-upload-error-visible-'+mode,(await rejected.locator('[role=status]').innerText()).includes('Synthetic upload limit')&&JSON.stringify(counts(ownerSeat))===JSON.stringify(beforeFailure));
+  await screenshot(page,'upload-error-'+mode+'.png');await rejected.locator('.sx').click();await page.unroute(uploadPath);
+  assertID('stage1-upload-error-preserves-stage-'+mode,await page.locator('#attstage .stagechip.done[title="owner-file.txt"]').count()===1);
+  await page.locator('#destinationpeople').click();let dialog=page.waitForEvent('dialog');
+  const paste=page.locator('#prompt').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people.txt',{type:'text/plain'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+  const warning=await dialog;assertID('stage1-people-file-feedback-'+mode,/text only/i.test(warning.message()));await warning.accept();await paste;
+  dialog=page.waitForEvent('dialog');const drop=page.locator('#promptbar').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people-drop.txt',{type:'text/plain'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));});
+  const dropWarning=await dialog;assertID('stage1-people-drop-feedback-'+mode,/text only/i.test(dropWarning.message()));await dropWarning.accept();await drop;
+  assertID('stage1-people-file-keeps-draft-'+mode,(await page.locator('#prompt').innerText())==='People draft '+mode);
+  await page.locator('#destinationagent').click();assertID('stage1-owner-file-staged-'+mode,(await page.locator('#attstage').innerText()).includes('owner-file.txt'));
+  await page.locator('#prompt').fill('Owner file prompt '+mode);
+  const before=counts(ownerSeat),request=page.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/nodes/'+chat.id+'/send');
+  await page.locator('#sendbtn').click();const body=(await request).postDataJSON();
+  await until(()=>counts(ownerSeat).accepted===before.accepted+1,30000,'owner file delivered to fake transport');
+  const after=counts(ownerSeat),records=jsonLines(path.join(ownerSeat.data,'counter'));const sent=records.at(-1)?.text||'';
+  assertID('stage1-owner-file-delivered-'+mode,body.attachments?.length===1&&sent.includes(body.attachments[0].path)&&fs.readFileSync(body.attachments[0].path,'utf8')==='synthetic delivered file'&&after.attempted===before.attempted+1&&after.controls===before.controls);
+  assertID('stage1-owner-file-disarms-'+mode,(await page.locator('#destinationpeople').getAttribute('aria-pressed'))==='true'&&(await page.locator('#prompt').innerText())==='People draft '+mode);
+  manifest['stage1-owner-files-'+mode]={before,after};await screenshot(page,'stage1-owner-files-'+mode+'.png');
+}
+async function recreatedChatIsolation(mode,seat,readerSeat) {
+ for(const pending of [false,true]) {
+  const title='Synthetic recreated '+mode+' '+pending,old=await node(seat,'codex',title,'Synthetic old request');
+  await seat.api('/api/team/shares/'+old.id,'PUT',{server:seat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const page=await pageFor(seat,mode,'recreated-'+mode+'-'+pending);await open(page,old.id);
+  await page.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await page.locator('#destinationagent').click();
+  let held,finish;if(pending)await page.route('**/api/nodes/'+old.id+'/attachments?*',route=>{held=route;return new Promise(resolve=>{finish=resolve})});
+  await page.locator('#attadd').waitFor({state:'visible'});await page.locator('#attadd').click();const picker=page.waitForEvent('filechooser');await page.locator('#attmenu [data-src=file]').click();
+  await (await picker).setFiles({name:'old-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic old file')});
+  if(pending){await until(()=>!!held,10000,'held upload');await page.locator('#prompt').fill('Synthetic old pending prompt');await page.locator('#sendbtn').click();}
+  else await page.locator('#attstage .stagechip.done').waitFor({timeout:30000});
+  if(mode==='phone')await page.locator('#chatback').click();await open(page,seat.node.id);
+  await seat.api('/api/nodes/'+old.id,'DELETE');seat.nodes=seat.nodes.filter(id=>id!==old.id);
+  const fresh=await node(seat,'codex',title,'Synthetic replacement request');assertID('recreated-id-reused-'+mode+'-'+pending,fresh.id===old.id);
+  await seat.api('/api/team/shares/'+fresh.id,'PUT',{server:seat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const afterCreate=counts(seat);
+  if(pending){await held.continue();finish();await delay(2500);const current=await seat.api('/api/nodes/'+fresh.id+'/chat');
+   assertID('recreated-no-old-dispatch-'+mode,JSON.stringify(counts(seat))===JSON.stringify(afterCreate)&&!(current.turns||[]).some(t=>t.role==='user'&&t.text.includes('Synthetic old pending prompt')));
+  } else {
+   if(mode==='phone')await page.locator('#chatback').click();await open(page,fresh.id);await page.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await page.locator('#destinationagent').click();
+   assertID('recreated-no-old-files-'+mode,!(await page.locator('#attstage').innerText()).includes('old-synthetic'));await screenshot(page,'recreated-attachment-'+mode+'.png');
+  }
+  manifest['recreated-'+mode+'-'+pending]={afterCreate,after:counts(seat)};
+ }
+}
+
+async function bubbleSelection(mode,ownerSeat,readerSeat) {
+ const drag=async(page,bubble,label)=>{const para=bubble.locator('p').first();await para.waitFor();
+  await page.evaluate(()=>new Promise((resolve,reject)=>{let timer;const deadline=setTimeout(()=>{obs.disconnect();reject(Error('transcript did not settle'))},10000);const obs=new MutationObserver(()=>{clearTimeout(timer);timer=setTimeout(done,800)});function done(){clearTimeout(deadline);obs.disconnect();resolve()}obs.observe(document.querySelector('#msgs'),{childList:true,subtree:true});timer=setTimeout(done,800)}));
+  await para.scrollIntoViewIfNeeded();
+  const r=await until(async()=>{const box=await para.boundingBox(),view=page.viewportSize();if(!box||box.x<0||box.y<0||box.x+box.width>view.width||box.y+box.height>view.height)return null;const visible=await para.evaluate((el,b)=>[b.x+3,b.x+b.width-3].every(x=>{const hit=document.elementFromPoint(x,b.y+b.height/2);return hit===el||el.contains(hit)}),box);return visible?box:null},30000,'visible selection text bounds');
+  assertID('bubble-selection-target-visible-'+mode+'-'+label,!!r);
+  await page.mouse.move(r.x+3,r.y+r.height/2);await page.mouse.down();await page.mouse.move(r.x+r.width-3,r.y+r.height/2,{steps:12});await page.mouse.up();
+  assertID('bubble-selection-real-pointer-'+mode+'-'+label,(await page.evaluate(()=>String(window.getSelection()))).trim().length>0);
+  assertID('bubble-selection-no-actions-'+mode+'-'+label,await page.locator('#msgs .bubactions').count()===0);
+ };
+ const local=await pageFor(ownerSeat,mode,'bubble-selection-local-'+mode);await open(local,ownerSeat.node.id);
+ await drag(local,local.locator('#msgs .turn.assistant .bubble').filter({hasText:'Synthetic response 1'}).first(),'local');
+ const sub=(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(v=>v.owner===ownerSeat.self);assert.ok(sub,'synthetic share exists');
+ const page=await pageFor(readerSeat,mode,'bubble-selection-shared-'+mode);await open(page,'team/'+[sub.server,sub.owner,sub.chat,sub.generation].join('/'));
+ await drag(page,page.locator('#msgs .turn.assistant .bubble').filter({hasText:'Synthetic response 1'}).first(),'shared');await screenshot(page,'bubble-selection-shared-'+mode+'.png');
+}
+
+async function draftRecovery(mode,seat) {
+ const page=await pageFor(seat,mode,'draft-recovery-'+mode);await open(page,seat.node.id);
+ const chat=await node(seat,'codex','Synthetic recovery '+mode,'Synthetic recovery setup');
+ const draft='Synthetic saved draft <review> '+mode;
+ await page.evaluate(({id,text})=>{localStorage.removeItem('scimux-draft-owner:'+id);localStorage.setItem('scimux-draft:'+id,text)}, {id:chat.id,text:draft});
+ const before=counts(seat);if(mode==='phone')await page.locator('#chatback').click();await open(page,chat.id);
+ await page.locator('#draftrecovery summary').waitFor();
+ assertID('recovery-does-not-prepare-'+mode,(await page.locator('#prompt').innerText())===''&&JSON.stringify(counts(seat))===JSON.stringify(before));
+ await page.locator('#draftrecovery summary').click();const saved=page.locator('#draftrecovery textarea');
+ assertID('recovery-explicit-review-'+mode,await saved.inputValue()===draft&&await saved.getAttribute('readonly')!==null);
+ assertID('recovery-no-agent-dispatch-'+mode,JSON.stringify(counts(seat))===JSON.stringify(before));
+ await screenshot(page,'draft-recovery-'+mode+'.png');manifest['draft-recovery-'+mode]={before,after:counts(seat)};
+}
+
+async function headerFocus(mode,seat) {
+ const reader=seats[2];const targetNode=await node(seat,'codex','Synthetic focus target '+mode,'Synthetic shared focus target');
+ await seat.api('/api/team/shares/'+targetNode.id,'PUT',{server:seat.serverID,scope:'all',members:[{seat:reader.self,access:'write'}]});
+ const other=await node(seat,'codex','Synthetic focus holder '+mode,'Synthetic separate local chat');
+ const page=await pageFor(seat,mode,'coordinator-header-focus-'+mode);await open(page,other.id);
+ const header=page.locator('[data-activity-group="mine"]');await header.waitFor();await header.focus();
+ assertID('coordinator-mine-header-focused-'+mode,await header.evaluate(el=>document.activeElement===el));
+ const share=await seat.api('/api/team/shares/'+targetNode.id);
+ const target={server:reader.serverID,owner:seat.self,chat:share.uid,generation:share.generation};
+ const sub=await until(async()=>selectSharedSubscription((await reader.api('/api/team/subscriptions')).subscriptions,target),30000,'exact focus share');
+ assert.equal(sub.access,'write','synthetic share is writable');const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');
+ const before=counts(seat);await reader.api('/api/team/subscriptions/'+key+'/comments','POST',{key:require('node:crypto').randomBytes(8).toString('hex'),anchor:0,text:'Synthetic incoming focus check'});
+ await page.locator('[id="card-'+targetNode.id+'"] .activity-unread').waitFor({timeout:30000});
+ const after=counts(seat);manifest['coordinator-header-focus-'+mode]={before,after,active:await page.evaluate(()=>({tag:document.activeElement.tagName,group:document.activeElement.dataset.activityGroup||''}))};
+ await screenshot(page,'coordinator-header-focus-after-unread-'+mode+'.png');
+ assertID('coordinator-mine-header-keeps-focus-after-unread-'+mode,await header.evaluate(el=>document.activeElement===el));
+ assertID('coordinator-focus-comment-zero-dispatch-'+mode,JSON.stringify(before)===JSON.stringify(after));
+ const received='team/'+key,readerPage=await pageFor(reader,mode,'sharer-header-focus-'+mode);
+ await open(readerPage,received);await readerPage.locator('#msgs .gmsg').first().waitFor({timeout:30000});
+ if(mode==='phone')await readerPage.locator('#chatback').click();await open(readerPage,reader.node.id);
+ const sharer=readerPage.locator('[data-activity-group="owner/'+sub.server+'/'+sub.owner+'"]');await sharer.waitFor();await sharer.focus();
+ assertID('sharer-header-focused-'+mode,await sharer.evaluate(el=>document.activeElement===el));
+ const own=selectSharedSubscription((await seat.api('/api/team/subscriptions')).subscriptions,{...target,server:seat.serverID});
+ assert.ok(own,'synthetic owner subscription exists');const ownKey=[own.server,own.owner,own.chat,own.generation].join('/');
+ const beforeReader=counts(reader);await seat.api('/api/team/subscriptions/'+ownKey+'/comments','POST',{key:require('node:crypto').randomBytes(8).toString('hex'),anchor:0,text:'Synthetic sharer focus check '+mode});
+ await readerPage.locator('[id="card-'+received+'"] .activity-unread').waitFor({timeout:30000});
+ assertID('sharer-header-keeps-focus-after-unread-'+mode,await sharer.evaluate(el=>document.activeElement===el));
+ assertID('sharer-focus-zero-dispatch-'+mode,JSON.stringify(beforeReader)===JSON.stringify(counts(reader))&&JSON.stringify(after)===JSON.stringify(counts(seat)));
+ await screenshot(readerPage,'sharer-header-focus-after-unread-'+mode+'.png');
+}
+
+async function overlappingDescriptionChoices(mode,ownerSeat,readerSeat) {
+ const a=await node(readerSeat,'codex','Choice A '+mode,'Synthetic destination A');
+ const b=await node(readerSeat,'codex','Choice B '+mode,'Synthetic destination B');
+ const share=await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id);
+ const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation),30000,'choice-order subscription');
+ const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),received='team/'+key,source='Synthetic choice-order source '+mode;
+ await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{key:require('node:crypto').randomBytes(8).toString('hex'),anchor:0,text:source});
+ const page=await pageFor(readerSeat,mode,'description-choice-order-'+mode);await open(page,received);
+ const bubble=page.locator('#msgs .gmsg .bubble').filter({hasText:source}).first();await bubble.waitFor({timeout:30000});await bubble.click();
+ await page.waitForResponse(r=>new URL(r.url()).pathname==='/api/state'&&r.request().headers()['if-none-match'],{timeout:30000});
+ const held=[];await page.route('**/api/state',async route=>{
+  if(route.request().headers()['if-none-match']) {await route.continue();return;}
+  const response=await route.fetch();let release;const wait=new Promise(resolve=>release=resolve);heldReleases.add(release);held.push({release});
+  try {await wait;if(!page.isClosed())await route.fulfill({response});}finally{heldReleases.delete(release)}
+ });
+ try {
+  const before=counts(readerSeat);
+  await page.locator('[data-gact=desc]').click();await page.locator('#sendto_list [data-choice]').filter({hasText:a.title}).click();await until(()=>held.length===1,10000,'first description verification');
+  await page.locator('[data-gact=desc]').click();await page.locator('#sendto_list [data-choice]').filter({hasText:b.title}).click();await until(()=>held.length===2,10000,'second description verification');
+  const first=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/state'&&!r.request().headers()['if-none-match']);held[0].release();await first;await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assertID('choice-order-old-cannot-navigate-'+mode,await page.evaluate(()=>localStorage.getItem('scimux-sel'))===received&&await page.locator('#msgs .gmsg').filter({hasText:source}).count()===1);
+  assertID('choice-order-no-old-editor-'+mode,!await page.locator('#chatdescinput').isVisible());await screenshot(page,'description-choice-order-pending-'+mode+'.png');
+  const second=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/state'&&!r.request().headers()['if-none-match']);held[1].release();await second;await page.locator('#chatdescinput').waitFor({state:'visible',timeout:30000});
+  assertID('choice-order-new-destination-'+mode,await page.evaluate(()=>localStorage.getItem('scimux-sel'))===b.id&&(await page.locator('#chattitle').innerText())===b.title&&(await page.locator('#chatdescinput').inputValue()).includes(source));
+  assertID('choice-order-zero-dispatch-'+mode,JSON.stringify(before)===JSON.stringify(counts(readerSeat)));manifest['description-choice-order-'+mode]={before,after:counts(readerSeat),a:a.id,b:b.id};await screenshot(page,'description-choice-order-applied-'+mode+'.png');
+ } finally {for(const item of held)item.release();await page.unrouteAll({behavior:'wait'});}
+}
+async function recreatedDescriptionChoice(mode,ownerSeat,readerSeat) {
+ const title='Synthetic description destination '+mode;
+ const old=await node(readerSeat,'codex',title,'Synthetic original description');
+ const share=await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id);
+ const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation),30000,'description subscription');
+ const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),received='team/'+key;
+ await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{key:require('node:crypto').randomBytes(8).toString('hex'),anchor:0,text:'Synthetic description source '+mode});
+ const page=await pageFor(readerSeat,mode,'description-recreated-choice-'+mode);await open(page,received);
+ const bubble=page.locator('#msgs .gmsg .bubble').filter({hasText:'Synthetic description source '+mode}).first();await bubble.waitFor({timeout:30000});
+ const clickURL=page.url(),events=[];const navigated=frame=>{if(frame===page.mainFrame())events.push({type:'navigation',url:frame.url()});};const dialog=d=>{events.push({type:'dialog',message:d.message()});d.dismiss().catch(()=>{});};page.on('framenavigated',navigated);page.on('dialog',dialog);
+ let clickState;
+ try {await bubble.click();} finally {
+  page.off('framenavigated',navigated);page.off('dialog',dialog);
+  try {clickState=await Promise.race([page.evaluate(mode=>{const turn=[...document.querySelectorAll('#msgs .gmsg')].find(el=>el.textContent.includes('Synthetic description source '+mode));return {selected:localStorage.getItem('scimux-sel'),source:turn?.dataset.cseq||'',action:!!turn?.nextElementSibling?.matches('[data-gactions]'),rows:document.querySelectorAll('#msgs [data-gactions]').length};},mode),delay(3000).then(()=>({error:'click state unavailable'}))]);}catch(e){clickState={error:String(e)};}
+  manifest['description-choice-click-'+mode]={initialURL:clickURL,currentURL:page.url(),events,state:clickState};
+ }
+ assertID('description-choice-source-action-'+mode,page.url()===clickURL&&events.length===0&&clickState.selected===received&&!!clickState.source&&clickState.action&&clickState.rows===1);
+ await page.locator('[data-gact=desc]').click();
+ const choice=page.locator('#sendto_list [data-choice]').filter({hasText:title});await choice.waitFor();
+ await readerSeat.api('/api/nodes/'+old.id,'DELETE');readerSeat.nodes=readerSeat.nodes.filter(id=>id!==old.id);
+ const fresh=await node(readerSeat,'codex',title,'Synthetic replacement description');
+ assertID('description-choice-reuses-id-'+mode,fresh.id===old.id&&fresh.instance_id!==old.instance_id);
+ const before=counts(readerSeat);await choice.click();await page.locator('#sendto.open').waitFor({state:'hidden',timeout:10000});
+ await page.waitForTimeout(500);const state=await readerSeat.api('/api/state');const replacement=state.nodes.find(n=>n.id===fresh.id);
+ assertID('description-choice-refuses-replacement-'+mode,await page.evaluate(()=>localStorage.getItem('scimux-sel'))===received&&await page.locator('#msgs .gmsg').count()>0&&replacement.instance_id===fresh.instance_id&&replacement.description!==(await bubble.innerText()));
+ assertID('description-choice-zero-dispatch-'+mode,JSON.stringify(before)===JSON.stringify(counts(readerSeat)));
+ manifest['description-recreated-choice-'+mode]={before,after:counts(readerSeat),old:old.instance_id,fresh:fresh.instance_id};await screenshot(page,'description-recreated-choice-'+mode+'.png');
+}
+async function descriptionSaveIsolation(mode,seat) {
+ const first=await node(seat,'codex','Synthetic old description '+mode,'Synthetic first source');
+ const second=await node(seat,'codex','Synthetic new description '+mode,'Synthetic second source');
+ const page=await pageFor(seat,mode,'coordinator-description-save-'+mode);await open(page,first.id);
+ const a=page.locator('#msgs .turn.user:not(.echo) .bubble').first();await a.waitFor({timeout:30000});await a.click();await page.locator('[data-bact=desc]').click();
+ await page.locator('#chatdescinput').fill('Synthetic old description text');
+ let release,ready;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
+ await page.route('**/api/nodes/'+first.id+'?*',async route=>{
+  if(route.request().method()!=='PATCH'){await route.continue();return;}
+  const response=await route.fetch();ready();await held;if(!page.isClosed())await route.fulfill({response});
+ });
+ try {
+  const before=counts(seat);await page.locator('#infobtn').click();await Promise.race([requested,delay(20000).then(()=>{throw Error('description save was not requested');})]);
+  if(mode==='phone')await page.locator('#chatback').click();await open(page,second.id);
+  const b=page.locator('#msgs .turn.user:not(.echo) .bubble').first();await b.waitFor({timeout:30000});await b.click();await page.locator('[data-bact=desc]').click();
+  const input=page.locator('#chatdescinput');await input.fill('Synthetic newer description text');
+  assertID('coordinator-new-description-editor-ready-'+mode,await input.isVisible()&&(await input.inputValue())==='Synthetic newer description text');
+  const done=page.waitForResponse(response=>response.request().method()==='PATCH'&&new URL(response.url()).pathname==='/api/nodes/'+first.id);release();heldReleases.delete(release);await done;
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const state={visible:await input.isVisible(),value:await input.inputValue(),before,after:counts(seat)};manifest['coordinator-description-save-'+mode]=state;
+  await screenshot(page,'coordinator-description-after-late-save-'+mode+'.png');
+  assertID('coordinator-description-late-response-isolated-'+mode,state.visible&&state.value==='Synthetic newer description text');
+  assertID('coordinator-description-zero-dispatch-'+mode,JSON.stringify(state.before)===JSON.stringify(state.after));
+ } finally {release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
+}
+
 async function unsharedChat(mode,seat) {
   const first=await node(seat,'codex','Unshared first '+mode,'Synthetic unshared first');const second=await node(seat,'codex','Unshared second '+mode,'Synthetic unshared second');
   const page=await pageFor(seat,mode,'unshared-'+mode);await open(page,first.id);await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
@@ -277,7 +836,7 @@ async function unsharedChat(mode,seat) {
   const before=counts(seat);if(mode==='phone'){await page.locator('#prompt').focus();await page.locator('#prompt').press('Enter');assertID('unshared-phone-enter-no-send',JSON.stringify(counts(seat))===JSON.stringify(before));await page.locator('#prompt').fill(prompt);await page.locator('#sendbtn').click();}else{await page.locator('#prompt').focus();await page.locator('#prompt').press('Enter');}
   await until(()=>counts(seat).accepted===before.accepted+1,20000,'unshared explicit send');
   const after=counts(seat);assertID('unshared-send-once-'+mode,after.attempted===before.attempted+1&&after.accepted===before.accepted+1);
-  await page.getByText('Synthetic response 2',{exact:true}).waitFor({timeout:30000});
+  await page.locator('#msgs').getByText('Synthetic response 2',{exact:true}).waitFor({timeout:30000});
   const bubble=page.locator('#msgs .turn.user:not(.echo) .bubble').filter({hasText:prompt}).first();await bubble.waitFor({timeout:30000});await bubble.click();await page.locator('[data-bact=bookmark]').click();
   await until(async()=>(await seat.api('/api/ui')).bookmarks?.some(x=>x.text===prompt),20000,'unshared bookmark');
   if(!await page.locator('[data-bact=sendto]').isVisible())await bubble.click();
@@ -293,18 +852,20 @@ async function mediaContrast(mode,scheme,ownerSeat,readerSeat) {
   await page.locator('#attfile').setInputFiles({name:'synthetic-pixel.png',mimeType:'image/png',buffer:png});await page.locator('#attstage .stagechip.done').waitFor({timeout:30000});
   await page.locator('#prompt').fill('');await page.locator('#sendbtn').click();
   const caption=page.locator('#msgs .turn.user.media .gwho').last();await caption.waitFor({timeout:30000});
-  const colors=await caption.evaluate(el=>({text:getComputedStyle(el).color,background:getComputedStyle(document.querySelector('#chathead')).backgroundColor}));
-  const luminance=color=>{const rgb=color.match(/[\d.]+/g).slice(0,3).map(x=>Number(x)/255).map(v=>v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4);return rgb[0]*0.2126+rgb[1]*0.7152+rgb[2]*0.0722;};
-  const a=luminance(colors.text),b=luminance(colors.background),contrast=(Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);
-  assertID('media-caption-contrast-'+mode+'-'+scheme,(await caption.innerText())==='You · Agent'&&contrast>=4.5);
-  manifest['media-contrast-'+mode+'-'+scheme]={...colors,contrast};await screenshot(page,'media-'+mode+'-'+scheme+'.png');
+  let lastSample,colors;
+  try { colors=await until(async()=>{
+    lastSample=await page.evaluate(()=>{const el=[...document.querySelectorAll('#msgs .turn.user.media .gwho')].at(-1),head=document.querySelector('#chathead');const rect=el?.getBoundingClientRect();return {connected:!!el?.isConnected&&!!head?.isConnected,visible:!!rect&&rect.width>0&&rect.height>0&&getComputedStyle(el).visibility==='visible',text:el?getComputedStyle(el).color:null,background:head?getComputedStyle(head).backgroundColor:null,caption:el?.innerText||'',selected:localStorage.getItem('scimux-sel')||'',title:document.querySelector('#chattitle')?.innerText||''};});
+    const sample=contrastSample(lastSample);return sample&&sample.selected===chat.id&&sample.title===chat.title?sample:null;
+  },10000,'connected media contrast sample'); } catch(e) {throw Error(`${e.message}; sample=${JSON.stringify(lastSample)}`);}
+  assertID('media-caption-contrast-'+mode+'-'+scheme,colors.caption==='You'&&colors.contrast>=4.5);
+  manifest['media-contrast-'+mode+'-'+scheme]=colors;await screenshot(page,'media-'+mode+'-'+scheme+'.png');
 }
 async function reshareStale(mode,ownerSeat,readerSeat) {
   const chat=await node(ownerSeat,'codex','Reshare '+mode,'Synthetic reshare initial');const sharePath='/api/team/shares/'+chat.id;
   await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
   const initial=await ownerSeat.api(sharePath);const old=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===initial.uid&&x.generation===initial.generation),30000,'old generation');
   const oldKey=[old.server,old.owner,old.chat,old.generation].join('/');const page=await pageFor(readerSeat,mode,'reshare-reader-'+mode);await open(page,'team/'+oldKey);
-  await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});const prior='Old generation comment '+mode;await page.locator('#prompt').fill(prior);await page.locator('#sendbtn').click();await page.getByText(prior,{exact:true}).waitFor({timeout:30000});
+  await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});const prior='Old generation comment '+mode;await page.locator('#prompt').fill(prior);await page.locator('#sendbtn').click();await page.locator('#msgs').getByText(prior,{exact:true}).waitFor({timeout:30000});
   let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
   await page.route('**/api/team/subscriptions/'+oldKey+'?after=*',async route=>{try{const response=await route.fetch();ready();await held;if(!page.isClosed())await route.fulfill({response});}catch(e){if(!released&&!shutting&&!page.isClosed())throw e;}});
   try {
@@ -316,8 +877,8 @@ async function reshareStale(mode,ownerSeat,readerSeat) {
     const draft='New generation draft '+mode;await page.locator('#prompt').fill(draft);released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});
     await delay(1000);assertID('reshare-stale-response-keeps-new-generation-'+mode,await page.evaluate(id=>localStorage.getItem('scimux-sel')===id,'team/'+freshKey)&&(await page.locator('#prompt').innerText())===draft&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
     const subscriptions=(await readerSeat.api('/api/team/subscriptions')).subscriptions;assertID('reshare-retains-old-copy-'+mode,subscriptions.some(x=>x.chat===old.chat&&x.generation===old.generation&&x.state==='ended')&&subscriptions.some(x=>x.chat===old.chat&&x.generation===fresh.generation));
-    await page.locator('#sendbtn').click();await page.getByText(draft,{exact:true}).waitFor({timeout:30000});
-    assertID('reshare-new-discussion-once-'+mode,await page.getByText(draft,{exact:true}).count()===1&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
+    await page.locator('#sendbtn').click();await page.locator('#msgs').getByText(draft,{exact:true}).waitFor({timeout:30000});
+    assertID('reshare-new-discussion-once-'+mode,await page.locator('#msgs').getByText(draft,{exact:true}).count()===1&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
     manifest['reshare-'+mode]={oldKey,freshKey,before,after:counts(ownerSeat)};
   } finally {released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
 }
@@ -331,7 +892,7 @@ async function droppedSend(mode,ownerSeat,readerSeat) {
   const source=owner.locator('#msgs .bubble').filter({hasText:comment}).first();await source.waitFor({timeout:30000});await source.click();await owner.locator('[data-gact=prompt]').click();
   const prompt='Synthetic dropped prompt '+mode+' [delay-dispatch]';await owner.locator('#prompt').fill(prompt);
   let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
-  await owner.route('**/api/nodes/'+chat.id+'/send',async route=>{try{await route.fetch();ready();await held;if(!owner.isClosed())await route.abort('failed');}catch(e){if(!released&&!shutting&&!owner.isClosed())throw e;}});
+  await owner.route('**/api/nodes/'+chat.id+'/send?*',async route=>{try{await route.fetch();ready();await held;if(!owner.isClosed())await route.abort('failed');}catch(e){if(!released&&!shutting&&!owner.isClosed())throw e;}});
   try {
     const before=counts(ownerSeat);await owner.locator('#sendbtn').click();await Promise.race([requested,delay(20000).then(()=>{throw Error('real send not received');})]);
     await owner.locator('#destinationpeople').click();await owner.locator('#prompt').fill('People after dropped response '+mode);
@@ -383,21 +944,38 @@ async function heldEvidence(mode,ownerSeat,readerSeat) {
   await open(owner,chat.id);await open(reader,'team/'+key);await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
   const comment='Synthetic held evidence source '+mode;await reader.locator('#prompt').fill(comment);await reader.locator('#sendbtn').click();
   const source=owner.locator('#msgs .bubble').filter({hasText:comment}).first();await source.waitFor({timeout:30000});await source.click();await owner.locator('[data-gact=prompt]').click();
-  const prompt='Synthetic held evidence prompt '+mode+' [delay-dispatch]';await owner.locator('#prompt').fill(prompt);
-  const before=counts(ownerSeat);await owner.locator('#sendbtn').click();await owner.locator('[aria-label="Awaiting prompt delivery"]').waitFor({timeout:15000});
-  assert.equal(counts(ownerSeat).accepted,before.accepted,'synthetic agent is still delaying acceptance');
-  let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
-  await owner.route('**/api/nodes/'+chat.id+'/chat*',async route=>{try{const response=await route.fetch();ready();await held;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!released&&!shutting&&!owner.isClosed())throw e;}});
+  const releasePath=path.join(ownerSeat.data,'counter.release-dispatch');try{fs.unlinkSync(releasePath);}catch(e){if(e.code!=='ENOENT')throw e;}
+  const releaseDispatch=()=>fs.writeFileSync(releasePath,'release');heldReleases.add(releaseDispatch);
+  const prompt='Synthetic held evidence prompt '+mode+' [hold-dispatch]';await owner.locator('#prompt').fill(prompt);
+  let releasePost,postReady,releaseChat,chatReady,postReleased=false,chatReleased=false,postCount=0,postStatus;
+  const heldPost=new Promise(resolve=>releasePost=resolve),requestedPost=new Promise(resolve=>postReady=resolve);
+  const heldChat=new Promise(resolve=>releaseChat=resolve),requestedChat=new Promise(resolve=>chatReady=resolve);
+  heldReleases.add(releasePost);heldReleases.add(releaseChat);
+  const sendPath='/api/nodes/'+chat.id+'/send',chatPath='/api/nodes/'+chat.id+'/chat';
+  await owner.route(url=>url.pathname===sendPath,async route=>{if(route.request().method()!=='POST'){await route.continue();return;}try{postCount++;const response=await route.fetch();postStatus=response.status();postReady();await heldPost;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!postReleased&&!shutting&&!owner.isClosed())throw e;}});
+  const before=counts(ownerSeat);
   try {
+    await owner.locator('#sendbtn').click();
+    await Promise.race([requestedPost,delay(20000).then(()=>{throw Error('send response not held');})]);
+    await source.locator('[aria-label="Awaiting prompt delivery"]').waitFor({timeout:15000});
+    assert.equal(counts(ownerSeat).accepted,before.accepted,'synthetic agent is still delaying acceptance');
+    assertID('held-evidence-http-pending-'+mode,postCount===1&&postStatus===200&&await owner.locator('#destinationpeople[aria-pressed=true]').count()===1);
+    await screenshot(owner,'held-evidence-pending-'+mode+'.png');
+    await owner.route(url=>url.pathname===chatPath,async route=>{try{const response=await route.fetch();chatReady();await heldChat;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!chatReleased&&!shutting&&!owner.isClosed())throw e;}});
+    releaseDispatch();heldReleases.delete(releaseDispatch);
     await until(()=>counts(ownerSeat).accepted===before.accepted+1,15000,'held evidence accepted');
-    await Promise.race([requested,delay(20000).then(()=>{throw Error('later evidence not requested');})]);
-    const during=counts(ownerSeat);assertID('held-evidence-awaiting-not-sent-'+mode,await owner.locator('[aria-label="Sent as prompt"]').count()===0&&during.attempted===before.attempted+1&&during.accepted===before.accepted+1&&during.controls===before.controls);
+    await Promise.race([requestedChat,delay(20000).then(()=>{throw Error('later evidence not requested');})]);
     await owner.locator('#destinationpeople').click();await owner.locator('#prompt').fill('New people while awaiting '+mode);
-    released=true;release();heldReleases.delete(release);await owner.unrouteAll({behavior:'wait'});
-    await owner.locator('[aria-label="Sent as prompt"]').waitFor({timeout:30000});
+    postReleased=true;releasePost();heldReleases.delete(releasePost);
+    await source.locator('[aria-label="Accepted; awaiting confirmation"]').waitFor({timeout:10000});
+    assertID('held-evidence-accepted-not-confirmed-'+mode,await owner.locator('[aria-label="Awaiting prompt delivery"]').count()===0&&await owner.locator('[aria-label="Sent as prompt"]').count()===0);
+    const during=counts(ownerSeat);assertID('held-evidence-awaiting-not-sent-'+mode,await owner.locator('[aria-label="Sent as prompt"]').count()===0&&during.attempted===before.attempted+1&&during.accepted===before.accepted+1&&during.controls===before.controls);
+    await screenshot(owner,'held-evidence-accepted-'+mode+'.png');
+    chatReleased=true;releaseChat();heldReleases.delete(releaseChat);await owner.unrouteAll({behavior:'wait'});
+    await source.locator('[aria-label="Sent as prompt"]').waitFor({timeout:30000});
     assertID('held-evidence-confirmed-after-release-'+mode,(await owner.locator('#prompt').innerText())==='New people while awaiting '+mode&&JSON.stringify(counts(ownerSeat))===JSON.stringify(during));
-    manifest['held-evidence-'+mode]={before,during,after:counts(ownerSeat)};
-  } finally {released=true;release();heldReleases.delete(release);await owner.unrouteAll({behavior:'wait'});}
+    await screenshot(owner,'held-evidence-confirmed-'+mode+'.png');manifest['held-evidence-'+mode]={before,during,after:counts(ownerSeat),postCount,postStatus};
+  } finally {releaseDispatch();heldReleases.delete(releaseDispatch);postReleased=true;releasePost();heldReleases.delete(releasePost);chatReleased=true;releaseChat();heldReleases.delete(releaseChat);await owner.unrouteAll({behavior:'wait'});}
 }
 async function recipientLeaveStale(mode,ownerSeat,readerSeat) {
   const chat=await node(ownerSeat,'codex','Delayed leave '+mode,'Synthetic delayed leave initial');
@@ -438,7 +1016,17 @@ async function permissionLifecycle(mode,ownerSeat,readerSeat) {
   const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');const owner=await pageFor(ownerSeat,mode,'permission-owner-'+mode);await open(owner,chat.id);
   await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});const page=await pageFor(readerSeat,mode,'permission-reader-'+mode);
   await open(page,'team/'+key);await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
-  const comment='Synthetic retained human '+mode;await page.locator('#prompt').fill(comment);await page.locator('#sendbtn').click();await page.getByText(comment,{exact:true}).waitFor({timeout:30000});
+  const comment='Synthetic retained human '+mode;let release,ready,released=false;
+  const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
+  await page.route('**/api/team/subscriptions/'+key+'/comments',async route=>{try{ready();await held;if(!page.isClosed())await route.continue();}catch(e){if(!released&&!shutting&&!page.isClosed())throw e;}});
+  try {
+    await page.locator('#prompt').fill(comment);await page.locator('#sendbtn').click();
+    await Promise.race([requested,delay(20000).then(()=>{throw Error('publication response not held');})]);
+    assertID('permission-pending-input-is-not-publication-'+mode,(await page.locator('#prompt').innerText())===comment&&await page.locator('#msgs .bubble').getByText(comment,{exact:true}).count()===0);
+    released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});
+    await page.locator('#msgs .bubble').getByText(comment,{exact:true}).waitFor({timeout:30000});
+    await until(async()=>(await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0')).entries.some(entry=>entry.text===comment),30000,'published comment retained in recipient copy');
+  } finally {released=true;release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
   const before=counts(ownerSeat),draft='Preserve draft on read '+mode;await page.locator('#prompt').fill(draft);
   await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'read'}]});
   await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(x=>x.chat===share.uid&&x.access==='read'),30000,'read permission propagated');
@@ -447,15 +1035,15 @@ async function permissionLifecycle(mode,ownerSeat,readerSeat) {
   assertID('permission-read-draft-and-denial-'+mode,denied===403&&(await page.locator('#prompt').innerText())===draft);
   await ownerSeat.api(sharePath,'DELETE');
   await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(x=>x.chat===share.uid&&x.state==='ended'),30000,'ended copy propagated');
-  await page.getByText(comment,{exact:true}).waitFor({timeout:30000});
-  manifest['permission-ended-debug-'+mode]={count:await page.getByText(comment,{exact:true}).count(),before,after:counts(ownerSeat)};
-  assertID('permission-ended-copy-retained-'+mode,await page.getByText(comment,{exact:true}).count()===1&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
+  await page.locator('#msgs .bubble').getByText(comment,{exact:true}).waitFor({timeout:30000});
+  manifest['permission-ended-debug-'+mode]={count:await page.locator('#msgs .bubble').getByText(comment,{exact:true}).count(),before,after:counts(ownerSeat)};
+  assertID('permission-ended-copy-retained-'+mode,await page.locator('#msgs .bubble').getByText(comment,{exact:true}).count()===1&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
   const source=owner.locator('#msgs .bubble').filter({hasText:comment}).first();await source.waitFor({timeout:30000});await source.click();
   await owner.locator('[data-gact=prompt]').click();
   assertID('permission-ended-owner-prompt-no-dispatch-'+mode,(await owner.locator('#prompt').innerText()).includes(comment)&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
   await ownerSeat.api('/api/nodes/'+chat.id+'/exit','POST',{});
   await until(async()=>(await ownerSeat.api('/api/state')).nodes.find(x=>x.id===chat.id)?.ended_at,30000,'owner node closed');
-  await owner.reload({waitUntil:'networkidle'});await owner.getByText(comment,{exact:true}).waitFor({timeout:30000});
+  await owner.reload({waitUntil:'networkidle'});await owner.locator('#msgs').getByText(comment,{exact:true}).waitFor({timeout:30000});
   await owner.locator('#msgs .bubble').filter({hasText:comment}).first().click();
   assertID('permission-closed-owner-no-prompt-'+mode,await owner.locator('[data-gact=prompt]').count()===0);
   manifest['permission-'+mode]={key,denied,before,after:counts(ownerSeat)};
@@ -494,7 +1082,7 @@ async function aiSourcePrompt(mode,ownerSeat,readerSeat) {
   const owner=await pageFor(ownerSeat,mode,'ai-owner-'+mode),reader=await pageFor(readerSeat,mode,'ai-reader-'+mode);
   await open(owner,chat.id);await open(reader,'team/'+key);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
   const local=await ownerSeat.api('/api/nodes/'+chat.id+'/chat');const ai=local.turns.find(t=>t.role==='assistant'&&t.text==='Synthetic response 1');assert.ok(ai);
-  const before=counts(ownerSeat);await owner.getByText('Synthetic response 1',{exact:true}).first().click();await owner.locator('[data-bact=prompt]').click();
+  const before=counts(ownerSeat);await owner.locator('#msgs').getByText('Synthetic response 1',{exact:true}).first().click();await owner.locator('[data-bact=prompt]').click();
   const draft=await owner.locator('#prompt').innerText();assertID('ai-source-disclosure-no-autosend-'+mode,draft.includes('[AI-generated, quoted from another chat — not written by me:]')&&draft.includes(ai.text)&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before));
   await owner.locator('#sendbtn').click();await owner.locator('[aria-label="Sent as prompt"]').waitFor({timeout:30000});
   const link=await until(async()=>{const ui=await ownerSeat.api('/api/ui');return (ui.forward_links||[]).find(x=>x.kind==='prompt'&&x.destination?.node===chat.id&&x.source?.uid===ai.uid&&x.source.record===ai.record);},30000,'AI source exact link');
@@ -572,7 +1160,7 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   const received='team/'+[sub.server,sub.owner,sub.chat,sub.generation].join('/');
   const owner=await pageFor(ownerSeat,mode,'trace-owner-'+mode),reader=await pageFor(readerSeat,mode,'trace-reader-'+mode);
   await open(owner,chat.id);await open(reader,received);
-  await reader.getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
+  await reader.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
   await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
   assertID('trace-normal-panel-'+mode,await reader.locator('#chat').isVisible()&&await reader.locator('#prompt').isVisible()&&await reader.locator('#prompt').count()===1&&await reader.locator('#sharedview').count()===0);
   assertID('trace-people-next-auto-'+mode,await owner.evaluate(()=>document.querySelector('#autoapprove').nextElementSibling?.id==='destination'));
@@ -587,9 +1175,9 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   assertID('trace-recipient-ai-no-prompt-'+mode,await reader.locator('[data-gact=prompt]').count()===0);
   const discussion='Synthetic trace human '+mode;
   await reader.locator('#prompt').fill(discussion);await reader.locator('#sendbtn').click();
-  await owner.getByText(discussion,{exact:true}).waitFor({timeout:40000});
-  assertID('trace-original-once-'+mode,(await owner.getByText(discussion,{exact:true}).count())===1&&(await owner.locator('#chattitle').innerText())==='trace '+mode);
-  assertID('trace-agent-turn-alongside-'+mode,await owner.getByText('Synthetic response 1',{exact:true}).count()===1);
+  await owner.locator('#msgs').getByText(discussion,{exact:true}).waitFor({timeout:40000});
+  assertID('trace-original-once-'+mode,(await owner.locator('#msgs').getByText(discussion,{exact:true}).count())===1&&(await owner.locator('#chattitle').innerText())==='trace '+mode);
+  assertID('trace-agent-turn-alongside-'+mode,await owner.locator('#msgs').getByText('Synthetic response 1',{exact:true}).count()===1);
   const log=fs.readFileSync(path.join(ownerSeat.data,'sessions',chat.id+'.jsonl'),'utf8');
   assertID('trace-human-not-agent-log-'+mode,!log.includes(discussion));
   for(const s of seats)assert.deepEqual(counts(s),before[s.name]);
@@ -597,8 +1185,8 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   const bookmark=await until(async()=>{const u=await readerSeat.api('/api/ui');return (u.bookmarks||[]).find(x=>x.text===discussion&&x.team?.chat===sub.chat&&x.team?.generation===sub.generation);},20000,'received bookmark saved');
   assertID('trace-bookmark-full-address-'+mode,bookmark.team.server===sub.server&&bookmark.team.owner===sub.owner&&bookmark.team.log==='comments'&&bookmark.team.seq>0&&bookmark.role==='user');
   const ownerComment='Owner human for rename '+mode;await owner.locator('#prompt').fill(ownerComment);await owner.locator('#sendbtn').click();
-  await owner.getByText(ownerComment,{exact:true}).waitFor();await owner.locator('#msgs .gwho').filter({hasText:'You · People'}).first().waitFor({timeout:40000});assertID('trace-owner-people-provenance-'+mode,true);
-  const otherPerson=reader.locator('#msgs .bubble').filter({hasText:ownerComment}).first();await otherPerson.waitFor({timeout:40000});await otherPerson.click();await reader.locator('[data-gact=rename]').click();await reader.locator('[data-grename]').fill('Synthetic renamed person');await reader.locator('[data-gact=name-save]').click();
+  const ownerHuman=owner.locator('#msgs .turn.gmsg .bubble').filter({hasText:ownerComment});await ownerHuman.locator('.gwho').getByText('You',{exact:true}).waitFor({timeout:40000});assertID('trace-owner-people-provenance-'+mode,true);
+  const otherPerson=reader.locator('#msgs .bubble').filter({hasText:ownerComment}).first();await otherPerson.waitFor({timeout:40000});await otherPerson.click();await reader.locator('[data-gact=more]').click();await reader.locator('#sendto_list [data-choice="0"]').click();await reader.locator('[data-grename]').fill('Synthetic renamed person');await reader.locator('[data-gact=name-save]').click();
   assertID('trace-rename-person-'+mode,await reader.getByText('Synthetic renamed person',{exact:false}).count()>0);
   await readerSource.click();await reader.locator('[data-gact=sendto]').click();await reader.locator('#sendto_list [data-fwd="'+readerSeat.node.id+'"]').click();
   assertID('trace-sendto-own-agent-draft-'+mode,(await reader.locator('#chattitle').innerText())===readerSeat.name+' chat'&&(await reader.locator('#prompt').innerText()).includes(discussion));
@@ -607,7 +1195,7 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   const peopleDraft='Editing people during new data '+mode;await owner.locator('#prompt').fill(peopleDraft);
   await owner.locator('#prompt').evaluate(el=>{window.__tracePrompt=el;el.focus();const range=document.createRange();range.setStart(el.firstChild,5);range.collapse(true);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);});
   const incoming='Incoming while editing '+mode;await reader.locator('#prompt').fill(incoming);await reader.locator('#sendbtn').click();
-  await owner.getByText(incoming,{exact:true}).waitFor({timeout:40000});
+  await owner.locator('#msgs').getByText(incoming,{exact:true}).waitFor({timeout:40000});
   assertID('trace-new-comment-keeps-focus-caret-'+mode,await owner.locator('#prompt').evaluate(el=>el===window.__tracePrompt&&document.activeElement===el&&el.innerText.startsWith('Editing people')&&window.getSelection().anchorNode===el.firstChild&&window.getSelection().anchorOffset===5));
   assertID('trace-people-labels-'+mode,(await owner.locator('#prompt').getAttribute('data-placeholder'))==='Message people…'&&(await owner.locator('#sendbtn').getAttribute('aria-label'))==='Send message to people');
   await owner.locator('#prompt').fill('');
@@ -629,8 +1217,10 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   await source.click();await owner.locator('[data-gact=prompt]').click();
   const edited='Edited prompt α '+mode;await owner.locator('#prompt').fill(edited);
   const beforeSend=counts(ownerSeat);await owner.locator('#sendbtn').click();
+  assertID('stage1-owner-send-disarms-'+mode,(await owner.locator('#destinationpeople').getAttribute('aria-pressed'))==='true'&&(await owner.locator('#prompt').innerText())==='Independent people draft '+mode);
+  await screenshot(owner,'stage1-owner-disarmed-'+mode+'.png');
   await owner.locator('[aria-label="Sent as prompt"]').waitFor({timeout:30000});
-  const afterSend=counts(ownerSeat);assertID('trace-owner-agent-provenance-'+mode,await owner.getByText('You · Agent',{exact:true}).count()>0);
+  const afterSend=counts(ownerSeat);const submittedBubble=owner.locator('#msgs .turn[data-bk] .bubble').filter({hasText:edited});assertID('trace-owner-agent-provenance-'+mode,await submittedBubble.locator('.gwho').getByText('You',{exact:true}).count()>0);
   assertID('trace-explicit-one-dispatch-'+mode,afterSend.attempted===beforeSend.attempted+1&&afterSend.accepted===beforeSend.accepted+1&&afterSend.controls===beforeSend.controls);
   const link=await until(async()=>{const ui=await ownerSeat.api('/api/ui');return (ui.forward_links||[]).find(x=>x.kind==='prompt'&&x.destination?.node===chat.id);},20000,'confirmed source link persisted');
   const local=await ownerSeat.api('/api/nodes/'+chat.id+'/chat');
@@ -638,6 +1228,10 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   const turn=local.turns.find(x=>x.uid===link.destination.uid&&(x.segment??0)===(link.destination.segment??0)&&x.record===link.destination.record);
   assertID('trace-confirmed-exact-address-'+mode,!!turn&&turn.text===edited&&local.turns.some((x,i)=>i>local.turns.indexOf(turn)&&x.role==='assistant'));
   manifest['trace-address-'+mode]={source:link.source,destination:link.destination,preview:link.preview,beforeSend,afterSend};
+  await owner.locator('[aria-label="Sent as prompt"]').focus();
+  const later='Incoming after confirmed marker '+mode;await reader.locator('#prompt').fill(later);await reader.locator('#sendbtn').click();
+  await owner.locator('#msgs .gmsg').filter({hasText:later}).waitFor({timeout:30000});
+  assertID('trace-confirmed-marker-keeps-focus-'+mode,await owner.evaluate(()=>document.activeElement?.getAttribute('aria-label')==='Sent as prompt')&&JSON.stringify(counts(ownerSeat))===JSON.stringify(afterSend));
   await owner.reload({waitUntil:'networkidle'});await owner.locator('[aria-label="Sent as prompt"]').waitFor();
   await owner.locator('#destinationagent').click();await owner.locator('#prompt').fill('temporary');await owner.locator('#prompt').fill('');
   assertID('trace-confirmed-survives-empty-'+mode,await owner.locator('[aria-label="Sent as prompt"]').count()===1);
@@ -663,11 +1257,11 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   await screenshot(owner,'trace-chooser-'+mode+'.png');await choices.first().press('Escape');
   assertID('trace-chooser-escape-focus-'+mode,await marker.evaluate(el=>document.activeElement===el));
   await owner.locator('#destinationpeople').click();await owner.locator('#prompt').fill('Independent people draft '+mode);
-  await owner.locator('#msgs .gmsg .bubble').last().click();await owner.locator('#msgs [data-gact=rename]').click();
+  await owner.locator('#msgs .gmsg .bubble').last().click();await owner.locator('#msgs [data-gact=more]').click();await owner.locator('#sendto_list [data-choice="0"]').click();
   const editor=owner.locator('#msgs [data-grename]');await editor.fill('In progress person edit');await editor.evaluate(el=>{el.setSelectionRange(4,9);window.__traceEditor=el;});
   const editorAnchor=await editor.evaluate(el=>el.getBoundingClientRect().top);
   await readerSeat.api('/api/team/subscriptions/'+received.slice(5)+'/comments','POST',{text:'Poll while editing '+mode,anchor:mirror.next,key:(mode==='desktop'?'fa110000':'fa220000')+'00000001'});
-  await owner.getByText('Poll while editing '+mode,{exact:true}).waitFor({timeout:30000});
+  await owner.locator('#msgs').getByText('Poll while editing '+mode,{exact:true}).waitFor({timeout:30000});
   const latePoll=owner.waitForResponse(r=>new URL(r.url()).pathname==='/api/nodes/'+chat.id+'/chat'&&[200,304].includes(r.status()),{timeout:20000});
   await ownerSeat.api('/api/nodes/'+chat.id,'PATCH',{title:'Synthetic concurrent title '+mode});
   const late=await latePoll;await delay(250);
@@ -695,7 +1289,7 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   await owner.locator('#attstage .sx').click();
   await owner.emulateMedia({reducedMotion:'reduce'});
   let releaseUpload,uploadReady,releasedUpload=false;const uploadHeld=new Promise(resolve=>releaseUpload=resolve),uploadRequested=new Promise(resolve=>uploadReady=resolve);heldReleases.add(releaseUpload);
-  await owner.route('**/api/nodes/'+chat.id+'/attachments',async route=>{try{const response=await route.fetch();uploadReady();await uploadHeld;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!releasedUpload&&!shutting&&!owner.isClosed())throw e;}});
+  await owner.route('**/api/nodes/'+chat.id+'/attachments?*',async route=>{try{const response=await route.fetch();uploadReady();await uploadHeld;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!releasedUpload&&!shutting&&!owner.isClosed())throw e;}});
   try {
     await owner.locator('#attfile').setInputFiles({name:'held-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic held upload')});
     await Promise.race([uploadRequested,delay(20000).then(()=>{throw Error('upload not requested');})]);
@@ -711,7 +1305,7 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
     await owner.locator('#destinationpeople').click();assertID('trace-held-upload-people-draft-'+mode,(await owner.locator('#prompt').innerText())==='People during upload '+mode);
     await owner.locator('#destinationagent').click();await owner.locator('#attstage .sx').click();await owner.locator('#prompt').fill('');
   } finally {releasedUpload=true;releaseUpload();heldReleases.delete(releaseUpload);await owner.unrouteAll({behavior:'wait'});await owner.emulateMedia({reducedMotion:'no-preference'});}
-  await owner.route('**/api/nodes/'+chat.id+'/attachments',route=>route.abort('failed'));
+  await owner.route('**/api/nodes/'+chat.id+'/attachments?*',route=>route.abort('failed'));
   try {
     await owner.locator('#prompt').fill('Agent draft after failed upload '+mode);
     await owner.locator('#attfile').setInputFiles({name:'failed-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic failed upload')});
@@ -723,9 +1317,9 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   } finally {await owner.unrouteAll({behavior:'wait'});}
   await owner.locator('#destinationagent').click();await owner.locator('#prompt').fill('/clear');await owner.locator('#sendbtn').click();
   await owner.locator('.histload').waitFor({timeout:30000});await owner.locator('.histload').click();
-  await owner.getByText(discussion,{exact:true}).waitFor({timeout:30000});
+  await owner.locator('#msgs').getByText(discussion,{exact:true}).waitFor({timeout:30000});
   const history=await ownerSeat.api('/api/nodes/'+chat.id+'/chat?history=1');
-  assertID('trace-clear-history-seam-'+mode,(history.segments.length+(history.empty_segments||[]).length)>=2&&(await owner.getByText(discussion,{exact:true}).count())===1);
+  assertID('trace-clear-history-seam-'+mode,(history.segments.length+(history.empty_segments||[]).length)>=2&&(await owner.locator('#msgs').getByText(discussion,{exact:true}).count())===1);
   manifest['trace-history-'+mode]={segments:history.segments.map(x=>({uid:x.log_uid,index:x.segment_index,seam:x.seam,reason:x.reason}))};await screenshot(owner,'trace-history-'+mode+'.png');
 }
 async function nativeTrace(mode,ownerSeat,readerSeat) {
@@ -736,7 +1330,7 @@ async function nativeTrace(mode,ownerSeat,readerSeat) {
   const received='team/'+[sub.server,sub.owner,sub.chat,sub.generation].join('/');
   const owner=await pageFor(ownerSeat,mode,'native-trace-owner-'+mode),reader=await pageFor(readerSeat,mode,'native-trace-reader-'+mode);
   await open(owner,native.id);await open(reader,received);await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
-  await reader.getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
+  await reader.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
   const comment='Native source α '+mode+'\nSecond line 漢';await reader.locator('#prompt').fill(comment);await reader.locator('#sendbtn').click();
   const source=owner.locator('#msgs .bubble').filter({hasText:'Native source α '+mode}).first();await source.waitFor({timeout:40000});
   const before=counts(ownerSeat);await source.click();await owner.locator('[data-gact=prompt]').click();
@@ -766,8 +1360,13 @@ async function refusalTrace(mode,ownerSeat,readerSeat,newer) {
   const rejected='Refused '+mode+' '+newer+' [delay-dispatch] [reject-dispatch]';await owner.locator('#prompt').fill(rejected);
   const observed=[];manifest['refusal-responses-'+mode+'-'+newer]=observed;owner.on('response',async r=>{if(r.url().endsWith('/api/nodes/'+chat.id+'/chat')&&r.status()===200){try{const j=await r.json();observed.push({error:j.error,restore_draft:j.restore_draft,trace_outcome:j.trace_outcome,pending:j.pending});}catch{}}});
   const restored=owner.waitForResponse(async r=>{if(!r.url().endsWith('/api/nodes/'+chat.id+'/chat')||r.status()!==200)return false;try{return Boolean((await r.json()).error);}catch{return false;}},{timeout:30000});
-  const before=counts(ownerSeat);await owner.locator('#sendbtn').click();await owner.locator('[aria-label="Awaiting prompt delivery"]').waitFor({timeout:10000});
-  assertID('refusal-awaiting-not-sent-'+mode+'-'+newer,await owner.locator('[aria-label="Sent as prompt"]').count()===0);
+  let releaseSend;const heldSend=new Promise(resolve=>releaseSend=resolve);heldReleases.add(releaseSend);
+  await owner.route('**/api/nodes/'+chat.id+'/send?*',async route=>{await heldSend;if(!owner.isClosed())await route.continue();});
+  const before=counts(ownerSeat);
+  try {
+    await owner.locator('#sendbtn').click();await owner.locator('[aria-label="Awaiting prompt delivery"]').waitFor({timeout:10000});
+    assertID('refusal-awaiting-not-sent-'+mode+'-'+newer,await owner.locator('[aria-label="Sent as prompt"]').count()===0);
+  } finally {releaseSend();heldReleases.delete(releaseSend);await owner.unrouteAll({behavior:'wait'});}
   await owner.locator('#destinationpeople').click();const people='People editing '+mode+' '+newer;await owner.locator('#prompt').fill(people);
   if(newer){await owner.locator('#destinationagent').click();await owner.locator('#prompt').fill('Newer agent draft '+mode);await owner.locator('#destinationpeople').click();}
   const restoredResponse=await restored;const restoredBody=await restoredResponse.json();await delay(200);assertID('refusal-people-preserved-'+mode+'-'+newer,(await owner.locator('#prompt').innerText())===people);
@@ -776,28 +1375,40 @@ async function refusalTrace(mode,ownerSeat,readerSeat,newer) {
   const after=counts(ownerSeat);assertID('refusal-no-retry-'+mode+'-'+newer,after.attempted===before.attempted+1&&after.accepted===before.accepted&&after.controls===before.controls);
   manifest['refusal-'+mode+'-'+newer]={before,after,errorGET:restoredBody.error,restoreDraftGET:restoredBody.restore_draft||null};await screenshot(owner,'refusal-'+mode+'-'+newer+'.png');
 }
-async function captureCoverage() {
-  const result=[];const sourceDir=path.resolve(__dirname,'../js');
-  for (const {page,label} of pages) {
-    if(page.isClosed()) continue;
-    try {for(const entry of await page.coverage.stopJSCoverage()) {
+const capturePage=createPageCapture(async(page,label)=>{
+  if(captureProbeGate){captureProbeStarted=true;await captureProbeGate;}
+  const sourceDir=path.resolve(__dirname,'../js');
+  for(const entry of await page.coverage.stopJSCoverage()) {
       const url=new URL(entry.url);if(!/^\/js\/[a-z0-9-]+\.js$/.test(url.pathname))continue;
       const source=fs.readFileSync(path.join(sourceDir,path.basename(url.pathname)),'utf8');
       assert.equal(entry.source,source,'browser source matches checkout: '+url.pathname);
-      result.push({page:label,path:url.pathname,source,functions:entry.functions});
-    }} catch(e){manifest.coverageError=String(e);throw e;}
+      coverageArchive.push({page:label,path:url.pathname,source,functions:entry.functions});
   }
-  fs.writeFileSync(artifacts('browser-coverage.json'),JSON.stringify(result));manifest.artifacts.push('browser-coverage.json');
+});
+async function captureCoverage(selectedPages=pages) {
+  for (const {page,label} of selectedPages) {
+    try {await capturePage(page,label);} catch(e){manifest.coverageError=String(e);throw e;}
+  }
+  fs.writeFileSync(artifacts('browser-coverage.json'),JSON.stringify(coverageArchive));
+  if(!manifest.artifacts.includes('browser-coverage.json'))manifest.artifacts.push('browser-coverage.json');
+}
+async function runCompletedCase(fn) {
+  const pageStart=pages.length,contextStart=contexts.length;
+  await fn();
+  const completedPages=pages.slice(pageStart),completedContexts=contexts.slice(contextStart);
+  await retireCompletedContexts(completedPages,completedContexts,()=>captureCoverage(completedPages));
+  pages.splice(pageStart);contexts.splice(contextStart);
 }
 async function terminate(c) {
   if(!c || c.exitCode!==null || c.signalCode!==null)return;
   c.kill('SIGTERM');await Promise.race([new Promise(r=>c.once('exit',r)),delay(4000)]);
   if(c.exitCode===null && c.signalCode===null){c.kill('SIGKILL');await Promise.race([new Promise(r=>c.once('exit',r)),delay(2000)]);}
 }
-async function cleanup() {
-  if(shutting)return;shutting=true;
+async function performCleanup() {
+  shutting=true;
+  if(cleanupProbeGate)await cleanupProbeGate;
   for(const release of heldReleases)release();
-  if(browser){try{await captureCoverage();}catch(e){manifest.cleanup.push({coverage:'failed',error:String(e)});manifest.result='fail';process.exitCode=1;}try{await browser.close();}catch{}}
+  if(browser){try{await retireCompletedContexts(pages,contexts,captureCoverage);}catch(e){manifest.cleanup.push({coverage:'failed',error:String(e)});manifest.result='fail';process.exitCode=1;}try{await browser.close();}catch(e){manifest.cleanup.push({browserCloseError:String(e)});manifest.result='fail';process.exitCode=1;}}
   await Promise.allSettled([...pending]);
   for(const s of seats) {
     if(s.api){try {
@@ -835,30 +1446,54 @@ async function cleanup() {
   }
   record();
 }
-for(const [sig,code] of [['SIGINT',130],['SIGTERM',143]])process.once(sig,()=>{signalCode=code;manifest.result='interrupted';manifest.signal=sig;cleanup().then(()=>{console.log('Artifacts: '+root);process.exit(code);}).catch(e=>{console.error(e);process.exit(code);});});
+const cleanup=createCleanupOnce(async()=>{try{await performCleanup();}catch(e){manifest.result='fail';manifest.cleanup.push({fatal:String(e)});process.exitCode=1;record();throw e;}});
+for(const [sig,code] of [['SIGINT',130],['SIGTERM',143]])process.once(sig,()=>{signalCode=code;if(manifest.result!=='fail')manifest.result='interrupted';manifest.signal=sig;const finished=cleanup();cleanupProbeRelease?.();captureProbeRelease?.();finished.then(()=>{record();process.stdout.write('Artifacts: '+root+'\n',()=>process.exit(code));}).catch(e=>{process.stderr.write(String(e)+'\n',()=>process.exit(code));});});
 
 async function run() {
  const selected=process.env.SCIMUX_E2E_SCENARIO||'default';
- if(!['default','stale-membership','stale-removed-membership','conversation-trace','conversation-native','conversation-refusal','conversation-core','early-native','native-start-failure','recipient-boundary','ai-source','ui-join','recipient-leave','permission-lifecycle','leave-empty','leave-stale','held-evidence','viewport-keyboard','dropped-send','reshare-stale','media-contrast','unshared','held-chat-loading','received-offline'].includes(selected))throw Error('unknown SCIMUX_E2E_SCENARIO');
+ if(!['default','stale-membership','stale-removed-membership','conversation-trace','conversation-native','conversation-refusal','conversation-core','early-native','native-start-failure','recipient-boundary','ai-source','ui-join','recipient-leave','permission-lifecycle','leave-empty','leave-stale','held-evidence','viewport-keyboard','dropped-send','reshare-stale','media-contrast','unshared','held-chat-loading','received-offline','stage1-scanner','stage1-unread','stage1-owner-files','stage2-shared-actions','stage2-bookmark-pages','recreated-chat-isolation','bubble-selection','draft-recovery','header-focus','description-save-isolation','description-recreated-choice','description-choice-order','no-selection','delete-recreation-isolation','legacy-closed-recreation','browser-lifecycle'].includes(selected))throw Error('unknown SCIMUX_E2E_SCENARIO');
  if(selected!=='default')manifest.scope=selected+' scenario only';
  relay=await launchRelay();
  for(const name of ['owner-a','owner-b','recipient','observer']) await makeSeat(name);
  const [a,b,r,observer]=seats;
  for(const s of seats)s.node=await node(s,'codex',s.name+' chat','Synthetic initial request');
  if(selected==='native-start-failure'){
-  browser=await playwright.chromium.launch();
+  browser=await launchBrowser();
   for(const mode of ['desktop','phone']){const before=counts(a);await nativeStartupFailure(mode,a);assert.deepEqual(counts(a),before);assertID('native-start-failure-zero-dispatch-'+mode,true);}return;
  }
+ if(selected==='no-selection'){browser=await launchBrowser();const empty=await makeSeat('no-selection');for(const mode of ['desktop','phone'])await noSelection(mode,empty);return;}
+ if(selected==='legacy-closed-recreation'){browser=await launchBrowser();for(const mode of ['desktop','phone'])await legacyClosedRecreation(mode);return;}
  if(process.env.SCIMUX_E2E_FAIL_AFTER_START==='1')throw Error('controlled post-start failure');
- if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='failure'||process.env.SCIMUX_E2E_CLEANUP_PROBE==='signal') {
+ if(['failure','signal','overlap','capture-overlap'].includes(process.env.SCIMUX_E2E_CLEANUP_PROBE)) {
   manifest.scope='cleanup probe only';
-  await node(a,'claude','native cleanup probe','Synthetic native initial');
+  const native=await node(a,'claude','native cleanup probe','Synthetic native initial');
   if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='failure')throw Error('controlled native cleanup failure');
+  if(['overlap','capture-overlap'].includes(process.env.SCIMUX_E2E_CLEANUP_PROBE)){
+   browser=await launchBrowser();const page=await pageFor(a,'desktop','cleanup-overlap');await open(page,native.id);await page.locator('#msgs').getByText('Synthetic native initial',{exact:true}).waitFor({timeout:30000});
+   if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='overlap'){
+    cleanupProbeGate=new Promise(resolve=>cleanupProbeRelease=resolve);cleanup().catch(()=>{});await Promise.resolve();assert.ok(shutting,'cleanup has started');
+   } else {
+    captureProbeGate=new Promise(resolve=>captureProbeRelease=resolve);captureCoverage().catch(()=>{});await until(()=>captureProbeStarted,10000,'capture has started');
+   }
+   console.log('Cleanup overlap probe ready');await new Promise(()=>{});
+  }
   console.log('Native cleanup probe ready');
   await new Promise(()=>{});
  }
  if(shutting)throw Error('runner shutting down');
- browser=await playwright.chromium.launch();
+ browser=await launchBrowser();
+ if(selected==='browser-lifecycle'){
+  for(const mode of ['desktop','phone']){
+   const before=counts(a),label='lifecycle-'+mode;let page;
+   await runCompletedCase(async()=>{page=await pageFor(a,mode,label);await open(page,a.node.id);
+    await page.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});await screenshot(page,label+'.png');
+    const pageSet=pages.slice(),contextSet=contexts.slice();await assert.rejects(retireCompletedContexts(pageSet,contextSet,async()=>{await captureCoverage(pageSet);throw Error('synthetic post-capture failure');}),/synthetic post-capture failure/);
+    assertID('browser-lifecycle-failure-keeps-page-'+mode,!page.isClosed()&&pageSet.length===1&&contextSet.length===1);
+   });
+   assertID('browser-lifecycle-retains-coverage-'+mode,coverageArchive.some(item=>item.page===label&&item.path==='/js/chat.js')&&page.isClosed()&&pages.length===0&&contexts.length===0&&JSON.stringify(before)===JSON.stringify(counts(a)));
+  }
+  return;
+ }
  // Selected chat remains selected as Team becomes available and through reload.
  if(selected==='default'||selected==='ui-join') for(const mode of ['desktop','phone']) {
   const s=mode==='desktop'?a:b;
@@ -884,6 +1519,19 @@ async function run() {
  for(const s of selected==='default'?[r,observer]:seats){await s.api('/api/settings','PUT',{experimental_feature_team:true});const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));await s.api('/api/team/servers','POST',{link:issue.link,name:selected==='received-offline'&&s===a?'Synthetic sharer':s.name});}
  for(const s of seats){s.serverID=(await s.api('/api/team/servers')).servers[0].id;s.self=(await s.api('/api/team/servers/'+s.serverID+'/seats')).self;}
  for(const s of [a,b])await s.api('/api/team/shares/'+s.node.id,'PUT',{server:s.serverID,scope:'all',members:[{seat:r.self,access:'write'},...(s===b?[{seat:observer.self,access:'write'}]:[])]});
+ if(selected==='stage1-scanner'){for(const mode of ['desktop','phone'])await stage1Scanner(mode,a,r);return;}
+ if(selected==='stage1-unread'){for(const mode of ['desktop','phone'])await stage1Unread(mode,a,r);return;}
+ if(selected==='stage1-owner-files'){for(const mode of ['desktop','phone'])await stage1OwnerFiles(mode,a,r);return;}
+ if(selected==='stage2-shared-actions'){await r.api('/api/nodes/'+r.node.id,'PATCH',{title:'Synthetic renamed recipient'});for(const mode of ['desktop','phone'])await stage2SharedActions(mode,a,b,r);return;}
+ if(selected==='stage2-bookmark-pages'){for(const mode of ['desktop','phone'])await stage2BookmarkPages(mode,a,r);return;}
+ if(selected==='recreated-chat-isolation'){for(const mode of ['desktop','phone'])await recreatedChatIsolation(mode,a,r);return;}
+ if(selected==='bubble-selection'){const before=counts(a),sh=await a.api('/api/team/shares/'+a.node.id);const sub=await until(async()=>(await a.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===sh.uid&&x.access==='owner'),30000,'selection seed');const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');for(let i=0;i<40;i++)await a.api('/api/team/subscriptions/'+key+'/comments','POST',{key:i.toString(16).padStart(16,'0'),anchor:0,text:'Synthetic selection history '+i});assertID('bubble-selection-seed-zero-dispatch',JSON.stringify(before)===JSON.stringify(counts(a)));for(const mode of ['desktop','phone'])await bubbleSelection(mode,a,r);return;}
+ if(selected==='draft-recovery'){for(const mode of ['desktop','phone'])await draftRecovery(mode,a);return;}
+ if(selected==='header-focus'){const prior=await pageFor(a,'desktop','prior-owner-active');await open(prior,a.node.id);for(const mode of ['desktop','phone'])await headerFocus(mode,a);return;}
+ if(selected==='description-save-isolation'){for(const mode of ['desktop','phone'])await descriptionSaveIsolation(mode,a);return;}
+ if(selected==='description-recreated-choice'){for(const mode of ['desktop','phone'])await recreatedDescriptionChoice(mode,a,r);return;}
+ if(selected==='description-choice-order'){for(const mode of ['desktop','phone'])await overlappingDescriptionChoices(mode,a,r);return;}
+ if(selected==='delete-recreation-isolation'){for(const mode of ['desktop','phone'])await deleteRecreationIsolation(mode,a);return;}
  if(selected==='default'||selected==='stale-membership')for(const mode of ['desktop','phone'])await staleMembership(mode,a,b,r,observer);
  if(selected==='default'||selected==='stale-removed-membership')for(const mode of ['desktop','phone'])await staleRemovedMembership(mode,a,b,r,observer);
  if(selected==='early-native'){for(const mode of ['desktop','phone'])await earlyNativeComment(mode,a,r);return;}
@@ -950,8 +1598,8 @@ async function run() {
   const guest=await pageFor(a,mode,'new-writer-'+mode);await open(guest,invitedID);
   await guest.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
   const human='New writer human '+mode;await guest.locator('#prompt').fill(human);await guest.locator('#sendbtn').click();
-  await owner.getByText(human,{exact:true}).waitFor({timeout:40000});
-  assertID('new-writer-human-comment-'+mode,(await owner.getByText(human,{exact:true}).count())===1);
+  await owner.locator('#msgs').getByText(human,{exact:true}).waitFor({timeout:40000});
+  assertID('new-writer-human-comment-'+mode,(await owner.locator('#msgs').getByText(human,{exact:true}).count())===1);
   const ownerWrite=owner.waitForResponse(async response=>{if(!response.url().endsWith('/api/team/shares/'+b.node.id)||response.status()!==200)return false;try{return (await response.json()).members?.some(x=>x.seat===r.self&&x.access==='write');}catch{return false;}},{timeout:30000});
   await b.api('/api/team/shares/'+b.node.id,'PUT',{server:b.serverID,scope:'all',members:[{seat:r.self,access:'write'},{seat:a.self,access:'write'},{seat:observer.self,access:'write'}]});
   await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
@@ -1017,7 +1665,7 @@ async function run() {
   assertID('shared-excludes-own-'+mode,await p.locator('[data-activity-group=mine]').count()===0&&await p.locator('[data-open="'+r.node.id+'"]').count()===0&&await p.locator('[data-activity-group]').count()===2);
   await screenshot(p,'groups-shared-'+mode+'.png');
   await p.locator('[data-activity-group="'+groupA+'"]').click();
-  await open(p,received);await p.getByText('Unread folded '+mode,{exact:true}).waitFor({timeout:30000});await delay(2500);await goBack();
+  await open(p,received);await p.locator('#msgs').getByText('Unread folded '+mode,{exact:true}).waitFor({timeout:30000});await delay(2500);await goBack();
   await until(async()=>await p.locator('[data-activity-group="'+groupA+'"] [aria-label=unread]').count()===0,15000,'opened unread marked read');
   assertID('open-marks-unread-read-'+mode,true);
   const pin=async id=>{
@@ -1087,8 +1735,8 @@ async function run() {
   const restoredFetch=op.waitForResponse(response=>response.url().startsWith(a.base+'/api/')&&response.status()===200,{timeout:30000});
   await op.context().setOffline(false);
   await restoredFetch;assertID('offline-valid-fetch-after-online-'+mode,true);
-  await op.getByText(offlineComment,{exact:true}).waitFor({timeout:40000});
-  assertID('offline-new-content-once-'+mode,(await op.getByText(offlineComment,{exact:true}).count())===1);
+  await op.locator('#msgs').getByText(offlineComment,{exact:true}).waitFor({timeout:40000});
+  assertID('offline-new-content-once-'+mode,(await op.locator('#msgs').getByText(offlineComment,{exact:true}).count())===1);
   assertID('offline-selection-draft-'+mode,(await op.locator('#chattitle').innerText())==='owner-a chat' && (await op.locator('#prompt').innerText())===draft);
   await op.locator('#prompt').click({trial:true});await op.locator('#sharebtn').click({trial:true});
   if(mode==='phone')await op.locator('#chatback').click({trial:true});
@@ -1119,8 +1767,8 @@ async function run() {
    const key=[own.server,own.owner,own.chat,own.generation].join('/');
    const recoveryComment='Recovery new human '+mode;
    await a.api('/api/team/subscriptions/'+key+'/comments','POST',{text:recoveryComment,anchor:0,key:mode==='desktop'?'abcdef0123456789':'abcdef0123456790'});
-   await rp.getByText(recoveryComment,{exact:true}).waitFor({timeout:30000});
-   assertID('recovery-once-selection-draft-'+mode,(await rp.getByText(recoveryComment,{exact:true}).count())===1 && (await rp.locator('#chattitle').innerText())==='owner-a chat' && (await rp.locator('#prompt').innerText())===recoveryDraft && await rp.evaluate(id=>localStorage.getItem('scimux-sel')===id,received));
+   await rp.locator('#msgs').getByText(recoveryComment,{exact:true}).waitFor({timeout:30000});
+   assertID('recovery-once-selection-draft-'+mode,(await rp.locator('#msgs').getByText(recoveryComment,{exact:true}).count())===1 && (await rp.locator('#chattitle').innerText())==='owner-a chat' && (await rp.locator('#prompt').innerText())===recoveryDraft && await rp.evaluate(id=>localStorage.getItem('scimux-sel')===id,received));
    await rp.locator('#prompt').click({trial:true});
    manifest.counters['recovery-'+mode]={before:counterBefore,after:Object.fromEntries(seats.map(s=>[s.name,counts(s)])),offlineFailedRequests:failedRequests,heldReads:2};
    for(const s of seats)assert.deepEqual(counts(s),counterBefore[s.name]);
@@ -1141,25 +1789,39 @@ async function run() {
  const attempts=jsonLines(path.join(a.data,'counter.attempts')).filter(x=>x.text===text);
  assertID('native-exact-one-prompt',rows.length===1 && attempts.length===1);
  await until(async()=>{const c=await a.api('/api/nodes/'+native.id+'/chat');return c.turns?.some(t=>t.role==='assistant' && String(t.text||'').includes('Synthetic response 2'));},30000,'native authoritative response');
- for(const mode of ['desktop','phone'])await earlyNativeComment(mode,a,r);
- for(const mode of ['desktop','phone']){await conversationTrace(mode,a,r);await nativeTrace(mode,a,r);await refusalTrace(mode,a,r,false);await refusalTrace(mode,a,r,true);}
- for(const mode of ['desktop','phone']){const before=counts(a);await nativeStartupFailure(mode,a);assert.deepEqual(counts(a),before);assertID('native-start-failure-zero-dispatch-'+mode,true);}
- for(const mode of ['desktop','phone'])await recipientBoundary(mode,a,r);
- for(const mode of ['desktop','phone'])await aiSourcePrompt(mode,a,r);
- for(const mode of ['desktop','phone'])await recipientLeave(mode,a,r);
- for(const mode of ['desktop','phone'])await permissionLifecycle(mode,a,r);
- for(const mode of ['desktop','phone'])await recipientLeaveEmpty(mode,a);
- for(const mode of ['desktop','phone'])await recipientLeaveStale(mode,a,r);
- for(const mode of ['desktop','phone'])await heldEvidence(mode,a,r);
- for(const mode of ['w320','w390','w768'])await viewportKeyboard(mode,r);
- for(const mode of ['desktop','phone'])await droppedSend(mode,a,r);
- for(const mode of ['desktop','phone'])await reshareStale(mode,a,r);
- for(const mode of ['desktop','phone'])for(const scheme of ['light','dark'])await mediaContrast(mode,scheme,a,r);
- for(const mode of ['desktop','phone'])await unsharedChat(mode,a);
- for(const mode of ['desktop','phone'])await heldChatLoading(mode,a);
- for(const mode of ['desktop','phone'])await receivedOfflineRetry(mode,a,r);
+ await retireCompletedContexts(pages,contexts,captureCoverage);
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>earlyNativeComment(mode,a,r));
+ for(const mode of ['desktop','phone']){await runCompletedCase(()=>conversationTrace(mode,a,r));await runCompletedCase(()=>nativeTrace(mode,a,r));await runCompletedCase(()=>refusalTrace(mode,a,r,false));await runCompletedCase(()=>refusalTrace(mode,a,r,true));}
+ for(const mode of ['desktop','phone'])await runCompletedCase(async()=>{const before=counts(a);await nativeStartupFailure(mode,a);assert.deepEqual(counts(a),before);assertID('native-start-failure-zero-dispatch-'+mode,true);});
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>recipientBoundary(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>aiSourcePrompt(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>recipientLeave(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>permissionLifecycle(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>recipientLeaveEmpty(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>recipientLeaveStale(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>heldEvidence(mode,a,r));
+ for(const mode of ['w320','w390','w768'])await runCompletedCase(()=>viewportKeyboard(mode,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>droppedSend(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>reshareStale(mode,a,r));
+ for(const mode of ['desktop','phone'])for(const scheme of ['light','dark'])await runCompletedCase(()=>mediaContrast(mode,scheme,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>unsharedChat(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>headerFocus(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>descriptionSaveIsolation(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>recreatedDescriptionChoice(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>overlappingDescriptionChoices(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>heldChatLoading(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>receivedOfflineRetry(mode,a,r));
+ for(const mode of ['desktop','phone']){await runCompletedCase(()=>stage1Scanner(mode,a,r));await runCompletedCase(()=>stage1Unread(mode,a,r));await runCompletedCase(()=>stage1OwnerFiles(mode,a,r));}
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>stage2SharedActions(mode,a,b,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>stage2BookmarkPages(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>recreatedChatIsolation(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>bubbleSelection(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>draftRecovery(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>deleteRecreationIsolation(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>legacyClosedRecreation(mode));
+ const empty=await makeSeat('no-selection');for(const mode of ['desktop','phone'])await runCompletedCase(()=>noSelection(mode,empty));
  manifest.counters.afterNative=Object.fromEntries(seats.map(s=>[s.name,counts(s)]));
  assertID('native-authoritative-response',true);
  if(process.env.SCIMUX_E2E_FAIL_AFTER_NATIVE==='1')throw Error('controlled failure with native node');
 }
-(async()=>{try{await run();manifest.result='pass';}catch(e){manifest.result='fail';manifest.error=String(e);console.error(e.stack||e);process.exitCode=1;for(const {page,label} of pages){try{if(!page.isClosed())await screenshot(page,'failure-'+label+'.png');}catch{}}}finally{await cleanup();console.log('Artifacts: '+root);if(signalCode)process.exitCode=signalCode;}})();
+(async()=>{try{await run();manifest.result='pass';}catch(e){if(!signalCode)manifest.result='fail';manifest.error=String(e);console.error(e.stack||e);if(!signalCode)process.exitCode=1;for(const {page,label} of [...pages].reverse()){try{if(!page.isClosed()){const name='failure-'+label+'.png';await page.screenshot({path:artifacts(name),fullPage:true,timeout:5000});manifest.artifacts.push(name);}}catch{}}}finally{await cleanup();console.log('Artifacts: '+root);if(signalCode)process.exitCode=signalCode;}})();

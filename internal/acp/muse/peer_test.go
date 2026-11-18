@@ -14,6 +14,18 @@ import (
 	"time"
 )
 
+func TestDispatchLoopDoesNotDispatchQueuedFrameAfterClose(t *testing.T) {
+	closed := make(chan struct{})
+	close(closed)
+	dispatched := false
+	p := &peer{closeCh: closed, onProtocol: func(string, json.RawMessage) { dispatched = true }}
+	p.dispq.q = []orderedFrame{{kind: orderedNotify, in: inbound{Method: "synthetic"}}}
+	p.dispatchLoop()
+	if dispatched {
+		t.Fatal("closed peer dispatched a queued notification")
+	}
+}
+
 func TestRPCErrorRegistry(t *testing.T) {
 	entries := []struct {
 		code      int

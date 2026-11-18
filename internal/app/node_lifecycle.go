@@ -556,6 +556,12 @@ func (a *app) createNode(n *Node, taken map[string]bool) (int, initialDelivery, 
 		return status, "", err
 	}
 	n.ID = a.uniqueID(n.Title, taken)
+	instance, err := newUUID()
+	if err != nil {
+		a.mu.Unlock()
+		return 500, "", fmt.Errorf("allocate chat identity: %w", err)
+	}
+	n.InstanceID = instance
 	if a.reserved == nil { // tests build app literals without the map
 		a.reserved = map[string]bool{}
 	}
