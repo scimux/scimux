@@ -23,6 +23,31 @@ import (
 	"github.com/scimux/scimux/internal/team"
 )
 
+func TestInstalledShareOutboxOwnerInstanceTracksLiveNode(t *testing.T) {
+	a := &app{byID: map[string]*Node{}}
+	installShareOutbox(a, t.TempDir(), time.Now)
+	h := a.teamHandler.(*teamHandler)
+	if h.ownerInstance("local", "one") {
+		t.Fatal("missing node authorized")
+	}
+	a.byID["local"] = &Node{ID: "local"}
+	if h.ownerInstance("local", "") || h.ownerInstance("local", "one") {
+		t.Fatal("node without an instance authorized")
+	}
+	a.byID["local"].InstanceID = "one"
+	if !h.ownerInstance("local", "one") || h.ownerInstance("local", "two") {
+		t.Fatal("current and wrong instance were not distinguished")
+	}
+	a.byID["local"].EndedAt = "2026-01-01T00:00:00Z"
+	if h.ownerInstance("local", "one") {
+		t.Fatal("ended node authorized")
+	}
+	a.byID["local"] = &Node{ID: "local", InstanceID: "two"}
+	if h.ownerInstance("local", "one") || !h.ownerInstance("local", "two") {
+		t.Fatal("replacement instance was not fenced")
+	}
+}
+
 type outboxScript struct {
 	helloStatus   int
 	helloID       string

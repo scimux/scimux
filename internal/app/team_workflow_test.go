@@ -298,6 +298,31 @@ func TestTeamServerWorkflow(t *testing.T) {
 	if !strings.Contains(string(request(writer, "GET", address(next), nil, 200)), "Private earlier answer") {
 		t.Fatal("entire-history share omitted the earlier conversation")
 	}
+	// The relay escapes HTML characters while retaining the exact JSON value.
+	// Reconciliation must accept that wire representation without rounding the
+	// large anchor or confusing the synthetic attachment name.
+	ownerServers, err := team.Load(owner.dir)
+	if err != nil || len(ownerServers) != 1 {
+		t.Fatal("cannot read synthetic owner credentials")
+	}
+	body := json.RawMessage(`{"v":1,"text":"Synthetic <caption> & file","anchor":9007199254740993,"files":[{"name":"<synthetic> & file.txt"}]}`)
+	seq, err := team.NewClient().AppendPeopleComment(ctx, baseURL, ownerServers[0].Token, next.Owner, next.Chat, next.Generation, "c/0123456789abcdef", owner.id, body)
+	if err != nil || seq == 0 {
+		t.Fatalf("relay-escaped synthetic publication not reconciled: %v", err)
+	}
+	boundaryText := "A" + strings.Repeat("\n", 16383)
+	boundaryBody, err := json.Marshal(map[string]any{"v": 1, "t": "comment", "text": boundaryText + "\n" + peopleAttachmentNotice, "content_text": boundaryText, "anchor": uint64(9007199254740993), "people_attachments_version": 1, "people_attachments": []map[string]any{{"id": "0123456789abcdef", "sha256": strings.Repeat("a", 64), "size": 1, "name": "<synthetic> & file.txt", "mime": "text/plain"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundarySeq, err := team.NewClient().AppendPeopleComment(ctx, baseURL, ownerServers[0].Token, next.Owner, next.Chat, next.Generation, "c/fedcba9876543210", owner.id, boundaryBody)
+	if err != nil || boundarySeq == 0 {
+		t.Fatalf("boundary synthetic publication failed: %v", err)
+	}
+	retrySeq, err := team.NewClient().AppendPeopleComment(ctx, baseURL, ownerServers[0].Token, next.Owner, next.Chat, next.Generation, "c/fedcba9876543210", owner.id, boundaryBody)
+	if err != nil || retrySeq != boundarySeq {
+		t.Fatalf("boundary exact retry failed: %v", err)
+	}
 	request(writer, "POST", "/api/team/servers/"+server.ID+"/leave", nil, 204)
 	request(writer, "POST", "/api/team/servers", map[string]string{"link": issue(), "name": "Rejoined"}, 201)
 	for _, sub := range list(writer).Subscriptions {

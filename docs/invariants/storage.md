@@ -115,6 +115,38 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   belong to no node.
   They are never sent anywhere or logged; with the team gate off they are
   neither read nor written.
+- **People files remain bound to their copy and message.** Managed file stages,
+  pending publications, receipts and retained bytes belong under the associated
+  `team-copies/` identity and count toward the global budget. A local copy
+  instance survives restart and share retirement, but changes when that copy is
+  removed and recreated. A visible identity is returned only after its containing
+  directory is synced; a failed sync remains unavailable until a later retry
+  establishes durability, without replacing the identity. A published file is
+  resolved through its copy, log, sequence and logical attachment ID; a hash
+  alone grants no access. Share
+  retirement preserves previously retained bytes, while explicit copy removal
+  removes that copy's managed data. An independent reference-media capture has
+  its own retention. File drafts and unconfirmed publications require explicit
+  review; recovery never sends them to an agent or automatically republishes.
+  Local stages and frozen publications use private records with bounded
+  temporary writes and atomic admission. A visible stage is usable for upload
+  or retry only after its directory sync succeeds; a later read retries that
+  sync without replacing the record. Under the copy lock and then the
+  global budget lock, recovery removes recognized abandoned temporary files
+  before reserving space; a failed admission leaves existing records intact.
+  A pending publication pins its stages until an exact retained comment and
+  associated bytes are confirmed and a completion receipt is durable. The
+  per-copy limit includes encoded stages, pending records, receipts and retained
+  records (4096 records and 256 MiB); the global storage budget also applies.
+  No network I/O occurs while these locks are held.
+- **Browser drafts are separate from retained copies.** The browser's local
+  file store holds raw People and prepared source files for review across
+  navigation and reload, with a 16 MiB per-scope limit and a 256 MiB/4096-file
+  global limit. Text and pending identifiers are stored separately. Removing
+  a local chat copy removes its server-managed data; older browser drafts are
+  offered for explicit review when available and are not automatically adopted
+  by the replacement. Browser data removal and individual draft cleanup are
+  separate from copy removal and independent reference-media captures.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth
   (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a
   default 64 MiB free-space reserve plus optional global/per-node byte budgets

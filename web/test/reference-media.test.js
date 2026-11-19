@@ -8,6 +8,11 @@ import {
   createLegacyMediaResolver,
   legacyMediaTextAndTiles,
 } from "../js/reference-media.js";
+
+test("a generic shared file explicitly reports that an independent copy is unavailable",()=>{
+ const html=renderReferenceMedia({version:1,capture_id:"a".repeat(64),items:[{id:"0",key:"attachment:team:0123456789abcdef",name:"synthetic.txt",state:"unavailable"}]});
+ assert.match(html,/independent copy unsupported/i);
+});
 import { bookmarkListHTML } from "../js/bookmarks.js";
 import { inboxItemHTML, referenceHTML, buildBookmarkSnapshot } from "../js/notes.js";
 
@@ -138,6 +143,13 @@ test("legacy lookup renders ordinary raster asset links and preserves ordinary f
   assert.match(out.html, /assets\/a_1/);
   assert.equal(out.clean, "[manual](scimux-asset:file_1)");
   assert.match(legacyMediaTextAndTiles(record, resolver).html, /href="\/api\/nodes\/live\/assets\/a_1/);
+});
+
+test('legacy image with an empty stored name remains identifiable as unavailable',()=>{
+ const record={uid:'synthetic',segment:0,record:0,text:'![](scimux-asset:a_1)'};
+ const resolver={view:()=>({state:'ready',node:'synthetic',assets:{a_1:{name:''}}})};
+ const result=legacyMediaTextAndTiles(record,resolver);
+ assert.equal(result.clean,'');assert.match(result.html,/image \(unavailable\)/);assert.doesNotMatch(result.html,/href=/);
 });
 
 test("legacy cache keeps settled entries, bounds unseen entries, and handles network failure", async () => {

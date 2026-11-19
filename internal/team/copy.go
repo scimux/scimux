@@ -178,6 +178,11 @@ func ReadCopy(dataDir string, id CopyID, log string, after uint64, maxEntries in
 	}
 	unlock := lockCopy(filepath.Dir(path))
 	defer unlock()
+	return readCopyLocked(path, after, maxEntries, maxBodyBytes)
+}
+
+// readCopyLocked requires the copy lock held by the caller.
+func readCopyLocked(path string, after uint64, maxEntries int, maxBodyBytes int) ([]MirrorRecord, uint64, error) {
 	m := metaFor(path)
 	if err := m.sync(path); err != nil {
 		return nil, 0, err
@@ -460,6 +465,13 @@ func RemoveCopy(dataDir string, id CopyID) error {
 		return err
 	}
 	defer data.Close()
+	// Copy removal must serialize with stage writes and global budget scans.
+	// Keep the same copy-lock then budget-lock order as AppendCopy and staging.
+	release, err := storagebudget.Lock(dataDir)
+	if err != nil {
+		return err
+	}
+	defer release()
 	root, err := copyOps.openChild(data, CopiesDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {

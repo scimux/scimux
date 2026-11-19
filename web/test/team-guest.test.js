@@ -114,7 +114,7 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
         insertAdjacentHTML(_where, html) { pieces.splice(index, 0, html); body.innerHTML = pieces.join(""); } };
     });
   } });
-  const routed = (path, opts) => path.includes("/comments?") ? commentsApi(path, opts) : api(path, opts);
+  const routed = (path, opts) => path.includes("/comments?") && opts?.method !== "POST" ? commentsApi(path, opts) : api(path, opts);
   let feature;
   const callbacks = extra.panel || {};
   const panel = { bubbleActions:bubbleActionsHTML, promptIcon:"", preparePrompt() {}, ...callbacks,
@@ -912,6 +912,32 @@ test('shared bubbles expose the ordinary action order and icons', async () => {
  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const turn=sharedActionBubble(1);f.click('msgs',turn.bubble);
  const html=turn.turn.rowHTML,actions=[...html.matchAll(/data-gact="(fork|sendto|desc|bookmark|copy)"/g)].map(m=>m[1]);
  assert.deepEqual(actions,['fork','sendto','desc','bookmark','copy']);assert.match(html,/FORK/);assert.match(html,/INTO/);assert.match(html,/COPY/);f.feature.destroy();
+});
+
+test('shared file bookmark failures do not commit a misleading bookmark',async()=>{
+ for(const mode of ['missing capture','capture error']) {
+  const entry={seq:1,anchor:0,author:'a',text:'synthetic',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1}]};
+  const mutations=[],panel=mode==='capture error'?{captureBookmark:async()=>{throw Error('synthetic capture failure')}}:{};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer(),async()=>commentsAnswer([entry],1),undefined,{panel,bookmarks:()=>[],uiMutate:change=>mutations.push(change)});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const item=sharedActionBubble(0);item.turn.dataset={cseq:'1'};f.click('msgs',item.bubble);
+  const action={dataset:{gact:'bookmark'},closest:selector=>selector==='[data-gact]'?action:null};f.click('msgs',action);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.get('guestnote').textContent,'Bookmark capture failed — try again.');assert.deepEqual(mutations,[]);f.feature.destroy();
+ }
+});
+
+test('shared file copy explains whether text can be copied',async()=>{
+ for(const text of ['', 'synthetic caption']) {
+  const entry={seq:1,anchor:0,author:'a',text,attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+  const notices=[],copied=[];
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer(),async()=>commentsAnswer([entry],1),undefined,{toast:value=>notices.push(value),panel:{copy:value=>copied.push(value)}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const item=sharedActionBubble(0);item.turn.dataset={cseq:'1'};f.click('msgs',item.bubble);
+  const action={dataset:{gact:'copy'},closest:selector=>selector==='[data-gact]'?action:null};f.click('msgs',action);
+  assert.deepEqual(copied,text?[text]:[]);
+  assert.deepEqual(notices,[text?'This action uses the text; attached files are not included.':'This action does not support files without text.']);f.feature.destroy();
+ }
 });
 
 test('shared action commands pass captured text to local capability adapters', async () => {
@@ -1758,7 +1784,7 @@ test("panel send-to keeps the received conversation selected", async () => {
 test("panel People send posts bounded text with a stable retry key and no controller dispatch", async () => {
   const calls=[]; let fail=true; const store=new Map();
   const storage={getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v),removeItem:k=>store.delete(k)};
-  const view={...base,access:"write"};
+  const view={...base,access:"write",people_copy_instance:"1".repeat(32)};
   const panel={ids:{},loaded(){},select(){},removed(){},changed(){}};
   const f=nativeViewFixture(async(path,opts)=>{
     if(path==="/api/team/subscriptions") return list([view]);
@@ -1912,6 +1938,24 @@ test('late owner mirror and comment pages cannot repaint a different local chat'
  }
 });
 
+test('late owner file retention cannot apply to a different local chat', async () => {
+ const view={...base,access:'owner',local_node:'n1',people_copy_instance:'1'.repeat(32)}, pending=deferred();
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};
+ const entry={seq:1,anchor:0,text:'synthetic',author:'p',attachments:[file]};
+ let selected='n1',started=false,seen=0,renders=0;
+ const panel={ids:{},loaded(){},select(){},removed(){},ownerChanged(){renders++}};
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return {...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};
+  if(path.includes('/seen')&&opts?.method==='PUT'){seen++;return {}}
+  return readAnswer([],0,false,view);
+ },async()=>({entries:[entry],names:{p:'Person'},next:1,more:false}),undefined,{panel,selectedNode:()=>selected,selectedUID:()=>selected==='n1'?'c':'',retainPeople:async()=>{started=true;return pending.promise}});
+ f.feature.tick();for(let i=0;i<40&&!started;i++)await Promise.resolve();assert.equal(started,true);
+ selected='n2';f.feature.setOwnerShare('n2',null);const before=renders;
+ pending.resolve({files:{'1/0123456789abcdef':true}});await f.feature.settled();
+ assert.equal(renders,before);assert.deepEqual(f.feature.ownerSnapshots(),[]);assert.equal(entry._peopleRetained,undefined);assert.equal(seen,0);
+ f.feature.destroy();
+});
+
 test('owner permission loss prevents a later comment post', async () => {
  let ended=false, posts=0; const view={...base,access:'owner'}, panel={ids:{},loaded(){},select(){},removed(){},ownerChanged(){}};
  const f=nativeViewFixture(async(path,opts)=>{
@@ -1944,6 +1988,52 @@ test('panel subscription removal calls the panel callback and clears its saved s
  const f=nativeViewFixture(async(path,opts)=>path==='/api/team/subscriptions'?list([base]):opts?.method==='DELETE'?{}:readAnswer(),undefined,undefined,{panel});
  f.feature.tick(); await f.feature.settled(); f.feature.selectActivity('team/s/o/c/g'); await f.feature.settled();
  f.click('guestremove'); await f.feature.settled(); assert.deepEqual(removed,[true]); assert.equal(f.feature.tab.selected(),''); f.feature.destroy();
+});
+
+test('received preview authority accepts only the current associated raster',async()=>{
+ const view={...base,people_copy_instance:'1'.repeat(32),access:'read',state:'ended'};
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1};
+ const message={seq:1,anchor:0,author:'a',text:'',attachments:[file]};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false));
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const path='/api/team/subscriptions/s/o/c/g/attachments/1/'+file.id+'?copy_instance='+view.people_copy_instance+'&preview=1';
+ const turn={dataset:{cseq:'1'}},anchor={dataset:{tkey:file.id},closest:()=>turn,getAttribute:()=>path};
+ assert.deepEqual(f.feature.sharedPreview(anchor),{url:path,name:file.name});
+ anchor.getAttribute=()=> 'https://example.invalid/forged';assert.equal(f.feature.sharedPreview(anchor),null);
+ anchor.getAttribute=()=>path;anchor.dataset.tkey='fedcba9876543210';assert.equal(f.feature.sharedPreview(anchor),null);
+ anchor.dataset.tkey=file.id;turn.dataset.cseq='0';assert.equal(f.feature.sharedPreview(anchor),null);
+ turn.dataset.cseq='9007199254740992';assert.equal(f.feature.sharedPreview(anchor),null);turn.dataset.cseq='1';
+ message._peopleRetained={[file.id]:false};assert.equal(f.feature.sharedPreview(anchor),null);delete message._peopleRetained;
+ file.mime='text/html';assert.equal(f.feature.sharedPreview(anchor),null);file.mime='image/png';
+ delete anchor.dataset.tkey;assert.equal(f.feature.sharedPreview(anchor),null);anchor.dataset.tkey=file.id;
+ assert.equal(f.feature.sharedPreview({dataset:{tkey:file.id},closest:()=>null}),null);
+ f.navigate();assert.equal(f.feature.sharedPreview(anchor),null);f.feature.destroy();
+});
+
+test('received preview authority refuses a copy without its local identity',async()=>{
+ const view={...base,access:'read'},file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,author:'a',attachments:[file]}],1,false));
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(f.feature.sharedPreview({dataset:{tkey:file.id},closest:()=>({dataset:{cseq:'1'}})}),null);f.feature.destroy();
+});
+
+test('received preview authority rejects unavailable assets and damaged descriptors',async()=>{
+ const view={...base,people_copy_instance:'1'.repeat(32),access:'read'};let available=false;
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1};
+ const message={seq:1,anchor:0,author:'a',text:'',attachments:[file]};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{assetURL:path=>available?path:''});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const path='/api/team/subscriptions/s/o/c/g/attachments/1/'+file.id+'?copy_instance='+view.people_copy_instance+'&preview=1';
+ const turn={dataset:{cseq:'1'}},anchor={dataset:{tkey:file.id},closest:()=>turn,getAttribute:()=>path};
+ assert.equal(f.feature.sharedPreview(anchor),null);available=true;assert.ok(f.feature.sharedPreview(anchor));
+ file.sha256='damaged';assert.equal(f.feature.sharedPreview(anchor),null);f.feature.destroy();
+});
+
+test('removing a People copy carries its captured local identity', async () => {
+ const instance='a'.repeat(32),sub={...base,people_copy_instance:instance};let removed='';
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([sub]);if(opts?.method==='DELETE'){removed=path;return {}}return readAnswer([],0,false,{people_copy_instance:instance});});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();f.click('guestremove');await f.feature.settled();
+ assert.equal(new URL(removed,'http://localhost').searchParams.get('copy_instance'),instance);f.feature.destroy();
 });
 
 test('panel selection ignores a repeated id and closes when navigating to a local chat', async () => {
@@ -2070,6 +2160,9 @@ test('owner comment prompt action prepares attributed source and recipient forge
  const action={dataset:{gact:'prompt'},closest:s=>s==='[data-gact]'?action:null}; f.click('msgs',action);
  assert.equal(prepared.length,1); assert.equal(prepared[0][0].who,'Alex'); assert.equal(prepared[0][0].prov,true);
  assert.deepEqual(prepared[0][1],{server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1});
+ assert.equal(prepared[0][2](),true);
+ const copy={dataset:{gact:'copy'},closest:s=>s==='[data-gact]'?copy:null};f.click('msgs',copy);
+ assert.equal(prepared[0][2](),false,'a later action must retire the preparation callback');
  f.feature.destroy();
  const g=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([],0),comments,undefined,{panel});
  g.feature.tick(); await g.feature.settled(); g.feature.selectActivity('team/s/o/c/g'); await g.feature.settled();
@@ -2397,4 +2490,311 @@ test('another shared bubble action retires pending description verification', as
  const action=name=>({dataset:{gact:name},closest:s=>s==='[data-gact]'?{dataset:{gact:name}}:null});
  f.click('msgs',action('desc'));menu.onChoose(menu.choices[0]);await Promise.resolve();f.click('msgs',action('copy'));finish({nodes});await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual(selected,[]);assert.deepEqual(copies,['human']);f.feature.destroy();
+});
+
+test("People file publication keeps an uncertain manifest immutable across edits", async () => {
+ const calls=[],paths=[];let fail=true;const values=new Map();const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};const view={...base,access:"write",people_copy_instance:"1".repeat(32)};
+ const panel={ids:{},loaded(){},select(){},removed(){},changed(){}};
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==="/api/team/subscriptions")return {...list([view],[{id:"s",delivery:"ok",people_files:"supported"}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};
+  if(path.split("?")[0].endsWith("/comments")&&opts?.method==="POST"){paths.push(path);calls.push(JSON.parse(opts.body));if(fail)throw Error("offline");return {seq:1}}
+  return readAnswer([],3,false,view);
+ },undefined,()=>new Uint8Array([1,2,3,4,5,6,7,8]),{panel,storage});
+ f.feature.tick();await f.feature.settled();f.feature.selectActivity("team/s/o/c/g");await f.feature.settled();
+ assert.equal(f.feature.peopleContext().attachments,true);
+ await assert.rejects(f.feature.sendPeople("s/o/c/g","",["0123456789abcdef"]),/offline/);
+ await assert.rejects(f.feature.sendPeople("s/o/c/g","newer text",["fedcba9876543210"]),/unconfirmed/i);assert.equal(calls.length,1);
+ assert.equal(f.feature.pendingPeople().text, "");
+ fail=false;const receipt=await f.feature.retryPeople();
+ assert.deepEqual(calls,[{text:"",anchor:3,key:"0102030405060708",attachments:["0123456789abcdef"]},{text:"",anchor:3,key:"0102030405060708",attachments:["0123456789abcdef"]}]);
+ assert.equal(paths.length,2);for(const path of paths)assert.equal(new URL(path,'http://local.invalid').searchParams.get('copy_instance'),view.people_copy_instance);
+ assert.ok([...values.keys()].some(key=>key.startsWith("scimux-people-file-pending:")),"confirmed response cleared pending before durable browser acknowledgement");
+ assert.equal(f.feature.finishPeople(receipt),true);
+ assert.equal([...values.keys()].some(key=>key.startsWith("scimux-people-file-pending:")),false);
+ f.feature.destroy();
+});
+
+test("People file capability requires the selected local copy identity", async () => {
+ let view={...base,access:"write"};
+ const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?{...list([view],[{id:"s",delivery:"ok",people_files:"supported"}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view));
+ f.feature.tick();await f.feature.settled();f.feature.selectActivity("team/s/o/c/g");await f.feature.settled();
+ assert.equal(f.feature.peopleContext().attachments,false);
+ f.feature.destroy();
+});
+
+test("damaged People pending data never posts or deletes a retry record", async () => {
+ const view={...base,access:'write',people_copy_instance:'1'.repeat(32)};
+ const values=new Map(),storage={persistent:true,getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+ const key='scimux-people-file-pending:s/o/c/g::copy:'+view.people_copy_instance;let posts=0;
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return {...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};
+  if(opts?.method==='POST'){posts++;return {seq:0}}
+  return readAnswer([],0,false,view);
+ },undefined,undefined,{storage});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ for(const raw of ['{',JSON.stringify({instance:'',copyInstance:view.people_copy_instance,request:{text:'synthetic',anchor:0,key:'0123456789abcdef',attachments:['0123456789abcdef','0123456789abcdef']}})]) {
+  values.set(key,raw);
+  assert.throws(()=>f.feature.pendingPeople(),/recovery is unavailable/i);
+  await assert.rejects(f.feature.retryPeople(),/recovery is unavailable/i);
+  assert.equal(f.feature.finishPeople({peoplePending:{key,value:'different'}}),false);
+  assert.equal(values.get(key),raw);
+ }
+ assert.equal(posts,0);
+ const valid=JSON.stringify({instance:'',copyInstance:view.people_copy_instance,request:{text:'synthetic',anchor:0,key:'0123456789abcdef',attachments:['0123456789abcdef']}});
+ values.set(key,valid);await assert.rejects(f.feature.retryPeople(),/delivery is unconfirmed/i);
+ assert.equal(posts,1);assert.equal(values.get(key),valid);
+ assert.equal(f.feature.finishPeople(null),false);
+ assert.equal(f.feature.finishPeople({peoplePending:{key:'unrelated',value:valid}}),false);
+ storage.persistent=false;assert.equal(f.feature.pendingPeople(),null);
+ await assert.rejects(f.feature.retryPeople(),/recovery is unavailable/i);
+ assert.equal(values.get(key),valid);assert.equal(posts,1);f.feature.destroy();
+});
+
+test('owner People retry preserves copy, configuration and native instance binding',async()=>{
+ const view={...base,access:'owner',local_node:'n1',people_copy_instance:'1'.repeat(32)};
+ const values=new Map(),storage={persistent:true,getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+ let native='synthetic-instance',sent;
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return {...list([view],[{id:'s',delivery:'ok',people_files:'supported',people_file_binding:'binding'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};
+  if(opts?.method==='POST'){sent={path,body:JSON.parse(opts.body)};return {seq:3}}
+  return readAnswer([],0,false,view);
+ },undefined,undefined,{storage,selectedNode:()=> 'n1',selectedUID:()=> 'c',localNodes:()=>[{id:'n1',instance_id:native}]});
+ f.feature.tick();await f.feature.settled();f.feature.setOwnerShare('n1',{node:'n1',uid:'c',server:'s',generation:'g',state:'active'});await f.feature.settled();
+ const key='scimux-people-file-pending:s/o/c/g:'+native+':binding:copy:'+view.people_copy_instance;
+ const request={text:'synthetic',anchor:0,key:'0123456789abcdef',attachments:['fedcba9876543210']};
+ values.set(key,JSON.stringify({instance:native,copyInstance:view.people_copy_instance,request}));
+ const receipt=await f.feature.retryPeople();
+ const url=new URL(sent.path,'http://local.invalid');
+ assert.equal(url.searchParams.get('copy_instance'),view.people_copy_instance);assert.equal(url.searchParams.get('chat_instance'),native);assert.deepEqual(sent.body,request);
+ assert.ok(values.has(key));assert.equal(f.feature.finishPeople(receipt),true);assert.equal(values.has(key),false);
+ native='';assert.equal(f.feature.pendingPeople(),null);f.feature.destroy();
+});
+
+test('owner People file publication requires the current native instance',async()=>{
+ const view={...base,access:'owner',local_node:'n1',people_copy_instance:'1'.repeat(32)};
+ const values=new Map(),storage={persistent:true,getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};let posts=0;
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return {...list([view],[{id:'s',delivery:'ok',people_files:'supported',people_file_binding:'binding'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};
+  if(opts?.method==='POST'){posts++;return {seq:1}}return readAnswer([],0,false,view);
+ },undefined,undefined,{storage,selectedNode:()=> 'n1',selectedUID:()=> 'c',localNodes:()=>[{id:'other',instance_id:'unrelated'},{id:'n1',instance_id:'current'}]});
+ f.feature.tick();await f.feature.settled();f.feature.setOwnerShare('n1',{node:'n1',uid:'c',server:'s',generation:'g',state:'active'});await f.feature.settled();
+ await assert.rejects(f.feature.sendPeople('s/o/c/g','draft',['0123456789abcdef'],'old'),/identity is unavailable/i);assert.equal(posts,0);assert.equal(values.size,0);
+ const receipt=await f.feature.sendPeople('s/o/c/g','draft',['0123456789abcdef'],'current');assert.equal(posts,1);assert.ok(receipt.peoplePending);f.feature.destroy();
+});
+
+test("file-only shared comment keeps its exact source and common attachment tile", () => {
+ const entry={seq:7,anchor:0,author:"a",at:"2026-01-01T00:00:00Z",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.png",mime:"image/png",size:12}]};
+ const capture=guestModule.guestCapture(entry,base,{a:"Ada"});
+ assert.ok(capture);assert.equal(capture.text,"");assert.equal(capture.team.seq,7);assert.deepEqual(capture.attachments.map(file=>file.id),["0123456789abcdef"]);
+ const html=guestMessageHTML(entry,{a:"Ada"},"s",{},"","","s/o/c/g");
+ assert.match(html,/class="attthumb"/);assert.match(html,/\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef\?preview=1/);assert.match(html,/tabindex="0"/);
+});
+
+test("shared attachment tiles use the remote asset transport for downloads and previews", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.png",mime:"image/png",size:12}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g",path=>"/remote-asset?path="+encodeURIComponent(path));
+ assert.match(html,/href="\/remote-asset\?path=/);assert.match(html,/src="\/remote-asset\?path=/);
+});
+
+test("shared attachment with unavailable remote bytes does not link to the current page", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.png",mime:"image/png",size:12}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g",()=>"");
+ assert.doesNotMatch(html,/href=""|src=""/);assert.match(html,/unavailable/i);
+});
+
+test("a missing local copy identity never creates an unbound file link", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:1}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g",path=>path,"");
+ assert.match(html,/unavailable/i);assert.doesNotMatch(html,/href="\/api\/team\/subscriptions/);assert.doesNotMatch(html,/data-attachment-retry=/);
+});
+
+test("a People file that could not be retained is labelled truthfully", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",_peopleRetained:{"0123456789abcdef":false},attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:12}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g");
+ assert.match(html,/not retained/i);assert.match(html,/retry download/i);
+});
+
+test('invalid shared attachment manifests never produce file links',()=>{
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:4194304};
+ const oversized=Array.from({length:5},(_,i)=>({...file,id:i.toString(16).padStart(16,'0')}));
+ for(const attachments of [null,[],[{...file,name:'../escape'}],[file,file],oversized]) {
+  let calls=0;const entry={seq:7,anchor:0,author:'a',text:'synthetic',attachments};
+  const html=guestModule.guestMessageHTML(entry,{},'s',{},'','','s/o/c/g',()=>{calls++;return 'blob:unexpected'});
+  assert.match(html,/Attachments unavailable/);assert.doesNotMatch(html,/blob:unexpected/);assert.equal(calls,0);
+ }
+});
+
+test('a malformed shared attachment source key cannot produce a file URL',()=>{
+ const entry={seq:7,anchor:0,author:'a',text:'synthetic',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+ let calls=0;const html=guestModule.guestMessageHTML(entry,{},'s',{},'','',{invalid:true},()=>{calls++;return 'blob:unexpected'});
+ assert.equal(calls,0);assert.doesNotMatch(html,/blob:unexpected|data-attachment-retry/);
+});
+
+test("received People files are handed to bounded retention before their page renders", async()=>{
+ const view={...base,access:"write",people_copy_instance:"1".repeat(32)};const retained=[];
+ const message={seq:1,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:1}]};
+ const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?{...list([view],[{id:"s",delivery:"ok",people_files:"supported"}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{retainPeople:async(key,entries)=>{retained.push({key,entries});}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(retained.length,1);assert.equal(retained[0].key,"s/o/c/g");assert.equal(retained[0].entries[0].attachments[0].name,"synthetic.txt");f.feature.destroy();
+});
+
+test('received retention failure preserves the discussion without inventing availability',async()=>{
+ const view={...base,access:'read',people_copy_instance:'1'.repeat(32)};
+ const message={seq:1,anchor:0,author:'a',text:'synthetic retained caption',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+ let attempts=0;const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?{...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{retainPeople:async()=>{attempts++;throw Error('synthetic retention failure')}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(attempts,1);assert.match(f.get('msgs').innerHTML,/synthetic retained caption/);assert.equal(message._peopleRetained,undefined);f.feature.destroy();
+});
+
+test('closing or destroying a received panel aborts its in-flight file retention',async()=>{
+ for(const action of ['close','destroy']) {
+  const view={...base,access:'read',people_copy_instance:'1'.repeat(32)};
+  const message={seq:1,anchor:0,author:'a',text:'synthetic stale caption',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+  let entered;const started=new Promise(resolve=>{entered=resolve});
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?{...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{retainPeople:async(_key,_entries,signal)=>{entered(signal);return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(Error('synthetic abort')),{once:true}))}});
+  f.feature.tick();await f.feature.settled();f.open();const signal=await started;
+  if(action==='close')f.navigate();else f.feature.destroy();
+  assert.equal(signal.aborted,true);await f.feature.settled();assert.doesNotMatch(f.get('msgs').innerHTML,/synthetic stale caption/);
+  if(action==='close')f.feature.destroy();
+ }
+});
+
+test("retention results stay scoped to each comment and show missing bytes", async()=>{
+ const view={...base,access:"write",people_copy_instance:"1".repeat(32)},file={id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:1};
+ const first={seq:1,anchor:0,author:"a",text:"",attachments:[file]},second={seq:2,anchor:0,author:"a",text:"",attachments:[{...file,name:"second.txt"}]};
+ const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?{...list([view],[{id:"s",delivery:"ok",people_files:"supported"}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([first,second],2,false),undefined,{retainPeople:async()=>({files:{"1/0123456789abcdef":true,"2/0123456789abcdef":false}})});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(first._peopleRetained[file.id],true);assert.equal(second._peopleRetained[file.id],false);
+ assert.doesNotMatch(guestModule.guestMessageHTML(first,{},"s",{},"","","s/o/c/g"),/not retained/i);
+ assert.match(guestModule.guestMessageHTML(second,{},"s",{},"","","s/o/c/g"),/not retained/i);
+ f.feature.destroy();
+});
+
+test('retention results cannot authorize a malformed neighboring comment',async()=>{
+ const view={...base,access:'write',people_copy_instance:'1'.repeat(32)},file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};
+ const valid={seq:1,anchor:0,author:'a',text:'valid',attachments:[file]},invalid={seq:2,anchor:0,author:'a',text:'invalid',attachments:[{...file,name:'../escape'}]};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?{...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([valid,invalid],2,false),undefined,{retainPeople:async()=>({files:{'1/0123456789abcdef':true,'2/0123456789abcdef':true}})});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(valid._peopleRetained[file.id],true);assert.equal(invalid._peopleRetained,undefined);
+ assert.match(guestModule.guestMessageHTML(invalid,{},'s',{},'','','s/o/c/g'),/Attachments unavailable/);f.feature.destroy();
+});
+
+test("shared attachment capture does not carry arbitrary paths or URLs", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",name:"synthetic.png",mime:"image/png",size:12,sha256:"a".repeat(64),path:"/synthetic/private",url:"https://example.invalid/file"}]};
+ const capture=guestModule.guestCapture(entry,base,{a:"Ada"});
+ assert.ok(capture);assert.equal("path" in capture.attachments[0],false);assert.equal("url" in capture.attachments[0],false);assert.equal(capture.attachments[0].id,"0123456789abcdef");
+});
+
+test('a verified remote download stays available when raster preview is unavailable',()=>{
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:12};
+ const entry={seq:7,anchor:0,author:'a',text:'',attachments:[file]};
+ const html=guestModule.guestMessageHTML(entry,{},'s',{},'','','s/o/c/g',path=>path.endsWith('?preview=1')?'':'blob:retained');
+ assert.match(html,/synthetic\.png/);assert.match(html,/preview unavailable/i);assert.match(html,/href="blob:retained"/);assert.match(html,/download=/);
+});
+
+test('remote unavailable association offers a scoped explicit retry control',()=>{
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};const entry={seq:7,anchor:0,author:'a',text:'',_peopleRetained:{[file.id]:false},attachments:[file]};
+ const html=guestModule.guestMessageHTML(entry,{},'s',{},'','','s/o/c/g',()=> '');
+ assert.match(html,/data-attachment-retry="\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef"/);assert.match(html,/>Retry download<\/button>/);
+});
+
+test('retained owner file authority binds exact copy, descriptor and native instance',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1',people_copy_instance:'1'.repeat(32)};const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};let subscriptions=[view],binding='one',instance='original';
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list(subscriptions,[{id:'s',people_file_binding:binding}]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[file]}],1),undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',localAgentAvailable:()=>true,localNodes:()=>[{id:'n1',instance_id:instance}]});
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const scope=f.feature.capturePromptAuthority(source,[file]);assert.ok(scope);assert.equal(scope.current(),true);
+ instance='';assert.equal(f.feature.capturePromptAuthority(source,[file]),null);assert.equal(scope.current(),false);instance='original';
+ assert.equal(f.feature.capturePromptAuthority(source,[{...file,name:'different'}]),null);assert.equal(f.feature.capturePromptAuthority({...source,generation:'other'},[file]),null);
+ instance='replacement';assert.equal(scope.current(),false);instance='original';binding='two';f.setTime(10000);f.feature.tick();await f.feature.settled();assert.equal(scope.current(),false);
+ binding='one';subscriptions=[];f.setTime(20000);f.feature.tick();await f.feature.settled();subscriptions=[view];f.setTime(30000);f.feature.tick();await f.feature.settled();assert.equal(scope.current(),false);f.feature.destroy();
+});
+
+test('owner preparation authority requires every ordered retained descriptor',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1',people_copy_instance:'1'.repeat(32)};
+ const first={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'first.txt',mime:'text/plain',size:1},second={id:'fedcba9876543210',sha256:'b'.repeat(64),name:'second.txt',mime:'text/plain',size:2};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[first,second]}],1),undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',localAgentAvailable:()=>true,localNodes:()=>[{id:'n1',instance_id:'synthetic-instance'}]});
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const valid=f.feature.capturePromptAuthority(source,[first,second]);assert.ok(valid);assert.equal(valid.current(),true);
+ for(const attempted of [null,[],[first],[second,first],[first,{...second,sha256:'c'.repeat(64)}],[first,{...second,size:1}],[first,{...second,mime:'image/png'}]]) assert.equal(f.feature.capturePromptAuthority(source,attempted),null);
+ f.feature.destroy();
+});
+
+test('owner file preparation refuses a retained copy without its local identity',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1'};
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[file]}],1),undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',localAgentAvailable:()=>true,localNodes:()=>[{id:'n1',instance_id:'synthetic-instance'}]});
+ f.feature.tick();await f.feature.settled();
+ assert.equal(f.feature.capturePromptAuthority({server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1},[file]),null);
+ f.feature.destroy();
+});
+
+test('retained file authority stops on feature disable, selection or source retirement',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1',people_copy_instance:'1'.repeat(32)};const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};let enabled=true,selected='n1',uid='c',agent=true;
+ const f=nativeViewFixture(async path=>{if(path==='/api/team/subscriptions'){if(!enabled)throw Object.assign(Error('disabled'),{status:404});return list([view])}return readAnswer([],0,false,view)},async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[file]}],1),undefined,{selectedNode:()=>selected,selectedUID:()=>uid,localAgentAvailable:()=>agent,localNodes:()=>[{id:'n1',instance_id:'original'}]});
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};const scope=f.feature.capturePromptAuthority(source,[file]);assert.ok(scope);assert.equal(scope.current(),true);
+ selected='n2';assert.equal(scope.current(),false);selected='n1';uid='other';assert.equal(scope.current(),false);uid='c';agent=false;assert.equal(scope.current(),false);agent=true;
+ enabled=false;f.setTime(10000);f.feature.tick();await f.feature.settled();assert.equal(scope.current(),false);assert.equal(f.feature.capturePromptAuthority(source,[file]),null);f.feature.destroy();
+});
+
+test('a replacement local copy must retire the failed prior panel even under the same durable chat address', async()=>{
+ let phase=0;const original={...base,access:'write',mirror_last:0,seen_mirror:0,people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};
+ const capabilities=view=>({...list([view],[{id:base.server,people_files:'supported',people_file_binding:'stable'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}});
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return capabilities(phase===2?replacement:original);
+  if(opts?.method==='PUT')return {};
+  if(phase===1)throw Object.assign(new Error('{"error":"not_found"}'),{status:404});
+  return readAnswer([],0,false,phase===2?replacement:original);
+ });
+ try{
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();assert.equal(f.feature.peopleContext().attachments,true);
+  phase=1;f.setTime(5000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.peopleContext().writable,false);
+  phase=2;f.feature.refresh();await f.feature.settled();f.open();await f.feature.settled();
+  assert.equal(f.feature.peopleContext().writable,true,'explicitly opening the listed replacement must not retain prior not-found failure');
+  assert.equal(f.feature.peopleContext().attachments,true,'replacement must use its current copy identity for attachment capability');
+  assert.equal(f.get('guestnote').textContent,'');
+ }finally{f.feature.destroy();}
+});
+
+test('owner copy replacement retires a delayed old history response',async()=>{
+ const original={...base,access:'owner',local_node:'n1',people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};
+ let view=original,release,entered;const started=new Promise(resolve=>{entered=resolve});
+ const f=nativeViewFixture(async path=>{
+  if(path==='/api/team/subscriptions')return list([view]);
+  if(path.includes('copy_instance='+original.people_copy_instance)){entered();return new Promise(resolve=>{release=()=>resolve(readAnswer([{t:'user',seq:1,text:'old retained'}],1,false,original))})}
+  return readAnswer([{t:'user',seq:1,text:'replacement retained'}],1,false,replacement);
+ },undefined,undefined,{selectedNode:()=> 'n1'});
+ try {
+  f.feature.tick();await started;view=replacement;f.feature.refresh();await new Promise(resolve=>setImmediate(resolve));
+  release();await f.feature.settled();const snapshots=f.feature.ownerSnapshots();assert.equal(snapshots.length,1);assert.equal(snapshots[0].view.people_copy_instance,replacement.people_copy_instance);
+  assert.deepEqual(snapshots[0].mirrors.map(item=>item.text),['replacement retained']);
+ } finally {if(release)release();f.feature.destroy()}
+});
+
+test('unread evidence from an earlier copy is not reused by its replacement',async()=>{
+ const original={...base,access:'write',state:'live',unread:true,comments_last:1,seen_comments:0,mirror_last:0,seen_mirror:0,people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};let view=original;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'synthetic',author:'p',mine:view===replacement}],1,false));
+ try {f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.activities()[0].unread,true);view=replacement;f.feature.refresh();await f.feature.settled();assert.equal(f.feature.tab.activities()[0].unread,false)} finally {f.feature.destroy()}
+});
+
+test('a delayed received-copy response cannot replace the current panel',async()=>{
+ const original={...base,access:'write',people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};let view=original,release,entered;
+ const started=new Promise(resolve=>{entered=resolve});
+ const f=nativeViewFixture(async path=>{
+  if(path==='/api/team/subscriptions')return list([view]);
+  if(path.includes('copy_instance='+original.people_copy_instance)){entered();return new Promise(resolve=>{release=()=>resolve(readAnswer([{t:'user',seq:1,text:'old response'}],1,false,original))})}
+  return readAnswer([{t:'user',seq:1,text:'replacement response'}],1,false,replacement);
+ });
+ try {f.feature.tick();await f.feature.settled();f.open();await started;view=replacement;f.feature.refresh();await new Promise(resolve=>setImmediate(resolve));release();await f.feature.settled();assert.match(f.get('msgs').innerHTML,/replacement response/);assert.doesNotMatch(f.get('msgs').innerHTML,/old response/)} finally {if(release)release();f.feature.destroy()}
+});
+
+test('refreshing and reselecting an unchanged copy preserves its panel',async()=>{
+ const view={...base,access:'write',people_copy_instance:'a'.repeat(32)};let reads=0;
+ const f=nativeViewFixture(async path=>{if(path==='/api/team/subscriptions')return list([{...view}]);reads++;return readAnswer([{t:'user',seq:1,text:'stable response'}],1,false,{...view})});
+ try {f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const before=f.get('msgs').innerHTML,count=reads;f.feature.refresh();await f.feature.settled();f.open();await f.feature.settled();assert.equal(f.get('msgs').innerHTML,before);assert.equal(reads,count)} finally {f.feature.destroy()}
+});
+
+test('read-position updates carry the selected copy identity',async()=>{
+ const view={...base,access:'write',people_copy_instance:'a'.repeat(32),seen_mirror:0,mirror_last:1};const seen=[];
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view]);if(opts?.method==='PUT'){seen.push(path);return {}}return readAnswer([{t:'user',seq:1,text:'synthetic'}],1,false,view)});
+ try {f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();assert.equal(seen.length,1);assert.equal(new URL(seen[0],'http://local.invalid').searchParams.get('copy_instance'),view.people_copy_instance)} finally {f.feature.destroy()}
 });

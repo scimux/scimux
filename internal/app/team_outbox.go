@@ -971,6 +971,13 @@ func installShareOutbox(a *app, dataDir string, now func() time.Time) {
 	client := newTeamClient()
 	h := newTeamHandler(dataDir, now, client)
 	th := h.(*teamHandler)
+	th.peopleEnabled = func() bool { return !a.teamSettingsGate || a.settings().teamEnabled() }
+	th.ownerInstance = func(nodeID, instance string) bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		n := a.byID[nodeID]
+		return n != nil && n.InstanceID != "" && n.InstanceID == instance && n.EndedAt == ""
+	}
 	box := &shareOutbox{dataDir: dataDir, now: now, client: client, files: &th.mu, shareOps: &th.shareOps}
 	th.shareDelivery = box.delivery
 	a.teamHandler = h

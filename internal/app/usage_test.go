@@ -505,3 +505,19 @@ func readFixture(t *testing.T, path string) []byte {
 	}
 	return b
 }
+
+func TestCodexUsageRequiresBothExplicitPercentages(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"event_msg","payload":{"type":"token_count"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":0,"window_minutes":300}}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"secondary":{"used_percent":0,"window_minutes":10080}}}}`,
+	} {
+		if _, _, ok := parseCodexLine([]byte(line)); ok {
+			t.Fatal("incomplete usage was accepted")
+		}
+	}
+	line := []byte(`{"timestamp":"2026-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":0,"window_minutes":300},"secondary":{"used_percent":0,"window_minutes":10080}}}}`)
+	if _, _, ok := parseCodexLine(line); !ok {
+		t.Fatal("explicit zero percentages were treated as missing")
+	}
+}

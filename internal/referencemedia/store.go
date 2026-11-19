@@ -53,9 +53,20 @@ var (
 )
 
 type Source struct {
-	UID     string `json:"uid"`
-	Segment int    `json:"segment"`
-	Record  int    `json:"record"`
+	UID     string      `json:"uid"`
+	Segment int         `json:"segment"`
+	Record  int         `json:"record"`
+	Team    *TeamSource `json:"team,omitempty"`
+}
+
+type TeamSource struct {
+	Server        string   `json:"server"`
+	Owner         string   `json:"owner"`
+	Chat          string   `json:"chat"`
+	Generation    string   `json:"generation"`
+	Log           string   `json:"log"`
+	Seq           uint64   `json:"seq"`
+	AttachmentIDs []string `json:"attachment_ids"`
 }
 
 type Item struct {
@@ -121,7 +132,7 @@ func (s *Store) Capture(source Source, text string, input []CaptureItem) (Media,
 	if limits.MaxItems <= 0 || limits.MaxImageBytes <= 0 || limits.MaxTotalBytes <= 0 || limits.MaxManifestBytes <= 0 {
 		return Media{}, fmt.Errorf("%w: invalid limits", ErrInvalid)
 	}
-	if source.Segment < 0 || source.Record < 0 || strings.TrimSpace(source.UID) == "" {
+	if !validSource(source) {
 		return Media{}, fmt.Errorf("%w: source", ErrInvalid)
 	}
 	seen := make(map[string]bool)
@@ -356,7 +367,7 @@ func (s *Store) loadManifest(captureID string) (manifest, error) {
 		return manifest{}, ErrCorrupt
 	}
 	var m manifest
-	if json.Unmarshal(b, &m) != nil || m.Version != Version || m.Source.UID == "" {
+	if json.Unmarshal(b, &m) != nil || m.Version != Version || !validSource(m.Source) {
 		return manifest{}, ErrCorrupt
 	}
 	canonical := marshalManifest(m)
@@ -389,12 +400,36 @@ func (s *Store) loadManifest(captureID string) (manifest, error) {
 // item order for the capture hash.
 func marshalManifest(m manifest) []byte {
 	b := append([]byte(`{"version":`), strconv.Itoa(m.Version)...)
-	b = append(b, `,"source":{"uid":`...)
-	b = appendJSONString(b, m.Source.UID)
-	b = append(b, `,"segment":`...)
-	b = strconv.AppendInt(b, int64(m.Source.Segment), 10)
-	b = append(b, `,"record":`...)
-	b = strconv.AppendInt(b, int64(m.Source.Record), 10)
+	if m.Source.Team == nil {
+		b = append(b, `,"source":{"uid":`...)
+		b = appendJSONString(b, m.Source.UID)
+		b = append(b, `,"segment":`...)
+		b = strconv.AppendInt(b, int64(m.Source.Segment), 10)
+		b = append(b, `,"record":`...)
+		b = strconv.AppendInt(b, int64(m.Source.Record), 10)
+	} else {
+		t := m.Source.Team
+		b = append(b, `,"source":{"team":{"server":`...)
+		b = appendJSONString(b, t.Server)
+		b = append(b, `,"owner":`...)
+		b = appendJSONString(b, t.Owner)
+		b = append(b, `,"chat":`...)
+		b = appendJSONString(b, t.Chat)
+		b = append(b, `,"generation":`...)
+		b = appendJSONString(b, t.Generation)
+		b = append(b, `,"log":`...)
+		b = appendJSONString(b, t.Log)
+		b = append(b, `,"seq":`...)
+		b = strconv.AppendUint(b, t.Seq, 10)
+		b = append(b, `,"attachment_ids":[`...)
+		for i, id := range t.AttachmentIDs {
+			if i > 0 {
+				b = append(b, ',')
+			}
+			b = appendJSONString(b, id)
+		}
+		b = append(b, `]}`...)
+	}
 	b = append(b, `},"text":`...)
 	b = appendJSONString(b, m.Text)
 	b = append(b, `,"items":[`...)
@@ -423,6 +458,36 @@ func marshalManifest(m manifest) []byte {
 		b = append(b, '}')
 	}
 	return append(b, ']', '}')
+}
+
+func validSource(source Source) bool {
+	if source.Team == nil {
+		return source.Segment >= 0 && source.Record >= 0 && strings.TrimSpace(source.UID) != ""
+	}
+	t := source.Team
+	if source.UID != "" || source.Segment != 0 || source.Record != 0 || !lowerHex(t.Server, 32) || !lowerHex(t.Owner, 32) || !lowerHex(t.Chat, 16) || !lowerHex(t.Generation, 16) || t.Log != "comments" || t.Seq == 0 || len(t.AttachmentIDs) == 0 || len(t.AttachmentIDs) > 16 {
+		return false
+	}
+	seen := make(map[string]bool, len(t.AttachmentIDs))
+	for _, id := range t.AttachmentIDs {
+		if !lowerHex(id, 16) || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
+}
+
+func lowerHex(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func appendJSONString(dst []byte, value string) []byte {

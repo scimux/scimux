@@ -40,3 +40,13 @@ test('missing assets can retry and external asset URLs never leave the channel',
   await (await transport.fetchImpl('/api/nodes/drive/chat')).json();
   assert.equal(transport.assetURL(path), 'blob:retry');
 });
+
+test('remote native upload prepares only returned managed attachment leaves', async()=>{
+ const calls=[],assets=new Map(),path='/api/nodes/drive/attachments/01234567-synthetic.txt';
+ const transport=createRemoteAssetTransport({assets,createObjectURL:()=> 'blob:synthetic',channel:async(url,options)=>{calls.push({url,method:options?.method});
+  if(url==='/api/nodes/drive/attachments')return new Response(JSON.stringify({attachments:[{path:'/managed/01234567-synthetic.txt',mime:'text/plain'}]}));
+  assert.equal(url,path);return new Response('synthetic',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl('/api/nodes/drive/attachments',{method:'POST'})).json();
+ assert.equal(transport.assetURL(path),'blob:synthetic');assert.equal(calls.length,2);
+});

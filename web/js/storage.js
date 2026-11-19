@@ -43,6 +43,19 @@ export function createStorage(raw){
   let persistent = store !== null;
   return {
     get persistent(){ return persistent; },
+    keys(){
+      if (!store || typeof store.key !== "function") return null;
+      try {
+        if (!Number.isSafeInteger(store.length) || store.length > 4096) return null;
+        const keys = new Set();
+        for (let i = 0; i < store.length; i++) {
+          const key = store.key(i);
+          if (typeof key === "string") keys.add(key);
+        }
+        for (const [key, value] of shadow) value === null ? keys.delete(key) : keys.add(key);
+        return keys.size <= 4096 ? [...keys] : null;
+      } catch { persistent = false; return null; }
+    },
     getItem(key){
       if (shadow.has(key)) return shadow.get(key);
       if (!store) return null;

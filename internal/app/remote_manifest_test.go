@@ -125,7 +125,7 @@ func TestRemoteBootstrapManifestAntiVacuityCounts(t *testing.T) {
 	}
 	for kind, want := range map[string]int{
 		"index": 1,
-		"js":    39,
+		"js":    43,
 		"css":   10,
 		"asset": 18,
 	} {

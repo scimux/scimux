@@ -17,8 +17,9 @@ const maxResponseBody = 64 * 1024
 
 // Server is the identity a team server reports for itself.
 type Server struct {
-	ID   string
-	Name string
+	ID             string
+	Name           string
+	BlobGeneration bool
 }
 
 // Sentinel errors from Hello, Register, Check and Leave. None of them quote
@@ -70,13 +71,14 @@ type registerResponse struct {
 // Hello is GET /v1/hello.
 func (c *Client) Hello(ctx context.Context, baseURL string) (Server, error) {
 	var out helloResponse
-	if err := c.exchange(ctx, http.MethodGet, baseURL, "/v1/hello", nil, http.StatusOK, &out); err != nil {
+	var headers http.Header
+	if err := c.exchange(ctx, http.MethodGet, baseURL, "/v1/hello", nil, http.StatusOK, &out, &headers); err != nil {
 		return Server{}, err
 	}
 	if out.Protocol != 1 || !validServer(out.Server) {
 		return Server{}, ErrProtocol
 	}
-	return Server{ID: out.Server.ID, Name: out.Server.Name}, nil
+	return Server{ID: out.Server.ID, Name: out.Server.Name, BlobGeneration: headers.Get("Scimux-Blob-Generation") == "1"}, nil
 }
 
 // Register is POST /v1/register.
@@ -97,7 +99,7 @@ func (c *Client) Register(ctx context.Context, baseURL, code, installationID, na
 	return out.Token, Server{ID: out.Server.ID, Name: out.Server.Name}, nil
 }
 
-func (c *Client) exchange(ctx context.Context, method, baseURL, path string, body []byte, okStatus int, dest any) error {
+func (c *Client) exchange(ctx context.Context, method, baseURL, path string, body []byte, okStatus int, dest any, headers ...*http.Header) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -120,6 +122,9 @@ func (c *Client) exchange(ctx context.Context, method, baseURL, path string, bod
 		return ErrUnreachable
 	}
 	defer resp.Body.Close()
+	if len(headers) > 0 {
+		*headers[0] = resp.Header.Clone()
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	if err != nil {
 		return ErrUnreachable
@@ -287,6 +292,16 @@ func (c *Client) doAuthed(ctx context.Context, method, baseURL, path, token stri
 }
 
 func (c *Client) doAuthedQuery(ctx context.Context, method, baseURL, path, query, token string, body []byte, limit int) (int, []byte, error) {
+	status, raw, err := c.doAuthedQueryLimits(ctx, method, baseURL, path, query, token, body, limit, limit)
+	if errors.Is(err, errResponseTooLarge) {
+		return 0, nil, ErrProtocol
+	}
+	return status, raw, err
+}
+
+var errResponseTooLarge = errors.New("team: response too large")
+
+func (c *Client) doAuthedQueryLimits(ctx context.Context, method, baseURL, path, query, token string, body []byte, successLimit, errorLimit int) (int, []byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -313,12 +328,16 @@ func (c *Client) doAuthedQuery(ctx context.Context, method, baseURL, path, query
 		return 0, nil, ErrUnreachable
 	}
 	defer resp.Body.Close()
+	limit := errorLimit
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		limit = successLimit
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return 0, nil, ErrUnreachable
 	}
 	if len(raw) > limit {
-		return 0, nil, ErrProtocol
+		return resp.StatusCode, nil, errResponseTooLarge
 	}
 	return resp.StatusCode, raw, nil
 }

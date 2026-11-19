@@ -15,6 +15,7 @@ var productionJSModules = []string{
 	"web/js/api.js",
 	"web/js/app.js",
 	"web/js/asset-preview.js",
+	"web/js/attachment-tile.js",
 	"web/js/bookmark-capture.js",
 	// S8: the FR-40 remote bootstrap. Served and locked from the moment it is
 	// embedded; nothing in index.html imports it yet, because the page-owned
@@ -41,6 +42,9 @@ var productionJSModules = []string{
 	"web/js/notes.js",
 	"web/js/pairing.js",
 	"web/js/pairing-ui.js",
+	"web/js/people-file-store.js",
+	"web/js/people-preparation.js",
+	"web/js/people-retention.js",
 	"web/js/polling.js",
 	"web/js/qr.js",
 	"web/js/qrcodegen.js",

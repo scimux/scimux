@@ -15,9 +15,50 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   bootstrap,
+  createRemoteAssetTransport,
   SOURCE_COMPUTER,
   SOURCE_RENDEZVOUS,
 } from "../js/bootstrap.js";
+
+test("remote transport prepares scoped People attachment preview and download URLs", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),id="0123456789abcdef";
+ const base=`/api/team/subscriptions/${server}/${owner}/${chat}/${generation}`;const calls=[];const assets=new Map();let n=0;
+ const channel=async path=>{calls.push(path);if(path==="/api/team/subscriptions")return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:"f".repeat(32)}]}));if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,sha256:"e".repeat(64),size:2,name:"x.png",mime:"image/png"}]}]}),{headers:{"Content-Type":"application/json"}});return new Response(new Uint8Array([1,2]),{headers:{"Content-Type":path.endsWith("&preview=1")?"image/png":"application/octet-stream"}})};
+ const transport=createRemoteAssetTransport({channel,assets,createObjectURL:()=>`blob:synthetic-${++n}`});
+ await (await transport.fetchImpl(base+"/comments?after=0&copy_instance="+"f".repeat(32))).json();assert.equal(calls.length,1,"no file request before capability discovery");
+ await (await transport.fetchImpl("/api/team/subscriptions")).json();
+ await (await transport.fetchImpl(base+"/comments?after=0&copy_instance="+"f".repeat(32))).json();
+ assert.match(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),/^blob:/);assert.match(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}&preview=1`),/^blob:/);assert.equal(calls.length,5);
+});
+
+test("remote People capability refresh fails closed while a newer result is pending", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),id="0123456789abcdef";
+ const base=`/api/team/subscriptions/${server}/${owner}/${chat}/${generation}`;let release,lists=0;const calls=[];
+ const channel=async path=>{calls.push(path);if(path==="/api/team/subscriptions"){lists++;if(lists===2)return new Promise(r=>{release=r});return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:"f".repeat(32)}]}));}if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,size:1,mime:"text/plain"}]}]}));return new Response(new Uint8Array([1]),{headers:{"Content-Type":"application/octet-stream"}})};
+ const transport=createRemoteAssetTransport({channel,assets:new Map(),createObjectURL:()=>"blob:synthetic"});
+ await (await transport.fetchImpl("/api/team/subscriptions")).json();const refresh=transport.fetchImpl("/api/team/subscriptions");
+ await (await transport.fetchImpl(base+"/comments?copy_instance="+"f".repeat(32))).json();assert.equal(calls.length,3,"must not fetch while capability is being refreshed");
+ release(new Response(JSON.stringify({servers:[]})));await (await refresh).json();
+});
+
+test("remote retained attachment cache stays bounded and removes copies on explicit deletion", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),id="0123456789abcdef";
+ const base=`/api/team/subscriptions/${server}/${owner}/${chat}/${generation}`;const revoked=[];const assets=new Map();
+ const channel=async(path,opts)=>{if(path==="/api/team/subscriptions")return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:"f".repeat(32)}]}));if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,size:2,mime:"image/png"}]}]}));if(opts?.method==="DELETE")return new Response(null,{status:204});return new Response(new Uint8Array([1,2]),{headers:{"Content-Type":path.endsWith("&preview=1")?"image/png":"application/octet-stream"}})};
+ const transport=createRemoteAssetTransport({channel,assets,createObjectURL:()=>"blob:synthetic",revokeObjectURL:url=>revoked.push(url),peopleByteBudget:2});
+ await (await transport.fetchImpl("/api/team/subscriptions")).json();await (await transport.fetchImpl(base+"/comments?copy_instance="+"f".repeat(32))).json();
+ assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),"blob:synthetic");assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}&preview=1`),"");
+ await transport.fetchImpl(base,{method:"DELETE"});assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),"");assert.deepEqual(revoked,["blob:synthetic"]);
+});
+
+test("a delayed remote attachment cannot restore a deleted copy cache", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),id="0123456789abcdef";
+ const base=`/api/team/subscriptions/${server}/${owner}/${chat}/${generation}`;let release,entered;const reached=new Promise(r=>{entered=r});
+ const channel=async(path,opts)=>{if(path==="/api/team/subscriptions")return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:"f".repeat(32)}]}));if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,size:1,mime:"text/plain"}]}]}));if(opts?.method==="DELETE")return new Response(null,{status:204});entered();return new Promise(r=>{release=r})};
+ const transport=createRemoteAssetTransport({channel,assets:new Map(),createObjectURL:()=>"blob:synthetic"});await (await transport.fetchImpl("/api/team/subscriptions")).json();
+ const reading=(await transport.fetchImpl(base+"/comments?copy_instance="+"f".repeat(32))).json();await reached;await transport.fetchImpl(base,{method:"DELETE"});release(new Response(new Uint8Array([1]),{headers:{"Content-Type":"application/octet-stream"}}));await reading;
+ assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),"");
+});
 
 const here = dirname(fileURLToPath(import.meta.url));
 const WEB = join(here, "..");
@@ -824,4 +865,406 @@ test("AT-FR-40-g: the minted graph resolves and evaluates in a real module loade
   if (typeof mod.createApp !== "function") {
     fail(at, "the graph linked but the entry exports no createApp()");
   }
+});
+
+test("Unchanged capability poll preserves an in-flight People download", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),gen="d".repeat(16),id="0123456789abcdef";
+ const root="/api/team/subscriptions",base=`${root}/${server}/${owner}/${chat}/${gen}`,file=`${base}/attachments/1/${id}?copy_instance=${"f".repeat(32)}`;
+ const capabilities={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation:gen,people_copy_instance:"f".repeat(32)}]};
+ let release,startedResolve;const started=new Promise(resolve=>{startedResolve=resolve});
+ const assets=new Map();
+ const transport=createRemoteAssetTransport({assets,createObjectURL:()=>"blob:verified-synthetic",channel:async path=>{
+  if(path===root)return new Response(JSON.stringify(capabilities),{headers:{"Content-Type":"application/json"}});
+  if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,size:1,mime:"text/plain"}]}]}),{headers:{"Content-Type":"application/json"}});
+  assert.equal(path,file);startedResolve();return await new Promise(resolve=>{release=()=>resolve(new Response("x",{headers:{"Content-Type":"application/octet-stream","Content-Length":"1"}}))});
+ }});
+ await (await transport.fetchImpl(root)).json();
+ const comments=await transport.fetchImpl(base+"/comments?copy_instance="+"f".repeat(32));const pending=comments.json();await started;
+ await (await transport.fetchImpl(root)).json();
+ release();await pending;
+ assert.equal(transport.assetURL(file),"blob:verified-synthetic","unchanged capabilities discarded an authorized in-flight download");
+});
+
+test("remote download waits for an overlapping capability refresh before exposing bytes", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),gen="d".repeat(16),instance="f".repeat(32),id="0123456789abcdef";
+ const root="/api/team/subscriptions",base=`${root}/${server}/${owner}/${chat}/${gen}`,file=`${base}/attachments/1/${id}?copy_instance=${instance}`;
+ const limits={version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216};
+ for(const staysSupported of [true,false]) {
+  let releaseFile,releasePoll,entered;const started=new Promise(resolve=>{entered=resolve});let polls=0;
+  const caps=supported=>({people_attachments:limits,servers:[{id:server,people_files:supported?"supported":"unsupported"}],subscriptions:[{server,owner,chat,generation:gen,people_copy_instance:instance}]});
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>"blob:verified-synthetic",channel:async path=>{
+   if(path===root){if(++polls===1)return new Response(JSON.stringify(caps(true)));return new Promise(resolve=>{releasePoll=()=>resolve(new Response(JSON.stringify(caps(staysSupported))))});}
+   if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,size:1,mime:"text/plain"}]}]}));
+   assert.equal(path,file);entered();return new Promise(resolve=>{releaseFile=()=>resolve(new Response("x",{headers:{"Content-Type":"application/octet-stream"}}))});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  const pending=(await transport.fetchImpl(base+"/comments?copy_instance="+instance)).json();await started;
+  const refresh=transport.fetchImpl(root);releaseFile();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(transport.assetURL(file),"","bytes were exposed while authorization was unresolved");
+  releasePoll();await (await refresh).json();await pending;
+  assert.equal(transport.assetURL(file),staysSupported?"blob:verified-synthetic":"");
+ }
+});
+
+test("remote capability failures revoke cached People files and block retries", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),instance="f".repeat(32),root="/api/team/subscriptions",copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ for(const failure of ["network","invalid JSON"]) {
+  let polls=0,downloads=0;const revoked=[];
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>"blob:cached",revokeObjectURL:url=>revoked.push(url),channel:async path=>{
+   if(path===root){if(++polls===1)return new Response(JSON.stringify(caps));if(failure==="network")throw Error("synthetic offline");return new Response("{");}
+   assert.equal(path,file);downloads++;return new Response("x",{headers:{"Content-Type":"application/octet-stream"}});
+  }});
+  await (await transport.fetchImpl(root)).json();assert.equal(await transport.retryAsset(file),"blob:cached");
+  if(failure==="network")await assert.rejects(transport.fetchImpl(root),/synthetic offline/);
+  else await assert.rejects((await transport.fetchImpl(root)).json());
+  assert.equal(transport.assetURL(file),"");assert.deepEqual(revoked,["blob:cached"]);
+  assert.equal(await transport.retryAsset(file),"");assert.equal(downloads,1);
+ }
+});
+
+test("a real capability change retires an in-flight People download even after support returns", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),gen="d".repeat(16),id="0123456789abcdef";
+ const root="/api/team/subscriptions",base=`${root}/${server}/${owner}/${chat}/${gen}`,file=`${base}/attachments/1/${id}?copy_instance=${"f".repeat(32)}`;
+ const limits={version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216};let support=true,release,startedResolve;const started=new Promise(r=>{startedResolve=r});
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>"blob:synthetic",channel:async path=>{
+  if(path===root)return new Response(JSON.stringify({people_attachments:limits,servers:[{id:server,people_files:support?"supported":"unsupported"}],subscriptions:[{server,owner,chat,generation:gen,people_copy_instance:"f".repeat(32)}]}));
+  if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,size:1,mime:"text/plain"}]}]}));
+  startedResolve();return new Promise(r=>{release=()=>r(new Response("x",{headers:{"Content-Type":"application/octet-stream"}}))});
+ }});
+ await (await transport.fetchImpl(root)).json();const pending=(await transport.fetchImpl(base+"/comments?copy_instance="+"f".repeat(32))).json();await started;
+ support=false;await (await transport.fetchImpl(root)).json();support=true;await (await transport.fetchImpl(root)).json();release();await pending;
+ assert.equal(transport.assetURL(file),"");
+});
+
+test("remote copy replacement retires a held file and refuses the old identity", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),root="/api/team/subscriptions",base=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const old="e".repeat(32),replacement="f".repeat(32),file=`${base}/attachments/1/0123456789abcdef?copy_instance=${old}`;let current=old,release,entered;const started=new Promise(resolve=>{entered=resolve});
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>"blob:synthetic",channel:async path=>{
+  if(path===root)return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:current}]}));
+  if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:"0123456789abcdef",size:1,mime:"text/plain"}]}]}));
+  assert.equal(path,file);entered();return new Promise(resolve=>{release=()=>resolve(new Response("x",{headers:{"Content-Type":"application/octet-stream"}}))});
+ }});
+ await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(base+"/comments?copy_instance="+old)).json();await started;
+ current=replacement;await (await transport.fetchImpl(root)).json();release();await reading;
+ assert.equal(transport.assetURL(file),"");assert.equal(await transport.retryAsset(file),"");
+});
+
+test("remote stale history cannot prefetch using a replacement copy identity", async()=>{
+ const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),root="/api/team/subscriptions",base=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const old="e".repeat(32),replacement="f".repeat(32);let fileRequests=0;
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>"blob:synthetic",channel:async path=>{
+  if(path===root)return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:replacement}]}));
+  if(path.startsWith(base+"/comments"))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:"0123456789abcdef",size:1,mime:"text/plain"}]}]}));
+  fileRequests++;return new Response("x",{headers:{"Content-Type":"application/octet-stream"}});
+ }});
+ await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(base+"/comments?after=0&copy_instance="+old)).json();
+ assert.equal(fileRequests,0);
+});
+
+test("remote multi-file prefetch stops when its copy or server binding is retired", async()=>{
+ for(const reason of ['copy replacement','server change','copy removal']) {
+  const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),root='/api/team/subscriptions',base=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const old='e'.repeat(32),replacement='f'.repeat(32);let current=old,binding='first',release,entered;const started=new Promise(resolve=>{entered=resolve}),fileRequests=[];
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:synthetic',channel:async(path,opts)=>{
+   if(path===root)return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported',people_file_binding:binding}],subscriptions:[{server,owner,chat,generation,people_copy_instance:current}]}));
+   if(path===base&&opts?.method==='DELETE')return new Response(null,{status:204});
+   if(path.startsWith(base+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'image/png'},{id:'fedcba9876543210',size:1,mime:'text/plain'}]},{seq:2,attachments:[{id:'1111111111111111',size:1,mime:'text/plain'}]}]}));
+   fileRequests.push(path);if(fileRequests.length===1){entered();return new Promise(resolve=>{release=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))});}
+   return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(base+'/comments?copy_instance='+old)).json();await started;
+  if(reason==='copy removal')await transport.fetchImpl(base,{method:'DELETE'});
+  else {if(reason==='copy replacement')current=replacement;else binding='second';await (await transport.fetchImpl(root)).json();}
+  release();await reading;
+  assert.deepEqual(fileRequests,[base+'/attachments/1/0123456789abcdef?copy_instance='+old],reason+' must retire remaining original files and preview');
+ }
+});
+
+test("unchanged copy polling preserves multi-file prefetch and raster preview", async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),copyInstance='e'.repeat(32),root='/api/team/subscriptions',base=`${root}/${server}/${owner}/${chat}/${generation}`;
+ let release,entered;const started=new Promise(resolve=>{entered=resolve}),files=[];
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:synthetic',channel:async path=>{
+  if(path===root)return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported',people_file_binding:'same'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:copyInstance}]}));
+  if(path.startsWith(base+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'image/png'},{id:'fedcba9876543210',size:1,mime:'text/plain'}]},{seq:2,attachments:[{id:'1111111111111111',size:1,mime:'text/plain'}]}]}));
+  files.push(path);if(files.length===1){entered();return new Promise(resolve=>{release=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))});}
+  return new Response('x',{headers:{'Content-Type':path.endsWith('&preview=1')?'image/png':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(base+'/comments?copy_instance='+copyInstance)).json();await started;
+ await (await transport.fetchImpl(root)).json();release();await reading;
+ assert.deepEqual(files,[base+'/attachments/1/0123456789abcdef?copy_instance='+copyInstance,base+'/attachments/1/0123456789abcdef?copy_instance='+copyInstance+'&preview=1',base+'/attachments/1/fedcba9876543210?copy_instance='+copyInstance,base+'/attachments/2/1111111111111111?copy_instance='+copyInstance]);
+});
+
+test('remote associated-file retry requires verified capability and returns only a fresh scoped asset',async()=>{
+ const server='a'.repeat(32),key=[server,'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),root='/api/team/subscriptions',file=`${root}/${key}/attachments/1/0123456789abcdef?copy_instance=${"f".repeat(32)}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),people_copy_instance:'f'.repeat(32)}]};let gets=0;
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:synthetic-retry',channel:async path=>{if(path===root)return new Response(JSON.stringify(caps));gets++;return gets===1?new Response('offline',{status:503}):new Response('x',{headers:{'Content-Type':'application/octet-stream'}})}});
+ assert.equal(await transport.retryAsset(file),'');assert.equal(gets,0);
+ await (await transport.fetchImpl(root)).json();assert.equal(await transport.retryAsset(file),'');assert.equal(gets,1);
+ assert.equal(await transport.retryAsset(file),'blob:synthetic-retry');assert.equal(gets,2);
+ assert.equal(await transport.retryAsset('/api/nodes/n/send'),'');assert.equal(gets,2);
+});
+
+test('remote copy removal revokes an actual object URL with the default adapter',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:blob=>URL.createObjectURL(blob),channel:async(path,opts)=>path===root?new Response(JSON.stringify(caps)):opts?.method==='DELETE'?new Response(null,{status:204}):new Response('x',{headers:{'Content-Type':'application/octet-stream'}})});
+ await (await transport.fetchImpl(root)).json();const url=await transport.retryAsset(file);assert.equal(await (await fetch(url)).text(),'x');
+ await transport.fetchImpl(copy,{method:'DELETE'});assert.equal(transport.assetURL(file),'');await assert.rejects(fetch(url));
+});
+
+test('remote associated files reject refused, empty, oversized and unsafe responses',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ const responses=[()=>new Response('denied',{status:403}),()=>new Response('x',{headers:{'Content-Length':'4194305','Content-Type':'application/octet-stream'}}),()=>new Response('',{headers:{'Content-Type':'application/octet-stream'}}),()=>new Response(new Uint8Array(4194305),{headers:{'Content-Type':'application/octet-stream'}}),()=>new Response('x',{headers:{'Content-Type':'text/html'}})];
+ for(const make of responses){let created=0;const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>{created++;return 'blob:unexpected'},channel:async path=>path===root?new Response(JSON.stringify(caps)):make()});
+  await (await transport.fetchImpl(root)).json();assert.equal(await transport.retryAsset(file),'');assert.equal(created,0);
+ }
+});
+
+test('remote comments without a copy precondition cannot prefetch associated files',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;let reads=0;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>assert.fail('unbound file was loaded'),channel:async path=>{
+  if(path===root)return new Response(JSON.stringify(caps));
+  if(path===copy+'/comments')return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'}]}]}));
+  reads++;return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(root)).json();const history=await (await transport.fetchImpl(copy+'/comments')).json();assert.equal(history.entries.length,1);assert.equal(reads,0);
+});
+
+test('remote People preview refuses unsafe image types while retaining the download',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`,preview=file+'&preview=1';
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ for(const type of ['image/gif','text/html']) {
+  const fetched=[];const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:download',channel:async path=>{
+   if(path===root)return new Response(JSON.stringify(caps));
+   if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'image/png'}]}]}));
+   fetched.push(path);return new Response('x',{headers:{'Content-Type':path===preview?type:'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();
+  assert.deepEqual(fetched,[file,preview]);assert.equal(transport.assetURL(file),'blob:download');assert.equal(transport.assetURL(preview),'');
+ }
+});
+
+test('remote native attachment preload preserves its existing size and type boundary',async()=>{
+ const route='/api/nodes/n1/attachments',file=route+'/01234567-synthetic.txt';
+ for(const [headers,expected] of [[{'Content-Type':'application/octet-stream'},'blob:valid'],[{'Content-Type':'text/html'},''],[{'Content-Type':'application/octet-stream','Content-Length':String(25*1024*1024+1)},'']]){
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:valid',channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-synthetic.txt'}]})):new Response('x',{headers})});
+  await (await transport.fetchImpl(route+'?chat_instance=synthetic',{method:'POST'})).json();assert.equal(transport.assetURL(file),expected);
+ }
+ let created=0;
+ const oversized=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>{created++;return 'blob:unexpected'},channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-synthetic.txt'}]})):new Response(new Uint8Array(25*1024*1024+1),{headers:{'Content-Type':'application/octet-stream'}})});
+ await (await oversized.fetchImpl(route+'?chat_instance=synthetic',{method:'POST'})).json();
+ assert.equal(oversized.assetURL(file),'');assert.equal(created,0);
+});
+
+test('remote native preloads respect the shared byte budget without hiding the accepted file',async()=>{
+	const route='/api/nodes/n1/attachments',assets=new Map();let created=0;
+	const transport=createRemoteAssetTransport({assets,peopleByteBudget:1,createObjectURL:()=>`blob:synthetic-${++created}`,channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-first.txt'},{path:'/synthetic/76543210-second.txt'}]})):new Response('x',{headers:{'Content-Type':'application/octet-stream'}})});
+ await (await transport.fetchImpl(route,{method:'POST'})).json();
+	assert.equal(transport.assetURL(route+'/01234567-first.txt'),'blob:synthetic-1');assert.equal(transport.assetURL(route+'/76543210-second.txt'),'');assert.equal(created,1);
+});
+
+test('remote native preload refuses a response that exceeds the remaining byte budget',async()=>{
+ const route='/api/nodes/n1/attachments';let created=0,reads=0;
+ const transport=createRemoteAssetTransport({assets:new Map(),peopleByteBudget:2,createObjectURL:()=>`blob:synthetic-${++created}`,channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-first.txt'},{path:'/synthetic/76543210-second.txt'}]})):(reads++,new Response(path.includes('first')?'x':'xx',{headers:{'Content-Type':'application/octet-stream'}}))});
+ await (await transport.fetchImpl(route,{method:'POST'})).json();assert.equal(transport.assetURL(route+'/01234567-first.txt'),'blob:synthetic-1');assert.equal(transport.assetURL(route+'/76543210-second.txt'),'');assert.equal(created,1);assert.equal(reads,2);
+});
+
+test('remote native upload preload ignores malformed attachment addresses',async()=>{
+ const route='/api/nodes/n1/attachments',requested=[];
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:valid',channel:async(path,opts)=>{
+  if(opts?.method==='POST')return new Response(JSON.stringify({attachments:[null,{}, {path:1},{path:'/synthetic/not-an-id.txt'},{path:'/synthetic/01234567-bad\\name.txt'},{path:'/synthetic/01234567-good.txt'}]}));
+  requested.push(path);return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(route+'?chat_instance=synthetic',{method:'POST'})).json();
+ assert.deepEqual(requested,[route+'/01234567-good.txt']);
+});
+
+test('remote upload prefetch rejects an overfull response without fetching any file',async()=>{
+ const route='/api/nodes/n1/attachments';let reads=0;
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>assert.fail('overfull response created an asset'),channel:async(path,opts)=>{
+  if(opts?.method==='POST')return new Response(JSON.stringify({attachments:Array.from({length:17},(_,i)=>({path:`/synthetic/${String(i).padStart(8,'0')}-file.txt`}))}));
+  reads++;return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ const response=await transport.fetchImpl(route,{method:'POST'});assert.equal((await response.json()).attachments.length,17);assert.equal(reads,0);
+});
+
+test('remote prefetch ignores malformed file associations and limits one response',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};let files=0;
+ const malformed=[{seq:0,attachments:[{id:'0123456789abcdef',size:1}]},{seq:1,attachments:[{id:'bad',size:1},{id:'0123456789abcdef',size:0},{id:'0123456789abcdef',size:4194305}]},{seq:2,attachments:Array.from({length:17},()=>({id:'0123456789abcdef',size:1}))},...Array.from({length:17},(_,i)=>({seq:i+3,attachments:Array.from({length:16},()=>({id:'bad',size:1}))}))];
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>assert.fail('invalid file loaded'),channel:async path=>{if(path===root)return new Response(JSON.stringify(caps));if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:malformed}));files++;return new Response('x');}});
+ await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();assert.equal(files,0);
+});
+
+test('remote explicit retry cannot revive a deleted copy or bypass a capability refresh',async()=>{
+ const server='a'.repeat(32),key=[server,'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),root='/api/team/subscriptions',copy=`${root}/${key}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${"f".repeat(32)}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),people_copy_instance:'f'.repeat(32)}]};let release,gets=0;
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:must-not-revive',channel:async(path,opts)=>{if(path===root)return new Response(JSON.stringify(caps));if(path===copy&&opts?.method==='DELETE')return new Response(null,{status:204});gets++;return new Promise(resolve=>{release=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))})}});
+ await (await transport.fetchImpl(root)).json();const refreshing=await transport.fetchImpl(root);assert.equal(await transport.retryAsset(file),'');assert.equal(gets,0);await refreshing.json();
+ const pending=transport.retryAsset(file);await new Promise(resolve=>setImmediate(resolve));assert.equal(gets,1);await transport.fetchImpl(copy,{method:'DELETE'});release();assert.equal(await pending,'');assert.equal(transport.assetURL(file),'');
+});
+
+test('remote query-bound copy removal retires an in-flight associated file',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};let release,started;const entered=new Promise(resolve=>{started=resolve});
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:must-not-revive',channel:async(path,opts)=>{if(path===root)return new Response(JSON.stringify(caps));if(opts?.method==='DELETE')return new Response(null,{status:204});started();return new Promise(resolve=>{release=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))})}});
+ await (await transport.fetchImpl(root)).json();const pending=transport.retryAsset(file);await entered;
+ await transport.fetchImpl(copy+'?copy_instance='+instance,{method:'DELETE'});release();assert.equal(await pending,'');assert.equal(transport.assetURL(file),'');
+});
+
+test('late remote removal completion cannot discard a replacement copy asset',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),old='e'.repeat(32),fresh='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${fresh}`;
+ let current=old,release,started;const entered=new Promise(resolve=>{started=resolve});const revoked=[];
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:replacement',revokeObjectURL:url=>revoked.push(url),channel:async(path,opts)=>{
+  if(path===root)return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:current}]}));
+  if(opts?.method==='DELETE'){started();return new Promise(resolve=>{release=()=>resolve(new Response(null,{status:204}))});}
+  return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(root)).json();const removing=transport.fetchImpl(copy+'?copy_instance='+old,{method:'DELETE'});await entered;
+ current=fresh;await (await transport.fetchImpl(root)).json();assert.equal(await transport.retryAsset(file),'blob:replacement');release();await removing;
+ assert.equal(transport.assetURL(file),'blob:replacement');assert.deepEqual(revoked,[]);
+});
+
+test('remote file prefetch rejects malformed copy capability metadata and resumes when repaired',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+ const limits={version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}, valid={server,owner,chat,generation,people_copy_instance:instance};
+ for (const field of ['server','owner','chat','generation','people_copy_instance']) for(const value of ['invalid',undefined]) {
+  let row={...valid,[field]:value}, downloads=0;
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:verified',channel:async path=>{
+   if(path===root)return new Response(JSON.stringify({people_attachments:limits,servers:[{id:server,people_files:'supported'}],subscriptions:[row]}));
+   if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'}]}]}));
+   downloads++;return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();
+  assert.equal(downloads,0,field+' cannot authorize a download');assert.equal(transport.assetURL(file),'');
+  row=valid;await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();
+  assert.equal(downloads,1,field+' recovery must permit the verified association');assert.equal(transport.assetURL(file),'blob:verified');
+ }
+});
+
+test('remote People prefetch waits for a refresh begun while exposing the first file',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ const files=[],first=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`,second=`${copy}/attachments/1/fedcba9876543210?copy_instance=${instance}`;let polls=0,release,started,refresh,transport;
+ const entered=new Promise(resolve=>{started=resolve});
+ transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>{if(!refresh)refresh=transport.fetchImpl(root);return 'blob:verified'},channel:async path=>{
+  if(path===root){polls++;if(polls===1)return new Response(JSON.stringify(caps));started();return new Promise(resolve=>{release=()=>resolve(new Response(JSON.stringify(caps)))})}
+  if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'},{id:'fedcba9876543210',size:1,mime:'text/plain'}]}]}));
+  files.push(path);return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();await entered;
+ assert.deepEqual(files,[first]);release();await (await refresh).json();await reading;
+ assert.deepEqual(files,[first,second]);assert.equal(transport.assetURL(second),'blob:verified');
+});
+
+test('remote People prefetch stops when an overlapping capability refresh times out',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ const files=[],first=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`,second=`${copy}/attachments/1/fedcba9876543210?copy_instance=${instance}`;let polls=0,release,started,refresh,transport;
+ const entered=new Promise(resolve=>{started=resolve});
+ transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>{if(!refresh)refresh=transport.fetchImpl(root);return 'blob:verified'},channel:async path=>{
+  if(path===root){polls++;if(polls===1)return new Response(JSON.stringify(caps));started();return new Promise(resolve=>{release=()=>resolve(new Response(JSON.stringify(caps)))})}
+  if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'},{id:'fedcba9876543210',size:1,mime:'text/plain'}]}]}));
+  files.push(path);return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();await entered;
+ try {
+  await new Promise(resolve=>setImmediate(resolve));t.mock.timers.tick(10000);await reading;
+  assert.deepEqual(files,[first]);assert.equal(transport.assetURL(second),'');
+ } finally {release();await (await refresh).json()}
+});
+
+test('remote People prefetch stops when an overlapping refresh replaces the copy',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ const replacement={...caps,subscriptions:[{server,owner,chat,generation,people_copy_instance:'e'.repeat(32)}]};
+ const files=[],first=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`,second=`${copy}/attachments/1/fedcba9876543210?copy_instance=${instance}`;let polls=0,release,started,refresh,transport;
+ const entered=new Promise(resolve=>{started=resolve});
+ transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>{if(!refresh)refresh=transport.fetchImpl(root);return 'blob:old'},channel:async path=>{
+  if(path===root){polls++;if(polls===1)return new Response(JSON.stringify(caps));started();return new Promise(resolve=>{release=()=>resolve(new Response(JSON.stringify(replacement)))})}
+  if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'},{id:'fedcba9876543210',size:1,mime:'text/plain'}]}]}));
+  files.push(path);return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();await entered;
+ assert.deepEqual(files,[first]);release();await (await refresh).json();await reading;
+ assert.deepEqual(files,[first]);assert.equal(transport.assetURL(first),'');assert.equal(transport.assetURL(second),'');
+});
+
+test('a server binding change during image preview stops the next file prefetch',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='e'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported',people_file_binding:'a'.repeat(64)}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ const changed={...caps,servers:[{...caps.servers[0],people_file_binding:'b'.repeat(64)}]};
+ const first=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`,preview=first+'&preview=1',second=`${copy}/attachments/1/fedcba9876543210?copy_instance=${instance}`;
+ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=','base64');
+ let polls=0,release,entered,dispatches=0;const waiting=new Promise(resolve=>{entered=resolve}),requests=[];
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:synthetic',revokeObjectURL:()=>{},channel:async(path,options)=>{
+  if(options?.method && options.method!=='GET'){dispatches++;throw Error('unexpected synthetic mutation')}
+  if(path===root)return new Response(JSON.stringify(++polls===1?caps:changed));
+  if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:png.length,mime:'image/png'},{id:'fedcba9876543210',size:1,mime:'text/plain'}]}]}));
+  requests.push(path);
+  if(path===preview){entered();return new Promise(resolve=>{release=()=>resolve(new Response(png,{headers:{'Content-Type':'image/png'}}))})}
+  if(path===first)return new Response(png,{headers:{'Content-Type':'application/octet-stream'}});
+  if(path===second)return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  throw Error('unexpected synthetic path');
+ }});
+ await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();
+ await waiting;await (await transport.fetchImpl(root)).json();release();await reading;
+ assert.deepEqual(requests,[first,preview]);assert.equal(transport.assetURL(preview),'');assert.equal(transport.assetURL(second),'');assert.equal(dispatches,0);
+});
+
+test('remote People prefetch does not start a file after an earlier capability refresh replaces the copy',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ let polls=0,release,downloads=0;
+ const transport=createRemoteAssetTransport({assets:new Map(),channel:async path=>{
+  if(path===root){if(++polls===1)return new Response(JSON.stringify(caps));return new Promise(resolve=>{release=()=>resolve(new Response(JSON.stringify({...caps,subscriptions:[{server,owner,chat,generation,people_copy_instance:'e'.repeat(32)}]})))})}
+  if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'}]}]}));
+  downloads++;return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+ }});
+ await (await transport.fetchImpl(root)).json();const comments=await transport.fetchImpl(copy+'/comments?copy_instance='+instance);
+ const refresh=transport.fetchImpl(root);const reading=comments.json();await new Promise(resolve=>setImmediate(resolve));release();await (await refresh).json();await reading;
+ assert.equal(downloads,0);assert.equal(transport.assetURL(`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`),'');
+});
+
+test('remote in-flight file is not exposed when capability verification times out',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+ const caps={people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+ let polls=0,releaseFile,releaseCaps,fileStarted;const entered=new Promise(resolve=>{fileStarted=resolve});
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:unexpected',channel:async path=>{
+  if(path===root){polls++;if(polls===1)return new Response(JSON.stringify(caps));return new Promise(resolve=>{releaseCaps=()=>resolve(new Response(JSON.stringify(caps)))})}
+  if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'}]}]}));
+  fileStarted();return new Promise(resolve=>{releaseFile=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))});
+ }});
+ await (await transport.fetchImpl(root)).json();const reading=(await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();await entered;
+ const refresh=transport.fetchImpl(root);releaseFile();
+ try {await new Promise(resolve=>setImmediate(resolve));t.mock.timers.tick(10000);await new Promise(resolve=>setImmediate(resolve));t.mock.timers.tick(10000);await reading;assert.equal(transport.assetURL(file),'')}
+ finally {releaseCaps();await (await refresh).json()}
+});
+
+test('remote transport does not infer a People association from a non-string request',async()=>{
+ let calls=0,created=0;
+ const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>{created++;return 'blob:unexpected'},channel:async()=>{calls++;return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'}]}]}))}});
+ const request=new Request('http://synthetic.invalid/comments');const response=await transport.fetchImpl(request);await response.json();
+ assert.equal(calls,1);assert.equal(created,0);assert.equal(transport.assetURL('/api/team/subscriptions/unknown'),'');
+});
+
+test('remote People prefetch requires a valid capability server identity',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),instance='f'.repeat(32),root='/api/team/subscriptions',copy=`${root}/${server}/${owner}/${chat}/${generation}`,file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+ for(const invalid of [undefined,'invalid']) {
+  let advertised=invalid,downloads=0;
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=> 'blob:verified',channel:async path=>{
+   if(path===root)return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:advertised,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]}));
+   if(path.startsWith(copy+'/comments'))return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id:'0123456789abcdef',size:1,mime:'text/plain'}]}]}));
+   downloads++;return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();assert.equal(downloads,0);assert.equal(transport.assetURL(file),'');
+  advertised=server;await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();assert.equal(downloads,1);assert.equal(transport.assetURL(file),'blob:verified');
+ }
 });

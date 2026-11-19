@@ -73,6 +73,24 @@ func contentEvents(evs []sessionlog.Event) []sessionlog.Event {
 	return out
 }
 
+func TestMirrorEmptyTranscriptRecordsOnlySource(t *testing.T) {
+	a := mirrorTestApp(t)
+	path := filepath.Join(t.TempDir(), "synthetic-empty.jsonl")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "n1", Agent: "claude", Transcript: path}
+	a.syncMirror(n)
+	events := logEvents(t, a, "n1")
+	if len(events) != 2 || events[0].T != "meta" || events[1].T != "source" {
+		t.Fatalf("empty transcript invented history or watermark: %v", kinds(events))
+	}
+	a.syncMirror(n)
+	if events = logEvents(t, a, "n1"); len(events) != 2 {
+		t.Fatalf("idle empty transcript appended events: %v", kinds(events))
+	}
+}
+
 func TestMirrorBackfillAndIncrement(t *testing.T) {
 	a := mirrorTestApp(t)
 	tdir := t.TempDir()

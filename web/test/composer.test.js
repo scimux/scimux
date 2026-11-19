@@ -288,6 +288,7 @@ function makeStorage(init = {}){
     getItem(k){ return map.has(k) ? map.get(k) : null; },
     setItem(k, v){ map.set(k, String(v)); },
     removeItem(k){ map.delete(k); },
+    keys(){ return [...map.keys()]; },
     _map: map,
   };
 }
@@ -301,6 +302,10 @@ function makeRoots(){
   attmenu.children.forEach(c => { c.parentNode = attmenu; });
   const attstage = el("div", { id: "attstage", hidden: true });
   attstage.querySelectorAll = sel => {
+    if (sel === ".people-retry") {
+      attstage._retryButtons = attstage.innerHTML.includes('class="people-retry"') ? [el("button")] : [];
+      return attstage._retryButtons;
+    }
     if (sel !== ".sx") return [];
     const keys = [...attstage.innerHTML.matchAll(/class="sx" data-key="([^"]+)"/g)]
       .map(m => m[1]);
@@ -384,6 +389,8 @@ function makeFeature(overrides = {}){
   let uploadHandler = overrides.uploadHandler;
   let sendHandler = overrides.sendHandler;
   let interruptHandler = overrides.interruptHandler;
+  const peopleSaved = new Map();
+  let peopleFileNumber = 0;
 
   const doc = {
     execCommandCalls: [],
@@ -415,6 +422,15 @@ function makeFeature(overrides = {}){
     roots,
     document: doc,
     storage,
+    peopleFileStore: {
+      async save(scope,id,file){ peopleSaved.set(scope + "\0" + id,{id,file}); },
+      async list(scope){ return [...peopleSaved.entries()].filter(([key])=>key.startsWith(scope + "\0")).map(([,value])=>value); },
+      async markPublished(){},
+      async markPublishedBatch(){},
+      async remove(scope,id){ peopleSaved.delete(scope + "\0" + id); },
+    },
+    randomBytes: () => new Uint8Array(peopleFileNumber++ === 0 ? [1,35,69,103,137,171,205,239] : [254,220,186,152,118,84,50,16]),
+    finishPeople: () => true,
     sel: () => sel,
     nodeById: id => nodes.find(n => n.id === id) || null,
     isPhoneTouch: () => !!overrides.isPhoneTouch,
@@ -2350,4 +2366,947 @@ test('an old unattributed draft is available for review without entering the rep
  ctx.feature.bind();ctx.feature.onSelect();
  assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/legacy words/);
  assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test("People attachment capability stages files without changing destination or dispatching", async () => {
+  const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),sendPeople:async()=>{}}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setPromptText("discussion draft");
+  ctx.feature.addFiles([{name:"synthetic.txt",type:"text/plain",size:12}]);
+  assert.equal(ctx.feature.destination(),"people");
+  assert.equal(ctx.feature.promptText(),"discussion draft");
+  assert.match(ctx.roots.attstage.innerHTML,/synthetic\.txt/);
+  assert.equal(ctx.apiCalls.filter(call=>call.path.split("?")[0].endsWith("/send")).length,0);
+});
+
+test("People file validation keeps valid staged files and never changes Agent draft", async () => {
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),sendPeople:async()=>{}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setDestination("agent");ctx.feature.setAttachAvail(true);ctx.feature.setPromptText("agent draft");ctx.roots.prompt.firstListener("input")();
+ ctx.feature.setDestination("people");ctx.feature.setPromptText("people draft");ctx.roots.prompt.firstListener("input")();
+ ctx.feature.addFiles([{name:"valid.txt",type:"text/plain",size:12},{name:"empty.txt",type:"text/plain",size:0},{name:"large.txt",type:"text/plain",size:(4<<20)+1}]);
+ assert.match(ctx.roots.attstage.innerHTML,/valid\.txt/);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/empty\.txt|large\.txt/);
+ assert.match(ctx.alerts.join(" "),/empty|4\s*MiB/i);assert.equal(ctx.feature.promptText(),"people draft");
+ ctx.feature.setDestination("agent");assert.equal(ctx.feature.promptText(),"agent draft");
+});
+
+test("People attachment feedback identifies unavailable local copy metadata", () => {
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:false,copyIdentityMissing:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('preserved discussion');ctx.roots.prompt.firstListener('input')();
+ ctx.feature.addFiles([{name:'synthetic.txt',type:'text/plain',size:1}]);
+ assert.match(ctx.alerts.join(' '),/copy identity.*unavailable/i);assert.equal(ctx.feature.promptText(),'preserved discussion');assert.equal(ctx.feature.destination(),'people');assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+});
+
+test("People staged removal waits for scoped server removal", async () => {
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:"synthetic.txt",type:"text/plain",size:12}]);await new Promise(r=>setImmediate(r));
+ ctx.roots.attstage._stageButtons[0].firstListener("click")();await new Promise(r=>setImmediate(r));
+ assert.equal(ctx.apiCalls.filter(call=>call.opts?.method==="DELETE" && call.path.includes("/subscriptions/s/o/c/g/attachments/stage/0123456789abcdef")).length,1);
+ assert.equal(ctx.roots.attstage.hidden,true);
+});
+
+test("People file-only send supplies the frozen stage identity without agent dispatch", async () => {
+ const sent=[];const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),sendPeople:async(...args)=>{sent.push(args);return {seq:7}}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:"synthetic.txt",type:"text/plain",size:12}]);await new Promise(r=>setImmediate(r));
+ await ctx.feature.sendPrompt();assert.equal(sent.length,1);assert.equal(sent[0][0],"s/o/c/g");assert.equal(sent[0][1],"");assert.deepEqual(sent[0][2],["0123456789abcdef"]);
+ assert.equal(ctx.apiCalls.filter(call=>call.path.split("?")[0].endsWith("/send")).length,0);
+});
+
+test("People file send preserves newer typing and staged files while pending", async () => {
+ let release;const calls=[];const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),sendPeople:(...args)=>{calls.push(args);return new Promise(r=>{release=r})}},uploadHandler:async(_path,opts)=>({ok:true,json:async()=>({attachments:[{id:opts.body.parts[0].name==="old.txt"?"0123456789abcdef":"fedcba9876543210"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("old text");ctx.roots.prompt.firstListener("input")();ctx.feature.addFiles([{name:"old.txt",type:"text/plain",size:3}]);await new Promise(r=>setImmediate(r));
+ const sending=ctx.feature.sendPrompt();await new Promise(r=>setImmediate(r));assert.equal(calls.length,1);
+ ctx.feature.setPromptText("new text");ctx.roots.prompt.firstListener("input")();ctx.feature.addFiles([{name:"new.txt",type:"text/plain",size:3}]);await new Promise(r=>setImmediate(r));
+ release({seq:7});await sending;assert.equal(ctx.feature.promptText(),"new text");assert.match(ctx.roots.attstage.innerHTML,/new\.txt/);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/old\.txt/);
+});
+
+test("People in-flight publication pins its original stage against removal", async () => {
+ let release;const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),sendPeople:()=>new Promise(r=>{release=r})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:"synthetic.txt",type:"text/plain",size:12}]);await new Promise(r=>setImmediate(r));const sending=ctx.feature.sendPrompt();await new Promise(r=>setImmediate(r));
+ ctx.roots.attstage._stageButtons[0].firstListener("click")();await new Promise(r=>setImmediate(r));assert.match(ctx.roots.attstage.innerHTML,/synthetic\.txt/);assert.equal(ctx.apiCalls.filter(call=>call.opts?.method==="DELETE").length,0);
+ release({seq:7});await sending;
+});
+
+test('confirmed People image releases its local preview after explicit send',async()=>{
+ let sends=0;
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),sendPeople:async()=>{sends++;return {seq:1}}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'synthetic.png',type:'image/png',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(ctx.created,['blob:synthetic.png']);assert.deepEqual(ctx.revoked,[]);assert.equal(sends,0);
+ await ctx.feature.sendPrompt();assert.equal(sends,1);assert.deepEqual(ctx.revoked,['blob:synthetic.png']);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/synthetic\.png/);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test("People file bytes are saved before upload and restored for the same share after reload", async () => {
+ let release;const saved=new Map();const fileStore={save:async(scope,id,file)=>{await new Promise(r=>{release=r});saved.set(scope+"/"+id,{id,file})},list:async scope=>[...saved.entries()].filter(([key])=>key.startsWith(scope+"/")).map(([,value])=>value),remove:async(scope,id)=>saved.delete(scope+"/"+id)};
+ const deps={peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),peopleFileStore:fileStore,randomBytes:()=>new Uint8Array([1,2,3,4,5,6,7,8])};
+ const ctx=makeFeature({deps,uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0102030405060708"}]})})});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:"synthetic.txt",type:"text/plain",size:12}]);
+ assert.equal(ctx.fetchCalls.length,0);release();await new Promise(r=>setImmediate(r));assert.equal(ctx.fetchCalls.length,1);assert.match(ctx.fetchCalls[0].path,/stage_id=0102030405060708/);
+ const reloaded=makeFeature({deps});reloaded.feature.bind();reloaded.feature.onSelect();await new Promise(r=>setImmediate(r));assert.match(reloaded.roots.attstage.innerHTML,/synthetic\.txt/);
+});
+
+test("People confirmed response retains drafts if durable sent marker cannot be stored", async () => {
+ let finished=0;const files=new Map();const fileStore={save:async(scope,id,file)=>files.set(scope+id,{id,file}),list:async()=>[],markPublishedBatch:async()=>{throw Error("storage unavailable")},remove:async()=>{throw Error("must not discard")}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),peopleFileStore:fileStore,finishPeople:()=>{finished++;return true},sendPeople:async()=>({seq:7})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("synthetic text");ctx.roots.prompt.firstListener("input")();ctx.feature.addFiles([{name:"synthetic.txt",type:"text/plain",size:12}]);await new Promise(r=>setImmediate(r));await ctx.feature.sendPrompt();
+ assert.equal(finished,0);assert.equal(ctx.feature.promptText(),"synthetic text");assert.match(ctx.roots.attstage.innerHTML,/synthetic\.txt/);assert.match(ctx.alerts.join(" "),/storage/i);
+});
+
+test("a confirmed People file with failed cleanup stays marked sent and cannot be republished", async () => {
+ let sends=0, finished=0;
+ const ctx=makeFeature({
+  deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),sendPeople:async()=>{sends++;return {seq:7}},finishPeople:()=>{finished++;return true}},
+  uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})}),
+  sendHandler:async(path,opts)=>{if(opts?.method==="DELETE" && path.includes("/attachments/stage/")) throw Error("synthetic cleanup failure");return {delivery:"ok"}}
+ });
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:"saved.txt",type:"text/plain",size:1}]);await new Promise(r=>setImmediate(r));
+ await ctx.feature.sendPrompt();
+ assert.equal(sends,1);assert.equal(finished,1);
+ assert.match(ctx.roots.attstage.innerHTML,/Sent; remove this saved file to finish cleanup/);
+ await ctx.feature.sendPrompt();assert.equal(sends,1);assert.equal(finished,1);
+ ctx.feature.destroy();
+});
+
+test("People draft recovery restarts after a stale A-B-A visit", async () => {
+ let release, calls=0;
+ const fileStore={list:async()=>{calls++;if(calls===1)return new Promise(r=>{release=r});return [{id:"0123456789abcdef",file:{name:"saved.txt",type:"text/plain",size:1}}];}};
+ const ctx=makeFeature({nodes:[{id:"n1"},{id:"n2"}],deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),peopleFileStore:fileStore}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(r=>setImmediate(r));
+ ctx.setSel("n2");ctx.feature.onSelect();ctx.setSel("n1");ctx.feature.onSelect();
+ release([]);await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+ assert.match(ctx.roots.attstage.innerHTML,/saved\.txt/);assert.ok(calls>=3);
+});
+
+test("Confirmed People caption clears its unchanged draft after switching to Agent", async()=>{
+ for (const withFiles of [false,true]) {
+  let finish;
+  const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:withFiles}),sendPeople:()=>new Promise(resolve=>{finish=resolve})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("confirmed People caption");ctx.roots.prompt.firstListener("input")();
+  if(withFiles){ctx.feature.addFiles([{name:"synthetic.txt",type:"text/plain",size:12}]);await new Promise(r=>setImmediate(r));}
+  const pending=ctx.feature.sendPrompt();await new Promise(r=>setImmediate(r));assert.equal(typeof finish,"function");
+  ctx.feature.setDestination("agent");ctx.feature.setPromptText("new Agent draft");ctx.roots.prompt.firstListener("input")();
+  finish({seq:1});await pending;assert.equal(ctx.feature.promptText(),"new Agent draft");assert.equal(ctx.feature.destination(),"agent");
+  ctx.feature.setDestination("people");assert.equal(ctx.feature.promptText(),"",`confirmed unchanged People caption remains armed after destination switch; withFiles=${withFiles}`);ctx.feature.destroy();
+ }
+});
+
+test("confirmed People caption clears its captured draft after navigation without touching the new chat", async()=>{
+ let finish;const nodes=[{id:"n1",instance_id:"one"},{id:"n2",instance_id:"two"}];
+ const ctx=makeFeature({nodes,deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),sendPeople:()=>new Promise(resolve=>{finish=resolve})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("old caption");ctx.roots.prompt.firstListener("input")();ctx.feature.addFiles([{name:"x.txt",type:"text/plain",size:1}]);await new Promise(r=>setImmediate(r));
+ const pending=ctx.feature.sendPrompt();await new Promise(r=>setImmediate(r));ctx.setSel("n2");ctx.feature.onSelect();ctx.feature.setPromptText("new chat text");ctx.roots.prompt.firstListener("input")();
+ finish({seq:1});await pending;assert.equal(ctx.feature.promptText(),"new chat text");ctx.setSel("n1");ctx.feature.onSelect();assert.equal(ctx.feature.promptText(),"");
+});
+
+test("People recovery shows the frozen caption and retries only by explicit button", async()=>{
+ let calls=0,finished=0;const old={key:"s/o/c/g",instance:"",text:"old message",attachments:["0123456789abcdef"]};
+ const fileStore={list:async()=>[{id:old.attachments[0],file:{name:"saved.txt",type:"text/plain",size:1}}],markPublishedBatch:async()=>{},remove:async()=>{}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:old.key,writable:true,owner:true,attachments:true}),peopleFileStore:fileStore,pendingPeople:()=>old,retryPeople:async()=>{calls++;return {seq:1}},finishPeople:()=>{finished++;return true}}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(r=>setImmediate(r));
+ assert.match(ctx.roots.attstage.innerHTML,/old message/);assert.match(ctx.roots.attstage.innerHTML,/saved\.txt/);assert.equal(calls,0);
+ ctx.roots.attstage._retryButtons[0].firstListener("click")();await new Promise(r=>setImmediate(r));
+ assert.equal(calls,1);assert.equal(finished,1);
+});
+
+test('headless People recovery still displays pending text without a DOM query adapter',async()=>{
+ const pending={key:'s/o/c/g',instance:'',text:'saved caption',attachments:['0123456789abcdef']};let retries=0;
+ const store={list:async()=>[{id:pending.attachments[0],file:{name:'saved.txt',type:'text/plain',size:1}}]};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>pending,retryPeople:async()=>{retries++;return {seq:1}}}});
+ ctx.roots.attstage.querySelectorAll=undefined;ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/saved caption/);assert.match(ctx.roots.attstage.innerHTML,/Retry this message/);assert.equal(retries,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test("an uncertain People file send immediately exposes the frozen retry control", async()=>{
+ let pending=null;
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),pendingPeople:()=>pending,sendPeople:async()=>{pending={key:"s/o/c/g",text:"old caption",attachments:["0123456789abcdef"]};throw Error("unconfirmed")}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("old caption");ctx.roots.prompt.firstListener("input")();ctx.feature.addFiles([{name:"x.txt",type:"text/plain",size:1}]);await new Promise(r=>setImmediate(r));
+ await ctx.feature.sendPrompt();assert.match(ctx.roots.attstage.innerHTML,/Retry this message/);
+});
+
+test("explicit People recovery clears only its unchanged confirmed caption", async()=>{
+ let old={key:"s/o/c/g",instance:"",text:"old caption",attachments:["0123456789abcdef"]};
+ const fileStore={list:async()=>[{id:old.attachments[0],file:{name:"saved.txt",type:"text/plain",size:1}}],markPublishedBatch:async()=>{},remove:async()=>{}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),peopleFileStore:fileStore,pendingPeople:()=>old,retryPeople:async()=>({seq:1}),finishPeople:()=>{old=null;return true}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("old caption");ctx.roots.prompt.firstListener("input")();
+ ctx.storage.setItem("scimux-people-pending-draft:people\0s/o/c/g\0n1\0fallback:1",JSON.stringify({binding:ctx.storage.getItem("scimux-people-draft:n1:binding"),text:"old caption",version:ctx.storage.getItem("scimux-people-draft:n1:version")}));await new Promise(r=>setImmediate(r));
+ ctx.roots.attstage._retryButtons[0].firstListener("click")();await new Promise(r=>setImmediate(r));assert.equal(ctx.feature.promptText(),"");
+});
+
+test('People retry preserves the draft when its old caption metadata is damaged',async()=>{
+ let old={key:'s/o/c/g',instance:'',text:'old caption',attachments:['0123456789abcdef']},retries=0;
+ const fileStore={list:async()=>[{id:old.attachments[0],file:{name:'saved.txt',type:'text/plain',size:1}}],markPublishedBatch:async()=>{},remove:async()=>{}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:fileStore,pendingPeople:()=>old,retryPeople:async()=>{retries++;return {seq:1}},finishPeople:()=>{old=null;return true}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('newer editing');ctx.roots.prompt.firstListener('input')();
+ ctx.storage.setItem('scimux-people-pending-draft:people\0s/o/c/g\0n1\0fallback:1','{damaged');await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(retries,1);assert.equal(ctx.feature.promptText(),'newer editing');assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test("People recovery preserves newer editing even when its text is identical", async()=>{
+ let release,old={key:"s/o/c/g",instance:"",text:"old caption",attachments:["0123456789abcdef"]};
+ const fileStore={list:async()=>[{id:old.attachments[0],file:{name:"saved.txt",type:"text/plain",size:1}}],markPublishedBatch:async()=>{},remove:async()=>{}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true,attachments:true}),peopleFileStore:fileStore,pendingPeople:()=>old,retryPeople:()=>new Promise(r=>{release=r}),finishPeople:()=>{old=null;return true}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("old caption");ctx.roots.prompt.firstListener("input")();
+ ctx.storage.setItem("scimux-people-pending-draft:people\0s/o/c/g\0n1\0fallback:1",JSON.stringify({binding:ctx.storage.getItem("scimux-people-draft:n1:binding"),text:"old caption",version:ctx.storage.getItem("scimux-people-draft:n1:version")}));await new Promise(r=>setImmediate(r));
+ ctx.roots.attstage._retryButtons[0].firstListener("click")();ctx.roots.prompt.firstListener("input")();release({seq:1});await new Promise(r=>setImmediate(r));assert.equal(ctx.feature.promptText(),"old caption");
+});
+
+test('People retry refuses missing saved files and preserves the pending publication',async()=>{
+ let retries=0;const pending={key:'s/o/c/g',instance:'',text:'saved caption',attachments:['0123456789abcdef']};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:{list:async()=>[]},pendingPeople:()=>pending,retryPeople:async()=>{retries++;return {seq:1}}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('newer editing');ctx.roots.prompt.firstListener('input')();await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(retries,0);assert.equal(ctx.feature.promptText(),'newer editing');assert.match(ctx.alerts.at(-1),/saved files.*unavailable/i);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People retry waits for explicitly recovered files and never replays while loading',async()=>{
+ const pending={key:'s/o/c/g',instance:'',text:'saved caption',attachments:['0123456789abcdef']};let release,retries=0,finished=0;
+ const store={list:()=>new Promise(resolve=>{release=resolve}),markPublishedBatch:async()=>{},remove:async()=>{}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>pending,retryPeople:async()=>{retries++;return {seq:1}},finishPeople:()=>{finished++;return true}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('newer draft');
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();
+ assert.match(ctx.alerts.at(-1),/saved files.*unavailable/i);assert.equal(retries,0);assert.equal(ctx.feature.promptText(),'newer draft');
+ await new Promise(resolve=>setImmediate(resolve));release([{id:pending.attachments[0],file:{name:'saved.txt',type:'text/plain',size:1}}]);await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/saved\.txt/);assert.equal(retries,0);
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(retries,1);assert.equal(finished,1);assert.equal(ctx.feature.promptText(),'newer draft');ctx.feature.destroy();
+});
+
+test('a stale People retry control cannot retry after switching to Agent',async()=>{
+ const pending={key:'s/o/c/g',instance:'',text:'saved caption',attachments:['0123456789abcdef']};let retries=0;
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:{list:async()=>[]},pendingPeople:()=>pending,retryPeople:async()=>{retries++;return {seq:1}}}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));const oldClick=ctx.roots.attstage._retryButtons[0].firstListener('click');
+ ctx.feature.setDestination('agent');ctx.feature.setPromptText('Agent draft');oldClick();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(retries,0);assert.equal(ctx.feature.promptText(),'Agent draft');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People retry reports an unconfirmed message when the failure has no detail',async()=>{
+ const pending={key:'s/o/c/g',instance:'',text:'saved',attachments:['0123456789abcdef']};let retries=0;
+ const store={list:async()=>[{id:pending.attachments[0],file:{name:'saved.txt',type:'text/plain',size:1}}]};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>pending,retryPeople:async()=>{retries++;throw null}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('new draft');await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(retries,1);assert.match(ctx.alerts.join(' '),/Message delivery is unconfirmed/);assert.equal(ctx.feature.promptText(),'new draft');assert.match(ctx.roots.attstage.innerHTML,/saved\.txt/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People stage removal fails closed when pending publication state is unreadable',async()=>{
+ let unavailable=false, removals=0;
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{removals++}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>{if(unavailable)throw Error('synthetic pending storage failure');return null}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/review\.txt/);unavailable=true;
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/pending People message/i);assert.match(ctx.roots.attstage.innerHTML,/review\.txt/);assert.equal(removals,0);assert.equal(ctx.apiCalls.filter(call=>call.options?.method==='DELETE').length,0);ctx.feature.destroy();
+});
+
+test('file-only pending recovery identifies missing files and cannot retry them',async()=>{
+ let calls=0;
+ const pending={key:'s/o/c/g',instance:'',text:'',attachments:['0123456789abcdef']};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:{list:async()=>[]},pendingPeople:()=>pending,retryPeople:async()=>{calls++;return {seq:1}}}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/File-only message/);assert.match(ctx.roots.attstage.innerHTML,/Saved file unavailable/);
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls,0);assert.match(ctx.alerts.join(' '),/saved files.*unavailable/i);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People retry keeps reviewable files when local receipt persistence fails',async()=>{
+ let retries=0,marks=0;const pending={key:'s/o/c/g',instance:'',text:'saved caption',attachments:['0123456789abcdef']};
+ const store={list:async()=>[{id:pending.attachments[0],file:{name:'saved.txt',type:'text/plain',size:1}}],markPublishedBatch:async()=>{marks++},remove:async()=>assert.fail('must retain unresolved file')};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>pending,retryPeople:async()=>{retries++;return {seq:1}},finishPeople:()=>false}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(retries,1);assert.equal(marks,1);assert.match(ctx.alerts.at(-1),/could not be recorded locally/i);assert.match(ctx.roots.attstage.innerHTML,/saved\.txt/);assert.match(ctx.roots.attstage.innerHTML,/Review unconfirmed/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People retry reports a known refusal and preserves files for a later explicit retry',async()=>{
+ let calls=0,removals=0,pending={key:'s/o/c/g',instance:'',text:'saved',attachments:['0123456789abcdef']};
+ const store={list:async()=>[{id:'0123456789abcdef',file:{name:'saved.txt',type:'text/plain',size:1}}],markPublishedBatch:async()=>{},remove:async()=>{removals++}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>pending,retryPeople:async()=>{calls++;if(calls===1)throw Object.assign(Error('{"error":"relay_quota"}'),{status:507});return {seq:1}},finishPeople:()=>{pending=null;return true}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('newer draft');await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls,1);assert.equal(removals,0);assert.match(ctx.alerts.join(' '),/quota/i);assert.match(ctx.roots.attstage.innerHTML,/saved\.txt/);assert.equal(ctx.feature.promptText(),'newer draft');
+ ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls,2);assert.equal(removals,1);assert.equal(ctx.feature.promptText(),'newer draft');assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test('late People retry failure cannot alert or overwrite a newer visit',async()=>{
+ let reject,context={key:'s/o/c/g',writable:true,owner:true,attachments:true};
+ const pending={key:'s/o/c/g',instance:'',text:'saved',attachments:['0123456789abcdef']};
+ const store={list:async()=>[{id:'0123456789abcdef',file:{name:'saved.txt',type:'text/plain',size:1}}],remove:async()=>assert.fail('failed retry must retain files')};
+ const ctx=makeFeature({nodes:[{id:'n1'},{id:'n2'}],deps:{peopleContext:()=>context,peopleFileStore:store,pendingPeople:()=>context?pending:null,retryPeople:()=>new Promise((_,fail)=>{reject=fail})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));ctx.roots.attstage._retryButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ context=null;ctx.setSel('n2');ctx.feature.onSelect();ctx.feature.setPromptText('new visit');reject(Error('old retry failed'));await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.feature.promptText(),'new visit');assert.deepEqual(ctx.alerts,[]);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test("prepared source association follows logical source files rather than identical unrelated bytes", async()=>{
+ const source={server:"s",owner:"o",chat:"c",generation:"g",log:"comments",seq:1};
+ let sourceUpdates=0;const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",writable:true,owner:true}),canPreparePrompt:()=>true,promptSourcesChanged:()=>{sourceUpdates++}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:"synthetic-ref"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ assert.equal(ctx.feature.preparePrompt("source text",source,[{name:"source.txt",type:"text/plain",size:1}]),true);
+ ctx.feature.addFiles([{name:"other.txt",type:"text/plain",size:1}]);await new Promise(r=>setImmediate(r));
+ ctx.feature.setPromptText("");ctx.roots.prompt.firstListener("input")();assert.notEqual(ctx.storage.getItem("scimux-prompt-sources:n1"),null);
+ ctx.feature.setPromptText("unrelated new text");ctx.roots.prompt.firstListener("input")();const beforeRemoval=sourceUpdates;ctx.roots.attstage._stageButtons[0].firstListener("click")();await new Promise(r=>setImmediate(r));
+ assert.equal(sourceUpdates,beforeRemoval+1,"removing the last source file refreshes source evidence");
+ assert.equal(ctx.storage.getItem("scimux-prompt-sources:n1"),null);assert.match(ctx.roots.attstage.innerHTML,/other\.txt/);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith("/send")).length,0);
+});
+
+test("explicit owner preparation stages source files without dispatching an agent", async()=>{
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};
+ const key=[source.server,source.owner,source.chat,source.generation].join("/");const descriptor={id:"0123456789abcdef",sha256:"e".repeat(64),size:1,name:"source.txt",mime:"text/plain"};
+ let prepared=0;const ctx=makeFeature({deps:{peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,preparePeopleFiles:async()=>{prepared++;return [{name:"source.txt",type:"text/plain",size:1}]}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:"native-ref"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);assert.equal(await ctx.feature.prepareSharedPrompt("quoted",source,[descriptor]),true);await new Promise(r=>setImmediate(r));
+ assert.equal(prepared,1);assert.equal(ctx.feature.destination(),"agent");assert.equal(ctx.feature.promptText(),"quoted");assert.match(ctx.roots.attstage.innerHTML,/source\.txt/);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith("/send")).length,0);
+});
+
+test('file-only source preparation keeps existing Agent text and its file provenance',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ const descriptor={id:'0123456789abcdef',sha256:'e'.repeat(64),size:1,name:'source.txt',mime:'text/plain'};
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{}};
+ const ctx=makeFeature({deps:{peopleContext:()=>null,canPreparePrompt:()=>true,peopleFileStore:store,preparePeopleFiles:async()=>[{name:'source.txt',type:'text/plain',size:1}]},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:'synthetic-ref'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);ctx.feature.setPromptText('existing draft');ctx.roots.prompt.firstListener('input')();
+ assert.equal(await ctx.feature.prepareSharedPrompt('',source,[descriptor]),true);await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.feature.promptText(),'existing draft');assert.match(ctx.roots.attstage.innerHTML,/source\.txt/);assert.notEqual(ctx.storage.getItem('scimux-prompt-sources:n1'),null);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test('a failed prepared source upload blocks Send and preserves the source for review',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ const descriptor={id:'0123456789abcdef',sha256:'e'.repeat(64),size:1,name:'source.txt',mime:'text/plain'};
+ let fail;const ctx=makeFeature({deps:{peopleContext:()=>null,canPreparePrompt:()=>true,preparePeopleFiles:async()=>[{name:'source.txt',type:'text/plain',size:1}]},uploadHandler:()=>new Promise((_,reject)=>{fail=reject})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);assert.equal(await ctx.feature.prepareSharedPrompt('source caption',source,[descriptor]),true);
+ const send=ctx.feature.sendPrompt();fail(Error('synthetic upload failure'));await new Promise(resolve=>setImmediate(resolve));ctx.timers.runIntervals();await send;
+ assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);assert.match(ctx.alerts.join(' '),/Review failed or unfinished source files/);assert.match(ctx.roots.attstage.innerHTML,/source\.txt/);assert.notEqual(ctx.storage.getItem('scimux-prompt-sources:n1'),null);ctx.feature.destroy();
+});
+
+test('failed removal of a prepared source file preserves its source association',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ const descriptor={id:'0123456789abcdef',sha256:'e'.repeat(64),size:1,name:'source.txt',mime:'text/plain'};
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{throw Error('synthetic storage failure')}};
+ const ctx=makeFeature({deps:{peopleContext:()=>null,canPreparePrompt:()=>true,peopleFileStore:store,preparePeopleFiles:async()=>[{name:'source.txt',type:'text/plain',size:1}]},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:'synthetic-ref'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);assert.equal(await ctx.feature.prepareSharedPrompt('source caption',source,[descriptor]),true);await new Promise(resolve=>setImmediate(resolve));
+ ctx.feature.setPromptText('');ctx.roots.prompt.firstListener('input')();ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/saved file removal failed/i);assert.match(ctx.roots.attstage.innerHTML,/source\.txt/);assert.notEqual(ctx.storage.getItem('scimux-prompt-sources:n1'),null);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test("late owner file preparation cannot switch destination after newer People editing", async()=>{
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};const key=[source.server,source.owner,source.chat,source.generation].join("/");
+ let release;const ctx=makeFeature({deps:{peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,preparePeopleFiles:()=>new Promise(r=>{release=r})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);const pending=ctx.feature.prepareSharedPrompt("old",source,[{id:"0123456789abcdef"}]);
+ ctx.feature.setPromptText("newer People text");ctx.roots.prompt.firstListener("input")();release([{name:"x.txt",type:"text/plain",size:1}]);
+ assert.equal(await pending,false);assert.equal(ctx.feature.destination(),"people");assert.equal(ctx.feature.promptText(),"newer People text");assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);
+});
+
+test("a received or wrong-generation source cannot prepare files into a local agent", async()=>{
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};let calls=0;
+ for (const context of [{key:"other",writable:true,owner:true,attachments:true},{key:[source.server,source.owner,source.chat,source.generation].join("/"),writable:true,owner:false,attachments:true}]) {
+  const ctx=makeFeature({deps:{peopleContext:()=>context,canPreparePrompt:()=>true,preparePeopleFiles:async()=>{calls++;return []}}});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+  assert.equal(await ctx.feature.prepareSharedPrompt("text",source,[{id:"0123456789abcdef"}]),false);assert.equal(ctx.apiCalls.length,0);
+ }
+ assert.equal(calls,0);
+});
+
+test("retiring a source action cancels its late file preparation", async()=>{
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};const key=[source.server,source.owner,source.chat,source.generation].join("/");let release,active=true;
+ const ctx=makeFeature({deps:{peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,preparePeopleFiles:()=>new Promise(r=>{release=r})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);const pending=ctx.feature.prepareSharedPrompt("old",source,[{id:"0123456789abcdef"}],()=>active);
+ active=false;release([{name:"x.txt",type:"text/plain",size:1}]);assert.equal(await pending,false);assert.equal(ctx.feature.destination(),"people");assert.equal(ctx.fetchCalls.length,0);
+});
+
+test("prepared owner files survive reload for the same native instance", async()=>{
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};const key=[source.server,source.owner,source.chat,source.generation].join("/");
+ const rows=new Map();const fileStore={save:async(scope,id,file,metadata)=>rows.set(scope+"/"+id,{id,file,metadata}),list:async scope=>[...rows.entries()].filter(([name])=>name.startsWith(scope+"/")).map(([,row])=>row),markPublishedBatch:async(scope,ids)=>{for(const id of ids)rows.get(scope+"/"+id).published=1},remove:async(scope,id)=>rows.delete(scope+"/"+id)};
+ const deps={peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,peopleFileStore:fileStore,preparePeopleFiles:async()=>[{name:"source.txt",type:"text/plain",size:1}]};
+ const nodes=[{id:"n1",instance_id:"same"}],ctx=makeFeature({nodes,deps,uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:"native-ref"}]})})});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ assert.equal(await ctx.feature.prepareSharedPrompt("text",source,[{id:"fedcba9876543210"}]),true);await new Promise(r=>setImmediate(r));assert.equal(rows.size,1);
+ const reload=makeFeature({nodes,storage:ctx.storage,deps,uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:"recovered-ref"}]})})});reload.feature.bind();reload.feature.onSelect();reload.feature.setAttachAvail(true);reload.feature.setDestination("agent");await new Promise(r=>setImmediate(r));assert.match(reload.roots.attstage.innerHTML,/source\.txt/);
+ const sending=reload.feature.sendPrompt();await new Promise(r=>setImmediate(r));reload.timers.runIntervals();await sending;
+ const sends=reload.apiCalls.filter(call=>call.path.split("?")[0].endsWith("/send"));assert.equal(sends.length,1);assert.deepEqual(JSON.parse(sends[0].opts.body).attachments,[{path:"recovered-ref"}]);
+ assert.equal(rows.size,0,"accepted source file must not be offered again after reload");
+});
+
+test("Reload cannot associate unrelated text with vanished source-derived files", async()=>{
+ const storage=makeStorage(),nodes=[{id:"n1",instance_id:"1".repeat(32)}];
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};
+ const key=[source.server,source.owner,source.chat,source.generation].join("/");
+ const deps={peopleContext:()=>({key,writable:true,owner:true}),canPreparePrompt:()=>true};
+ const first=makeFeature({storage,nodes,deps,recovery:true,uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:"synthetic-ref"}]})})});
+ first.feature.bind();first.feature.onSelect();first.feature.setAttachAvail(true);
+ assert.equal(first.feature.preparePrompt("source caption",source,[{name:"source.txt",type:"text/plain",size:1}]),true);await new Promise(r=>setImmediate(r));
+ first.feature.setPromptText("");first.roots.prompt.firstListener("input")();assert.notEqual(storage.getItem("scimux-prompt-sources:n1"),null);first.feature.destroy();
+ let releaseSend;const restarted=makeFeature({storage,nodes,deps,recovery:true,sendHandler:()=>new Promise(resolve=>{releaseSend=resolve})});restarted.feature.bind();restarted.feature.onSelect();restarted.feature.setAttachAvail(true);restarted.feature.setDestination("agent");
+ restarted.feature.setPromptText("unrelated new text");restarted.roots.prompt.firstListener("input")();
+ const recoveredFile=!restarted.roots.attstage.hidden && restarted.roots.attstage.innerHTML.includes("source.txt");
+ const explicitRecovery=!restarted.roots.recovery.hidden;
+ if (!recoveredFile) {
+  const pending=restarted.feature.sendPrompt();
+  const flights=JSON.parse(storage.getItem("scimux-prompt-flights:n1") || "[]");
+  if (typeof releaseSend === "function") {
+   releaseSend({delivery:"ok"});await pending;
+   assert.ok(flights.every(flight=>!flight.sources?.length),"unrelated Agent send inherited the source of vanished files and removed source text after reload");
+  } else {await pending;assert.ok(explicitRecovery,"missing source content must be recovered, disassociated or explicitly blocked for review");}
+ }
+ restarted.feature.destroy();
+});
+
+test("empty source recovery removes only cleared associations before later sends", async()=>{
+ const storage=makeStorage(),nodes=[{id:"n1",instance_id:"1".repeat(32)}],source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};
+ const key=[source.server,source.owner,source.chat,source.generation].join("/");const deps={peopleContext:()=>({key,writable:true,owner:true}),canPreparePrompt:()=>true};
+ const first=makeFeature({storage,nodes,deps});first.feature.bind();first.feature.onSelect();first.feature.setAttachAvail(true);first.feature.preparePrompt("source",source,[{name:"x",type:"text/plain",size:1}]);first.feature.setPromptText("");first.roots.prompt.firstListener("input")();first.feature.destroy();
+ const next=makeFeature({storage,nodes,deps,recovery:true});next.feature.bind();next.feature.onSelect();next.feature.setDestination("agent");await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+ assert.equal(storage.getItem("scimux-prompt-sources:n1"),null);next.feature.setPromptText("unrelated");next.roots.prompt.firstListener("input")();await next.feature.sendPrompt();
+ const flights=JSON.parse(storage.getItem("scimux-prompt-flights:n1")||"[]");assert.ok(flights.every(flight=>flight.sources.length===0));
+});
+
+test("People staged files are isolated when the server configuration binding changes", async()=>{
+ let binding="a".repeat(64);const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",binding,writable:true,owner:true,attachments:true})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:"0123456789abcdef"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:"old.txt",type:"text/plain",size:1}]);await new Promise(r=>setImmediate(r));assert.match(ctx.roots.attstage.innerHTML,/old\.txt/);
+ binding="b".repeat(64);ctx.feature.contextChanged();assert.doesNotMatch(ctx.roots.attstage.innerHTML,/old\.txt/);
+});
+
+test("People text drafts follow the server binding and return when it is restored",()=>{
+ let binding="a".repeat(64);const ctx=makeFeature({deps:{peopleContext:()=>({key:"s/o/c/g",binding,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText("old server draft");ctx.roots.prompt.firstListener("input")();
+ binding="b".repeat(64);ctx.feature.contextChanged();assert.equal(ctx.feature.promptText(),"");ctx.feature.setPromptText("new server draft");ctx.roots.prompt.firstListener("input")();
+ binding="a".repeat(64);ctx.feature.contextChanged();assert.equal(ctx.feature.promptText(),"old server draft");
+});
+
+test("damaged source recovery metadata blocks an unrelated Agent send",async()=>{
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};
+ const storage=makeStorage({"scimux-draft-owner:n1":"1".repeat(32),"scimux-prompt-sources:n1":JSON.stringify([source]),["scimux-cleared-source-text:n1\0"+"1".repeat(32)]:"{damaged"});
+ const ctx=makeFeature({storage,nodes:[{id:"n1",instance_id:"1".repeat(32)}],recovery:true});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setDestination("agent");
+ ctx.feature.setPromptText("unrelated");ctx.roots.prompt.firstListener("input")();await ctx.feature.sendPrompt();
+ assert.equal(ctx.apiCalls.filter(call=>call.path.split("?")[0].endsWith("/send")).length,0);assert.equal(ctx.roots.recovery.hidden,false);
+});
+
+test('legacy unbound People draft remains reviewable after capability binding appears',()=>{
+ const storage=makeStorage({'scimux-people-draft:n1':'old discussion'});
+ const ctx=makeFeature({storage,recovery:true,deps:{peopleContext:()=>({key:'s/o/c/g',binding:'a'.repeat(64),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();
+ assert.equal(ctx.feature.promptText(),'');
+ assert.equal(ctx.roots.recovery.hidden,false);
+ assert.match(ctx.roots.recovery.innerHTML,/old discussion/);
+ assert.equal(storage.getItem('scimux-people-draft:n1'),'old discussion');
+ assert.equal(ctx.apiCalls.length,0);
+});
+
+test('invalid cleared-source metadata blocks unrelated sends without discarding the draft',async()=>{
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1},identity='n1\0'+'1'.repeat(32);
+ for(const invalid of ['{}','[1]']) {
+  const storage=makeStorage({'scimux-draft-owner:n1':'1'.repeat(32),'scimux-prompt-sources:n1':JSON.stringify([source]),['scimux-cleared-source-text:'+identity]:invalid});
+  const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'1'.repeat(32)}],recovery:true});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setDestination('agent');ctx.feature.setPromptText('new draft');ctx.roots.prompt.firstListener('input')();await ctx.feature.sendPrompt();
+  assert.equal(ctx.apiCalls.filter(call=>call.path.split('?')[0].endsWith('/send')).length,0);assert.equal(ctx.feature.promptText(),'new draft');assert.equal(storage.getItem('scimux-cleared-source-text:'+identity),invalid);assert.equal(ctx.roots.recovery.hidden,false);ctx.feature.destroy();
+ }
+});
+
+test('a People draft saved before copy identities stays reviewable',()=>{
+ const binding='a'.repeat(64),oldScope='s/o/c/g\0binding:'+binding+'\0n1\0owner-instance';
+ const key='scimux-people-draft:n1:scope:'+encodeURIComponent(oldScope),storage=makeStorage({[key]:'older scoped discussion'});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();
+ assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/older scoped discussion/);assert.equal(storage.getItem(key),'older scoped discussion');assert.equal(ctx.apiCalls.length,0);
+});
+
+test('an unresolved People publication from before copy identities stays reviewable',()=>{
+ const binding='a'.repeat(64),key='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding;
+ const pending={instance:'owner-instance',request:{text:'unconfirmed older publication',anchor:0,key:'0123456789abcdef',attachments:['fedcba9876543210']}};
+ const storage=makeStorage({[key]:JSON.stringify(pending)});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed older publication/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),JSON.stringify(pending));assert.equal(ctx.apiCalls.length,0);
+});
+
+test('a staged People file from before copy identities remains reviewable without upload',async()=>{
+ const binding='a'.repeat(64),oldScope='people\0s/o/c/g\0binding:'+binding+'\0n1\0owner-instance';
+ const store={list:async scope=>scope===oldScope?[{id:'0123456789abcdef',file:{name:'saved-synthetic.txt',type:'text/plain',size:1}}]:[]};
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/saved-synthetic\.txt/);assert.match(ctx.roots.recovery.innerHTML,/download/i);
+ assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();assert.ok(ctx.revoked.includes('blob:saved-synthetic.txt'));
+});
+
+test('retired file review is cleared when its current copy identity disappears',async()=>{
+ const binding='a'.repeat(64),oldScope='people\0s/o/c/g\0binding:'+binding+'\0n1\0owner-instance';let copyInstance='b'.repeat(32);
+ const store={list:async scope=>scope===oldScope?[{id:'0123456789abcdef',file:{name:'saved-synthetic.txt',type:'text/plain',size:1}}]:[]};
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:!!copyInstance})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));assert.match(ctx.roots.recovery.innerHTML,/saved-synthetic\.txt/);
+ copyInstance='';ctx.feature.contextChanged();assert.doesNotMatch(ctx.roots.recovery.innerHTML,/saved-synthetic\.txt/);assert.ok(ctx.revoked.includes('blob:saved-synthetic.txt'));ctx.feature.destroy();
+});
+
+test('a replacement copy exposes earlier scoped files only for manual review',async()=>{
+ const binding='a'.repeat(64),copyInstance='b'.repeat(32),prefix='people\0s/o/c/g\0binding:'+binding,owner='n1\0owner-instance',current=prefix+'\0copy:'+copyInstance+'\0'+owner;let requested;
+ const store={list:async()=>[],listRetired:async(...args)=>{requested=args;return [{scope:prefix+'\0copy:'+'c'.repeat(32)+'\0'+owner,id:'0123456789abcdef',file:{name:'earlier.txt',type:'text/plain',size:1}}]}};
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(requested,[prefix,owner,current]);assert.match(ctx.roots.recovery.innerHTML,/Download earlier\.txt/);assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();assert.ok(ctx.revoked.includes('blob:earlier.txt'));
+});
+
+test('a same-channel replacement switches to its own People draft',async()=>{
+ const binding='a'.repeat(64);let copyInstance='b'.repeat(32);
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('earlier draft');ctx.roots.prompt.firstListener('input')();
+ copyInstance='c'.repeat(32);ctx.feature.contextChanged();assert.equal(ctx.feature.promptText(),'');ctx.feature.setPromptText('replacement draft');ctx.roots.prompt.firstListener('input')();
+ copyInstance='b'.repeat(32);ctx.feature.contextChanged();assert.equal(ctx.feature.promptText(),'earlier draft');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('an earlier copy pending publication is reviewable without replay',async()=>{
+ const binding='a'.repeat(64),copyInstance='b'.repeat(32),oldCopy='c'.repeat(32),prefix='people\0s/o/c/g\0binding:'+binding,owner='n1\0owner-instance';
+ const key='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding+':copy:'+oldCopy,pending={instance:'owner-instance',copyInstance:oldCopy,request:{text:'earlier pending text',anchor:0,key:'0123456789abcdef',attachments:['fedcba9876543210']}};
+ const storage=makeStorage({[key]:JSON.stringify(pending)}),store={list:async()=>[],listRetired:async()=>[{scope:prefix+'\0copy:'+oldCopy+'\0'+owner,id:'fedcba9876543210',file:{name:'earlier.txt',type:'text/plain',size:1}}]};
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.recovery.innerHTML,/earlier pending text/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),JSON.stringify(pending));assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('an earlier copy text draft and unconfirmed publication remain reviewable without file rows',async()=>{
+ const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),owner='n1\0owner-instance';
+ const draftKey='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+binding+'\0copy:'+oldCopy+'\0'+owner);
+ const pendingKey='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding+':copy:'+oldCopy;
+ const pending=JSON.stringify({instance:'owner-instance',copyInstance:oldCopy,request:{text:'unconfirmed prior message',attachments:['fedcba9876543210']}});
+ const storage=makeStorage({[draftKey]:'old text draft',[pendingKey]:pending});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.feature.promptText(),'');assert.match(ctx.roots.recovery.innerHTML,/old text draft/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed prior message/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);
+ assert.equal(storage.getItem(draftKey),'old text draft');assert.equal(storage.getItem(pendingKey),pending);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('an earlier copy text draft remains reviewable when file storage is unavailable',async()=>{
+ const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),owner='n1\0owner-instance';
+ const key='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+binding+'\0copy:'+oldCopy+'\0'+owner),storage=makeStorage({[key]:'saved discussion without file store'});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:null,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.recovery.innerHTML,/saved discussion without file store/);assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(storage.getItem(key),'saved discussion without file store');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('an earlier copy text draft remains reviewable when file storage read fails',async()=>{
+ const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),owner='n1\0owner-instance';
+ const key='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+binding+'\0copy:'+oldCopy+'\0'+owner),storage=makeStorage({[key]:'saved discussion after storage error'});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>{throw Error('synthetic unavailable')}},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.recovery.innerHTML,/saved discussion after storage error/);assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(storage.getItem(key),'saved discussion after storage error');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('a late retired-file storage failure cannot change a newer chat recovery view',async()=>{
+ let reject,selected='n1';const pending=new Promise((_resolve,fail)=>{reject=fail});
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'one'},{id:'n2',instance_id:'two'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async prefix=>prefix.includes('first')?pending:[]},peopleContext:()=>({key:selected==='n1'?'first':'second',binding:'a'.repeat(64),copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));selected='n2';ctx.setSel('n2');ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ reject(Error('synthetic unavailable'));await new Promise(resolve=>setImmediate(resolve));assert.doesNotMatch(ctx.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('a damaged earlier pending message stays stored and is labelled unavailable',async()=>{
+ const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),key='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding+':copy:'+oldCopy;
+ const storage=makeStorage({[key]:'{damaged'}),ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));assert.match(ctx.roots.recovery.innerHTML,/unavailable/i);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),'{damaged');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('a retired file-only pending message remains reviewable without replay',async()=>{
+ const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),key='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding+':copy:'+oldCopy;
+ const pending=JSON.stringify({instance:'owner-instance',copyInstance:oldCopy,request:{text:'',attachments:['0123456789abcdef']}}),storage=makeStorage({[key]:pending});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('new draft');await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.recovery.innerHTML,/File-only People message/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),pending);assert.equal(ctx.feature.promptText(),'new draft');assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+});
+
+test('recipient reload offers an earlier copy pending message for review without replay',async()=>{
+ const binding='a'.repeat(64),old='c'.repeat(32),current='b'.repeat(32),key='scimux-people-file-pending:s/o/c/g::'+binding+':copy:'+old;
+ const pending=JSON.stringify({instance:'',copyInstance:old,request:{text:'saved recipient caption',attachments:['0123456789abcdef']}}),storage=makeStorage({[key]:pending});
+ const ctx=makeFeature({sel:'team/s/o/c/g',nodes:[],storage,recovery:true,deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:current,writable:true,owner:false,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ const assertRetained=()=>{assert.match(ctx.roots.recovery.innerHTML,/saved recipient caption/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),pending);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0)};
+ assertRetained();ctx.feature.contextChanged();await new Promise(resolve=>setImmediate(resolve));assertRetained();ctx.feature.destroy();
+});
+
+test('recipient can review an earlier pending copy when the server binding is unavailable',async()=>{
+ const old='c'.repeat(32),current='b'.repeat(32),key='scimux-people-file-pending:s/o/c/g::copy:'+old;
+ const pending=JSON.stringify({instance:'',copyInstance:old,request:{text:'saved offline caption',attachments:[]}}),storage=makeStorage({[key]:pending});
+ const ctx=makeFeature({sel:'team/s/o/c/g',nodes:[],storage,recovery:true,deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',copyInstance:current,writable:false,owner:false,attachments:false})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.recovery.innerHTML,/saved offline caption/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),pending);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+});
+
+test('unchanged People context refresh preserves retired-file review without reloading it',async()=>{
+ const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),owner='n1\0owner-instance',prefix='people\0s/o/c/g\0binding:'+binding;let reads=0;
+ const store={list:async()=>[],listRetired:async()=>{reads++;return [{scope:prefix+'\0copy:'+oldCopy+'\0'+owner,id:'0123456789abcdef',file:{name:'earlier.txt',type:'text/plain',size:1}}]}};
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,1);assert.match(ctx.roots.recovery.innerHTML,/earlier\.txt/);
+ ctx.feature.contextChanged();ctx.feature.contextChanged();await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,1);assert.match(ctx.roots.recovery.innerHTML,/earlier\.txt/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People file recovery reports a storage failure without sending or clearing the draft',async()=>{
+ const store={list:async()=>{throw Error('synthetic unavailable')},listRetired:async()=>[]};
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding:'a'.repeat(64),copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setDestination('people');ctx.feature.setPromptText('keep this draft');
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/Saved People files could not be recovered/);assert.equal(ctx.feature.promptText(),'keep this draft');assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+});
+
+test('saved sent People images restore as cleanup-only tiles without dispatch',async()=>{
+ const store={list:async()=>[{id:'0123456789abcdef',file:{name:'saved.png',type:'image/png',size:1},published:true}],listRetired:async()=>[]};
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding:'a'.repeat(64),copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setDestination('people');await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/saved\.png/);assert.match(ctx.roots.attstage.innerHTML,/Sent; remove this saved file/);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+});
+
+test('recipient reload restores a staged People file without owner identity or dispatch',async()=>{
+ const store={list:async()=>[{id:'0123456789abcdef',file:{name:'recipient.txt',type:'text/plain',size:1}}],listRetired:async()=>[]};
+ const ctx=makeFeature({sel:'team/s/o/c/g',nodes:[],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding:'a'.repeat(64),copyInstance:'b'.repeat(32),writable:true,owner:false,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/recipient\.txt/);assert.match(ctx.roots.attstage.innerHTML,/Review and send to retry/);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+});
+
+test('retired People recovery reports a failed draft enumeration without dispatch',async()=>{
+ const storage=makeStorage();storage.keys=()=>{throw Error('synthetic enumeration failure')};
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding:'a'.repeat(64),copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/i);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+});
+
+test('retired draft discovery refuses unrelated bindings and reports unavailable enumeration',async()=>{
+ const binding='a'.repeat(64),other='d'.repeat(64),old='c'.repeat(32),current='b'.repeat(32),owner='n1\0owner-instance';
+ const key='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+other+'\0copy:'+old+'\0'+owner);
+ const storage=makeStorage({[key]:'other server private draft','scimux-people-draft:n1:scope:%bad':'damaged'});
+ const deps={peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:current,writable:true,owner:true,attachments:true})};
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.doesNotMatch(ctx.roots.recovery.innerHTML,/other server private draft/);ctx.feature.destroy();
+ storage.keys=()=>null;
+ const retry=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps});
+ retry.feature.bind();retry.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(retry.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(retry.apiCalls.length,0);retry.feature.destroy();
+});
+
+test('legacy People draft appears for review when capability arrives without replacing newer bound editing',()=>{
+ let binding='';
+ const storage=makeStorage({'scimux-people-draft:n1':'older <draft>'});
+ const ctx=makeFeature({storage,recovery:true,deps:{peopleContext:()=>({key:'s/o/c/g',binding,writable:true,owner:true,attachments:!!binding})}});
+ ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.feature.promptText(),'older <draft>');
+ binding='a'.repeat(64);ctx.feature.contextChanged();assert.equal(ctx.feature.promptText(),'');
+ assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/older &lt;draft&gt;/);
+ ctx.feature.setPromptText('newer');ctx.roots.prompt.firstListener('input')();
+ assert.equal(storage.getItem('scimux-people-draft:n1'),'older <draft>');assert.equal(ctx.feature.promptText(),'newer');
+});
+
+test('owner file preparation rolls back saved files when its action is retired during persistence',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};const key=[source.server,source.owner,source.chat,source.generation].join('/');
+ let release,active=true;const removed=[];const fileStore={save:()=>new Promise(resolve=>{release=resolve}),remove:async(scope,id)=>removed.push([scope,id]),list:async()=>[]};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,peopleFileStore:fileStore,preparePeopleFiles:async()=>[{name:'x.txt',type:'text/plain',size:1}]}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);const work=ctx.feature.prepareSharedPrompt('source',source,[{id:'0123456789abcdef'}],()=>active);
+ await new Promise(r=>setImmediate(r));active=false;release();assert.equal(await work,false);assert.equal(removed.length,1);assert.equal(ctx.feature.destination(),'people');assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);
+});
+
+test('failed source-file recovery leaves owner preparation and existing People draft untouched',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};const key=[source.server,source.owner,source.chat,source.generation].join('/');
+ const ctx=makeFeature({deps:{peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,peopleFileStore:null,preparePeopleFiles:async()=>[{name:'x.txt',type:'text/plain',size:1}]}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);ctx.feature.setPromptText('newer People draft');ctx.roots.prompt.firstListener('input')();
+ assert.equal(await ctx.feature.prepareSharedPrompt('source',source,[{id:'0123456789abcdef'}]),false);assert.equal(ctx.feature.destination(),'people');assert.equal(ctx.feature.promptText(),'newer People draft');assert.match(ctx.alerts.at(-1),/recovery is unavailable/);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);
+});
+
+test('People quota refusal displays actionable feedback while keeping its retry file identity',async()=>{
+ let calls=0;const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true})},uploadHandler:async()=>{calls++;return {ok:false,status:507,text:async()=>JSON.stringify({error:'relay_quota',stage_id:'0123456789abcdef'})}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'synthetic.txt',type:'text/plain',size:1}]);await new Promise(r=>setImmediate(r));
+ assert.match(ctx.roots.attstage.innerHTML,/relay.*quota.*full/i);assert.match(ctx.roots.attstage.innerHTML,/synthetic\.txt/);assert.equal(calls,1);assert.match(ctx.fetchCalls[0].path,/stage_id=0123456789abcdef/);assert.equal(ctx.apiCalls.length,0);
+});
+
+test('People files reject invalid random identities without disturbing the draft',async()=>{
+ for(const value of [null,new Uint8Array(7),[0,1,2,3,4,5,6,256],[0,1,2,3,4,5,6,1.5]]) {
+  const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),randomBytes:()=>value}});
+  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('keep this draft');ctx.feature.addFiles([{name:'unsafe.txt',type:'text/plain',size:1}]);
+  assert.equal(ctx.feature.promptText(),'keep this draft');assert.match(ctx.alerts.join(' '),/file identity is unavailable/i);assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+ }
+ const missing=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),randomBytes:undefined}});
+ missing.feature.bind();missing.feature.onSelect();missing.feature.setPromptText('keep draft');missing.feature.addFiles([{name:'missing.txt',type:'text/plain',size:1}]);
+ assert.match(missing.alerts.join(' '),/file identity is unavailable/i);assert.equal(missing.feature.promptText(),'keep draft');assert.equal(missing.fetchCalls.length,0);missing.feature.destroy();
+});
+
+test('People staging enforces the combined byte and file-count limits without discarding accepted files',async()=>{
+ for(const files of [
+  [...Array.from({length:4},(_,i)=>({name:`large-${i}.txt`,type:'text/plain',size:4*1024*1024})),{name:'extra.txt',type:'text/plain',size:1}],
+  Array.from({length:17},(_,i)=>({name:`small-${i}.txt`,type:'text/plain',size:1})),
+ ]) {
+  const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('keep draft');ctx.feature.addFiles(files);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ctx.fetchCalls.length,files.length-1);assert.match(ctx.alerts.join(' '),/at most 16 files and 16 MiB total/i);assert.equal(ctx.feature.promptText(),'keep draft');assert.match(ctx.roots.attstage.innerHTML,new RegExp(files[0].name.replace('.','\\.')));assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+ }
+});
+
+test('recipient file staging and removal remain bound to the selected People copy',async()=>{
+ const paths=[];
+ const ctx=makeFeature({sel:'team/s/o/c/g',nodes:[],deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:false,attachments:true}),api:async(path,options)=>{paths.push({path,options})}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'recipient.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.fetchCalls.length,1);assert.match(ctx.fetchCalls[0].path,/copy_instance=f{32}/);assert.doesNotMatch(ctx.fetchCalls[0].path,/chat_instance=/);
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(paths.length,1);assert.equal(paths[0].options.method,'DELETE');assert.match(paths[0].path,/copy_instance=f{32}/);assert.doesNotMatch(paths[0].path,/chat_instance=/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('owner file removal includes the captured native and copy identities',async()=>{
+ const calls=[];const instance='a'.repeat(32),copyInstance='f'.repeat(32);
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:instance}],deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance,writable:true,owner:true,attachments:true}),api:async(path,options)=>calls.push({path,options})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'owner.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls.length,1);const url=new URL(calls[0].path,'http://local.invalid');assert.equal(calls[0].options.method,'DELETE');assert.equal(url.searchParams.get('copy_instance'),copyInstance);assert.equal(url.searchParams.get('chat_instance'),instance);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People staging preserves the draft when durable file storage is unavailable',async()=>{
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:null}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('keep this draft');ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.feature.promptText(),'keep this draft');assert.match(ctx.roots.attstage.innerHTML,/People file storage is unavailable/);assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('a damaged People draft version is repaired on the next edit without sending',()=>{
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.storage.setItem('scimux-people-draft:n1:version','synthetic invalid version');
+ ctx.feature.setPromptText('new local edit');ctx.roots.prompt.firstListener('input')();
+ assert.equal(ctx.storage.getItem('scimux-people-draft:n1:version'),'1');assert.equal(ctx.feature.promptText(),'new local edit');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('People staging reports a storage failure without an error message',async()=>{
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true}),peopleFileStore:{list:async()=>[],save:async()=>{throw null}}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('keep draft');ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.feature.promptText(),'keep draft');assert.match(ctx.roots.attstage.innerHTML,/People file storage is unavailable/);assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('an unreadable People upload error remains unconfirmed and never invents a stage reference',async()=>{
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true,attachments:true})},uploadHandler:async()=>({ok:false,status:502,statusText:'unavailable',text:async()=>'{synthetic malformed'})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('keep draft');ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/review\.txt/);assert.match(ctx.roots.attstage.innerHTML,/unconfirmed/i);assert.equal(ctx.feature.promptText(),'keep draft');assert.equal(ctx.fetchCalls.length,1);
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('failed People stage removal preserves the file until an explicit successful retry',async()=>{
+ let fail=true,removals=0,localRemovals=0;
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{localRemovals++}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true}),peopleFileStore:store,api:async(path,options)=>{assert.match(path,/copy_instance=f{32}/);assert.equal(options.method,'DELETE');removals++;if(fail)throw Error('synthetic removal failure')}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'retain.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/synthetic removal failure/);assert.match(ctx.roots.attstage.innerHTML,/retain\.txt/);assert.equal(localRemovals,0);
+ fail=false;ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(removals,2);assert.equal(localRemovals,1);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/retain\.txt/);ctx.feature.destroy();
+});
+
+test('late People stage removal failure cannot alert or alter another visit',async()=>{
+ let reject,context={key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true};
+ const store={list:async()=>[],save:async()=>{},remove:async()=>assert.fail('failed server removal must keep local file')};
+ const ctx=makeFeature({nodes:[{id:'n1'},{id:'n2'}],deps:{peopleContext:()=>context,peopleFileStore:store,api:()=>new Promise((_,fail)=>{reject=fail})},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'old.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ context=null;ctx.setSel('n2');ctx.feature.onSelect();ctx.feature.setPromptText('new visit draft');reject(Error('old failure'));await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.feature.promptText(),'new visit draft');assert.deepEqual(ctx.alerts,[]);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/old\.txt/);ctx.feature.destroy();
+});
+
+test('overlapping removal clicks admit one People stage deletion',async()=>{
+ let release,calls=0;
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true}),api:()=>{calls++;return new Promise(resolve=>{release=resolve})}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'one.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ const click=ctx.roots.attstage._stageButtons[0].firstListener('click');click();await new Promise(resolve=>setImmediate(resolve));click();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls,1);assert.match(ctx.roots.attstage.innerHTML,/one\.txt/);release({});await new Promise(resolve=>setImmediate(resolve));assert.doesNotMatch(ctx.roots.attstage.innerHTML,/one\.txt/);ctx.feature.destroy();
+});
+
+test('unavailable People stage removal leaves its local file reviewable',async()=>{
+ let localRemovals=0;
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{localRemovals++}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true}),peopleFileStore:store,api:undefined},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/stage removal is unavailable/i);assert.match(ctx.roots.attstage.innerHTML,/review\.txt/);assert.equal(localRemovals,0);assert.equal(ctx.fetchCalls.length,1);ctx.feature.destroy();
+});
+
+test('an unavailable pending-message check fails closed before removing a People file',async()=>{
+ let removals=0;
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true}),pendingPeople:()=>{throw Error('synthetic pending lookup failure')},api:async()=>{removals++}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/part of a pending People message/i);assert.match(ctx.roots.attstage.innerHTML,/review\.txt/);assert.equal(removals,0);ctx.feature.destroy();
+});
+
+test('People stage removal keeps the file when the failure has no message',async()=>{
+ let localRemovals=0;
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{localRemovals++}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true}),peopleFileStore:store,api:async()=>{throw null}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/Stage removal failed/);assert.match(ctx.roots.attstage.innerHTML,/review\.txt/);assert.equal(localRemovals,0);ctx.feature.destroy();
+});
+
+test('an ordinary People file can be removed when no publication is pending',async()=>{
+ let serverRemovals=0,localRemovals=0;
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{localRemovals++}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>null,api:async()=>{serverRemovals++}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'review.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(serverRemovals,1);assert.equal(localRemovals,1);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/review\.txt/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('a text-only pending People message does not pin an unrelated staged file',async()=>{
+ let serverRemovals=0,localRemovals=0;
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{localRemovals++}};
+ const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',copyInstance:'f'.repeat(32),writable:true,owner:true,attachments:true}),peopleFileStore:store,pendingPeople:()=>({text:'earlier caption',attachments:[]}),api:async()=>{serverRemovals++}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{id:'0123456789abcdef'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.addFiles([{name:'new.txt',type:'text/plain',size:1}]);await new Promise(resolve=>setImmediate(resolve));
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(serverRemovals,1);assert.equal(localRemovals,1);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/new\.txt/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('attachment staging refuses missing selection and failed draft identity without uploading',()=>{
+ const unselected=makeFeature({sel:''});unselected.feature.bind();unselected.feature.onSelect();unselected.feature.setAttachAvail(true);unselected.feature.addFiles([{name:'x.txt',type:'text/plain',size:1}]);assert.equal(unselected.fetchCalls.length,0);
+ const storage=makeStorage();storage.setItem=()=>{throw Error('synthetic storage unavailable')};const failed=makeFeature({storage,nodes:[{id:'n1',instance_id:'1'.repeat(32)}]});failed.feature.bind();failed.feature.onSelect();failed.feature.setAttachAvail(true);failed.feature.addFiles([{name:'x.txt',type:'text/plain',size:1}]);assert.equal(failed.fetchCalls.length,0);assert.match(failed.alerts.join(' '),/storage/i);
+});
+
+test('prompt preparation refuses ineligible destinations and empty source content without dispatch',()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ for(const options of [{sel:''},{sel:'team/s/o/c/g'},{nodes:[{id:'n1',ended_at:'2026-01-01'}]},{nodes:[]},{deps:{canPreparePrompt:()=>false}}]) {
+  const ctx=makeFeature(options);ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.feature.preparePrompt('source',source),false);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);
+ }
+ const ctx=makeFeature({deps:{canPreparePrompt:()=>true}});ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.feature.preparePrompt('',source),false);assert.equal(ctx.feature.preparePrompt('text',{}),false);assert.equal(ctx.feature.preparePrompt('',source,[{name:'x',type:'text/plain',size:1}]),false);assert.equal(ctx.apiCalls.length,0);
+});
+
+test('common capture preparation preserves owner authority and draft for text and files',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ for(const attachments of [undefined,[],[{id:'0123456789abcdef'}]]) {
+  const ctx=makeFeature({deps:{peopleContext:()=>null,canPreparePrompt:()=>true,preparePeopleFiles:async()=>[{name:'source.txt',type:'text/plain',size:1}]},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:'synthetic-native-ref'}]})})});
+  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+  assert.equal(await ctx.feature.prepareCapturePrompt('quoted',source,attachments,()=>true),true);
+  assert.equal(ctx.feature.promptText(),'quoted');assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);
+  if(attachments?.length){await new Promise(r=>setImmediate(r));assert.match(ctx.roots.attstage.innerHTML,/source\.txt/)}
+  ctx.feature.destroy();
+ }
+ const denied=makeFeature({deps:{canPreparePrompt:()=>false}});denied.feature.bind();denied.feature.onSelect();
+ assert.equal(await denied.feature.prepareCapturePrompt('quoted',source,[],()=>true),false);assert.equal(denied.feature.promptText(),'');assert.equal(denied.apiCalls.length,0);
+});
+
+test('common capture preparation cannot apply files after its action is retired',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};let release,active=true;
+ const ctx=makeFeature({deps:{peopleContext:()=>null,canPreparePrompt:()=>true,preparePeopleFiles:()=>new Promise(resolve=>{release=resolve})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);ctx.feature.setPromptText('newer draft');
+ const work=ctx.feature.prepareCapturePrompt('old source',source,[{id:'0123456789abcdef'}],()=>active);
+ active=false;release([{name:'old.txt',type:'text/plain',size:1}]);
+ assert.equal(await work,false);assert.equal(ctx.feature.promptText(),'newer draft');assert.doesNotMatch(ctx.roots.attstage.innerHTML,/old\.txt/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('navigation and teardown abort in-flight source file preparation',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ for(const action of ['navigate','destroy']) {
+  let release,signal;const ctx=makeFeature({nodes:[{id:'n1'},{id:'n2'}],deps:{peopleContext:()=>null,canPreparePrompt:()=>true,preparePeopleFiles:opts=>{signal=opts.signal;return new Promise(resolve=>{release=resolve})}}});
+  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);const pending=ctx.feature.prepareCapturePrompt('old',source,[{id:'0123456789abcdef'}],()=>true);
+  if(action==='navigate'){ctx.setSel('n2');ctx.feature.onSelect();ctx.feature.setPromptText('new draft')}else ctx.feature.destroy();
+  assert.equal(signal.aborted,true);release([{name:'old.txt',type:'text/plain',size:1}]);assert.equal(await pending,false);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);
+  if(action==='navigate'){assert.equal(ctx.feature.promptText(),'new draft');assert.doesNotMatch(ctx.roots.attstage.innerHTML,/old\.txt/);ctx.feature.destroy()}
+ }
+});
+
+test('switching destinations aborts in-flight source preparation without replacing the Agent draft',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1},key=[source.server,source.owner,source.chat,source.generation].join('/');
+ let release,signal;const ctx=makeFeature({deps:{peopleContext:()=>({key,owner:true,writable:true,attachments:true}),canPreparePrompt:()=>true,preparePeopleFiles:opts=>{signal=opts.signal;return new Promise(resolve=>{release=resolve})}}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);ctx.feature.setDestination('agent');ctx.feature.setPromptText('existing Agent draft');ctx.roots.prompt.firstListener('input')();ctx.feature.setDestination('people');
+ const pending=ctx.feature.prepareCapturePrompt('old source',source,[{id:'0123456789abcdef'}],()=>true);ctx.feature.setDestination('agent');
+ assert.equal(signal.aborted,true);release([{name:'old.txt',type:'text/plain',size:1}]);assert.equal(await pending,false);assert.equal(ctx.feature.promptText(),'existing Agent draft');assert.doesNotMatch(ctx.roots.attstage.innerHTML,/old\.txt/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+for (const retainedContext of [null, {key:["a".repeat(32),"b".repeat(32),"c".repeat(16),"d".repeat(16)].join("/"),owner:true,writable:false,attachments:true}]) test("retained owner file preparation after share ended " + (retainedContext ? "ended-context" : "no-current-share"), async()=> {
+ const source={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:1};
+ const descriptor={id:"0123456789abcdef",sha256:"e".repeat(64),size:1,name:"retained.txt",mime:"text/plain"};let prepared=0;
+ const ctx=makeFeature({deps:{peopleContext:()=>retainedContext,canPreparePrompt:()=>true,preparePeopleFiles:async()=>{prepared++;return [{name:"retained.txt",type:"text/plain",size:1}]}},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:"synthetic-native-ref"}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ assert.equal(ctx.feature.preparePrompt("retained text",source),true,"existing retained-text preparation remains permitted by verified owner source adapter");
+ assert.equal(await ctx.feature.prepareSharedPrompt("retained file",source,[descriptor]),true,"explicit local owner preparation of retained file must not require People publication permission");
+ await new Promise(r=>setImmediate(r));assert.equal(prepared,1);assert.match(ctx.roots.attstage.innerHTML,/retained\.txt/);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith("/send")).length,0);ctx.feature.destroy();
+});
+
+test('retained file preparation cannot outlive the exact owned copy authority',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};const key=[source.server,source.owner,source.chat,source.generation].join('/');let valid=true,release;
+ const ctx=makeFeature({deps:{peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,capturePromptAuthority:()=>({current:()=>valid}),preparePeopleFiles:()=>new Promise(resolve=>{release=resolve})}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);const pending=ctx.feature.prepareSharedPrompt('source',source,[{id:'0123456789abcdef'}]);valid=false;release([{name:'x.txt',type:'text/plain',size:1}]);
+ assert.equal(await pending,false);assert.equal(ctx.feature.destination(),'people');assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);
+});
+
+test('owner file preparation requires a currently valid captured authority when provided',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};let reads=0;
+ for(const authority of [null,{}, {current:()=>false}]) {
+  const ctx=makeFeature({deps:{peopleContext:()=>null,canPreparePrompt:()=>true,capturePromptAuthority:()=>authority,preparePeopleFiles:async()=>{reads++;return []}}});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+  assert.equal(await ctx.feature.prepareSharedPrompt('text',source,[{id:'0123456789abcdef'}]),false);assert.equal(ctx.apiCalls.length,0);
+ }
+ assert.equal(reads,0);
+});
+
+test('failed source metadata preserves reviewable saved files even if rollback fails',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};const identity='n1\0'+'1'.repeat(32),saved=[];
+ const storage=makeStorage({'scimux-draft-owner:n1':'1'.repeat(32),['scimux-cleared-source-text:'+identity]:'{damaged'});
+ const fileStore={save:async(_scope,id)=>saved.push(id),list:async()=>[],remove:async()=>{throw Error('synthetic cleanup failure')}};
+ const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'1'.repeat(32)}],recovery:true,deps:{peopleContext:()=>null,canPreparePrompt:()=>true,peopleFileStore:fileStore,preparePeopleFiles:async()=>[{name:'x.txt',type:'text/plain',size:1}]}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);assert.equal(await ctx.feature.prepareSharedPrompt('text',source,[{id:'0123456789abcdef'}]),false);
+ assert.equal(saved.length,1);assert.match(ctx.alerts.join(' '),/damaged|unavailable/i);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);
+});
+
+test('a saved source file remains reviewable when its local removal fails',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ let fail=true,removals=0;
+ const store={list:async()=>[],save:async()=>{},remove:async()=>{removals++;if(fail)throw Error('synthetic storage failure')}};
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'1'.repeat(32)}],deps:{peopleFileStore:store,peopleContext:()=>null,canPreparePrompt:()=>true,preparePeopleFiles:async()=>[{name:'source.txt',type:'text/plain',size:1}]}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ assert.equal(await ctx.feature.prepareSharedPrompt('source caption',source,[{id:'0123456789abcdef'}]),true);
+ ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/saved file removal failed/i);assert.match(ctx.roots.attstage.innerHTML,/source\.txt/);
+ assert.equal(ctx.feature.promptText(),'source caption');assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);
+ fail=false;ctx.roots.attstage._stageButtons[0].firstListener('click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(removals,2);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/source\.txt/);assert.equal(ctx.feature.promptText(),'source caption');ctx.feature.destroy();
+});
+
+test('overlapping source file removals do not remove another staged file',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ const releases=[];const store={list:async()=>[],save:async()=>{},remove:()=>new Promise(resolve=>releases.push(resolve))};
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'1'.repeat(32)}],deps:{peopleFileStore:store,peopleContext:()=>null,canPreparePrompt:()=>true,preparePeopleFiles:async()=>[{name:'source.txt',type:'text/plain',size:1}]}});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ assert.equal(await ctx.feature.prepareSharedPrompt('source caption',source,[{id:'0123456789abcdef'}]),true);
+ ctx.feature.addFiles([{name:'other.txt',type:'text/plain',size:1}]);
+ const click=ctx.roots.attstage._stageButtons[0].firstListener('click');click();click();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(releases.length,2);releases.forEach(resolve=>resolve());await new Promise(resolve=>setImmediate(resolve));
+ assert.doesNotMatch(ctx.roots.attstage.innerHTML,/source\.txt/);assert.match(ctx.roots.attstage.innerHTML,/other\.txt/);
+ assert.equal(ctx.feature.promptText(),'source caption');assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test('owner file preparation reports a generic failure without exposing an unknown error',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ const ctx=makeFeature({deps:{peopleContext:()=>null,canPreparePrompt:()=>true,preparePeopleFiles:async()=>{throw null}}});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);
+ assert.equal(await ctx.feature.prepareSharedPrompt('text',source,[{id:'0123456789abcdef'}]),false);assert.match(ctx.alerts.join(' '),/source files are unavailable/i);assert.equal(ctx.apiCalls.length,0);
+});
+
+test('a source file retained by failed rollback cannot lose provenance after restart',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};const key=[source.server,source.owner,source.chat,source.generation].join('/');const storage=makeStorage(),nodes=[{id:'n1',instance_id:'1'.repeat(32)}],rows=[];let release,active=true;
+ const fileStore={save:async(scope,id,file,metadata)=>{await new Promise(resolve=>{release=resolve});rows.push({scope,id,file,metadata})},list:async scope=>rows.filter(row=>row.scope===scope),remove:async()=>{throw Error('synthetic removal failure')}};
+ const deps={peopleContext:()=>({key,writable:true,owner:true,attachments:true}),canPreparePrompt:()=>true,peopleFileStore:fileStore,preparePeopleFiles:async()=>[{name:'source.txt',type:'text/plain',size:1}]};
+ const first=makeFeature({nodes,storage,deps,recovery:true});first.feature.bind();first.feature.onSelect();first.feature.setAttachAvail(true);const pending=first.feature.prepareSharedPrompt('source',source,[{id:'0123456789abcdef'}],()=>active);await new Promise(resolve=>setImmediate(resolve));active=false;release();assert.equal(await pending,false);first.feature.destroy();
+ let finish,changed=0;const restarted=makeFeature({nodes,storage,deps:{...deps,promptSourcesChanged:()=>changed++},recovery:true,uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:'synthetic-native-ref'}]})}),sendHandler:()=>new Promise(resolve=>{finish=resolve})});restarted.feature.bind();restarted.feature.onSelect();restarted.feature.setDestination('agent');await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+ assert.match(restarted.roots.attstage.innerHTML,/source\.txt/);const sources=JSON.parse(storage.getItem('scimux-prompt-sources:n1')||'[]');assert.ok(sources.some(item=>item.seq===1),'recovered source file retains its provenance');assert.ok(changed>0,'source markers must refresh when provenance is recovered');
+ assert.equal(restarted.apiCalls.length,0);restarted.feature.setPromptText('unrelated');restarted.roots.prompt.firstListener('input')();const sending=restarted.feature.sendPrompt();await new Promise(resolve=>setImmediate(resolve));restarted.timers.runIntervals();await new Promise(resolve=>setImmediate(resolve));
+ const flights=JSON.parse(storage.getItem('scimux-prompt-flights:n1')||'[]');assert.ok(flights.some(flight=>flight.sources.some(item=>item.seq===1)));finish({delivery:'ok'});await sending;restarted.feature.destroy();
+});
+
+test('recovered source files cannot send when provenance storage is unavailable',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};const storage=makeStorage(),set=storage.setItem;storage.setItem=(key,value)=>{if(key==='scimux-prompt-sources:n1')throw Error('synthetic storage failure');set(key,value)};
+ const fileStore={list:async()=>[{id:'0123456789abcdef',file:{name:'source.txt',type:'text/plain',size:1},metadata:{source,sourceFileID:'fedcba9876543210'}}]};
+ const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'1'.repeat(32)}],recovery:true,deps:{peopleFileStore:fileStore}});ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));ctx.feature.setPromptText('unrelated');ctx.roots.prompt.firstListener('input')();await ctx.feature.sendPrompt();
+ assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.alerts.join(' '),/recovered/i);ctx.feature.destroy();
+});
+
+test('source file recovery distinguishes accepted images from retryable files',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1},file={name:'synthetic.png',type:'image/png',size:1};
+ const rows=[{id:'0123456789abcdef',file,metadata:{source,sourceFileID:'fedcba9876543210'},published:7},{id:'1111111111111111',file:{name:'retry.txt',type:'text/plain',size:1},metadata:{source,sourceFileID:'2222222222222222'}},{id:'3333333333333333',file,metadata:{sourceFileID:'4444444444444444'}},{id:'5555555555555555',file:{name:'invalid.txt',type:'text/plain',size:1},metadata:{source:{unknown:'synthetic'},sourceFileID:'6666666666666666'}}];
+ const fileStore={list:async()=>rows};const ctx=makeFeature({nodes:[{id:'n1',instance_id:'1'.repeat(32)}],deps:{peopleFileStore:fileStore},recovery:true});ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/synthetic\.png/);assert.match(ctx.roots.attstage.innerHTML,/Accepted; remove this saved file/);assert.match(ctx.roots.attstage.innerHTML,/retry\.txt/);assert.match(ctx.roots.attstage.innerHTML,/Review and send to retry/);
+ assert.doesNotMatch(ctx.roots.attstage.innerHTML,/invalid\.txt/);assert.equal(ctx.created.length,1);assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test('a legacy accepted flight without attachment metadata does not mark recovered files sent',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1},identity='n1\0'+'1'.repeat(32);
+ const storage=makeStorage({'scimux-draft-owner:n1':'1'.repeat(32),'scimux-prompt-flights:n1':JSON.stringify([{identity,accepted:true,sources:[source],text:'earlier'}])});
+ const store={list:async()=>[{id:'0123456789abcdef',file:{name:'review.txt',type:'text/plain',size:1},metadata:{source,sourceFileID:'fedcba9876543210'}}]};
+ const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'1'.repeat(32)}],deps:{peopleFileStore:store},recovery:true});ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.attstage.innerHTML,/review\.txt/);assert.match(ctx.roots.attstage.innerHTML,/Review and send to retry/);assert.doesNotMatch(ctx.roots.attstage.innerHTML,/Accepted; remove/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test('failed source file recovery blocks unrelated sends when cleared source content is unresolved',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};const identity='n1\0'+'1'.repeat(32);
+ const storage=makeStorage({'scimux-draft-owner:n1':'1'.repeat(32),'scimux-prompt-sources:n1':JSON.stringify([source]),['scimux-cleared-source-text:'+identity]:JSON.stringify([JSON.stringify(["shared",source.server,source.owner,source.chat,source.generation,"comments",1])])});
+ const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'1'.repeat(32)}],recovery:true,deps:{peopleFileStore:{list:async()=>{throw Error('synthetic storage failure')}}}});ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.alerts.join(' '),/could not be recovered/i);assert.equal(ctx.roots.recovery.hidden,false);ctx.feature.setPromptText('unrelated');ctx.roots.prompt.firstListener('input')();await ctx.feature.sendPrompt();assert.equal(ctx.apiCalls.filter(call=>call.path.endsWith('/send')).length,0);ctx.feature.destroy();
+});
+
+test('an already staged source file remains attributable while recovery is pending',async()=>{
+ const source={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};let release;
+ const store={list:()=>new Promise(resolve=>{release=resolve})};
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'1'.repeat(32)}],recovery:true,deps:{peopleFileStore:store,canPreparePrompt:()=>true},uploadHandler:async()=>({ok:true,json:async()=>({attachments:[{path:'synthetic-ref'}]})})});
+ ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setAttachAvail(true);assert.equal(ctx.feature.preparePrompt('source caption',source,[{name:'source.txt',type:'text/plain',size:1}]),true);await new Promise(resolve=>setImmediate(resolve));
+ ctx.feature.setPromptText('');ctx.roots.prompt.firstListener('input')();ctx.feature.setPromptText('unrelated text');ctx.roots.prompt.firstListener('input')();await ctx.feature.sendPrompt();
+ const sends=ctx.apiCalls.filter(call=>call.path.split('?')[0].endsWith('/send'));assert.equal(sends.length,1);assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-prompt-flights:n1'))[0].sources,[source]);
+ release([]);await new Promise(resolve=>setImmediate(resolve));ctx.feature.destroy();
 });

@@ -89,6 +89,7 @@ import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
 import { ownerCommentAnchors, ownerUnplacedComments, guestMessageHTML } from "./team-guest.js";
+import { attachmentTileHTML, replaceFailedAttachmentPreview, retryAttachmentDownload } from "./attachment-tile.js";
 import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
 import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
 import {
@@ -639,14 +640,10 @@ export function attTileHTML(nodeId, leaf, isImage, {
   escape = esc, iconFile = "", tileBox = {}, rasterRe = RASTER_RE,
   assetURL = (path) => path,
 } = {}){
-  const url = assetURL(`/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`);
+  const url = `/api/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(leaf)}`;
   const name = leaf.replace(/^[0-9a-f]{8}-/, "");
   isImage = isImage && rasterRe.test(name);
-  return isImage
-    ? `<a class="attthumb" data-asset-preview data-name="${escape(name)}" data-tkey="${escape(leaf)}"${tileStyle(tileBox, leaf)} href="${url}" target="_blank" rel="noopener" title="${escape(name)}">` +
-      `<img src="${url}" alt="${escape(name)}" loading="lazy"></a>`
-    : `<a class="attfile" href="${url}" target="_blank" rel="noopener" download="${escape(name)}" title="${escape(name)}">` +
-      `${iconFile}<span>${escape(name)}</span></a>`;
+  return attachmentTileHTML({name, url, image:isImage, key:leaf, style:tileStyle(tileBox, leaf), icon:iconFile, escape, assetURL});
 }
 
 export function refTilesHTML(refs, nodeId, deps = {}){
@@ -1726,7 +1723,7 @@ export function createChatFeature(deps){
     const source = {...copy.view, log:"comments", seq:comment.seq};
     discussionSources[`${copy.key}/${comment.seq}`] = source;
     const markers = discussionMarkerHTML(source, nodeId);
-    return guestMessageHTML(comment, copy.names, copy.view.server, copy.people, copy.key, markers);
+    return guestMessageHTML(comment, copy.names, copy.view.server, copy.people, copy.key, markers, copy.key, d.assetURL, copy.view.people_copy_instance || "");
   }
 
   function discussionMarkerHTML(source, nodeId){
@@ -2971,7 +2968,7 @@ export function createChatFeature(deps){
     const img = e.target;
     if (!img || img.tagName !== "IMG") return;
     const a = img.closest && img.closest(".attthumb");
-    if (a) a.remove();
+    if (a) replaceFailedAttachmentPreview(a, doc);
   }
 
   function onKeyrowClick(e){
@@ -3111,14 +3108,23 @@ export function createChatFeature(deps){
   }
 
   function onMsgsClick(e){
-    if (!nodeById(g("sel", ""))) return;
-    const preview = e.target.closest && e.target.closest("[data-asset-preview]");
-    if (preview){
-      e.preventDefault?.();
-      if (typeof d.openAssetPreview === "function")
-        d.openAssetPreview({ url: preview.href, name: preview.dataset?.name || preview.title || "image" });
+    const fileRetry = e.target.closest && e.target.closest("[data-attachment-retry]");
+    if (fileRetry) {
+      const selected = g("sel", ""), visit = g("selGen", 0);
+      void retryAttachmentDownload({button:fileRetry, document:doc, retryAsset:d.retryAsset, current:() => g("sel", "") === selected && g("selGen", 0) === visit});
       return;
     }
+    const preview = e.target.closest && e.target.closest("[data-asset-preview]");
+    if (preview){
+      const local = !!nodeById(g("sel", ""));
+      const shared = !local && typeof d.sharedPreview === "function" ? d.sharedPreview(preview) : null;
+      if (!local && !shared) { e.preventDefault?.(); return; }
+      e.preventDefault?.();
+      if (typeof d.openAssetPreview === "function")
+        d.openAssetPreview(shared || { url: preview.href, name: preview.dataset?.name || preview.title || "image" });
+      return;
+    }
+    if (!nodeById(g("sel", ""))) return;
     const settings = e.target.closest && e.target.closest("[data-asset-settings]");
     if (settings){
       if (typeof d.openAttachmentSettings === "function") d.openAttachmentSettings();

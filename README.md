@@ -211,9 +211,13 @@ your People comments and Agent prompts have distinct labels. A recipient can use
 the header action to leave a shared chat and remove its local copy after
 confirmation; the owner’s chat remains intact.
 
-People discussion is text-only for now. Files pasted, dropped or picked for
-the owner's Agent stay with that Agent draft; attempting to add files while
-People is selected explains the limitation instead of changing destinations.
+When People file support is available from both the app and relay, writable
+participants can attach files to a discussion, including a message without
+text. People files must be non-empty and at most 4 MiB each, with at most
+16 files and 16 MiB per message. When support is unavailable, People remains
+text-only and the composer explains the limitation. Files in the owner's
+Agent draft stay separate from People files and changing destinations does
+not send either draft.
 Choosing Agent arms one send: when a send attempt is dispatched, the composer
 returns to People. Pre-dispatch validation leaves the draft and Agent selection
 in place. Disarming does not confirm delivery; a failed or unconfirmed Agent

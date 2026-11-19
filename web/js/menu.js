@@ -189,10 +189,14 @@ export function dispatchBubbleAction(action, capture, adapter) {
   if (!capture) return false;
   const controller = adapter.controller;
   let actionToken = controller?.beginAction();
+  if (Array.isArray(capture.attachments) && capture.attachments.length && ["copy", "fork", "desc", "sendto"].includes(action)) {
+    if (!String(capture.text || "").trim()) { adapter.unsupported?.(); return true; }
+    adapter.attachmentNotice?.();
+  }
   if (action === "copy" && typeof adapter.copy === "function") { adapter.copy(capture.text || ""); return true; }
   if (action === "fork" && typeof adapter.fork === "function") { adapter.fork(stripAssetRefs(capture.text || "")); return true; }
   if (action === "prompt" && typeof adapter.prepare === "function" && typeof adapter.canPrepare === "function" && adapter.canPrepare(capture)) {
-    adapter.prepare(stripAssetRefs(capture.text || ""), capture.source); return true;
+    adapter.prepare(stripAssetRefs(capture.text || ""), capture.source, () => !controller || controller.isCurrentAction(actionToken)); return true;
   }
   if (action === "desc" && typeof adapter.describe === "function") {
     if (typeof adapter.choose !== "function") { adapter.describe(capture.node || "", capture); return true; }

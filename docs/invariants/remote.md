@@ -79,6 +79,13 @@ identifiers retain their numbering from the archived remote-access requirements.
   here, and `scripts/vendor-tunnel.sh` in scimux-connect;
   a single bidirectional "sync everything" entry point is deliberately absent,
   because it would eventually regenerate these vectors on the consuming side.
+- **People files use the existing tunnel and asset adapter.** Browser multipart
+  uploads and local-copy preconditions travel in the existing request body and
+  query, not in a new tunnel header. Remote previews and downloads resolve only
+  associated local API paths through the injected asset transport. Capability,
+  server-configuration and local-copy changes retire stale transfers and cached
+  object URLs; an unchanged capability poll must not retire a valid transfer.
+  A hash or an arbitrary URL is not an attachment authorization.
 - **`PairingTTL` is a constant shared with a server this repository does not
   deploy.** `internal/remote.PairingTTL` and rv's `PairingWaitTTL` must hold
   the same value — **120 s** as of 2026-09-05 — and nothing enforces it; a

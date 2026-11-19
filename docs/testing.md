@@ -219,22 +219,49 @@ Playwright is test-only and is not a shipped dependency. Install it outside
 this repository, for example with `npm install --prefix /some/test-tools
 playwright` followed by `/some/test-tools/node_modules/.bin/playwright install
 chromium`; install the browser's system libraries as needed. Build scimux and
-an independent relay, then supply absolute paths:
+an independent relay. The complete suite also needs a build of the Part 1
+tagged scimux source and a build of the pre-attachment relay, plus the exact
+source tree used for the tagged build. These run as isolated synthetic seats
+to verify mixed-version behavior. Supply absolute paths:
 
 ```sh
 CGO_ENABLED=0 go build -o /some/output/scimux ./cmd/scimux
 (cd /some/scimux-team && CGO_ENABLED=0 go build -o /some/output/scimux-team ./cmd/scimux-team)
 SCIMUX_E2E_BINARY=/some/output/scimux \
 SCIMUX_TEAM_E2E_BINARY=/some/output/scimux-team \
+SCIMUX_E2E_LEGACY_BINARY=/some/output/scimux-part1 \
+SCIMUX_E2E_LEGACY_SOURCE=/some/tagged-scimux-source \
+SCIMUX_TEAM_LEGACY_E2E_BINARY=/some/output/scimux-team-legacy \
 SCIMUX_E2E_PLAYWRIGHT=/some/test-tools/node_modules/playwright \
+SCIMUX_E2E_GO=/absolute/path/to/go \
 node web/test/team-e2e.cjs
 ```
+
+The real-tunnel fixture requires Go 1.26 or newer. `SCIMUX_E2E_GO` selects an
+absolute executable; if omitted, the runner resolves `go` from its incoming
+preflight PATH. It verifies the selected version with local toolchain
+selection, then invokes that exact executable with an offline module setting
+and the restricted fake-agent PATH. Set `GOCACHE` and `GOMODCACHE` or `GOPATH`
+to populated test caches for offline use. The manifest records its version and
+executable digest; it does not record the path.
 
 Set `PLAYWRIGHT_BROWSERS_PATH` for a custom browser location. The runner fails
 on missing prerequisites. Its default executes all implemented scenarios and
 records only assertions that passed. The printed private artifact directory
 contains a manifest, screenshots, logs, and raw browser JavaScript coverage
-with matching sources. It can contain synthetic credentials: keep it private.
+with each page checked against its matching current or tagged source. It can
+contain synthetic credentials: keep it private.
+The focused common file-chip contrast check also takes the source tree and a
+private artifact directory: `node web/test/testdata/team-e2e/file-contrast.cjs
+/absolute/scimux/source /absolute/private/artifacts` with
+`SCIMUX_E2E_PLAYWRIGHT` set. On Linux, run the opt-in real-browser tunnel
+interruption and timeout checks with `SCIMUX_REMOTE_CLEANUP_REAL=1 node --test
+web/test/testdata/team-e2e/test-remote-real-cleanup.mjs`; they inspect owned
+processes via `ps` and `/proc` and require the same Playwright environment.
+The standalone synthetic attachment checks `missing-file-retry.cjs`,
+`invalid-preview.cjs` and `remote-attachment-retry.cjs` accept the same source
+and private artifact directory arguments. The complete suite additionally
+tests retry and download against isolated application seats and the real relay.
 Each run owns its temporary homes, relay, fake PATH, workers and private tmux
 sockets. Teardown deletes its fixture nodes and stops owned processes on
 success, failure and catchable signals; it retains an owned socket and fails
@@ -290,6 +317,12 @@ accepted from confirmed. It explicitly releases the synthetic agent; delaying
 the fake turn alone does not hold the browser's POST acknowledgement.
 `browser-lifecycle` verifies that completed desktop and phone contexts retain
 their captured coverage through retirement, including a synthetic failure.
+The bounded `people-midbody-permission` and `people-local-budget` selections
+exercise the body-read and managed-budget cases described below. Both run in
+the no-selector default suite. The manifest checks can also be run on a saved
+private artifact with `node web/test/testdata/team-e2e/verify-midbody-witness.cjs
+<artifact>/manifest.json` and `node web/test/testdata/team-e2e/verify-local-budget.cjs
+<artifact>/manifest.json` respectively.
 The default run retires completed cases after their screenshots and coverage
 are saved, while keeping each active case's actor contexts together.
 The test-only native fixture uses a marker in its private synthetic HOME to
@@ -309,6 +342,22 @@ The manifest's assertion IDs map the principal requirements to real journeys:
 | Rendering and native recovery | `media-contrast`: `media-caption-contrast`; `viewport-keyboard`: `viewport-control-target`; `held-chat-loading`: `held-chat-loading-reduced-motion`; `native-start-failure`: `native-start-failure-restores-draft` |
 | Selection and owner discussion | `stage1-scanner`: `stage1-stale-active-response-isolated`, `stage1-shared-owner-active`; `stage1-unread`: `stage1-incoming-before-own-stays-unread`, `stage1-own-comment-no-unread` |
 | Owner files and one-send arm | `stage1-owner-files`: `stage1-owner-file-delivered`, `stage1-people-file-feedback`; `conversation-core`: `stage1-owner-send-disarms` |
+| People files and copy replacement | `people-files`: its file, preview and explicit-owner-send assertions; `people-copy-replacement`: its distinct identity, stale-upload, recovery and actionable-control assertions |
+| People file recovery and unread | `people-attachment-recovery`: its retry and download assertions; `people-retired-drafts` and `people-file-unread`: their saved-draft and unread assertions |
+| Uncertain People publication | `people-uncertain-retry`: its accepted-server, identical retry, newer-draft and no-agent-dispatch assertions |
+| People upload permission change | `people-upload-permission`: its empty-file feedback, held-before-admission upload denial, partial draft retention and no-agent-dispatch assertions |
+| People upload permission change during body | `people-midbody-permission`: the test-owned forwarder uses the isolated seat's private muxer socket and waits for its direct HTTP 100 Continue, which the muxer's Go server emits on the attachment handler's first body read after admission. It sends only part of the multipart body before changing access. A read-only direct request is refused without muxer Continue; a separate frontend request demonstrates that frontend Continue and partial bytes do not establish muxer admission. The test checks the same live copy, `409 not_active`, preserved draft and earlier stage, no publication, and explicit recovery. The private socket capability is never recorded in artifacts |
+| Local managed storage budget | `people-local-budget`: an exclusive sparse synthetic file in the isolated seat's managed assets and a temporary server-owned global limit produce an actual local `507 storage_full`, with no corresponding relay blob. The test removes only that filler, retries the same stage ID explicitly, verifies exact retained bytes and one comment, and restores the settings; screenshots, source/draft isolation and zero agent counters are checked in both viewports |
+| Relay file integrity | `people-relay-blob-recovery`: a fresh synthetic relay channel has its actual stored blob removed or replaced with same-length bytes of a different SHA-256 before the reader opens it; the reader reports unavailable, then explicitly retries and verifies restored and subsequently retained bytes without agent dispatch |
+| File association isolation | `people-cross-channel-forgery`: a reader verifies two published attachments and attempts to use one channel's stage, manifest and published attachment address in the other, while both synthetic owners' Autoapproval leases remain armed and agent counters remain unchanged |
+| People image bookmarks | `people-image-bookmark`: its exact source jump, local annotation and independent capture after copy removal and reload |
+| People source lifetime | `people-source-cancel`: removal of source-derived text and file, same-bytes unrelated file, explicit send and absence of a false source link |
+
+To exercise the held-multipart forwarder's cleanup paths, run the selected
+`people-midbody-permission` scenario with `SCIMUX_E2E_MIDBODY_PROBE` set to
+`failure`, `forward-error`, or `signal`. The first two runs intentionally
+fail; the signal run reports interruption. Check the resulting manifest and
+owned process and socket cleanup. Leave this probe unset for the default run.
 
 The mapping identifies exercised behavior, not every combination of transport,
 error and lifecycle state. Tests never substitute callback invocation for a

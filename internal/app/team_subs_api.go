@@ -29,21 +29,28 @@ const (
 
 // subAsk is one server's refresh clock in this process.
 type subAsk struct {
-	channels  time.Time
-	seats     time.Time
-	roster    time.Time
-	names     map[string]string
-	unnamed   map[string]struct{}
-	delivery  string
-	truncated bool
+	channels      time.Time
+	seats         time.Time
+	roster        time.Time
+	rosterBinding string
+	names         map[string]string
+	unnamed       map[string]struct{}
+	delivery      string
+	truncated     bool
+	peopleFiles   string
+	peopleBinding string
+	peopleStarted time.Time
+	peopleProbe   uint64
 }
 
 type subOutcome struct {
-	entry    team.Entry
-	started  time.Time
-	delivery string
-	channels []team.Channel
-	err      error
+	entry       team.Entry
+	started     time.Time
+	delivery    string
+	channels    []team.Channel
+	err         error
+	peopleFiles string
+	peopleProbe uint64
 }
 
 type seatOutcome struct {
@@ -58,35 +65,46 @@ type subKey struct {
 }
 
 type subscriptionView struct {
-	Server        string              `json:"server"`
-	ServerName    string              `json:"server_name"`
-	Owner         string              `json:"owner"`
-	OwnerName     string              `json:"owner_name"`
-	Chat          string              `json:"chat"`
-	Generation    string              `json:"generation"`
-	Title         string              `json:"title"`
-	Access        string              `json:"access"`
-	State         string              `json:"state"`
-	MirrorLast    uint64              `json:"mirror_last"`
-	SeenMirror    uint64              `json:"seen_mirror"`
-	CommentsLast  uint64              `json:"comments_last"`
-	SeenComments  uint64              `json:"seen_comments"`
-	Unread        bool                `json:"unread"`
-	FirstSeen     string              `json:"first_seen"`
-	LocalNode     string              `json:"local_node,omitempty"`
-	LocalOrder    *int                `json:"local_order,omitempty"`
-	LocalFrontier *team.OwnerFrontier `json:"local_frontier,omitempty"`
+	Server             string              `json:"server"`
+	ServerName         string              `json:"server_name"`
+	Owner              string              `json:"owner"`
+	OwnerName          string              `json:"owner_name"`
+	Chat               string              `json:"chat"`
+	Generation         string              `json:"generation"`
+	Title              string              `json:"title"`
+	Access             string              `json:"access"`
+	State              string              `json:"state"`
+	MirrorLast         uint64              `json:"mirror_last"`
+	SeenMirror         uint64              `json:"seen_mirror"`
+	CommentsLast       uint64              `json:"comments_last"`
+	SeenComments       uint64              `json:"seen_comments"`
+	Unread             bool                `json:"unread"`
+	FirstSeen          string              `json:"first_seen"`
+	LocalNode          string              `json:"local_node,omitempty"`
+	LocalOrder         *int                `json:"local_order,omitempty"`
+	LocalFrontier      *team.OwnerFrontier `json:"local_frontier,omitempty"`
+	PeopleCopyInstance string              `json:"people_copy_instance,omitempty"`
 }
 
 type subscriptionServerView struct {
-	ID       string `json:"id"`
-	Delivery string `json:"delivery"`
+	ID                string `json:"id"`
+	Delivery          string `json:"delivery"`
+	PeopleFiles       string `json:"people_files,omitempty"`
+	PeopleFileBinding string `json:"people_file_binding,omitempty"`
+}
+
+type peopleAttachmentCapabilities struct {
+	Version       int `json:"version"`
+	MaxFileBytes  int `json:"max_file_bytes"`
+	MaxFiles      int `json:"max_files"`
+	MaxTotalBytes int `json:"max_total_bytes"`
 }
 
 type subListResponse struct {
-	Subscriptions []subscriptionView       `json:"subscriptions"`
-	Servers       []subscriptionServerView `json:"servers"`
-	Truncated     bool                     `json:"truncated"`
+	Subscriptions     []subscriptionView            `json:"subscriptions"`
+	Servers           []subscriptionServerView      `json:"servers"`
+	Truncated         bool                          `json:"truncated"`
+	PeopleAttachments *peopleAttachmentCapabilities `json:"people_attachments,omitempty"`
 }
 
 // serveSubscriptions handles /api/team/subscriptions and paths below it.
@@ -102,15 +120,18 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if len(parts) != 4 {
-		if len(parts) != 5 {
+		if len(parts) == 7 && parts[4] == "attachments" {
+			// The sequence and attachment identity are validated below.
+		} else if len(parts) != 5 {
 			writeTeamError(w, http.StatusNotFound, "not_found")
 			return
-		}
-		switch parts[4] {
-		case "seen", "comments":
-		default:
-			writeTeamError(w, http.StatusNotFound, "not_found")
-			return
+		} else {
+			switch parts[4] {
+			case "seen", "comments", "attachments":
+			default:
+				writeTeamError(w, http.StatusNotFound, "not_found")
+				return
+			}
 		}
 	}
 	for i, size := range []int{32, 32, 16, 16} {
@@ -120,6 +141,38 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	id := team.CopyID{Server: parts[0], Owner: parts[1], Chat: parts[2], Generation: parts[3]}
+	if (len(parts) == 4 && (r.Method == http.MethodGet || r.Method == http.MethodDelete)) || (len(parts) >= 5 && (parts[4] == "attachments" || parts[4] == "comments" || (parts[4] == "seen" && r.Method == http.MethodPut))) {
+		stageID := ""
+		if len(parts) == 7 && parts[5] == "stage" {
+			stageID = parts[6]
+		} else if len(parts) == 5 && parts[4] == "attachments" && r.Method == http.MethodPost {
+			stageID = r.URL.Query().Get("stage_id")
+		}
+		var release func()
+		r, release = h.beginPeopleCopyOperation(r, id, stageID)
+		defer release()
+	}
+	if len(parts) == 7 && parts[5] == "stage" && (r.Method == http.MethodDelete || r.Method == http.MethodGet) {
+		if !subHex(parts[6], 16) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if r.Method == http.MethodDelete {
+			h.removePeopleStage(w, r, id, parts[6])
+		} else {
+			h.readPeopleStage(w, r, id, parts[6])
+		}
+		return
+	}
+	if len(parts) == 7 && r.Method == http.MethodGet {
+		seq, err := strconv.ParseUint(parts[5], 10, 64)
+		if err != nil || seq == 0 || strconv.FormatUint(seq, 10) != parts[5] || !subHex(parts[6], 16) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		h.readPeopleAttachment(w, r, id, seq, parts[6])
+		return
+	}
 	if len(parts) == 4 {
 		if r.Method == http.MethodDelete {
 			h.removeSubscription(w, r, id)
@@ -135,6 +188,10 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 			h.seeSubscription(w, r, id)
 			return
 		}
+	}
+	if len(parts) == 5 && parts[4] == "attachments" && r.Method == http.MethodPost {
+		h.stagePeopleAttachment(w, r, id)
+		return
 	}
 	if len(parts) == 5 {
 		if parts[4] == "comments" {
@@ -229,7 +286,15 @@ func (h *teamHandler) dueServers(entries []team.Entry, now time.Time) []team.Ent
 
 func (h *teamHandler) askChannels(ctx context.Context, entry team.Entry) subOutcome {
 	out := subOutcome{entry: entry, started: h.now().UTC()}
-	if err := h.confirmed(ctx, entry); err != nil {
+	h.mu.Lock()
+	h.peopleProbeSerial++
+	out.peopleProbe = h.peopleProbeSerial
+	h.mu.Unlock()
+	hello, err := h.client.Hello(ctx, entry.URL)
+	if err == nil && hello.ID != entry.ID {
+		err = errHelloMismatch
+	}
+	if err != nil {
 		out.err = err
 		if errors.Is(err, team.ErrUnreachable) {
 			out.delivery = "offline"
@@ -252,19 +317,28 @@ func (h *teamHandler) askChannels(ctx context.Context, entry team.Entry) subOutc
 		return out
 	}
 	out.delivery = "ok"
+	if hello.BlobGeneration {
+		out.peopleFiles = "supported"
+	} else {
+		out.peopleFiles = "unsupported"
+	}
 	out.channels = channels
 	return out
 }
 
 func (h *teamHandler) askSeats(ctx context.Context, entry team.Entry) seatOutcome {
 	h.mu.Lock()
-	ask := h.subAsks[entry.ID]
+	if !h.peopleFilesEnabled() || !h.serverCurrentLocked(entry) {
+		h.mu.Unlock()
+		return seatOutcome{id: entry.ID, entry: entry, err: team.ErrUnreachable}
+	}
+	ask := bindRoster(h.subAsks[entry.ID], entry)
 	ask.roster = h.now().UTC()
 	h.subAsks[entry.ID] = ask
 	h.mu.Unlock()
 	seats, err := h.client.Seats(ctx, entry.URL, entry.Token)
 	if err == nil {
-		h.storeRoster(entry.ID, seats)
+		h.storeRosterCurrent(ctx, entry, seats)
 	}
 	return seatOutcome{id: entry.ID, entry: entry, seats: seats, err: err}
 }
@@ -272,6 +346,9 @@ func (h *teamHandler) askSeats(ctx context.Context, entry team.Entry) seatOutcom
 func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Time) []team.Entry {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.peopleFilesEnabled() {
+		return nil
+	}
 	entries, subs, err := h.loadSubState()
 	if err != nil {
 		return nil
@@ -287,9 +364,10 @@ func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Tim
 		if outcome.delivery != "ok" {
 			continue
 		}
-		if _, ok := joined[outcome.entry.ID]; !ok {
+		if current, ok := joined[outcome.entry.ID]; !ok || !peopleSameServer(current, outcome.entry) {
 			continue
 		}
+		h.subAsks[outcome.entry.ID] = bindRoster(h.subAsks[outcome.entry.ID], outcome.entry)
 		newUnnamed := false
 		for _, sub := range subs {
 			if sub.Server == outcome.entry.ID && sub.OwnerName == "" && !known[team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}] {
@@ -308,6 +386,9 @@ func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Tim
 func (h *teamHandler) commitSubs(inst string, outcomes []subOutcome, seats []seatOutcome, now time.Time) (subListResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.peopleFilesEnabled() {
+		return subListResponse{}, errors.New("team disabled")
+	}
 	entries, subs, err := h.loadSubState()
 	if err != nil {
 		return subListResponse{}, err
@@ -331,10 +412,19 @@ func (h *teamHandler) commitSubs(inst string, outcomes []subOutcome, seats []sea
 	}
 	joined := entryMap(entries)
 	for _, outcome := range outcomes {
-		if _, ok := joined[outcome.entry.ID]; !ok {
+		current, ok := joined[outcome.entry.ID]
+		if !ok || !peopleSameServer(current, outcome.entry) {
 			continue
 		}
 		h.remember(outcome.entry.ID, outcome.delivery)
+		ask := h.subAsks[outcome.entry.ID]
+		if (outcome.peopleProbe != 0 && outcome.peopleProbe > ask.peopleProbe) || (outcome.peopleProbe == 0 && !outcome.started.Before(ask.peopleStarted)) {
+			ask.peopleFiles = outcome.peopleFiles
+			ask.peopleBinding = peopleServerFingerprint(outcome.entry)
+			ask.peopleStarted = outcome.started
+			ask.peopleProbe = outcome.peopleProbe
+			h.subAsks[outcome.entry.ID] = ask
+		}
 		if value, ok := truncation[outcome.entry.ID]; ok {
 			ask := h.subAsks[outcome.entry.ID]
 			ask.truncated = value
@@ -342,7 +432,7 @@ func (h *teamHandler) commitSubs(inst string, outcomes []subOutcome, seats []sea
 		}
 	}
 	for _, seat := range seats {
-		if _, ok := joined[seat.id]; !ok {
+		if current, ok := joined[seat.id]; !ok || !peopleSameServer(current, seat.entry) {
 			continue
 		}
 		if errors.Is(seat.err, team.ErrUnauthorized) {
@@ -434,7 +524,7 @@ func mergeSubs(subs []team.Subscription, entries []team.Entry, outcomes []subOut
 	}
 	truncation := make(map[string]bool)
 	for _, outcome := range outcomes {
-		if _, ok := joined[outcome.entry.ID]; !ok {
+		if current, ok := joined[outcome.entry.ID]; !ok || !peopleSameServer(current, outcome.entry) {
 			continue
 		}
 		if outcome.delivery == "refused" {
@@ -604,9 +694,15 @@ func entryMap(entries []team.Entry) map[string]team.Entry {
 }
 
 func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.Entry, truncated bool) subListResponse {
+	peopleReady := h.peopleCapabilitiesReady && h.peopleFilesEnabled()
 	views := make([]subscriptionView, 0, len(subs))
 	for i, sub := range subs {
 		var localOrder *int
+		var copyInstance string
+		if peopleReady {
+			id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+			copyInstance, _ = team.EnsurePeopleCopyInstance(h.dataDir, id)
+		}
 		if sub.Access == "owner" {
 			order := i
 			localOrder = &order
@@ -615,16 +711,29 @@ func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.
 			Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName,
 			Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State,
 			MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub),
-			FirstSeen: sub.FirstSeen, LocalNode: h.localOwnerNode(sub), LocalOrder: localOrder, LocalFrontier: h.localOwnerFrontier(sub),
+			FirstSeen: sub.FirstSeen, LocalNode: h.localOwnerNode(sub), LocalOrder: localOrder, LocalFrontier: h.localOwnerFrontier(sub), PeopleCopyInstance: copyInstance,
 		})
 	}
 	sort.Slice(views, func(i, j int) bool { return subLess(views[i], views[j]) })
 	servers := make([]subscriptionServerView, 0, len(entries))
 	for _, entry := range entries {
-		servers = append(servers, subscriptionServerView{ID: entry.ID, Delivery: h.deliveryWord(entry.ID)})
+		view := subscriptionServerView{ID: entry.ID, Delivery: h.deliveryWord(entry.ID)}
+		if peopleReady {
+			view.PeopleFiles = "unknown"
+			ask := h.subAsks[entry.ID]
+			if ask.peopleBinding == peopleServerFingerprint(entry) && ask.peopleFiles != "" {
+				view.PeopleFiles = ask.peopleFiles
+				view.PeopleFileBinding = ask.peopleBinding
+			}
+		}
+		servers = append(servers, view)
 	}
 	sort.Slice(servers, func(i, j int) bool { return servers[i].ID < servers[j].ID })
-	return subListResponse{Subscriptions: views, Servers: servers, Truncated: truncated}
+	result := subListResponse{Subscriptions: views, Servers: servers, Truncated: truncated}
+	if peopleReady {
+		result.PeopleAttachments = &peopleAttachmentCapabilities{Version: 1, MaxFileBytes: 4194304, MaxFiles: 16, MaxTotalBytes: 16777216}
+	}
+	return result
 }
 
 // localOwnerNode verifies a retained mapping against the current log identity.
@@ -709,12 +818,31 @@ func (h *teamHandler) lookupSubscription(id team.CopyID) (team.Subscription, tea
 	return team.Subscription{}, team.Entry{}, false, false, nil
 }
 
-func (h *teamHandler) endSubscription(id team.CopyID, whole bool) error {
+func (h *teamHandler) endSubscription(r *http.Request, id team.CopyID, server team.Entry, whole bool) (bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	subs, err := team.LoadSubs(h.dataDir)
+	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+		return false, nil
+	}
+	entries, subs, err := h.loadSubState()
 	if err != nil {
-		return err
+		return false, err
+	}
+	currentServer, currentCopy := false, false
+	for _, entry := range entries {
+		if peopleSameServer(entry, server) {
+			currentServer = true
+			break
+		}
+	}
+	for _, sub := range subs {
+		if sameCopy(sub, id) {
+			currentCopy = true
+			break
+		}
+	}
+	if !currentServer || !currentCopy {
+		return false, nil
 	}
 	changed := false
 	for i := range subs {
@@ -725,13 +853,89 @@ func (h *teamHandler) endSubscription(id team.CopyID, whole bool) error {
 		}
 	}
 	if changed {
-		return h.saveSubscriptionState(subs)
+		return true, h.saveSubscriptionState(subs)
 	}
-	return nil
+	return true, nil
+}
+
+// subscriptionReadCurrentLocked checks the original read authority at its local write boundary.
+func (h *teamHandler) subscriptionReadCurrentLocked(r *http.Request, id team.CopyID, original team.Subscription, server team.Entry) (bool, error) {
+	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+		return false, nil
+	}
+	entries, subs, err := h.loadSubState()
+	if err != nil {
+		return false, err
+	}
+	serverOK := false
+	for _, entry := range entries {
+		if peopleSameServer(entry, server) {
+			serverOK = true
+			break
+		}
+	}
+	if !serverOK {
+		return false, nil
+	}
+	for _, sub := range subs {
+		if sameCopy(sub, id) {
+			return sub.State == "live" && sub.Access == original.Access, nil
+		}
+	}
+	// An absent entry is handled by the existing serialized orphan cleanup.
+	return true, nil
+}
+
+// appendSubscriptionPage serializes the original authority check with copying a relay page.
+func (h *teamHandler) appendSubscriptionPage(r *http.Request, id team.CopyID, sub team.Subscription, server team.Entry, log string, entries []team.MirrorRecord) (copyCurrent, current bool, currentErr, appendErr error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	copyCurrent = peopleCopyCurrentLocked(r)
+	current, currentErr = h.subscriptionReadCurrentLocked(r, id, sub, server)
+	if !current || currentErr != nil {
+		return
+	}
+	appendErr = team.AppendCopy(h.dataDir, id, log, entries)
+	return
+}
+
+// cleanupMissingSubscription rechecks the missing copy before deleting its local data.
+func (h *teamHandler) cleanupMissingSubscription(r *http.Request, id team.CopyID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if peopleCopyCurrentLocked(r) {
+		_, current, stateErr := h.loadSubState()
+		present := false
+		for _, sub := range current {
+			if sameCopy(sub, id) {
+				present = true
+				break
+			}
+		}
+		if stateErr == nil && !present {
+			_ = removeSubscriptionCopy(h.dataDir, id)
+		}
+	}
+}
+
+func writeRetiredSubscriptionPage(w http.ResponseWriter, copyCurrent bool) {
+	if copyCurrent {
+		writeTeamError(w, http.StatusConflict, "not_active")
+		return
+	}
+	writeTeamError(w, http.StatusNotFound, "not_found")
 }
 
 func (h *teamHandler) readSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
 	h.readSubscriptionLog(w, r, id, false)
+}
+
+func (h *teamHandler) retiredSubscriptionRead(w http.ResponseWriter, r *http.Request) {
+	if h.peopleCopyCurrent(r) {
+		writeTeamError(w, http.StatusConflict, "not_active")
+		return
+	}
+	writeTeamError(w, http.StatusNotFound, "not_found")
 }
 
 func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request, id team.CopyID, comments bool) {
@@ -763,6 +967,9 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 		writeTeamError(w, 404, "not_found")
 		return
 	}
+	if _, supplied := query["copy_instance"]; supplied && !h.requirePeopleCopy(w, r) {
+		return
+	}
 	log := team.MirrorLog
 	if comments {
 		log = team.CommentsLog
@@ -785,11 +992,20 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 				} else {
 					page, err = h.client.ReadMirror(r.Context(), server.URL, server.Token, id.Owner, id.Chat, last)
 				}
+				if !h.peopleCopyCurrent(r) {
+					writeTeamError(w, http.StatusNotFound, "not_found")
+					return
+				}
 				if err != nil {
 					break
 				}
 				if page.Generation != id.Generation {
-					err = h.endSubscription(id, false)
+					var current bool
+					current, err = h.endSubscription(r, id, server, false)
+					if !current && err == nil {
+						h.retiredSubscriptionRead(w, r)
+						return
+					}
 					if err != nil {
 						writeTeamError(w, 500, "store_unavailable")
 						return
@@ -797,7 +1013,16 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 					sub.State = "ended"
 					break
 				}
-				err = team.AppendCopy(h.dataDir, id, log, page.Entries)
+				copyCurrent, current, currentErr, appendErr := h.appendSubscriptionPage(r, id, sub, server, log, page.Entries)
+				if !current || currentErr != nil {
+					if currentErr != nil {
+						writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+						return
+					}
+					writeRetiredSubscriptionPage(w, copyCurrent)
+					return
+				}
+				err = appendErr
 				if err != nil {
 					break
 				}
@@ -812,13 +1037,27 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 				}
 			}
 		}
+		if !h.peopleCopyCurrent(r) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
 		switch {
 		case err == nil:
 		case errors.Is(err, team.ErrNoChannel):
-			err = h.endSubscription(id, false)
+			var current bool
+			current, err = h.endSubscription(r, id, server, false)
+			if !current && err == nil {
+				h.retiredSubscriptionRead(w, r)
+				return
+			}
 			sub.State = "ended"
 		case errors.Is(err, team.ErrUnauthorized):
-			err = h.endSubscription(id, true)
+			var current bool
+			current, err = h.endSubscription(r, id, server, true)
+			if !current && err == nil {
+				h.retiredSubscriptionRead(w, r)
+				return
+			}
 			sub.State = "ended"
 			delivery = "refused"
 		case errors.Is(err, team.ErrUnreachable):
@@ -842,13 +1081,17 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	if !h.peopleFilesEnabled() {
+		writeTeamError(w, http.StatusConflict, "not_active")
+		return
+	}
 	_, _, stillFound, _, err := h.lookupSubscription(id)
 	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
 	if !stillFound {
-		_ = removeSubscriptionCopy(h.dataDir, id)
+		h.cleanupMissingSubscription(r, id)
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return
 	}
@@ -863,6 +1106,9 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 	}
 	var out subscriptionReadResponse
 	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub), FirstSeen: sub.FirstSeen, LocalNode: h.localOwnerNode(sub), LocalFrontier: h.localOwnerFrontier(sub)}
+	if h.peopleCapabilitiesReady && h.peopleFilesEnabled() {
+		out.View.PeopleCopyInstance, _ = team.ReadPeopleCopyInstance(h.dataDir, id)
+	}
 	out.View.Delivery = delivery
 	out.Last = last
 	out.Entries = []map[string]any{}
@@ -1109,8 +1355,21 @@ func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id
 		}
 		comments = &value
 	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	_, bound := query["copy_instance"]
+	if bound && !h.requirePeopleCopy(w, r) {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+		writeTeamError(w, http.StatusConflict, "copy_changed")
+		return
+	}
 	subs, err := team.LoadSubs(h.dataDir)
 	if err != nil {
 		writeTeamError(w, 500, "store_unavailable")
@@ -1173,6 +1432,14 @@ func (h *teamHandler) saveSubscriptionState(subs []team.Subscription) error {
 var removeSubscriptionCopy = team.RemoveCopy
 
 func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request, id team.CopyID) {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if _, bound := query["copy_instance"]; bound && !h.requirePeopleCopy(w, r) {
+		return
+	}
 	sub, server, found, joined, err := h.lookupSubscription(id)
 	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
@@ -1210,9 +1477,35 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+		writeTeamError(w, http.StatusConflict, "copy_changed")
+		return
+	}
+	entries, err := team.Load(h.dataDir)
+	if err != nil {
+		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		return
+	}
+	currentServer, exists := team.Entry{}, false
+	for _, entry := range entries {
+		if entry.ID == id.Server {
+			currentServer, exists = entry, true
+			break
+		}
+	}
+	if exists != joined || (joined && !peopleSameServer(currentServer, server)) {
+		writeTeamError(w, http.StatusConflict, "copy_changed")
+		return
+	}
 	if err := removeSubscriptionCopy(h.dataDir, id); err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
+	}
+	// The router retains this copy operation until the handler returns.
+	epoch := r.Context().Value(peopleCopyOperationKey{}).(*peopleCopyOperation).state
+	epoch.epoch++
+	for op := range epoch.operations {
+		op.cancel()
 	}
 	subs, err := team.LoadSubs(h.dataDir)
 	if err != nil {
@@ -1340,7 +1633,9 @@ func projectCommentRecord(record team.MirrorRecord, inst string) (map[string]any
 	if body.Anchor == nil {
 		return nil, 0, false
 	}
-	return map[string]any{"seq": record.Seq, "at": record.At, "author": record.Author, "mine": record.Author == inst, "text": *body.Text, "anchor": *body.Anchor}, len(*body.Text), true
+	entry := map[string]any{"seq": record.Seq, "at": record.At, "author": record.Author, "mine": record.Author == inst, "text": *body.Text, "anchor": *body.Anchor}
+	projectPeopleAttachments(record.Body, *body.Text, entry)
+	return entry, len(*body.Text), true
 }
 
 func (h *teamHandler) storeRoster(server string, seats []team.Seat) {
@@ -1354,6 +1649,49 @@ func (h *teamHandler) storeRoster(server string, seats []team.Seat) {
 		ask.names[seat.ID] = seat.Name
 	}
 	h.subAsks[server] = ask
+}
+
+func bindRoster(ask subAsk, server team.Entry) subAsk {
+	binding := peopleServerFingerprint(server)
+	if ask.rosterBinding != "" && ask.rosterBinding != binding {
+		ask.roster, ask.seats = time.Time{}, time.Time{}
+		ask.names, ask.unnamed = nil, nil
+	}
+	ask.rosterBinding = binding
+	return ask
+}
+
+// serverCurrentLocked compares the captured connection with current configuration under h.mu.
+func (h *teamHandler) serverCurrentLocked(server team.Entry) bool {
+	entries, err := team.Load(h.dataDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if peopleSameServer(entry, server) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *teamHandler) storeRosterCurrent(ctx context.Context, server team.Entry, seats []team.Seat) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if ctx.Err() != nil || !h.peopleFilesEnabled() || !h.serverCurrentLocked(server) {
+		return
+	}
+	if _, ok := ctx.Value(peopleCopyOperationKey{}).(*peopleCopyOperation); ok && !peopleCopyContextCurrentLocked(ctx) {
+		return
+	}
+	ask := bindRoster(h.subAsks[server.ID], server)
+	if ask.names == nil {
+		ask.names = make(map[string]string)
+	}
+	for _, seat := range seats {
+		ask.names[seat.ID] = seat.Name
+	}
+	h.subAsks[server.ID] = ask
 }
 
 // rememberUnnamed adds a server and seat only while the handler-wide bound permits it.
@@ -1379,10 +1717,18 @@ func (h *teamHandler) rememberUnnamed(id string, ask *subAsk, seat string) {
 
 func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string, entries []map[string]any) map[string]string {
 	h.mu.Lock()
+	if ctx.Err() != nil || !h.peopleFilesEnabled() || (joined && !h.serverCurrentLocked(server)) {
+		h.mu.Unlock()
+		return map[string]string{}
+	}
 	if h.subAsks == nil {
 		h.subAsks = make(map[string]subAsk)
 	}
 	ask := h.subAsks[id]
+	if joined {
+		ask = bindRoster(ask, server)
+		h.subAsks[id] = ask
+	}
 	due := false
 	if joined {
 		if ask.roster.IsZero() {
@@ -1400,12 +1746,18 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 		if h.confirmed(ctx, server) == nil {
 			seats, err := h.client.Seats(ctx, server.URL, server.Token)
 			if err == nil {
-				h.storeRoster(id, seats)
+				h.storeRosterCurrent(ctx, server, seats)
 			}
 		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if ctx.Err() != nil || !h.peopleFilesEnabled() || (joined && !h.serverCurrentLocked(server)) {
+		return map[string]string{}
+	}
+	if _, ok := ctx.Value(peopleCopyOperationKey{}).(*peopleCopyOperation); ok && !peopleCopyContextCurrentLocked(ctx) {
+		return map[string]string{}
+	}
 	ask = h.subAsks[id]
 	names := make(map[string]string)
 	people, loadErr := team.LoadPeople(h.dataDir)
@@ -1495,9 +1847,10 @@ func (h *teamHandler) postComment(w http.ResponseWriter, r *http.Request, id tea
 		return
 	}
 	var req struct {
-		Text   *string `json:"text"`
-		Anchor *uint64 `json:"anchor"`
-		Key    *string `json:"key"`
+		Text        *string   `json:"text"`
+		Anchor      *uint64   `json:"anchor"`
+		Key         *string   `json:"key"`
+		Attachments *[]string `json:"attachments,omitempty"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -1514,7 +1867,11 @@ func (h *teamHandler) postComment(w http.ResponseWriter, r *http.Request, id tea
 		writeTeamError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	if strings.TrimSpace(*req.Text) == "" {
+	if req.Attachments != nil && (len(*req.Attachments) == 0 || len(*req.Attachments) > 16) {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if strings.TrimSpace(*req.Text) == "" && req.Attachments == nil {
 		writeTeamError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
@@ -1543,6 +1900,11 @@ func (h *teamHandler) postComment(w http.ResponseWriter, r *http.Request, id tea
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return
 	}
+	if req.Attachments != nil {
+		if !h.requirePeopleCopy(w, r) || h.tryPeopleCompletion(w, r, id, sub, server, *req.Text, *req.Anchor, *req.Key, *req.Attachments) {
+			return
+		}
+	}
 	if sub.Access == "read" {
 		writeTeamError(w, http.StatusForbidden, "read_only")
 		return
@@ -1562,6 +1924,10 @@ func (h *teamHandler) postComment(w http.ResponseWriter, r *http.Request, id tea
 	}
 	if *req.Anchor > last {
 		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	if req.Attachments != nil {
+		h.postPeopleFileComment(w, r, id, sub, server, *req.Text, *req.Anchor, *req.Key, *req.Attachments)
 		return
 	}
 	var body bytes.Buffer
@@ -1584,16 +1950,26 @@ func (h *teamHandler) postComment(w http.ResponseWriter, r *http.Request, id tea
 			Seq uint64 `json:"seq"`
 		}{seq})
 	case errors.Is(err, team.ErrStaleGeneration), errors.Is(err, team.ErrNoChannel):
-		if h.endSubscription(id, false) != nil {
+		current, endErr := h.endSubscription(r, id, server, false)
+		if endErr != nil {
 			writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+			return
+		}
+		if !current {
+			writeTeamError(w, http.StatusConflict, "not_active")
 			return
 		}
 		writeTeamError(w, http.StatusConflict, "not_active")
 	case errors.Is(err, team.ErrForbidden):
 		writeTeamError(w, http.StatusForbidden, "read_only")
 	case errors.Is(err, team.ErrUnauthorized):
-		if h.endSubscription(id, true) != nil {
+		current, endErr := h.endSubscription(r, id, server, true)
+		if endErr != nil {
 			writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+			return
+		}
+		if !current {
+			writeTeamError(w, http.StatusConflict, "not_active")
 			return
 		}
 		writeTeamError(w, http.StatusBadGateway, "refused")

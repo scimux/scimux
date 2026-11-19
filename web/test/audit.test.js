@@ -75,8 +75,18 @@ const ALLOWLIST = [
    * target=_blank / bare-download cannot be fixed by injecting a supplier —
    * there is nothing to inject into. The ratchet is meant to fail if this
    * annotation outlives S8. */
-  { file: "js/chat.js", kind: "nav-bypass", detail: "blank:local", count: 4 }, /* owed to S8 */
-  { file: "js/chat.js", kind: "nav-bypass", detail: "download:valued", count: 2 }, /* explicit filename required for blob URLs */
+  { file: "js/chat.js", kind: "nav-bypass", detail: "blank:local", count: 2 }, /* remaining native session-asset tiles */
+  { file: "js/chat.js", kind: "nav-bypass", detail: "download:valued", count: 1 }, /* explicit filename required for blob URLs */
+  /* The two attachment links moved intact from chat.js into one common tile.
+   * That builder requires assetURL and resolves the exact path before emitting
+   * either link; the additional assertion below checks both callers and the
+   * builder, while attachment-tile.test.js tests the runtime seam. The scanner
+   * cannot infer that the interpolated escaped value is seam-resolved. */
+  { file: "js/attachment-tile.js", kind: "nav-bypass", detail: "blank:unknown", count: 2 },
+  { file: "js/attachment-tile.js", kind: "nav-bypass", detail: "download:valued", count: 1 },
+  /* Preview fallback reuses an assetURL-resolved value; explicit remote retry
+   * uses the guarded retryAsset transport. The proofs below lock both flows. */
+  { file: "js/attachment-tile.js", kind: "dom-url", detail: "prop:href:dynamic", count: 2 },
 
   /* index.html:400 — <a id="m_relurl" target="_blank"> with NO href in markup;
    * burger-menu.js assigns it (see prop:href:dynamic above). Allowlisted with that
@@ -95,6 +105,28 @@ const ALLOWLIST = [
   { file: "index.html", kind: "dom-url", detail: "attr:href", count: 10 },
   { file: "index.html", kind: "dom-url", detail: "attr:src", count: 1 },
 ];
+
+test("extracted attachment navigation requires the asset seam at every caller", () => {
+  const tile = readFileSync(join(WEB, "js/attachment-tile.js"), "utf8");
+  assert.match(tile, /typeof assetURL !== "function"/);
+  assert.match(tile, /const resolved = assetURL\(image \? previewURL : url\)/);
+  assert.match(tile, /const href = escape\(resolved\)/);
+  assert.match(tile, /data-fallback-url="\$\{escape\(fallbackURL\)\}"/);
+  assert.match(tile, /link\.href = url/);
+  assert.match(tile, /url = await retryAsset\(button\.dataset\.attachmentRetry\)/);
+  const guest = readFileSync(join(WEB, "js/team-guest.js"), "utf8");
+  assert.match(guest, /const download = assetURL\(url\)/);
+  assert.match(guest, /fallbackURL:download/);
+  const bootstrap = readFileSync(join(WEB, "js/bootstrap.js"), "utf8");
+  assert.match(bootstrap, /!match \|\| capabilityPending \|\| !peopleServers\.has\(match\[1\]\)/);
+  assert.match(bootstrap, /await load\(path\)/);
+  for (const file of ["chat.js", "team-guest.js"]) {
+    const source = readFileSync(join(WEB, "js", file), "utf8");
+    const calls = [...source.matchAll(/attachmentTileHTML\(\{([^}]*)\}\)/g)];
+    assert.equal(calls.length, 1, `${file} must have exactly one common tile call`);
+    assert.match(calls[0][1], /\bassetURL\b/);
+  }
+});
 
 /* ---------- scanner ---------- */
 

@@ -107,6 +107,7 @@
 
 import { esc as escDefault } from "./format.js";
 import { focusAtEnd } from "./caret.js";
+import { peopleFileFailureText } from "./people-preparation.js";
 import {
   readPendingForwards,
   clearPendingForwards,
@@ -115,7 +116,7 @@ import {
   bindDraftIdentity,
   archiveRetiredDraft,
   readRetiredDrafts,
-  addPromptSource, clearPromptSources, promptSourceKey, readPromptSources, readPromptFlights, writePromptFlights,
+  addPromptSource, clearPromptSources, promptSourceKey, readPromptSources, writePromptSources, readPromptFlights, writePromptFlights,
 } from "./storage.js";
 
 export function retiredDraftReviewHTML(entries){
@@ -398,11 +399,19 @@ export function createComposerFeature(deps){
   let destinationVisit = 0;
   let explicitAgent = false;
   let contextKey = "";
+  let contextDraftBinding = "";
   let ownerChoice = false;
   const peopleRevisions = new Map();
   const agentRevisions = new Map();
   const peopleSending = new Set();
   const sendingDestinations = new Set();
+  const recoveredPeopleFiles = new Set();
+  const recoveringPeopleFiles = new Set();
+  let legacyPeopleReview = {identity:"", files:[], drafts:[], unavailable:false};
+  const clearedSourceText = new Map();
+  const damagedSourceMetadata = new Set();
+  const recoveredSourceFiles = new Set(), recoveringSourceFiles = new Set();
+  const preparationControllers = new Set();
   const cleanups = [];
   /* dynamic remove buttons rebound on each renderStage */
   let stageRemoveCleanups = [];
@@ -423,6 +432,180 @@ export function createComposerFeature(deps){
   }
   function peopleContext(){
     return typeof d.peopleContext === "function" ? d.peopleContext() : null;
+  }
+  function peopleCanAttach(context = peopleContext()){
+    return !!context && context.attachments === true && !!context.writable && !!context.key;
+  }
+  function peopleStageIdentity(id, context = peopleContext()){
+    if (!id || !context?.key) return "";
+    const ownerIdentity = context.owner ? stageIdentity(id) : "";
+    if (context.owner && !ownerIdentity) return "";
+    return "people\0" + context.key + (context.binding ? "\0binding:" + context.binding : "") + (context.copyInstance ? "\0copy:" + context.copyInstance : "") + "\0" + ownerIdentity;
+  }
+  function currentStageIdentity(id = selId()){
+    return isPeople() ? peopleStageIdentity(id) : stageIdentity(id);
+  }
+  function attachmentAvailable(){ return isPeople() ? peopleCanAttach() : canAttach; }
+  function peopleStageID(){
+    const bytes = typeof d.randomBytes === "function" ? d.randomBytes(8) : null;
+    if (!bytes || bytes.length !== 8 || Array.from(bytes).some(value => !Number.isInteger(value) || value < 0 || value > 255)) throw new Error("People file identity is unavailable.");
+    return Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+  }
+  function sourceScope(identity){ return "agent-source\0" + identity; }
+  function clearedSources(identity){
+    if (clearedSourceText.has(identity)) return clearedSourceText.get(identity);
+    let entries = [];
+    try {
+      const saved = JSON.parse(storage.getItem("scimux-cleared-source-text:" + identity) || "[]");
+      if (!Array.isArray(saved) || saved.some(value => typeof value !== "string")) throw new Error("invalid source metadata");
+      entries = saved;
+    } catch { damagedSourceMetadata.add(identity); }
+    const result = new Set(entries); clearedSourceText.set(identity, result); return result;
+  }
+  function saveClearedSources(identity, entries){
+    clearedSourceText.set(identity, entries);
+    if (!damagedSourceMetadata.has(identity)) storage.setItem("scimux-cleared-source-text:" + identity, JSON.stringify([...entries]));
+  }
+  function unresolvedSourceFiles(id, identity){
+    if (!identity) return false;
+    const cleared = clearedSources(identity), items = stage[identity] || [], sources = readPromptSources(storage, id);
+    if (items.some(item => item.sourceKey && !item.sent && !sources.some(source => promptSourceKey(source) === item.sourceKey))) return true;
+    if (damagedSourceMetadata.has(identity) && sources.length) return true;
+    if (recoveredSourceFiles.has(identity)) return false;
+    return sources.some(source => {
+      const key = promptSourceKey(source);
+      return cleared.has(key) && !items.some(item => item.sourceKey === key && !item.sent);
+    });
+  }
+  function restoreSourceFiles() {
+    const id = selId(), identity = stageIdentity(id), visit = destinationVisit;
+    if (!id || id.startsWith("team/") || !identity || !d.peopleFileStore || recoveredSourceFiles.has(identity) || recoveringSourceFiles.has(identity)) return;
+    recoveringSourceFiles.add(identity); let stale = false;
+    Promise.resolve().then(() => d.peopleFileStore.list(sourceScope(identity))).then(rows => {
+      if (selId() !== id || destinationVisit !== visit || stageIdentity(id) !== identity) { stale = true; return; }
+      const arr = staged(identity);
+      const previousSources = readPromptSources(storage, id);
+      const accepted = new Set(readPromptFlights(storage, id).filter(flight => flight.identity === identity && flight.accepted).flatMap(flight => (flight.attachments || []).map(item => item.sourceLocalID).filter(Boolean)));
+      for (const row of rows) {
+        if (!row.metadata?.source || !row.metadata?.sourceFileID || arr.some(item => item.sourceLocalID === row.id)) continue;
+        const sourceKey = promptSourceKey(row.metadata.source);
+        if (!sourceKey) continue;
+        const file = row.file, isImage = isImageFileType(file.type);
+        const sent = !!row.published || accepted.has(row.id);
+        if (!sent) addPromptSource(storage, id, row.metadata.source);
+        arr.push({key:++stageKey, file, size:file.size, name:stagedFileName(file,isImage), isImage, preview:isImage ? URLImpl.createObjectURL(file) : "", ref:null, status:"err", error:sent ? "Accepted; remove this saved file to finish cleanup." : "Review and send to retry this file.", sourceKey, sourceLocalID:row.id, sourceFileID:row.metadata.sourceFileID, source:row.metadata.source, localSaved:true, sent, needsUpload:!sent});
+      }
+      recoveredSourceFiles.add(identity);
+      const cleared = clearedSources(identity);
+      const before = readPromptSources(storage, id);
+      const after = before.filter(source => !cleared.has(promptSourceKey(source)) || arr.some(item => item.sourceKey === promptSourceKey(source) && !item.sent));
+      if (after.length !== before.length) {
+        writePromptSources(storage, id, after);
+      }
+      if (JSON.stringify(previousSources) !== JSON.stringify(after) && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id);
+      renderRecovery(id);
+      if (!isPeople()) renderStage();
+    }).catch(() => { if (selId() === id && destinationVisit === visit && stageIdentity(id) === identity) { renderRecovery(id); alertFn("Saved Agent source files could not be recovered."); } })
+      .finally(() => { recoveringSourceFiles.delete(identity); if (stale && selId() === id && stageIdentity(id) === identity) restoreSourceFiles(); });
+  }
+  function restorePeopleFiles(){
+    const id = selId(), context = peopleContext(), identity = peopleStageIdentity(id, context), visit = destinationVisit;
+    if (!isPeople() || !peopleCanAttach(context) || !identity || !d.peopleFileStore || recoveredPeopleFiles.has(identity) || recoveringPeopleFiles.has(identity)) return;
+    recoveringPeopleFiles.add(identity);
+    let stale = false;
+    Promise.resolve().then(() => d.peopleFileStore.list(identity)).then(rows => {
+      if (selId() !== id || destinationVisit !== visit || !isPeople() || peopleStageIdentity(id) !== identity) { stale = true; return; }
+      const arr = staged(identity);
+      for (const row of rows) {
+        if (arr.some(item => item.localID === row.id)) continue;
+        const file = row.file, isImage = isImageFileType(file.type);
+        arr.push({key:++stageKey, file, size:file.size, name:stagedFileName(file, isImage), isImage,
+          preview:isImage ? URLImpl.createObjectURL(file) : "", ref:{id:row.id}, localID:row.id, localSaved:true,
+          peopleKey:context.key, copyInstance:context.copyInstance || "", instance:context.owner ? (nodeById(id)?.instance_id || "") : "",
+          status:"err", error:row.published ? "Sent; remove this saved file to finish cleanup." : "Review and send to retry this file.",
+          sent:!!row.published, needsUpload:!row.published});
+      }
+      recoveredPeopleFiles.add(identity);
+      renderStage();
+    }).catch(() => {
+      if (selId() === id && destinationVisit === visit && isPeople() && peopleStageIdentity(id) === identity) alertFn("Saved People files could not be recovered.");
+    }).finally(() => {
+      recoveringPeopleFiles.delete(identity);
+      if (stale && selId() === id && isPeople() && peopleStageIdentity(id) === identity) restorePeopleFiles();
+    });
+  }
+  function clearLegacyPeopleReview(){
+    for (const item of legacyPeopleReview.files) URLImpl.revokeObjectURL(item.url);
+    legacyPeopleReview = {identity:"", files:[], drafts:[], unavailable:false};
+  }
+  function restoreLegacyPeopleFiles(){
+    const id = selId(), context = peopleContext(), identity = peopleStageIdentity(id, context), visit = destinationVisit;
+    if (!id || !context?.copyInstance || !identity) {
+      if (legacyPeopleReview.identity) clearLegacyPeopleReview();
+      return;
+    }
+    if (identity === legacyPeopleReview.identity) return;
+    clearLegacyPeopleReview();
+    legacyPeopleReview.identity = identity;
+    const oldScope = peopleStageIdentity(id, {...context, copyInstance:""});
+    const prefix = "people\0" + context.key + (context.binding ? "\0binding:" + context.binding : "");
+    const ownerIdentity = context.owner ? stageIdentity(id) : "";
+    const missingStore = !d.peopleFileStore;
+    let failedStore = missingStore;
+    Promise.resolve().then(() => {
+      if (missingStore) return [];
+      return typeof d.peopleFileStore.listRetired === "function" ? d.peopleFileStore.listRetired(prefix, ownerIdentity, identity) : d.peopleFileStore.list(oldScope);
+    }).catch(() => { failedStore = true; return []; }).then(rows => {
+      if (selId() !== id || destinationVisit !== visit || peopleStageIdentity(id) !== identity || legacyPeopleReview.identity !== identity) return;
+      if (failedStore) legacyPeopleReview.unavailable = true;
+      const priorCopies = new Set();
+      for (const row of rows) {
+        legacyPeopleReview.files.push({name:row.file.name, url:URLImpl.createObjectURL(row.file)});
+        const marker = prefix + "\0copy:";
+        if (typeof row.scope === "string" && row.scope.startsWith(marker)) {
+          const copy = row.scope.slice(marker.length, marker.length + 32);
+          if (/^[0-9a-f]{32}$/.test(copy)) priorCopies.add(copy);
+        }
+      }
+      const native = context.owner ? (nodeById(id)?.instance_id || "") : "";
+      if (typeof storage.keys === "function") {
+        const keys = storage.keys();
+        if (!Array.isArray(keys)) legacyPeopleReview.unavailable = true;
+        else {
+          const draftPrefix = "scimux-people-draft:" + id + ":scope:";
+          const bindingPrefix = context.key + (context.binding ? "\0binding:" + context.binding : "") + "\0copy:";
+          const bindingSuffix = "\0" + (context.owner ? stageIdentity(id) : id);
+          const pendingPrefix = "scimux-people-file-pending:" + context.key + ":" + native + (context.binding ? ":" + context.binding : "") + ":copy:";
+          for (const key of keys) {
+            let copy = "";
+            if (key.startsWith(draftPrefix)) {
+              try {
+                const scope = decodeURIComponent(key.slice(draftPrefix.length));
+                if (scope.startsWith(bindingPrefix) && scope.endsWith(bindingSuffix)) copy = scope.slice(bindingPrefix.length, -bindingSuffix.length);
+              } catch { /* malformed unrelated key */ }
+            } else if (key.startsWith(pendingPrefix)) copy = key.slice(pendingPrefix.length);
+            if (/^[0-9a-f]{32}$/.test(copy) && copy !== context.copyInstance) priorCopies.add(copy);
+          }
+        }
+      }
+      for (const copy of priorCopies) {
+        const draft = storage.getItem(peopleDraftKey(id, {...context, copyInstance:copy}));
+        if (draft) legacyPeopleReview.drafts.push({owner:"unknown", values:{"scimux-people-draft:":draft}});
+        const pendingKey = "scimux-people-file-pending:" + context.key + ":" + native + (context.binding ? ":" + context.binding : "") + ":copy:" + copy;
+        const pending = storage.getItem(pendingKey);
+        if (pending) {
+          let text = "Saved pending message is unavailable.";
+          try { const parsed = JSON.parse(pending); if (typeof parsed?.request?.text === "string") text = parsed.request.text || "File-only People message"; } catch { /* retained for review */ }
+          legacyPeopleReview.drafts.push({owner:"unknown", values:{"scimux-people-draft:":text, "scimux-attachments:":"saved", "scimux-delivery-status:":"unconfirmed"}});
+        }
+      }
+      renderRecovery(id);
+    }).catch(() => {
+      if (selId() === id && destinationVisit === visit && peopleStageIdentity(id) === identity && legacyPeopleReview.identity === identity) {
+        legacyPeopleReview.unavailable = true;
+        renderRecovery(id);
+      }
+    });
   }
   function currentComposerIdentity(){
     const id = selId();
@@ -445,7 +628,16 @@ export function createComposerFeature(deps){
     alertFn("This chat was replaced. Review the current draft before sending.");
     return false;
   }
-  function peopleDraftKey(id){ return "scimux-people-draft:" + id; }
+  function peopleDraftKey(id, context = peopleContext()){
+    const binding = context?.attachments && context.binding ? peopleDraftBinding(id, context) : "";
+    return "scimux-people-draft:" + id + (binding ? ":scope:" + encodeURIComponent(binding) : "");
+  }
+  function peoplePendingDraftKey(identity){ return "scimux-people-pending-draft:" + identity; }
+  function peopleDraftBinding(id, context){
+    if (!context?.key) return "";
+    const native = context.owner ? stageIdentity(id) : id;
+    return native ? context.key + (context.binding ? "\0binding:" + context.binding : "") + (context.copyInstance ? "\0copy:" + context.copyInstance : "") + "\0" + native : "";
+  }
   function isPeople(){ return destination === "people"; }
   function isPhoneTouch(){
     return typeof d.isPhoneTouch === "function" ? !!d.isPhoneTouch() : false;
@@ -537,12 +729,12 @@ export function createComposerFeature(deps){
     /* production: when already equal, still force hidden to match; when
        flipping off, close the source menu. */
     if (canAttach === on){
-      if (attadd) attadd.hidden = !on || isPeople();
+      if (attadd) attadd.hidden = !attachmentAvailable();
       return;
     }
     canAttach = on;
-    if (attadd) attadd.hidden = !on || isPeople();
-    if (!on) closeAttMenu();
+    if (attadd) attadd.hidden = !attachmentAvailable();
+    if (!attachmentAvailable()) closeAttMenu();
   }
 
   function staged(key){
@@ -558,9 +750,11 @@ export function createComposerFeature(deps){
   function renderStage(){
     if (!attstage) return;
     const id = selId();
-    const items = id && !isPeople() ? (stage[stageIdentity(id)] || []) : [];
+    const items = id ? (stage[currentStageIdentity(id)] || []) : [];
+    let pending = null;
+    try { if (isPeople() && typeof d.pendingPeople === "function") pending = d.pendingPeople(); } catch { /* recovery remains unavailable */ }
     clearStageRemoveListeners();
-    if (!items.length){
+    if (!items.length && !pending){
       attstage.hidden = true;
       attstage.innerHTML = "";
       return;
@@ -570,6 +764,16 @@ export function createComposerFeature(deps){
       esc: escFn,
       iconFile: icons.ICON_FILE || "",
     });
+    if (pending) {
+      const names = pending.attachments.map(fileID => items.find(item => item.localID === fileID)?.name || "Saved file unavailable");
+      attstage.innerHTML += `<details><summary>Review unconfirmed People message</summary><p>${escFn(pending.text || "File-only message")}</p><p>${names.map(escFn).join(", ")}</p><button type="button" class="people-retry">Retry this message</button></details>`;
+      const buttons = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-retry") : [];
+      for (const b of buttons) {
+        const onClick = () => retryPeopleDraft(pending);
+        b.addEventListener("click", onClick);
+        stageRemoveCleanups.push(() => b.removeEventListener("click", onClick));
+      }
+    }
     /* rebind remove buttons */
     const buttons = typeof attstage.querySelectorAll === "function"
       ? attstage.querySelectorAll(".sx")
@@ -586,18 +790,50 @@ export function createComposerFeature(deps){
     }
   }
 
-  function removeStaged(key){
+  async function removeStaged(key){
     const id = selId();
     if (!id) return;
-    const arr = stage[stageIdentity(id)] || [];
+    const identity = currentStageIdentity(id);
+    const arr = stage[identity] || [];
     const i = arr.findIndex(x => String(x.key) === String(key));
     if (i < 0) return;
-    if (arr[i].preview) URLImpl.revokeObjectURL(arr[i].preview);
-    arr.splice(i, 1);
-    renderStage();
+    const item = arr[i];
+    if (item.removing) return;
+    let frozen = false;
+    try { frozen = !!item.peopleKey && !!d.pendingPeople?.()?.attachments?.includes(item.localID); } catch { frozen = true; }
+    if (item.pending || frozen) { alertFn("This file is part of a pending People message. Review its delivery before removing it."); return; }
+    if (item.peopleKey) {
+      item.removing = true;
+      try {
+        if (item.uploadPromise) await item.uploadPromise;
+        if (item.ref?.id) {
+          if (typeof d.api !== "function") throw new Error("Stage removal is unavailable");
+          const path = `/api/team/subscriptions/${item.peopleKey.split("/").map(encodeURIComponent).join("/")}/attachments/stage/${encodeURIComponent(item.ref.id)}?copy_instance=${encodeURIComponent(item.copyInstance || "")}${item.instance ? `&chat_instance=${encodeURIComponent(item.instance)}` : ""}`;
+          await d.api(path, {method:"DELETE"});
+        }
+        if (item.localSaved) await d.peopleFileStore.remove(identity, item.localID);
+      } catch (err) {
+        item.removing = false;
+        if (selId() === id && currentStageIdentity(id) === identity) { alertFn(err?.message || "Stage removal failed"); renderStage(); }
+        return;
+      }
+    }
+    if (item.sourceLocalID && item.localSaved) {
+      try { await d.peopleFileStore.remove(sourceScope(identity), item.sourceLocalID); }
+      catch { alertFn("Saved file removal failed."); return; }
+    }
+    const index = arr.indexOf(item);
+    if (index < 0) return;
+    if (item.preview) URLImpl.revokeObjectURL(item.preview);
+    arr.splice(index, 1);
+    if (item.sourceKey && clearedSources(identity).has(item.sourceKey) && !arr.some(other => other.sourceKey === item.sourceKey)) {
+      writePromptSources(storage, id, readPromptSources(storage, id).filter(source => promptSourceKey(source) !== item.sourceKey));
+      if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id);
+    }
+    if (selId() === id && currentStageIdentity(id) === identity) renderStage();
   }
 
-  async function uploadOne(it, dest, identity, instance){
+  async function uploadOne(it, dest, identity, instance, peopleKey = ""){
     if (!FormDataImpl){
       it.status = "err";
       it.error = "FormData unavailable";
@@ -610,46 +846,87 @@ export function createComposerFeature(deps){
       const withCsrf = d.withCsrf || (opts => opts);
       const fetchImpl = d.fetchImpl || (typeof fetch !== "undefined" ? fetch : null);
       if (!fetchImpl) throw new Error("fetch unavailable");
+      const target = peopleKey
+        ? `/api/team/subscriptions/${peopleKey.split("/").map(encodeURIComponent).join("/")}/attachments?stage_id=${encodeURIComponent(it.localID)}&copy_instance=${encodeURIComponent(it.copyInstance || "")}${instance ? `&chat_instance=${encodeURIComponent(instance)}` : ""}`
+        : `/api/nodes/${encodeURIComponent(dest)}/attachments${instance ? `?chat_instance=${encodeURIComponent(instance)}` : ""}`;
       const r = await fetchImpl(
-        `/api/nodes/${encodeURIComponent(dest)}/attachments${instance ? `?chat_instance=${encodeURIComponent(instance)}` : ""}`,
+        target,
         withCsrf({ method: "POST", body: fd, ...(instance ? {headers:{"X-Scimux-Chat-Instance":instance}} : {}) }),
       );
-      if (!r.ok) throw new Error((await r.text()) || r.statusText);
+      if (!r.ok) {
+        const message = (await r.text()) || r.statusText;
+        if (peopleKey) {
+          try { const result = JSON.parse(message); if (result?.stage_id === it.localID) it.ref = {id:result.stage_id}; } catch { /* preserve visible error */ }
+        }
+        throw new Error(message);
+      }
       const body = await r.json();
       it.ref = body.attachments[0];
+      if (peopleKey && it.ref?.id !== it.localID) { it.ref = null; throw new Error("People file identity did not match."); }
       it.status = "done";
+      if (peopleKey || it.sourceKey) it.needsUpload = false;
     } catch (e) {
       it.status = "err";
-      it.error = e.message;
+      it.error = peopleKey ? peopleFileFailureText(e.message) : e.message;
+      if (peopleKey || it.sourceKey) it.needsUpload = true;
     }
-    if (selId() === dest && stageIdentity(dest) === identity) renderStage();
+    if (selId() === dest && currentStageIdentity(dest) === identity) renderStage();
   }
 
-  function addFiles(files, dest){
+  function addFiles(files, dest, sourceKey = "", sourceRecords = []){
     if (!currentComposerIdentity()) return;
     dest = dest || selId();
     if (!identityReady) return;
     if (!files || !files.length) return;
-    if (isPeople()) { alertFn("People messages currently support text only. Choose Agent to attach files."); return; }
-    if (!canAttach || !dest || dest.startsWith("team/")) return;
-    const identity = stageIdentity(dest);
+    const people = isPeople();
+    const context = people ? peopleContext() : null;
+    if (people && !peopleCanAttach(context)) { alertFn(context?.copyIdentityMissing ? "The local copy identity is unavailable. Reconnect and review your saved files." : "People messages currently support text only. Choose Agent to attach files."); return; }
+    if ((!people && (!canAttach || dest.startsWith("team/"))) || !dest) return;
+    const identity = people ? peopleStageIdentity(dest, context) : stageIdentity(dest);
     if (!identity) { alertFn("This chat's identity is unavailable. Reconnect before attaching files."); return; }
-    const instance = nodeById(dest)?.instance_id || "";
+    const instance = people && !context.owner ? "" : (nodeById(dest)?.instance_id || "");
     const arr = staged(identity);
     const list = Array.from(files);
-    for (const f of list){
+    for (const [index, f] of list.entries()){
+      if (people && (!Number.isSafeInteger(f.size) || f.size < 1 || f.size > 4 * 1024 * 1024 || arr.length >= 16 || arr.reduce((sum, item) => sum + item.size, 0) + f.size > 16 * 1024 * 1024)) {
+        alertFn("People files must be non-empty, at most 4 MiB each, with at most 16 files and 16 MiB total.");
+        continue;
+      }
       const isImage = isImageFileType(f.type);
+      let localID = "";
+      if (people) {
+        try { localID = peopleStageID(); } catch (err) { alertFn(err.message); continue; }
+      }
       const it = {
         key: ++stageKey,
         file: f,
+        size: f.size,
         name: stagedFileName(f, isImage),
         isImage,
         preview: isImage ? URLImpl.createObjectURL(f) : "",
         ref: null,
         status: "up",
+        peopleKey: people ? context.key : "",
+        copyInstance: people ? context.copyInstance || "" : "",
+        instance: people ? instance : "",
+        localID,
+        sourceKey: people ? "" : sourceKey,
+        ...(sourceRecords[index] || {}),
       };
       arr.push(it);
-      uploadOne(it, dest, identity, instance);
+      if (people) {
+        it.uploadPromise = (async () => {
+          try {
+            if (!d.peopleFileStore) throw new Error("People file storage is unavailable.");
+            await d.peopleFileStore.save(identity, localID, f);
+            it.localSaved = true;
+            await uploadOne(it, dest, identity, instance, it.peopleKey);
+          } catch (err) {
+            it.status = "err"; it.error = err?.message || "People file storage is unavailable.";
+            if (selId() === dest && currentStageIdentity(dest) === identity) renderStage();
+          }
+        })();
+      } else it.uploadPromise = uploadOne(it, dest, identity, instance);
     }
     if (selId() === dest) renderStage();
   }
@@ -670,13 +947,38 @@ export function createComposerFeature(deps){
 
   function renderRecovery(id){
     if (!roots.recovery) return;
-    const entries = id ? [...readRetiredDrafts(storage, id), ...(retiredMemory.get(id) || [])] : [];
-    roots.recovery.hidden = !entries.length;
-    roots.recovery.innerHTML = entries.length
-      ? `<details><summary>Review saved drafts</summary>${retiredDraftReviewHTML(entries)}</details>` : "";
+    const entries = id ? [...readRetiredDrafts(storage, id), ...(retiredMemory.get(id) || []), ...legacyPeopleReview.drafts] : [];
+    if (id && peopleDraftKey(id) !== "scimux-people-draft:" + id) {
+      const legacy = storage.getItem("scimux-people-draft:" + id);
+      if (legacy) entries.push({owner:"unknown", values:{"scimux-people-draft:":legacy}});
+    }
+    const context = peopleContext();
+    if (id && context?.copyInstance) {
+      const priorKey = peopleDraftKey(id, {...context, copyInstance:""});
+      if (priorKey !== "scimux-people-draft:" + id) {
+        const prior = storage.getItem(priorKey);
+        if (prior) entries.push({owner:"unknown", values:{"scimux-people-draft:":prior}});
+      }
+      const native = context.owner ? (nodeById(id)?.instance_id || "") : "";
+      const pendingKey = "scimux-people-file-pending:" + context.key + ":" + native + (context.binding ? ":" + context.binding : "");
+      const pending = storage.getItem(pendingKey);
+      if (pending) {
+        let text = "Saved pending message is unavailable.";
+        try { const parsed = JSON.parse(pending); if (typeof parsed?.request?.text === "string") text = parsed.request.text || "File-only People message"; } catch { /* retained for review */ }
+        entries.push({owner:"unknown", values:{"scimux-people-draft:":text, "scimux-attachments:":"saved", "scimux-delivery-status:":"unconfirmed"}});
+      }
+    }
+    const pendingSources = id && unresolvedSourceFiles(id, stageIdentity(id));
+    roots.recovery.hidden = !entries.length && !pendingSources && !legacyPeopleReview.files.length && !legacyPeopleReview.unavailable;
+    roots.recovery.innerHTML = (entries.length ? `<details><summary>Review saved drafts</summary>${retiredDraftReviewHTML(entries)}</details>` : "") +
+      (pendingSources ? '<p role="status">Review saved source files before sending; recovery is pending or unavailable.</p>' : "") +
+      (legacyPeopleReview.files.length ? '<p>Files saved from an earlier copy are available for review.</p>' + legacyPeopleReview.files.map(item => `<a href="${escDefault(item.url)}" download="${escDefault(item.name)}">Download ${escDefault(item.name)}</a>`).join("") : "") +
+      (legacyPeopleReview.unavailable ? '<p role="status">Saved People files could not be reviewed.</p>' : "");
   }
 
   function onSelect({preferAgent = false} = {}){
+    clearLegacyPeopleReview();
+    for (const controller of preparationControllers) controller.abort();
     destinationVisit++;
     /* restore this node's draft and stage; hide + until chat confirms turns */
     const id = selId();
@@ -689,6 +991,7 @@ export function createComposerFeature(deps){
     renderRecovery(id);
     const context = peopleContext();
     contextKey = context?.key || "";
+    contextDraftBinding = peopleDraftBinding(id, context);
     ownerChoice = !!context?.owner && !id.startsWith("team/");
     explicitAgent = !!preferAgent && !id.startsWith("team/");
     destination = !explicitAgent && (id.startsWith("team/") || contextKey) ? "people" : "agent";
@@ -706,20 +1009,30 @@ export function createComposerFeature(deps){
     const busy = composerBusy; const closed = composerClosed;
     composerBusy = null; composerClosed = null;
     setComposerBusy(busy); setComposerClosed(closed);
-    if (attadd) attadd.hidden = !canAttach || isPeople();
-    if (isPeople()) closeAttMenu();
+    if (attadd) attadd.hidden = !attachmentAvailable();
+    if (!attachmentAvailable()) closeAttMenu();
     renderStage();
+    restoreSourceFiles();
+    restoreLegacyPeopleFiles();
+    if (isPeople()) restorePeopleFiles();
   }
 
   function contextChanged(){
     const context = peopleContext();
     const key = context?.key || "";
+    const nextBinding = peopleDraftBinding(selId(), context);
+    if (isPeople() && key === contextKey && nextBinding !== contextDraftBinding && (context?.binding || contextDraftBinding.includes("\0binding:"))) {
+      destinationVisit++;
+      setPromptText(storage.getItem(peopleDraftKey(selId(), context)) || "");
+    }
+    contextDraftBinding = nextBinding;
     if (context?.owner && !selId().startsWith("team/")) ownerChoice = true;
     if (key && key !== contextKey && !selId().startsWith("team/") && !explicitAgent) {
       if (!isPeople()) keepDraft(selId(), promptText());
       contextKey = key;
       setDestination("people");
     } else { contextKey = key; refreshDestination(); }
+    renderRecovery(selId());
   }
 
   function setDestination(next){
@@ -731,6 +1044,7 @@ export function createComposerFeature(deps){
     if (next === "agent" && (selId().startsWith("team/") || !nodeById(selId()))) return;
     if (next === "people" && !context && !ownerChoice) return;
     if (destination === next) { refreshDestination(); return; }
+    for (const controller of preparationControllers) controller.abort();
     destinationVisit++;
     destination = next;
     explicitAgent = next === "agent";
@@ -738,21 +1052,67 @@ export function createComposerFeature(deps){
     refreshDestination();
   }
 
-  function preparePrompt(text, source){
+  function preparePrompt(text, source, files = [], sourceRecords = []){
     if (!currentComposerIdentity()) return false;
     if (!identityReady) return false;
     const id = selId();
     if (!id || id.startsWith("team/") || !nodeById(id) || nodeById(id).ended_at || !promptSourceKey(source) ||
-        typeof d.canPreparePrompt !== "function" || !d.canPreparePrompt(source) || !String(text || "").trim()) return false;
+        typeof d.canPreparePrompt !== "function" || !d.canPreparePrompt(source) || (!String(text || "").trim() && !files.length) || (files.length && !canAttach)) return false;
+    const identity = stageIdentity(id);
+    clearedSources(identity);
+    if (damagedSourceMetadata.has(identity)) { alertFn("Saved source information is damaged; review it before preparing another prompt."); return false; }
     const prior = isPeople() ? savedDraft(id) : promptText();
-    const merged = (prior ? prior + "\n\n" : "") + text;
+    const merged = text ? (prior ? prior + "\n\n" : "") + text : prior;
     keepDraft(id, merged);
     addPromptSource(storage, id, source);
+    const sourceKey = promptSourceKey(source);
+    const cleared = clearedSources(identity);
+    if (String(text || "").trim()) cleared.delete(sourceKey); else cleared.add(sourceKey);
+    saveClearedSources(identity, cleared);
     setDestination("agent");
     setPromptText(merged);
+    if (files.length) addFiles(files, id, sourceKey, sourceRecords);
     if (prompt) focusAtEnd(prompt);
     if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id);
     return true;
+  }
+
+  function prepareCapturePrompt(text, source, attachments, actionCurrent) {
+    return attachments?.length ? prepareSharedPrompt(text, source, attachments, actionCurrent) : preparePrompt(text, source);
+  }
+
+  async function prepareSharedPrompt(text, source, attachments, actionCurrent = () => true) {
+    const id = selId(), context = peopleContext(), identity = stageIdentity(id), visit = destinationVisit;
+    const key = source && [source.server,source.owner,source.chat,source.generation].join("/");
+    if (!identity || (context && (!context.owner || context.key !== key)) || !Array.isArray(attachments) || !attachments.length || !canAttach || typeof d.preparePeopleFiles !== "function" || typeof d.canPreparePrompt !== "function" || !d.canPreparePrompt(source)) return false;
+    const authority = typeof d.capturePromptAuthority === "function" ? d.capturePromptAuthority(source, attachments) : null;
+    if (typeof d.capturePromptAuthority === "function" && (!authority || typeof authority.current !== "function" || !authority.current())) return false;
+    const agentRevision = agentRevisions.get(id) || 0, peopleRevision = peopleRevisions.get(id) || 0, agentDraft = savedDraft(id);
+    const current = () => {
+      const next = peopleContext();
+      return actionCurrent() && selId() === id && destinationVisit === visit && stageIdentity(id) === identity && (context ? !!next?.owner && next.key === context.key && next.binding === context.binding : !next) && (!authority || authority.current()) && d.canPreparePrompt(source) && (agentRevisions.get(id) || 0) === agentRevision && (peopleRevisions.get(id) || 0) === peopleRevision && savedDraft(id) === agentDraft;
+    };
+    const controller = new AbortController(); preparationControllers.add(controller);
+    const saved = [];
+    try {
+      const files = await d.preparePeopleFiles({source, attachments, copyInstance:authority?.copyInstance, current, signal:controller.signal});
+      if (controller.signal.aborted || !current() || !Array.isArray(files) || files.length !== attachments.length) return false;
+      if (!d.peopleFileStore) throw new Error("Source file recovery is unavailable.");
+      for (let i = 0; i < files.length; i++) {
+        const sourceLocalID = peopleStageID();
+        await d.peopleFileStore.save(sourceScope(identity), sourceLocalID, files[i], {source, sourceFileID:attachments[i].id});
+        saved.push({sourceLocalID, sourceFileID:attachments[i].id, source, localSaved:true});
+        if (controller.signal.aborted || !current()) throw new Error("Source changed before preparation completed.");
+      }
+      preparationControllers.delete(controller);
+      const prepared = preparePrompt(text, source, files, saved);
+      if (!prepared) throw new Error("Source file preparation is unavailable.");
+      return true;
+    } catch (err) {
+      for (const item of saved) { try { await d.peopleFileStore.remove(sourceScope(identity), item.sourceLocalID); } catch { /* retained for later review */ } }
+      if (!controller.signal.aborted && current()) alertFn(err?.message || "Source files are unavailable.");
+      return false;
+    } finally { preparationControllers.delete(controller); }
   }
 
   function agentDraftText(id){
@@ -769,23 +1129,109 @@ export function createComposerFeature(deps){
     if (selId() === id && !isPeople()) { setPromptText(merged); renderStage(); }
   }
 
+  async function finishPeopleFiles(fileIdentity, files, receipt) {
+    await d.peopleFileStore.markPublishedBatch(fileIdentity, files.map(item => item.localID), receipt?.seq);
+    if (typeof d.finishPeople !== "function" || !d.finishPeople(receipt)) throw new Error("The sent message could not be recorded locally. Review and retry it.");
+    const arr = stage[fileIdentity];
+    for (const item of files) {
+      item.sent = true;
+      try {
+        const path = `/api/team/subscriptions/${item.peopleKey.split("/").map(encodeURIComponent).join("/")}/attachments/stage/${encodeURIComponent(item.ref.id)}?copy_instance=${encodeURIComponent(item.copyInstance || "")}${item.instance ? `&chat_instance=${encodeURIComponent(item.instance)}` : ""}`;
+        await d.api(path, {method:"DELETE"});
+        await d.peopleFileStore.remove(fileIdentity, item.localID);
+      } catch {
+        item.status = "err";
+        item.error = "Sent; remove this saved file to finish cleanup.";
+        continue;
+      }
+      const index = arr.indexOf(item);
+      if (item.preview) URLImpl.revokeObjectURL(item.preview);
+      arr.splice(index, 1);
+    }
+  }
+
+  async function retryPeopleDraft(pending) {
+    const id = selId(), context = peopleContext(), identity = peopleStageIdentity(id, context), visit = destinationVisit;
+    const draftKey = peopleDraftKey(id, context);
+    if (!isPeople() || !identity || context?.key !== pending.key || peopleSending.has(identity) || typeof d.retryPeople !== "function") return;
+    const arr = stage[identity] || [];
+    const files = pending.attachments.map(fileID => arr.find(item => item.localID === fileID));
+    if (files.some(item => !item || !item.localSaved)) { alertFn("Saved files for this message are unavailable."); return; }
+    peopleSending.add(identity);
+    for (const item of files) item.pending = true;
+    try {
+      const receipt = await d.retryPeople();
+      await finishPeopleFiles(identity, files, receipt);
+      let frozen = null;
+      try { frozen = JSON.parse(storage.getItem(peoplePendingDraftKey(identity)) || "null"); } catch { /* keep draft */ }
+      const binding = peopleDraftBinding(id, context);
+      if (frozen?.binding === binding && frozen.text === pending.text && frozen.version === storage.getItem(draftKey + ":version") && storage.getItem(draftKey + ":binding") === binding && storage.getItem(draftKey) === pending.text && (!context.owner || binding.endsWith("\0" + stageIdentity(id)))) {
+        storage.removeItem(draftKey);
+        if (selId() === id && destinationVisit === visit && isPeople() && promptText() === pending.text) clearPrompt();
+      }
+      storage.removeItem(peoplePendingDraftKey(identity));
+      if (selId() === id && destinationVisit === visit && isPeople() && peopleStageIdentity(id) === identity) renderStage();
+    } catch (err) { if (selId() === id && destinationVisit === visit && isPeople()) alertFn(err?.status ? peopleFileFailureText(err.message) : (err?.message || "Message delivery is unconfirmed.")); }
+    finally {
+      for (const item of files) item.pending = false;
+      peopleSending.delete(identity);
+      if (selId() === id && destinationVisit === visit && isPeople() && peopleStageIdentity(id) === identity) renderStage();
+    }
+  }
+
   async function sendPeople(){
     const context = peopleContext(); const id = selId(); const text = promptText();
-    const identity = id.startsWith("team/") ? id : (stageIdentity(id) || (context?.key ? "people/" + context.key : ""));
-    const sameIdentity = () => id.startsWith("team/") || (identity.startsWith("people/")
-      ? selId() === id && peopleContext()?.key === context.key : stageIdentity(id) === identity);
-    if (!context || !context.writable || !identity || !text.trim() || new TextEncoder().encode(text).length > 16384 || peopleSending.has(identity) || typeof d.sendPeople !== "function") return;
+    const draftKey = peopleDraftKey(id, context);
+    const withFiles = peopleCanAttach(context);
+    const fileIdentity = withFiles ? peopleStageIdentity(id, context) : "";
+    const identity = withFiles ? fileIdentity : (id.startsWith("team/") ? id : (stageIdentity(id) || (context?.key ? "people/" + context.key : "")));
+    const sameIdentity = () => withFiles ? (selId() === id && peopleStageIdentity(id) === identity) : (id.startsWith("team/") || (identity.startsWith("people/")
+      ? selId() === id && peopleContext()?.key === context.key : stageIdentity(id) === identity));
+    const files = withFiles ? (stage[fileIdentity] || []).filter(item => !item.sent) : [];
+    if (!context || !context.writable || !identity || (!text.trim() && !files.length) || new TextEncoder().encode(text).length > 16384 || peopleSending.has(identity) || typeof d.sendPeople !== "function") return;
     const revision = peopleRevisions.get(id) || 0;
+    const draftBinding = peopleDraftBinding(id, context);
+    const visit = destinationVisit;
+    const stillCurrent = () => selId() === id && destinationVisit === visit && isPeople() && peopleContext()?.key === context.key && (!withFiles || peopleStageIdentity(id) === fileIdentity);
     peopleSending.add(identity);
+    for (const item of files) item.pending = true;
     try {
-      await d.sendPeople(context.key, text);
-      if (!sameIdentity()) return;
-      if ((peopleRevisions.get(id) || 0) === revision && storage.getItem(peopleDraftKey(id)) === text) {
-        storage.removeItem(peopleDraftKey(id));
-        if (selId() === id && isPeople() && promptText() === text) clearPrompt();
+      if (files.length) {
+        for (const item of files) {
+          if (item.needsUpload && item.localSaved && item.status !== "up") {
+            item.status = "up";
+            item.uploadPromise = uploadOne(item, id, fileIdentity, item.instance, item.peopleKey);
+          }
+        }
+        await waitForUploads(files);
+        if (!stillCurrent() || !peopleCanAttach() || anyUploading(files)) return;
+        if (files.some(item => item.status !== "done" || !item.ref?.id || item.removing)) { alertFn("Review failed or unfinished People files before sending."); return; }
       }
-    } catch (err) { if (err && selId() === id && sameIdentity()) alertFn(err.message); }
-    finally { peopleSending.delete(identity); }
+      const instance = withFiles && context.owner ? (nodeById(id)?.instance_id || "") : "";
+      let receipt;
+      if (files.length) {
+        if (!d.pendingPeople?.()) storage.setItem(peoplePendingDraftKey(fileIdentity), JSON.stringify({binding:draftBinding, text, version:storage.getItem(draftKey + ":version")}));
+        receipt = await d.sendPeople(context.key, text, files.map(item => item.ref.id), instance);
+      }
+      else await d.sendPeople(context.key, text);
+      if (files.length) {
+        await finishPeopleFiles(fileIdentity, files, receipt);
+        storage.removeItem(peoplePendingDraftKey(fileIdentity));
+        if (stillCurrent()) renderStage();
+      }
+      const boundDraft = draftBinding && storage.getItem(draftKey + ":binding") === draftBinding &&
+        (!context.owner || draftBinding.endsWith("\0" + stageIdentity(id))) &&
+        (selId() !== id || peopleDraftBinding(id, peopleContext()) === draftBinding);
+      if ((withFiles ? boundDraft : sameIdentity()) && (peopleRevisions.get(id) || 0) === revision && storage.getItem(draftKey) === text) {
+        storage.removeItem(draftKey);
+        if ((withFiles ? stillCurrent() : selId() === id && isPeople()) && promptText() === text) clearPrompt();
+      }
+    } catch (err) { if (err && selId() === id && sameIdentity()) alertFn(files.length && err.status ? peopleFileFailureText(err.message) : err.message); }
+    finally {
+      for (const item of files) item.pending = false;
+      peopleSending.delete(identity);
+      if (stillCurrent()) renderStage();
+    }
   }
 
   async function interruptPrompt(){
@@ -842,18 +1288,19 @@ export function createComposerFeature(deps){
     const dest = cur; /* capture: selection may change while send is in flight */
     const identity = stageIdentity(dest);
     if (!identity) { alertFn("This chat's identity is unavailable. Reconnect before sending."); return; }
+    if (unresolvedSourceFiles(dest, identity)) { renderRecovery(dest); alertFn("Saved source files must be recovered before sending."); return; }
     if (sendingDestinations.has(identity)) return;
     const instance = nodeById(dest)?.instance_id || "";
     const visit = destinationVisit;
     const armedOwner = ownerChoice;
     const draftRevision = agentRevisions.get(dest) || 0;
     const originalStored = savedDraft(dest);
-    const items = (stage[identity] || []).slice();
+    const items = (stage[identity] || []).filter(item => !item.sent);
     const sourceSnapshot = readPromptSources(storage, dest);
     const turns = typeof d.getLastTurns === "function" ? d.getLastTurns() : [];
     const last = turns?.length ? turns[turns.length-1] : null;
     const boundary = last ? {uid:last.uid, segment:last.segment ?? 0, record:last.record} : null;
-    const flight = {id:newPromptFlightID(nowFn()), text, sources:sourceSnapshot, boundary, attachments:[], at:nowFn(), accepted:false};
+    const flight = {id:newPromptFlightID(nowFn()), identity, text, sources:sourceSnapshot, boundary, attachments:[], at:nowFn(), accepted:false};
     sendingDestinations.add(identity);
     writePromptFlights(storage, dest, [...readPromptFlights(storage, dest), flight]);
     clearPromptSources(storage, dest);
@@ -886,6 +1333,12 @@ export function createComposerFeature(deps){
       writePromptFlights(storage, dest, readPromptFlights(storage, dest).filter(item => item.id !== flight.id));
       sendingDestinations.delete(identity);
     }
+    for (const item of items) {
+      if (item.sourceKey && item.localSaved && item.needsUpload && item.status !== "up") {
+        item.status = "up";
+        item.uploadPromise = uploadOne(item, dest, identity, instance);
+      }
+    }
     if (anyUploading(items)) await waitForUploads(items);
     if (stageIdentity(dest) !== identity) {
       // Never restore an old flight into the replacement chat's draft. Keep
@@ -894,6 +1347,11 @@ export function createComposerFeature(deps){
       return;
     }
     const refs = completedRefs(items);
+    if (items.some(item => item.sourceKey && item.status !== "done")) {
+      restoreSources(); sendingDestinations.delete(identity);
+      if (selId() === dest && !isPeople()) { alertFn("Review failed or unfinished source files before sending."); renderStage(); }
+      return;
+    }
     if (!hasSendPayload(text, refs)) { restoreSources(); sendingDestinations.delete(identity); return; }
     const destNode = nodeById(dest);
     if (destNode && String(destNode.agent || "").toLowerCase() === "claude" &&
@@ -903,7 +1361,7 @@ export function createComposerFeature(deps){
       alertFn("Claude /fork is not supported. Use scimux's Fork action to start a fresh chat that inherits launch configuration but not conversation history.");
       return;
     }
-    flight.attachments = items.filter(item => item.status === "done" && item.ref).map(item => ({name:item.name, isImage:item.isImage, ref:item.ref}));
+    flight.attachments = items.filter(item => item.status === "done" && item.ref).map(item => ({name:item.name, isImage:item.isImage, ref:item.ref, ...(item.sourceLocalID ? {sourceLocalID:item.sourceLocalID} : {})}));
     writePromptFlights(storage, dest, readPromptFlights(storage, dest).map(item => item.id === flight.id ? {...item, attachments:flight.attachments} : item));
     if (selId() === dest && !isPeople() && (agentRevisions.get(dest) || 0) === draftRevision) clearPrompt();
     const dispatchedItems = armedOwner ? items.filter(item => item.status === "done" && item.ref) : items;
@@ -955,6 +1413,19 @@ export function createComposerFeature(deps){
         return;
       }
       writePromptFlights(storage, dest, readPromptFlights(storage, dest).map(item => item.id === flight.id ? {...item, accepted:true, address:res?.trace} : item));
+      const savedFiles = dispatchedItems.filter(item => item.sourceLocalID && item.localSaved);
+      if (savedFiles.length) {
+        try {
+          await d.peopleFileStore.markPublishedBatch(sourceScope(identity), savedFiles.map(item => item.sourceLocalID), 1);
+          for (const item of savedFiles) await d.peopleFileStore.remove(sourceScope(identity), item.sourceLocalID);
+        } catch {
+          for (const item of savedFiles) {
+            item.sent = true; item.status = "err"; item.error = "Accepted; remove this saved file to finish cleanup.";
+            if (!(stage[identity] || []).includes(item)) staged(identity).push(item);
+          }
+          if (selId() === dest && stageIdentity(dest) === identity) { alertFn("Accepted, but saved file cleanup needs review."); renderStage(); }
+        }
+      }
       if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(dest);
       /* Delivered, so the saved copy is finally redundant. Removing it any
          earlier -- as this did, before the request was even made -- destroys
@@ -1000,8 +1471,27 @@ export function createComposerFeature(deps){
     if (!identityReady) return;
     resizePrompt();
     const id = selId();
-    if (id && isPeople()) { peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1); storage.setItem(peopleDraftKey(id), promptText()); if (composerBusy) renderBusy(); }
-    else if (id) { agentRevisions.set(id, (agentRevisions.get(id) || 0) + 1); keepDraft(id, promptText()); if (!promptText().trim()) { clearPromptSources(storage, id); if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id); } }
+    if (id && isPeople()) {
+      peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1);
+      storage.setItem(peopleDraftKey(id), promptText());
+      storage.setItem(peopleDraftKey(id) + ":binding", peopleDraftBinding(id, peopleContext()));
+      const versionKey = peopleDraftKey(id) + ":version";
+      let version; try { version = BigInt(storage.getItem(versionKey) || "0") + 1n; } catch { version = 1n; }
+      storage.setItem(versionKey, String(version));
+      if (composerBusy) renderBusy();
+    }
+    else if (id) {
+      agentRevisions.set(id, (agentRevisions.get(id) || 0) + 1); keepDraft(id, promptText());
+      if (!promptText().trim()) {
+        const identity = stageIdentity(id), sources = readPromptSources(storage, id), cleared = clearedSources(identity);
+        if (damagedSourceMetadata.has(identity)) { renderRecovery(id); return; }
+        for (const source of sources) cleared.add(promptSourceKey(source));
+        saveClearedSources(identity, cleared);
+        const files = stage[identity] || [];
+        writePromptSources(storage, id, sources.filter(source => files.some(item => item.sourceKey === promptSourceKey(source))));
+        if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id);
+      }
+    }
   }
 
   function onPromptPaste(e){
@@ -1168,6 +1658,8 @@ export function createComposerFeature(deps){
   }
 
   function destroy(){
+    clearLegacyPeopleReview();
+    for (const controller of preparationControllers) controller.abort();
     while (cleanups.length){
       try { cleanups.pop()(); } catch { /* ignore */ }
     }
@@ -1190,6 +1682,8 @@ export function createComposerFeature(deps){
     onSelect,
     reconcileIdentity: currentComposerIdentity,
     preparePrompt,
+    prepareCapturePrompt,
+    prepareSharedPrompt,
     recoverPromptDraft,
     agentDraftText,
     setDestination,

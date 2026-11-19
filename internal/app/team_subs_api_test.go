@@ -198,35 +198,39 @@ func holdClock(t *testing.T, h http.Handler) *time.Time {
 }
 
 type subView struct {
-	Server        string              `json:"server"`
-	ServerName    string              `json:"server_name"`
-	Owner         string              `json:"owner"`
-	OwnerName     string              `json:"owner_name"`
-	Chat          string              `json:"chat"`
-	Generation    string              `json:"generation"`
-	Title         string              `json:"title"`
-	Access        string              `json:"access"`
-	State         string              `json:"state"`
-	MirrorLast    uint64              `json:"mirror_last"`
-	SeenMirror    uint64              `json:"seen_mirror"`
-	CommentsLast  uint64              `json:"comments_last"`
-	SeenComments  uint64              `json:"seen_comments"`
-	Unread        bool                `json:"unread"`
-	FirstSeen     string              `json:"first_seen"`
-	LocalNode     string              `json:"local_node,omitempty"`
-	LocalOrder    *int                `json:"local_order,omitempty"`
-	LocalFrontier *team.OwnerFrontier `json:"local_frontier,omitempty"`
+	Server             string              `json:"server"`
+	ServerName         string              `json:"server_name"`
+	Owner              string              `json:"owner"`
+	OwnerName          string              `json:"owner_name"`
+	Chat               string              `json:"chat"`
+	Generation         string              `json:"generation"`
+	Title              string              `json:"title"`
+	Access             string              `json:"access"`
+	State              string              `json:"state"`
+	MirrorLast         uint64              `json:"mirror_last"`
+	SeenMirror         uint64              `json:"seen_mirror"`
+	CommentsLast       uint64              `json:"comments_last"`
+	SeenComments       uint64              `json:"seen_comments"`
+	Unread             bool                `json:"unread"`
+	FirstSeen          string              `json:"first_seen"`
+	LocalNode          string              `json:"local_node,omitempty"`
+	LocalOrder         *int                `json:"local_order,omitempty"`
+	LocalFrontier      *team.OwnerFrontier `json:"local_frontier,omitempty"`
+	PeopleCopyInstance string              `json:"people_copy_instance,omitempty"`
 }
 
 type subServerView struct {
-	ID       string `json:"id"`
-	Delivery string `json:"delivery"`
+	ID                string `json:"id"`
+	Delivery          string `json:"delivery"`
+	PeopleFiles       string `json:"people_files,omitempty"`
+	PeopleFileBinding string `json:"people_file_binding,omitempty"`
 }
 
 type subListBody struct {
-	Subscriptions []subView       `json:"subscriptions"`
-	Servers       []subServerView `json:"servers"`
-	Truncated     *bool           `json:"truncated"`
+	Subscriptions     []subView                     `json:"subscriptions"`
+	Servers           []subServerView               `json:"servers"`
+	Truncated         *bool                         `json:"truncated"`
+	PeopleAttachments *peopleAttachmentCapabilities `json:"people_attachments,omitempty"`
 }
 
 func readSubList(t *testing.T, h http.Handler) (subListBody, *httptest.ResponseRecorder) {
@@ -1335,6 +1339,8 @@ func TestSubListSkipsInvalidIdentitiesAlongsideValidChannels(t *testing.T) {
 		guestChannel(subOwnerB, subChatB, "Synthetic title", "bad", "read", 1),
 	), seatsBody: seatsOf(subOwner, "Ada")}
 	h, dir, _ := subSurface(t, script)
+	// Keep this legacy-list check independent of attachment identity creation.
+	asTeamHandler(t, h).peopleCapabilitiesReady = false
 	got, _ := readSubList(t, h)
 	if len(got.Subscriptions) != 1 || mustFindSub(t, got, subOwner, subChat, subGen).State != "live" || *got.Truncated {
 		t.Fatalf("list = %+v", got)
@@ -1979,6 +1985,27 @@ func TestSubReadRejectsMalformedEscapesInAfter(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assertAPIError(t, rec, 400, "bad_request")
+}
+
+func TestSubMutationRejectsMalformedCopyPreconditionWithoutSideEffects(t *testing.T) {
+	for _, tc := range []struct{ method, suffix, body string }{{http.MethodPut, "/seen", `{"mirror":1}`}, {http.MethodDelete, "", ""}} {
+		t.Run(tc.method, func(t *testing.T) {
+			h, dir := readSurface(t, func(http.ResponseWriter, *http.Request) { t.Error("malformed mutation contacted relay") })
+			before, err := team.LoadSubs(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(tc.method, "http://127.0.0.1"+subReadPath()+tc.suffix, strings.NewReader(tc.body))
+			req.URL.RawQuery = "copy_instance=%zz"
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			assertAPIError(t, rec, http.StatusBadRequest, "bad_request")
+			after, err := team.LoadSubs(dir)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("malformed mutation changed subscription: %v", err)
+			}
+		})
+	}
 }
 
 func TestSubReadIgnoresNullTypedFields(t *testing.T) {

@@ -1396,7 +1396,8 @@ The token a team server returns is a credential. It is stored in
 `team.json` and never leaves the server process: no response, log line, or
 error text contains it.
 
-All bodies are JSON. An error is `{"error":"<code>"}`. The routes sit
+Bodies are JSON except for the People file staging route described below. An
+error is `{"error":"<code>"}`. The routes sit
 behind the same request boundary as `/api/settings`.
 
 ### Agent ownership boundary
@@ -1669,6 +1670,18 @@ Recipient views omit all three fields.
 Channels whose owner, chat or generation is not fixed-length lowercase hex
 are skipped.
 
+When the local People file capability is advertised, the response adds
+`people_attachments` with `version:1`, `max_file_bytes:4194304`,
+`max_files:16`, and `max_total_bytes:16777216`. Server entries report
+`people_files` as `supported`, `unsupported`, or `unknown`; supported means
+the configured relay's identity and generation-safe blob capability were
+verified. A subscription can include a 32-character lowercase hexadecimal
+`people_copy_instance`. It identifies this installation's retained copy,
+survives reload and share retirement, and changes when that local copy is
+removed and recreated. It is a concurrency precondition, not a credential.
+If it is absent or unavailable, clients must not perform file operations for
+that copy. Legacy text-only requests do not require it.
+
 The list refreshes each joined server at most once per ten seconds, after
 Hello confirms its identity. Missing or revoked shares become ended; a subscription becomes live again
 if the same generation is listed again, retaining its read position and copy.
@@ -1728,10 +1741,67 @@ messages are not queued or copied by the post. Errors are `400 bad_request`,
 
 A successful comment append has no agent side effects: it cannot send a
 prompt, answer a tool request or select the owner's Agent destination.
+
+### People files
+
+When the local version 1 capability and the relay's `supported` state are
+available, a writable participant can stage a file with
+`POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/attachments`.
+The multipart body contains one `files` part, and the query includes the
+current `copy_instance` and optionally a 16-character lowercase hexadecimal
+`stage_id` for an exact retry. Owners also supply their native `chat_instance`
+query precondition. A successful response includes an attachment descriptor:
+`id`, `sha256`, `size`, `name`, and advisory `mime`. Files must contain at
+least one byte and be at most 4 MiB; a message can contain at most 16 files
+and 16 MiB total. Names are bounded, sanitized UTF-8 leaf names. These limits
+do not alter ordinary Agent uploads.
+
+Stage metadata and removal use GET and DELETE on
+`.../attachments/stage/{id}` with the same copy precondition and, for an
+owner, native precondition. File-bearing comment POSTs include an ordered
+`attachments` array of staged IDs and the current `copy_instance` query;
+the text may be empty when files are present. The publication body and key
+are frozen for retry. An uncertain outcome must be reviewed and retried with
+that same body and key; a conflicting existing body is not success. A
+successful retained receipt can be reconciled without another publication.
+
+The shared log entry remains a version-1 comment. Its ordinary `text` is the
+original text followed by a newline and `[Attachments unavailable in this
+version of scimux.]`; for a file-only message it is the notice alone. The
+extension carries the exact original `content_text`,
+`people_attachments_version:1`, and an ordered `people_attachments` manifest.
+Older readers therefore retain the original text and a visible notice rather
+than silently displaying an empty message. A new reader uses the extension only
+after validating the exact fallback and every descriptor; unknown or malformed
+extensions retain the fallback and report unsupported or corrupt attachments.
+An old relay without the generation capability is not used for People blob
+transfers. Relay blobs remain opaque and unreferenced uploads remain stored
+within the relay's channel budget until that channel is removed; an interrupted
+upload can therefore leave an unreferenced blob. Removing a local copy does not
+remove independent captured reference media or automatically republish any
+browser draft.
+
+Associated downloads use GET `.../attachments/{seq}/{id}` with the current
+copy precondition. `preview=1` requests a verified bounded PNG or JPEG preview;
+unsupported previews do not prevent an available file download. Downloads
+use an attachment disposition and `nosniff`. The full subscription identity,
+comment sequence, and logical file ID authorize the association; a bare hash
+does not. Available verified local bytes remain readable after a share ends
+or its relay is unavailable. Missing, corrupt, unsupported, and unavailable
+files are distinct from empty files. Removing the local copy removes its
+managed files; independent captured reference media has its own retention.
+
+`copy_instance_required`, `copy_changed`, and `copy_identity_unavailable`
+report a missing, stale, or unavailable local precondition. These checks do
+not replace permission, server, generation, or native owner checks. Relay
+quota and size refusals use `relay_quota` and `file_too_large`; an uncertain
+upload or publication is not reported as confirmed delivery. File transfer,
+preview, download, and comment publication never dispatch an agent.
 When a comment response is uncertain, the browser keeps its text, anchor and
 idempotency key for an explicit retry. Retrying that same pending comment uses
 the same key, so a previously accepted append is not duplicated. People
-discussion is text-only. Its draft is separate from the owner's Agent draft;
+discussion is text-only when the required file capabilities are unavailable.
+Its draft is separate from the owner's Agent draft;
 Agent attachments keep the existing staging behavior across destination
 changes and in-flight work. For a shared owner chat, Agent is a one-send arm:
 the composer returns to People when an Agent attempt is dispatched, while
@@ -1747,9 +1817,15 @@ each old seen position and `N`, capped at that log's highest copied sequence,
 without contacting a server. Success
 is `204`; errors are `404` `not_found`, `400` `bad_request`, and `500`
 `store_unavailable`.
+An optional `copy_instance` query binds the read-position update to the
+selected local copy; a stale or unavailable identity returns `409` and does
+not advance the replacement copy. Older text-only clients can omit it.
 
 `DELETE /api/team/subscriptions/{server}/{owner}/{chat}/{generation}` removes
-one subscription and its saved copy. For a live subscription on a joined
+one subscription and its saved copy. A `copy_instance` query precondition,
+when supplied, must match the current local copy before the operation proceeds;
+legacy clients may omit it. An already admitted operation is retired when its
+copy is removed. For a live subscription on a joined
 server, it first confirms that server's identity and leaves the channel;
 ended or unjoined subscriptions need no server request. Success is `204`.
 Errors are `404` `not_found` for an invalid identity or unknown subscription,

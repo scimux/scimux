@@ -349,3 +349,37 @@ func saturatingMul(a, b int64) int64 {
 	}
 	return a * b
 }
+
+// ReserveSerialized reserves space and holds the shared lock even when the
+// global policy has no configured limits. Callers use it for additional
+// per-copy limits that must be checked across processes.
+func ReserveSerialized(dataDir, nodeID string, incoming int64) (func(), error) {
+	return ReserveSerializedAfter(dataDir, nodeID, incoming, nil)
+}
+
+// ReserveSerializedAfter runs bounded caller-owned recovery under the same
+// lock as the usage check. It must not reserve recursively or perform I/O
+// outside the caller's managed storage.
+func ReserveSerializedAfter(dataDir, nodeID string, incoming int64, recoverFn func() error) (func(), error) {
+	if incoming < 0 {
+		return nil, fmt.Errorf("storage budget: negative reservation")
+	}
+	if dataDir == "" {
+		return func() {}, nil
+	}
+	release, err := Lock(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if recoverFn != nil {
+		if err := recoverFn(); err != nil {
+			release()
+			return nil, err
+		}
+	}
+	if err := check(dataDir, nodeID, incoming, LoadPolicy(dataDir)); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}

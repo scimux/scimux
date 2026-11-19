@@ -59,6 +59,36 @@ func TestGlobalBudgetRejectsWithoutDeletingHistory(t *testing.T) {
 	}
 }
 
+func TestSerializedQuotaRefusalReleasesLockAndPreservesManagedData(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions", "synthetic.jsonl")
+	writeManaged(t, path, "1234567890")
+	writePolicy(t, dir, `{"storage_min_free_bytes":0,"storage_global_limit_bytes":10}`)
+	if release, err := ReserveSerializedAfter(dir, "", 1, nil); !errors.Is(err, ErrBudget) || release != nil {
+		t.Fatalf("quota refusal: %v", err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		release, err := ReserveSerializedAfter(dir, "", 0, nil)
+		if err == nil {
+			release()
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("lock not reusable: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("quota refusal retained the storage lock")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "1234567890" {
+		t.Fatalf("managed data changed: %q %v", data, err)
+	}
+}
+
 func TestNodeBudgetCountsLogAttachmentsAndAssets(t *testing.T) {
 	data := t.TempDir()
 	writeManaged(t, filepath.Join(data, "sessions", "n1.jsonl"), "1234")
@@ -185,4 +215,73 @@ func TestTeamCopiesCountGloballyButNeverAsNodeUsage(t *testing.T) {
 	if len(status.Nodes) != 0 {
 		t.Fatalf("team copy acquired node charge: %#v", status.Nodes)
 	}
+}
+
+func TestReserveSerializedLocksEvenWhenGlobalLimitsDisabled(t *testing.T) {
+	data := t.TempDir()
+	writePolicy(t, data, `{"storage_min_free_bytes":0,"storage_global_limit_bytes":0,"storage_node_limit_bytes":0}`)
+	release, err := ReserveSerialized(data, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan func(), 1)
+	go func() {
+		unlock, err := Lock(data)
+		if err == nil {
+			done <- unlock
+		} else {
+			done <- nil
+		}
+	}()
+	select {
+	case unlock := <-done:
+		if unlock != nil {
+			unlock()
+		}
+		release()
+		t.Fatal("serialized reservation did not hold the lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case unlock := <-done:
+		if unlock == nil {
+			t.Fatal("second lock failed")
+		}
+		unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock did not release")
+	}
+}
+
+func TestReserveSerializedAfterRejectsInvalidOrUnavailableStorage(t *testing.T) {
+	called := false
+	recoverFn := func() error { called = true; return nil }
+	if release, err := ReserveSerializedAfter(t.TempDir(), "", -1, recoverFn); err == nil || release != nil || called {
+		t.Fatal("negative reservation reached recovery")
+	}
+	release, err := ReserveSerializedAfter("", "", 1, recoverFn)
+	if err != nil || release == nil || called {
+		t.Fatal("empty unmanaged root invoked recovery")
+	}
+	release()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".storage.lock"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if release, err := ReserveSerializedAfter(dir, "", 1, recoverFn); err == nil || release != nil || called {
+		t.Fatal("reservation entered recovery without the storage lock")
+	}
+	if err := os.Remove(filepath.Join(dir, ".storage.lock")); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("synthetic recovery failure")
+	if release, err := ReserveSerializedAfter(dir, "", 1, func() error { return failure }); !errors.Is(err, failure) || release != nil {
+		t.Fatal("recovery failure did not abort reservation")
+	}
+	release, err = Lock(dir)
+	if err != nil {
+		t.Fatalf("failed recovery did not release lock: %v", err)
+	}
+	release()
 }

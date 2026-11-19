@@ -76,6 +76,31 @@ test("no store at all is a usable store", () => {
   assert.equal(s.persistent, false);
 });
 
+test("bounded key discovery includes current shadow updates without inventing persisted keys", () => {
+  const map = new Map([["old", "v"], ["gone", "v"]]); let rejectWrites = false;
+  const raw = {get length(){return map.size}, key:i=>[...map.keys()][i] ?? null,
+    getItem:k=>map.get(k) ?? null, setItem(k,v){if(rejectWrites) throw Error();map.set(k,String(v));},
+    removeItem(k){if(rejectWrites) throw Error();map.delete(k);}};
+  const store = createStorage(raw); rejectWrites = true;
+  store.setItem("new", "v"); store.removeItem("gone");
+  assert.deepEqual(new Set(store.keys()), new Set(["old", "new"]));
+  assert.equal(store.persistent, false);
+});
+
+test("key discovery reports inaccessible or excessive storage", () => {
+  assert.equal(createStorage(null).keys(), null);
+  const raw = {getItem:()=>null,setItem(){},removeItem(){},key(){throw Error()},length:1};
+  const store = createStorage(raw); assert.equal(store.keys(), null); assert.equal(store.persistent, false);
+  assert.equal(createStorage({...raw,length:4097}).keys(), null);
+});
+
+test("key discovery refuses a shadow that pushes the combined key count over its bound", () => {
+  const map = new Map(Array.from({length:4096}, (_,i)=>['k'+i,'v'])); let rejectWrites = false;
+  const raw = {get length(){return map.size},key:i=>[...map.keys()][i] ?? null,getItem:k=>map.get(k) ?? null,
+    setItem(k,v){if(rejectWrites) throw Error();map.set(k,String(v));},removeItem:k=>map.delete(k)};
+  const store=createStorage(raw);rejectWrites=true;store.setItem('new','v');assert.equal(store.keys(),null);
+});
+
 /* ---------- shell seams ----------
  * app.js is the untested composition root, so the adapter's *behaviour* is
  * tested above and what is checked here is that the shell actually uses it:
