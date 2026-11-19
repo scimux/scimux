@@ -11,6 +11,8 @@ env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux # static; web
 env GOTOOLCHAIN=auto go test ./...        # unit + integration (integration needs tmux)
 env GOTOOLCHAIN=auto go test -short ./... # unit only; CI also runs the full suite
 node --test web/test/*.test.js  # browser unit suite; no browser needed
+go test -cover ./internal/testowned/testdata/supervisor # non-shipped supervisor command entry
+go test -cover -tags testowned_unsupported ./internal/testowned # unsupported-platform refusal
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target CI ships
 go test ./internal/transcript -run=XXX -fuzz=FuzzParseLine       -fuzztime=30s
@@ -18,6 +20,14 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
 ```
+
+The non-shipped Linux supervisor command reports cleanup status separately from
+`runner_exit`. `status clean` and command exit 0 mean the supervisor proved its
+owned children were reaped; the runner may still have exited nonzero or by a
+signal. A caller must check both results before accepting a run. Invalid command
+arguments and unavailable supervisor prerequisites exit 2; cleanup failures
+exit 1. The current interrupt grace is for this focused test tool; integration
+must measure an adequate bounded teardown grace before using it for browser E2E.
 
 Keep `TMPDIR` short (prefer `/tmp`) when running the suite. Integration tests
 create Unix-domain sockets below temporary directories, and long sandbox paths

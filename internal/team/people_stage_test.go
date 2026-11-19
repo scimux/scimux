@@ -1628,3 +1628,83 @@ func TestPeoplePublishedRetainsBytesAcrossConfigurationChange(t *testing.T) {
 		t.Fatalf("retained data lost or rewritten: %v", err)
 	}
 }
+
+func TestPeoplePublishedMatchingRetryAfterTransientDurabilityFailure(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	data := []byte("synthetic retained attachment")
+	digest := sha256.Sum256(data)
+	originalStage := PeopleStage{ID: "1234567890abcdef", Hash: hex.EncodeToString(digest[:]), Name: "example.txt", MIME: "text/plain", ConfigHash: strings.Repeat("c", 64), OwnerInstance: "synthetic-owner", Data: data}
+	history := MirrorRecord{Seq: 1, Key: "synthetic-entry", Author: strings.Repeat("1", 32), At: "2000-01-01T00:00:00Z", Body: json.RawMessage(`{"v":1,"text":"Synthetic history"}`)}
+	if err := AppendCopy(dir, id, MirrorLog, []MirrorRecord{history}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePublished(dir, id, 1, originalStage); err != nil {
+		t.Fatal(err)
+	}
+	historyPath := copyPathOf(dir, id)
+	beforeHistory, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordDir := filepath.Join(filepath.Dir(historyPath), "people-records", "comments", "1")
+	recordPath := filepath.Join(recordDir, originalStage.ID+".json")
+	beforeRecord, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(recordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := originalStage
+	retry.ConfigHash = strings.Repeat("d", 64)
+	retry.OwnerInstance = "synthetic-retry"
+	originalIO := peopleRecordIO
+	t.Cleanup(func() { peopleRecordIO = originalIO })
+	failedSync, existingLink := false, false
+	peopleRecordIO.sync = func(f *os.File) error {
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && !failedSync {
+			failedSync = true
+			return errors.New("synthetic one-time directory sync failure")
+		}
+		return originalIO.sync(f)
+	}
+	peopleRecordIO.link = func(root *os.Root, old, name string) error {
+		err := originalIO.link(root, old, name)
+		if errors.Is(err, fs.ErrExist) {
+			existingLink = true
+		}
+		return err
+	}
+	if err := SavePeoplePublished(dir, id, 1, retry); err != nil {
+		t.Fatalf("matching retry did not recover: %v", err)
+	}
+	peopleRecordIO = originalIO
+	if !failedSync || !existingLink {
+		t.Fatalf("expected transient failure and existing association: sync=%t link=%t", failedSync, existingLink)
+	}
+	got, err := ReadPeoplePublished(dir, id, 1, originalStage.ID)
+	if err != nil || !reflect.DeepEqual(got, originalStage) {
+		t.Fatalf("original association changed: %+v %v", got, err)
+	}
+	afterInfo, err := os.Stat(recordPath)
+	if err != nil || !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatalf("published record identity changed: %v", err)
+	}
+	afterRecord, err := os.ReadFile(recordPath)
+	if err != nil || !bytes.Equal(afterRecord, beforeRecord) {
+		t.Fatalf("published record bytes changed: %v", err)
+	}
+	entries, err := os.ReadDir(recordDir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != originalStage.ID+".json" {
+		t.Fatalf("duplicate or missing association: %v %v", entries, err)
+	}
+	afterHistory, err := os.ReadFile(historyPath)
+	if err != nil || !bytes.Equal(beforeHistory, afterHistory) {
+		t.Fatalf("history changed: %v", err)
+	}
+}
