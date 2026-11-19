@@ -330,3 +330,12 @@ func TestCommandPrerequisiteExitIsConsistent(t *testing.T) {
 		t.Fatalf("prerequisite exit codes: invalid=%d unsupported=%d", bad, missing)
 	}
 }
+
+func TestCheckRunnerOutcome(t *testing.T) {
+	if err := CheckRunner(Result{RunnerExit: 0}, 0); err != nil {
+		t.Fatal("matching runner outcome rejected")
+	}
+	if err := CheckRunner(Result{RunnerExit: 1}, 0); err == nil {
+		t.Fatal("unexpected runner outcome accepted")
+	}
+}

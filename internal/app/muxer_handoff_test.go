@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"github.com/scimux/scimux/internal/backend"
 	"github.com/scimux/scimux/internal/remote"
 	"github.com/scimux/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/testowned"
 	"github.com/scimux/scimux/internal/tmuxsession"
 )
 
@@ -358,6 +360,49 @@ var muxerExecHarnesses = []muxerExecHarness{
 }
 
 const muxerExecReadyFDEnv = "SCIMUX_MUXER_EXEC_READY_FD"
+const muxerExecRootEnv = "SCIMUX_MUXER_EXEC_ROOT"
+const muxerExecRootFDEnv = "SCIMUX_MUXER_EXEC_ROOT_FD"
+
+// muxerSyntheticObservation records only this synthetic probe's own objects.
+// It has no effect unless a test explicitly supplies the observation file.
+func muxerSyntheticObservation(t *testing.T, stage, path string, result *testowned.Result) {
+	t.Helper()
+	name := os.Getenv("SCIMUX_MUXER_EXEC_TEST_OBSERVATION")
+	if name == "" {
+		return
+	}
+	event := struct {
+		Stage  string            `json:"stage"`
+		Path   string            `json:"path,omitempty"`
+		Dev    uint64            `json:"dev,omitempty"`
+		Ino    uint64            `json:"ino,omitempty"`
+		UID    uint32            `json:"uid,omitempty"`
+		Result *testowned.Result `json:"result,omitempty"`
+	}{Stage: stage, Path: path, Result: result}
+	if path != "" {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal("synthetic observation unavailable")
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.IsDir() || info.Mode().Perm() != 0700 {
+			t.Fatal("synthetic observation invalid")
+		}
+		event.Dev, event.Ino, event.UID = uint64(stat.Dev), stat.Ino, stat.Uid
+	}
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal("synthetic observation open failed")
+	}
+	if err := json.NewEncoder(f).Encode(event); err != nil {
+		_ = f.Close()
+		t.Fatal("synthetic observation write failed")
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal("synthetic observation close failed")
+	}
+}
+
 const muxerExecCSRFToken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 func productionMuxerExecManager(t *testing.T, data, build string) (*workerManager, string) {
@@ -436,14 +481,20 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 	if os.Getenv("SCIMUX_MUXER_EXEC_PARENT_TEST") != "1" {
 		return
 	}
-	data, err := os.MkdirTemp("", "scimux-muxer-exec-")
+	data := os.Getenv(muxerExecRootEnv)
+	fd, err := strconv.Atoi(os.Getenv(muxerExecRootFDEnv))
+	if err != nil || fd < 3 {
+		t.Fatal("missing owned runtime handle")
+	}
+	handle := os.NewFile(uintptr(fd), "owned runtime")
+	owned, err := testowned.BindRoot(filepath.Dir(data), data)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("invalid owned runtime")
 	}
-	defer os.RemoveAll(data)
-	if err := os.Chmod(data, 0o700); err != nil {
-		t.Fatal(err)
+	if err := owned.VerifyHandle(handle); err != nil {
+		t.Fatal("owned runtime binding mismatch")
 	}
+	_ = handle.Close()
 	owner, err := backend.Claim(data)
 	if err != nil {
 		t.Fatal(err)
@@ -530,6 +581,30 @@ func TestMuxerExecParentHelperProcess(t *testing.T) {
 	if err := replaceMuxerProcess(os.Args[0], files); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestMuxerExecSupervisorHelperProcess(t *testing.T) {
+	if os.Getenv("SCIMUX_MUXER_EXEC_SUPERVISOR_TEST") != "1" {
+		return
+	}
+	proof := os.NewFile(4, "supervisor proof")
+	result := testowned.RunWithHandles([]string{os.Args[0], "-test.run=^TestMuxerExecParentHelperProcess$"}, testowned.Handles{
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		ExtraFiles: []*os.File{os.NewFile(3, "readiness"), os.NewFile(5, "owned runtime")},
+	})
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "late-after-stop" {
+		muxerSyntheticObservation(t, "supervisor-result", "", &result)
+	}
+	if err := json.NewEncoder(proof).Encode(result); err != nil {
+		os.Exit(1)
+	}
+	if err := proof.Close(); err != nil {
+		os.Exit(1)
+	}
+	if !result.Clean {
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func cleanupMuxerExecTmux(t *testing.T, socket string) {
@@ -659,19 +734,88 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires tmux and real process exec")
 	}
+	if !testowned.RootSupported() || runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
+		t.Skip("requires Linux test supervisor")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(exe, "-test.run=^TestMuxerExecParentHelperProcess$")
+	parent, err := os.MkdirTemp("", "mx-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentGuard, err := testowned.BindParent(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := false
+	t.Cleanup(func() {
+		if started {
+			return
+		}
+		if err := parentGuard.RemoveUnstarted(); err != nil {
+			t.Error("unstarted runtime retained")
+		}
+	})
+	muxerSyntheticObservation(t, "parent", parent, nil)
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "init-parent" {
+		t.Fatal("controlled initialization failure")
+	}
+	data, err := os.MkdirTemp(parent, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := parentGuard.RegisterChild(data); err != nil {
+		t.Fatal("runtime registration failed")
+	}
+	muxerSyntheticObservation(t, "data", data, nil)
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "init-data" {
+		t.Fatal("controlled initialization failure")
+	}
+	owned, err := testowned.BindRoot(parent, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "init-bound" {
+		t.Fatal("controlled initialization failure")
+	}
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "init-changed" {
+		original := data + "-original"
+		if err := os.Rename(data, original); err != nil {
+			t.Fatal("controlled rename failed")
+		}
+		if err := os.Mkdir(data, 0700); err != nil {
+			t.Fatal("controlled replacement failed")
+		}
+		muxerSyntheticObservation(t, "original", original, nil)
+		muxerSyntheticObservation(t, "replacement", data, nil)
+		t.Fatal("controlled initialization failure")
+	}
+	rootHandle, err := os.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootHandle.Close()
+	if err := owned.VerifyHandle(rootHandle); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestMuxerExecSupervisorHelperProcess$")
+	cmd.WaitDelay = 2 * time.Second
 	readyR, readyW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer readyR.Close()
 	defer readyW.Close()
-	cmd.ExtraFiles = []*os.File{readyW}
-	cmd.Env = append(os.Environ(), "SCIMUX_MUXER_EXEC_PARENT_TEST=1", muxerExecReadyFDEnv+"=3")
+	proofR, proofW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proofR.Close()
+	defer proofW.Close()
+	cmd.ExtraFiles = []*os.File{readyW, proofW, rootHandle}
+	cmd.Env = append(os.Environ(), "SCIMUX_MUXER_EXEC_SUPERVISOR_TEST=1", "SCIMUX_MUXER_EXEC_PARENT_TEST=1", muxerExecReadyFDEnv+"=3", muxerExecRootEnv+"="+data, muxerExecRootFDEnv+"=4", "TMPDIR="+data, "TMUX_TMPDIR="+data)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -681,33 +825,83 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	started = true
 	_ = readyW.Close()
-	process := cmd.Process
+	_ = proofW.Close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 	waited := false
+	var waitErr error
+	expectedExit := 0
 	defer func() {
 		if !waited {
-			_ = process.Kill()
-			_ = cmd.Wait()
+			if expectedExit != 1 {
+				expectedExit = 143
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+			}
+			_ = stdin.Close()
+			select {
+			case waitErr = <-done:
+				waited = true
+			case <-time.After(8 * time.Second):
+				t.Error("supervisor wait unconfirmed; runtime retained")
+				return
+			}
+		}
+		if waitErr != nil {
+			t.Error("supervisor failure; runtime retained")
+			return
+		}
+		if err := proofR.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Error("supervisor proof unavailable; runtime retained")
+			return
+		}
+		var proof testowned.Result
+		if err := json.NewDecoder(proofR).Decode(&proof); err != nil {
+			t.Error("supervisor proof unavailable; runtime retained")
+			return
+		}
+		if err := testowned.CheckRunner(proof, expectedExit); err != nil {
+			t.Error("unexpected runner outcome")
+		}
+		if err := owned.VerifyHandle(rootHandle); err != nil {
+			t.Error("runtime identity changed; retained")
+			return
+		}
+		if err := owned.RemoveAfter(waitErr, proof); err != nil {
+			t.Error("runtime removal failed; retained")
+			return
+		}
+		if err := parentGuard.RemoveParent(); err != nil {
+			t.Error("runtime parent removal failed; retained")
 		}
 	}()
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "before-readiness" {
+		_ = readyR.Close()
+	}
 	var ready muxerExecReady
 	readyResult := make(chan error, 1)
 	go func() { readyResult <- json.NewDecoder(readyR).Decode(&ready) }()
 	select {
 	case err := <-readyResult:
 		if err != nil {
-			_ = process.Kill()
-			_ = cmd.Wait()
-			waited = true
-			t.Fatalf("read muxer-exec readiness: %v\n%s", err, childOutput.String())
+			expectedExit = 1
+			t.Fatalf("read muxer-exec readiness: %v", err)
 		}
 	case <-time.After(15 * time.Second):
-		_ = process.Kill()
-		_ = cmd.Wait()
-		waited = true
-		t.Fatalf("timed out waiting for muxer-exec readiness\n%s", childOutput.String())
+		t.Fatal("timed out waiting for muxer-exec readiness")
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(ready.DataDir) })
+	if ready.DataDir != data {
+		t.Fatal("readiness runtime mismatch")
+	}
+	if err := owned.VerifyHandle(rootHandle); err != nil {
+		t.Fatal("readiness runtime identity changed")
+	}
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "after-readiness" {
+		expectedExit = 1
+		_ = stdin.Close()
+		t.Fatal("controlled failure after readiness")
+	}
 	if _, err := backend.Claim(ready.DataDir); !errors.Is(err, backend.ErrMuxerOwned) {
 		t.Fatalf("ownership before exec = %v", err)
 	}
@@ -827,10 +1021,26 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("muxer-exec helper: %v\n%s", err, childOutput.String())
+	if os.Getenv("SCIMUX_MUXER_EXEC_TEST_FAILURE") == "late-after-stop" {
+		deadline := time.Now().Add(15 * time.Second)
+		for len(done) == 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if len(done) == 0 {
+			t.Fatal("controlled completion observation timed out")
+		}
+		muxerSyntheticObservation(t, "wait-ready", "", nil)
+		t.Fatal("controlled late outer failure")
 	}
-	waited = true
+	select {
+	case waitErr = <-done:
+		waited = true
+	case <-time.After(15 * time.Second):
+		t.Fatal("muxer-exec supervisor did not exit")
+	}
+	if waitErr != nil {
+		t.Fatalf("muxer-exec supervisor: %v\n%s", waitErr, childOutput.String())
+	}
 	for _, harness := range muxerExecHarnesses {
 		if _, err := sessionworker.Discover(ready.DataDir, harness.ID); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("explicit stop left %s worker: %v", harness.Agent, err)

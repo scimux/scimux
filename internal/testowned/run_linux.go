@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
@@ -19,13 +20,30 @@ type processKernel struct {
 	signals   chan os.Signal
 	preflight func() error
 	register  func() error
+	seal      func() error
+	handles   Handles
 }
 
 func (k *processKernel) prepare() error {
 	if err := k.preflight(); err != nil {
 		return err
 	}
+	if k.seal != nil {
+		if err := k.seal(); err != nil {
+			return err
+		}
+	}
 	return k.register()
+}
+
+func sealInherited(arch string, call func() syscall.Errno) error {
+	if arch != "amd64" && arch != "arm64" {
+		return errors.New("unsupported descriptor isolation")
+	}
+	if err := call(); err != 0 {
+		return err
+	}
+	return nil
 }
 func noExistingChildren() error {
 	var info [128]byte
@@ -41,10 +59,21 @@ func registerSubreaper(call func() syscall.Errno) error {
 }
 
 func (k *processKernel) start() error {
+	defer k.handles.close()
 	if len(k.args) == 0 || k.args[0] == "" {
 		return errors.New("missing runner")
 	}
 	k.cmd = exec.Command(k.args[0], k.args[1:]...)
+	if k.handles.Stdin != nil {
+		k.cmd.Stdin = k.handles.Stdin
+	}
+	if k.handles.Stdout != nil {
+		k.cmd.Stdout = k.handles.Stdout
+	}
+	if k.handles.Stderr != nil {
+		k.cmd.Stderr = k.handles.Stderr
+	}
+	k.cmd.ExtraFiles = k.handles.ExtraFiles
 	return k.cmd.Start()
 }
 func (k *processKernel) waitRunner() (int, error) {
@@ -59,10 +88,28 @@ func (k *processKernel) waitRunner() (int, error) {
 }
 func (k *processKernel) pause(d time.Duration) { time.Sleep(d) }
 func Run(args []string) Result {
+	return run(args, Handles{}, nil)
+}
+
+// RunWithHandles is for a fresh, dedicated supervisor process. It takes
+// ownership of the supplied handles even when its prerequisite check fails.
+func RunWithHandles(args []string, handles Handles) Result {
+	return run(args, handles, func() error {
+		return sealInherited(runtime.GOARCH, func() syscall.Errno {
+			// close_range(3, UINT_MAX, CLOSE_RANGE_CLOEXEC) marks descriptors
+			// without closing or enumerating them; exec maps explicit handles.
+			_, _, errno := syscall.Syscall(436, 3, ^uintptr(0)>>32, 4)
+			return errno
+		})
+	})
+}
+
+func run(args []string, handles Handles, seal func() error) Result {
+	defer handles.close()
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	k := &processKernel{args: args, signals: signals, preflight: noExistingChildren, register: func() error {
+	k := &processKernel{args: args, signals: signals, handles: handles, seal: seal, preflight: noExistingChildren, register: func() error {
 		return registerSubreaper(func() syscall.Errno { _, _, err := syscall.Syscall6(syscall.SYS_PRCTL, 36, 1, 0, 0, 0, 0); return err })
 	}, nativeKernel: nativeKernel{ops: nativeOps{
 		list: func() ([]int, error) {

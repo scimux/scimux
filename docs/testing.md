@@ -28,6 +28,13 @@ signal. A caller must check both results before accepting a run. Invalid command
 arguments and unavailable supervisor prerequisites exit 2; cleanup failures
 exit 1. The current interrupt grace is for this focused test tool; integration
 must measure an adequate bounded teardown grace before using it for browser E2E.
+The optional explicit-handle adapter is only for a fresh, dedicated test
+supervisor process. On Linux amd64 and arm64 it requires `close_range` with
+`CLOSE_RANGE_CLOEXEC`; other architectures or an unavailable syscall fail
+before launching the runner. This is not a production prerequisite. The
+adapter takes ownership of the handles and closes them after the launch
+attempt, including a failed prerequisite or launch. Its runner streams are
+separate from the supervisor's cleanup proof.
 
 Keep `TMPDIR` short (prefer `/tmp`) when running the suite. Integration tests
 create Unix-domain sockets below temporary directories, and long sandbox paths

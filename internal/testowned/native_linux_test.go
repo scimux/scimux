@@ -137,6 +137,34 @@ func TestPreparationProofBeforeRegister(t *testing.T) {
 	}
 }
 
+func TestDescriptorIsolationPrerequisite(t *testing.T) {
+	for _, tc := range []struct {
+		arch   string
+		err    syscall.Errno
+		called bool
+		ok     bool
+	}{
+		{"amd64", 0, true, true}, {"arm64", 0, true, true},
+		{"amd64", syscall.ENOSYS, true, false}, {"amd64", syscall.EPERM, true, false},
+		{"unsupported", 0, false, false},
+	} {
+		called := false
+		err := sealInherited(tc.arch, func() syscall.Errno { called = true; return tc.err })
+		if called != tc.called || (err == nil) != tc.ok {
+			t.Fatalf("architecture %s: called=%t error=%v", tc.arch, called, err)
+		}
+	}
+	registered := false
+	k := processKernel{preflight: func() error { return nil }, seal: func() error { return syscall.ENOSYS }, register: func() error { registered = true; return nil }}
+	if err := k.prepare(); !errors.Is(err, syscall.ENOSYS) || registered {
+		t.Fatalf("failed isolation accepted: %v registered=%t", err, registered)
+	}
+	k.seal = func() error { return nil }
+	if err := k.prepare(); err != nil || !registered {
+		t.Fatalf("successful isolation rejected: %v registered=%t", err, registered)
+	}
+}
+
 func TestNoExistingChildrenAndStart(t *testing.T) {
 	if err := noExistingChildren(); err != nil {
 		t.Fatal("empty supervisor process not accepted")

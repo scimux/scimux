@@ -16,6 +16,23 @@ type Result struct {
 	Reaped     int
 }
 
+// Handles transfers ownership of explicitly supplied runner descriptors to
+// the supervisor. They are closed after the launch attempt, including when
+// preparation or launch fails. Nil fields preserve the ordinary Run defaults.
+type Handles struct {
+	Stdin, Stdout, Stderr *os.File
+	ExtraFiles            []*os.File
+}
+
+func (h Handles) close() {
+	files := append([]*os.File{h.Stdin, h.Stdout, h.Stderr}, h.ExtraFiles...)
+	for _, f := range files {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+}
+
 type kernel interface {
 	prepare() error
 	start() error
@@ -153,4 +170,12 @@ func Command(args []string, out io.Writer, run func([]string) Result) int {
 		return 1
 	}
 	return 0
+}
+
+// CheckRunner evaluates the runner outcome independently of cleanup proof.
+func CheckRunner(result Result, expectedExit int) error {
+	if result.RunnerExit != expectedExit {
+		return errors.New("unexpected test runner outcome")
+	}
+	return nil
 }
