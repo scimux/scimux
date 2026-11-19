@@ -15,7 +15,7 @@ import (
 
 // The production HTTP tunnel adapter must receive the query after the real
 // codec has removed unlisted headers. The label is a precondition, not auth.
-func TestChatIdentityQueryThroughProductionTunnel(t *testing.T) {
+func TestChatIdentityQueryThroughCodecPipeHTTPAdapter(t *testing.T) {
 	left, right := net.Pipe()
 	client := codec.NewConn(left, left, codec.RoleInitiator)
 	server := codec.NewConn(right, right, codec.RoleResponder)
@@ -56,7 +56,7 @@ func TestChatIdentityQueryThroughProductionTunnel(t *testing.T) {
 
 // Multipart uploads and associated downloads use the production codec and
 // HTTP adapter, including their closed header allowlists and query transport.
-func TestPeopleFilesThroughProductionCodecAndTunnel(t *testing.T) {
+func TestPeopleFilesThroughCodecPipeHTTPAdapter(t *testing.T) {
 	left, right := net.Pipe()
 	client := codec.NewConn(left, left, codec.RoleInitiator)
 	server := codec.NewConn(right, right, codec.RoleResponder)

@@ -1052,11 +1052,11 @@ async function peopleRealTunnel(mode,ownerSeat,readerSeat) {
   manifest['people-tunnel-toolchain-'+mode]={version:go.version,sha256:goDigest};
   async function throughTunnel(readonly) {
     const env={...goEnv,GOCACHE:process.env.GOCACHE||execFileSync(go.executable,['env','GOCACHE'],{env:goEnv,encoding:'utf8'}).trim(),GOMODCACHE:process.env.GOMODCACHE||execFileSync(go.executable,['env','GOMODCACHE'],{env:goEnv,encoding:'utf8'}).trim(),SCIMUX_TUNNEL_APP_TARGET:readerSeat.base,SCIMUX_TUNNEL_APP_KEY:key,SCIMUX_TUNNEL_APP_COPY_INSTANCE:sub.people_copy_instance,SCIMUX_TUNNEL_APP_CSRF:readerSeat.csrf,SCIMUX_TUNNEL_APP_READONLY:readonly?'1':'0'};
-    const child=start(go.executable,['test','./internal/remote','-run','^TestPeopleRealAppThroughProductionTunnel$','-count=1','-v'],env,'people-tunnel-'+mode+'-'+readonly,'pipe');let output='';child.stdout.on('data',chunk=>{if(output.length<65536)output+=chunk});
+    const child=start(go.executable,['test','./internal/remote','-run','^TestPeopleRealAppThroughCodecPipeHTTPBridge$','-count=1','-v'],env,'people-tunnel-'+mode+'-'+readonly,'pipe');let output='';child.stdout.on('data',chunk=>{if(output.length<65536)output+=chunk});
     const status=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}))});
     assert.equal(status.code,0,'real app tunnel integration failed: '+output);assert.equal(status.signal,null);
-    assert.match(output,/--- PASS: TestPeopleRealAppThroughProductionTunnel(?:\s|$)/,'real app tunnel test must run without skipping');
-    manifest['people-tunnel-child-'+mode+'-'+readonly]={test:'TestPeopleRealAppThroughProductionTunnel',passed:true,toolchainSha256:goDigest};
+    assert.match(output,/--- PASS: TestPeopleRealAppThroughCodecPipeHTTPBridge(?:\s|$)/,'codec pipe HTTP bridge test must run without skipping');
+    manifest['people-tunnel-child-'+mode+'-'+readonly]={test:'TestPeopleRealAppThroughCodecPipeHTTPBridge',passed:true,toolchainSha256:goDigest};
   }
   await throughTunnel(false);
   const bubble=page.locator('#msgs .gmsg').filter({hasText:'synthetic-tunnel.txt'}).last();await bubble.waitFor({timeout:40000});

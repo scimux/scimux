@@ -219,26 +219,31 @@ Playwright is test-only and is not a shipped dependency. Install it outside
 this repository, for example with `npm install --prefix /some/test-tools
 playwright` followed by `/some/test-tools/node_modules/.bin/playwright install
 chromium`; install the browser's system libraries as needed. Build scimux and
-an independent relay. The complete suite also needs a build of the Part 1
-tagged scimux source and a build of the pre-attachment relay, plus the exact
-source tree used for the tagged build. These run as isolated synthetic seats
-to verify mixed-version behavior. Supply absolute paths:
+an independent relay. The complete suite also needs an unreleased
+pre-attachment compatibility client, its matching source tree, and a
+pre-attachment compatibility relay. These run as isolated synthetic seats to
+verify mixed-version behavior. Build each fixture from an immutable revision
+and retain the revisions and build hashes with the private test evidence; the
+client source must match its binary. The relay capability advertised by the
+`Scimux-Blob-Generation` header is unpublished. A relay with this support
+must ship before the attachment-capable client, following separate approval.
+Supply absolute paths:
 
 ```sh
 CGO_ENABLED=0 go build -o /some/output/scimux ./cmd/scimux
 (cd /some/scimux-team && CGO_ENABLED=0 go build -o /some/output/scimux-team ./cmd/scimux-team)
 SCIMUX_E2E_BINARY=/some/output/scimux \
 SCIMUX_TEAM_E2E_BINARY=/some/output/scimux-team \
-SCIMUX_E2E_LEGACY_BINARY=/some/output/scimux-part1 \
-SCIMUX_E2E_LEGACY_SOURCE=/some/tagged-scimux-source \
+SCIMUX_E2E_LEGACY_BINARY=/some/output/scimux-compatibility \
+SCIMUX_E2E_LEGACY_SOURCE=/some/compatibility-client-source \
 SCIMUX_TEAM_LEGACY_E2E_BINARY=/some/output/scimux-team-legacy \
 SCIMUX_E2E_PLAYWRIGHT=/some/test-tools/node_modules/playwright \
 SCIMUX_E2E_GO=/absolute/path/to/go \
 node web/test/team-e2e.cjs
 ```
 
-The real-tunnel fixture requires Go 1.26 or newer. `SCIMUX_E2E_GO` selects an
-absolute executable; if omitted, the runner resolves `go` from its incoming
+The codec over net.Pipe and HTTP bridge fixture requires Go 1.26 or newer.
+`SCIMUX_E2E_GO` selects an absolute executable; if omitted, the runner resolves `go` from its incoming
 preflight PATH. It verifies the selected version with local toolchain
 selection, then invokes that exact executable with an offline module setting
 and the restricted fake-agent PATH. Set `GOCACHE` and `GOMODCACHE` or `GOPATH`
@@ -249,8 +254,21 @@ Set `PLAYWRIGHT_BROWSERS_PATH` for a custom browser location. The runner fails
 on missing prerequisites. Its default executes all implemented scenarios and
 records only assertions that passed. The printed private artifact directory
 contains a manifest, screenshots, logs, and raw browser JavaScript coverage
-with each page checked against its matching current or tagged source. It can
-contain synthetic credentials: keep it private.
+with each page checked against its matching current or compatibility client
+source. It can contain synthetic credentials: keep it private.
+To check the retained manifest and its declared screenshot files, select the
+source-defined profile independently of the evidence:
+
+```sh
+node web/test/testdata/team-e2e/audit-evidence.cjs --profile people-attachments /path/to/private/run
+```
+
+Use `owner-agent-attachments` for the pre-attachment scenario source and
+`people-attachments` for the People attachment scenario source. The auditor
+checks assertion results, scoped counter changes and the PNG signature and
+minimum header structure; it does not decode images. It emits counts and
+PASS or FAIL without evidence content. Its structural checks do not attest
+that mutable evidence is authentic or that recorded events occurred.
 The focused common file-chip contrast check also takes the source tree and a
 private artifact directory: `node web/test/testdata/team-e2e/file-contrast.cjs
 /absolute/scimux/source /absolute/private/artifacts` with
@@ -285,15 +303,15 @@ Use `SCIMUX_E2E_SCENARIO` for a bounded run. The available selections are
 `received-offline`, `permission-lifecycle`, `recipient-leave`, `leave-stale`,
 `leave-empty`, `held-evidence`, `dropped-send`, `reshare-stale`, `ai-source`,
 `viewport-keyboard`, `media-contrast`, `unshared`, and `held-chat-loading`.
-Stage 1 also provides `stage1-scanner`, `stage1-unread`, and
-`stage1-owner-files`: these exercise active and stale chat selection, unread
+The selections `stage1-scanner`, `stage1-unread`, and
+`stage1-owner-files` exercise active and stale chat selection, unread
 authorship and per-card indicators, and the owner's attachment composer.
 They use the same fake agent transports, private seats, and real relay as the
 default run. `stage2-shared-actions` checks shared bubble actions, exact
 bookmark jumps with duplicate text, local annotations and destinations, and
 an explicitly sent owner prompt. `stage2-bookmark-pages` checks an exact jump
-across the shared comment page boundary with duplicate text. These Stage 1 and
-Stage 2 scenarios also run as part of the complete default suite. The bounded
+across the shared comment page boundary with duplicate text. These scenarios
+also run as part of the complete default suite. The bounded
 `recreated-chat-isolation`, `bubble-selection`, and `draft-recovery` scenarios
 exercise reused local identities, pointer selection, and explicit review of
 older saved drafts on desktop and phone. `header-focus` checks Mine and sharer

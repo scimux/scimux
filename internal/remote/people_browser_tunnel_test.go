@@ -23,7 +23,7 @@ import (
 // This opt-in browser integration uses synthetic records and a private HTTP
 // bridge into the real codec and production HTTP tunnel adapter. It does not
 // launch an agent or depend on a user profile.
-func TestPeopleDelayedBrowserDownloadThroughProductionTunnel(t *testing.T) {
+func TestPeopleDelayedBrowserDownloadThroughCodecPipeHTTPBridge(t *testing.T) {
 	playwright := os.Getenv("SCIMUX_E2E_PLAYWRIGHT")
 	if playwright == "" {
 		t.Skip("set SCIMUX_E2E_PLAYWRIGHT for the browser tunnel integration")

@@ -18,10 +18,10 @@ import (
 	"github.com/scimux/scimux/internal/remote/codec"
 )
 
-// TestPeopleRealAppThroughProductionTunnel is opt-in from the isolated browser
+// TestPeopleRealAppThroughCodecPipeHTTPBridge is opt-in from the isolated browser
 // fixture. The loopback bridge supplies the fixture's local CSRF boundary;
 // application and relay authorization and storage remain the real routes.
-func TestPeopleRealAppThroughProductionTunnel(t *testing.T) {
+func TestPeopleRealAppThroughCodecPipeHTTPBridge(t *testing.T) {
 	target := os.Getenv("SCIMUX_TUNNEL_APP_TARGET")
 	if target == "" {
 		t.Skip("requires the isolated browser fixture")
