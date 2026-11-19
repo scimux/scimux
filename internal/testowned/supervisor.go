@@ -179,3 +179,11 @@ func CheckRunner(result Result, expectedExit int) error {
 	}
 	return nil
 }
+
+// runnerBounds selects nominal 100-millisecond ticks after the first signal.
+func runnerBounds(browser bool) (int, int) {
+	if browser {
+		return 6000, 6300
+	}
+	return 20, 40
+}

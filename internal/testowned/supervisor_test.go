@@ -339,3 +339,291 @@ func TestCheckRunnerOutcome(t *testing.T) {
 		t.Fatal("unexpected runner outcome accepted")
 	}
 }
+
+func TestRunnerBoundsBothModes(t *testing.T) {
+	for _, tc := range []struct {
+		browser bool
+		grace   int
+		limit   int
+	}{{false, 20, 40}, {true, 6000, 6300}} {
+		grace, limit := runnerBounds(tc.browser)
+		if grace != tc.grace || limit != tc.limit {
+			t.Fatalf("browser=%t: got (%d, %d), want (%d, %d)", tc.browser, grace, limit, tc.grace, tc.limit)
+		}
+	}
+}
+
+func TestBrowserGracePreservesBlockedRunner(t *testing.T) {
+	grace, limit := runnerBounds(true)
+	done := make(chan runnerWait, 1)
+	signals := make(chan os.Signal, 1)
+	ticks := make(chan time.Time)
+	forwarded := make(chan struct{})
+	killed := make(chan struct{}, 1)
+	result := make(chan runnerWait, 1)
+	go func() {
+		code, err := awaitRunner(done, signals, ticks, func(os.Signal) error { close(forwarded); return nil }, func() error { killed <- struct{}{}; return nil }, grace, limit)
+		result <- runnerWait{code: code, err: err}
+	}()
+	defer func() { done <- runnerWait{code: 143} }()
+	signals <- syscall.SIGTERM
+	select {
+	case <-forwarded:
+	case <-time.After(time.Second):
+		t.Fatal("signal not forwarded")
+	}
+	for i := 0; i < 25; i++ {
+		select {
+		case ticks <- time.Time{}:
+		case <-killed:
+			t.Fatal("blocked runner killed before browser grace")
+		case <-time.After(time.Second):
+			t.Fatal("runner timer stopped")
+		}
+	}
+	select {
+	case <-killed:
+		t.Fatal("blocked runner killed before browser grace")
+	default:
+	}
+}
+
+// The browser deadline is measured in nominal 100-millisecond ticks.
+func TestBrowserExactTickBoundaries(t *testing.T) {
+	grace, limit := runnerBounds(true)
+	if grace != 6000 || limit != 6300 {
+		t.Fatalf("browser bounds = %d/%d", grace, limit)
+	}
+	done := make(chan runnerWait, 1)
+	signals := make(chan os.Signal, 1)
+	ticks := make(chan time.Time)
+	forwarded := make(chan struct{})
+	killed := make(chan struct{})
+	result := make(chan error, 1)
+	cancel := make(chan struct{})
+	go func() {
+		_, err := awaitRunner(done, signals, ticks, func(os.Signal) error { close(forwarded); return nil }, func() error {
+			select {
+			case killed <- struct{}{}:
+				return nil
+			case <-cancel:
+				return errors.New("canceled")
+			}
+		}, grace, limit)
+		result <- err
+	}()
+	t.Cleanup(func() {
+		close(cancel)
+		select {
+		case done <- runnerWait{}:
+		default:
+		}
+	})
+	signals <- syscall.SIGINT
+	deadline := time.After(5 * time.Second)
+	select {
+	case <-forwarded:
+	case <-deadline:
+		t.Fatal("signal not forwarded")
+	}
+	for i := 1; i < grace; i++ {
+		select {
+		case ticks <- time.Time{}:
+		case <-killed:
+			t.Fatalf("killed before tick %d", grace)
+		case <-deadline:
+			t.Fatal("timer stalled")
+		}
+	}
+	select {
+	case ticks <- time.Time{}:
+	case <-killed:
+		t.Fatal("killed before grace boundary")
+	case <-deadline:
+		t.Fatal("timer stalled at grace")
+	}
+	select {
+	case <-killed:
+	case <-deadline:
+		t.Fatal("no kill at grace boundary")
+	}
+	for i := grace + 1; i < limit; i++ {
+		select {
+		case ticks <- time.Time{}:
+		case <-result:
+			t.Fatalf("timeout before tick %d", limit)
+		case <-deadline:
+			t.Fatal("timer stalled")
+		}
+	}
+	select {
+	case ticks <- time.Time{}:
+	case <-result:
+		t.Fatal("timeout before limit boundary")
+	case <-deadline:
+		t.Fatal("timer stalled at limit")
+	}
+	select {
+	case err := <-result:
+		if err == nil || err.Error() != "runner timeout" {
+			t.Fatalf("timeout = %v", err)
+		}
+	case <-deadline:
+		t.Fatal("no timeout at limit")
+	}
+}
+
+func TestBrowserTeardownNominalBoundaries(t *testing.T) {
+	for _, finish := range []bool{false, true} {
+		t.Run(fmt.Sprintf("finish=%t", finish), func(t *testing.T) {
+			grace, limit := runnerBounds(true)
+			done := make(chan runnerWait, 1)
+			signals := make(chan os.Signal)
+			ticks := make(chan time.Time)
+			forwarded := make(chan os.Signal, 2)
+			killed := make(chan struct{}, 2)
+			result := make(chan runnerWait, 1)
+			go func() {
+				code, err := awaitRunner(done, signals, ticks, func(s os.Signal) error { forwarded <- s; return nil }, func() error { killed <- struct{}{}; return nil }, grace, limit)
+				result <- runnerWait{code: code, err: err}
+			}()
+			t.Cleanup(func() {
+				select {
+				case done <- runnerWait{}:
+				default:
+				}
+			})
+			signals <- syscall.SIGTERM
+			if s := <-forwarded; s != syscall.SIGTERM {
+				t.Fatal("wrong signal forwarded")
+			}
+			deadline := time.After(5 * time.Second)
+			for i := 1; i <= 5999; i++ {
+				if i == 3000 {
+					select {
+					case signals <- syscall.SIGINT:
+					case <-deadline:
+						t.Fatal("repeat signal stalled")
+					}
+				}
+				select {
+				case ticks <- time.Time{}:
+				case <-killed:
+					t.Fatalf("killed before browser grace at tick %d", i)
+				case <-result:
+					t.Fatal("runner returned before grace")
+				case <-deadline:
+					t.Fatal("ticks stalled")
+				}
+			}
+			select {
+			case <-killed:
+				t.Fatal("killed before browser grace")
+			default:
+			}
+			select {
+			case ticks <- time.Time{}:
+			case <-deadline:
+				t.Fatal("grace tick stalled")
+			}
+			select {
+			case <-killed:
+			case <-deadline:
+				t.Fatal("no kill at browser grace")
+			}
+			end := 6300
+			if finish {
+				end = 6250
+			}
+			for i := 6001; i < end; i++ {
+				select {
+				case ticks <- time.Time{}:
+				case <-result:
+					t.Fatal("runner timed out too early")
+				case <-deadline:
+					t.Fatal("late ticks stalled")
+				}
+			}
+			select {
+			case <-killed:
+				t.Fatal("more than one kill")
+			case <-forwarded:
+				t.Fatal("repeat signal forwarded")
+			default:
+			}
+			if finish {
+				done <- runnerWait{code: 23}
+				select {
+				case got := <-result:
+					if got.err != nil || got.code != 23 {
+						t.Fatalf("late finish %+v", got)
+					}
+				case <-deadline:
+					t.Fatal("late finish stalled")
+				}
+				return
+			}
+			select {
+			case ticks <- time.Time{}:
+			case <-deadline:
+				t.Fatal("timeout tick stalled")
+			}
+			select {
+			case got := <-result:
+				if got.err == nil || got.err.Error() != "runner timeout" {
+					t.Fatalf("timeout %+v", got)
+				}
+			case <-deadline:
+				t.Fatal("timeout absent")
+			}
+		})
+	}
+}
+
+func TestBrowserTeardownReportsForwardAndKillErrors(t *testing.T) {
+	grace, limit := runnerBounds(true)
+	failure := errors.New("synthetic failure")
+	t.Run("forward", func(t *testing.T) {
+		signals := make(chan os.Signal, 1)
+		signals <- syscall.SIGINT
+		_, err := awaitRunner(make(chan runnerWait), signals, nil, func(os.Signal) error { return failure }, nil, grace, limit)
+		if !errors.Is(err, failure) {
+			t.Fatal("forward error lost")
+		}
+	})
+	t.Run("kill", func(t *testing.T) {
+		done := make(chan runnerWait, 1)
+		signals := make(chan os.Signal)
+		ticks := make(chan time.Time)
+		forwarded := make(chan struct{})
+		result := make(chan error, 1)
+		go func() {
+			_, err := awaitRunner(done, signals, ticks, func(os.Signal) error { close(forwarded); return nil }, func() error { return failure }, grace, limit)
+			result <- err
+		}()
+		t.Cleanup(func() {
+			select {
+			case done <- runnerWait{}:
+			default:
+			}
+		})
+		signals <- syscall.SIGTERM
+		<-forwarded
+		deadline := time.After(5 * time.Second)
+		for i := 0; i < grace; i++ {
+			select {
+			case ticks <- time.Time{}:
+			case <-deadline:
+				t.Fatal("ticks stalled")
+			}
+		}
+		select {
+		case err := <-result:
+			if !errors.Is(err, failure) {
+				t.Fatal("kill error lost")
+			}
+		case <-deadline:
+			t.Fatal("kill error missing")
+		}
+	})
+}

@@ -550,3 +550,34 @@ func TestActualNonChildRefused(t *testing.T) {
 		t.Fatalf("neighbor did not survive: %v", err)
 	}
 }
+
+func TestBrowserHandlesHelper(t *testing.T) {
+	if os.Getenv("TESTOWNED_PREFLIGHT_HELPER") != "1" {
+		return
+	}
+	result := RunBrowserWithHandles([]string{"/bin/bash", "--norc", "-c", "exit 0"}, Handles{})
+	_ = json.NewEncoder(os.Stdout).Encode(result)
+	os.Exit(0)
+}
+
+func TestBrowserHandlesLaunchAndProof(t *testing.T) {
+	guard := installFixtureReaper(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestBrowserHandlesHelper$")
+	cmd.Env = append(os.Environ(), "TESTOWNED_PREFLIGHT_HELPER=1")
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	wait := waitHandleFixture(t, guard, cmd)
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+	var result Result
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Clean || result.Category != "clean" || result.RunnerExit != 0 {
+		t.Fatalf("browser teardown proof: %+v", result)
+	}
+}

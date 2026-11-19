@@ -15,13 +15,14 @@ import (
 
 type processKernel struct {
 	nativeKernel
-	args      []string
-	cmd       *exec.Cmd
-	signals   chan os.Signal
-	preflight func() error
-	register  func() error
-	seal      func() error
-	handles   Handles
+	args            []string
+	cmd             *exec.Cmd
+	signals         chan os.Signal
+	preflight       func() error
+	register        func() error
+	seal            func() error
+	handles         Handles
+	browserTeardown bool
 }
 
 func (k *processKernel) prepare() error {
@@ -84,16 +85,26 @@ func (k *processKernel) waitRunner() (int, error) {
 	}()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
-	return awaitRunner(done, k.signals, ticker.C, func(s os.Signal) error { return k.cmd.Process.Signal(s) }, func() error { return k.cmd.Process.Kill() }, 20, 40)
+	grace, limit := runnerBounds(k.browserTeardown)
+	return awaitRunner(done, k.signals, ticker.C, func(s os.Signal) error { return k.cmd.Process.Signal(s) }, func() error { return k.cmd.Process.Kill() }, grace, limit)
 }
 func (k *processKernel) pause(d time.Duration) { time.Sleep(d) }
 func Run(args []string) Result {
-	return run(args, Handles{}, nil)
+	return run(args, Handles{}, nil, false)
 }
 
 // RunWithHandles is for a fresh, dedicated supervisor process. It takes
 // ownership of the supplied handles even when its prerequisite check fails.
 func RunWithHandles(args []string, handles Handles) Result {
+	return runWithHandles(args, handles, false)
+}
+
+// RunBrowserWithHandles allows bounded teardown of the browser test runner.
+func RunBrowserWithHandles(args []string, handles Handles) Result {
+	return runWithHandles(args, handles, true)
+}
+
+func runWithHandles(args []string, handles Handles, browser bool) Result {
 	return run(args, handles, func() error {
 		return sealInherited(runtime.GOARCH, func() syscall.Errno {
 			// close_range(3, UINT_MAX, CLOSE_RANGE_CLOEXEC) marks descriptors
@@ -101,15 +112,15 @@ func RunWithHandles(args []string, handles Handles) Result {
 			_, _, errno := syscall.Syscall(436, 3, ^uintptr(0)>>32, 4)
 			return errno
 		})
-	})
+	}, browser)
 }
 
-func run(args []string, handles Handles, seal func() error) Result {
+func run(args []string, handles Handles, seal func() error, browser bool) Result {
 	defer handles.close()
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	k := &processKernel{args: args, signals: signals, handles: handles, seal: seal, preflight: noExistingChildren, register: func() error {
+	k := &processKernel{args: args, signals: signals, handles: handles, seal: seal, browserTeardown: browser, preflight: noExistingChildren, register: func() error {
 		return registerSubreaper(func() syscall.Errno { _, _, err := syscall.Syscall6(syscall.SYS_PRCTL, 36, 1, 0, 0, 0, 0); return err })
 	}, nativeKernel: nativeKernel{ops: nativeOps{
 		list: func() ([]int, error) {
