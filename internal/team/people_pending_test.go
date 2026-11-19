@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -156,6 +157,64 @@ func TestPeopleConfirmationKeepsPinWhenRetainedDirectoryCannotSync(t *testing.T)
 	}
 }
 
+func TestPeopleCompletionParentSyncPrecedesPendingRemoval(t *testing.T) {
+	dir, id, stage := t.TempDir(), sampleCopyID(), syntheticPeopleStage()
+	pending := syntheticPeoplePending(stage)
+	if err := SavePeopleStage(dir, id, stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePending(dir, id, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePublished(dir, id, 1, stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
+		t.Fatal(err)
+	}
+	copyDir := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation)
+	parent, err := os.Stat(copyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := peopleRecordIO
+	t.Cleanup(func() { peopleRecordIO = original })
+	faults := 0
+	peopleRecordIO.sync = func(f *os.File) error {
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if os.SameFile(parent, info) {
+			if _, err := os.Stat(filepath.Join(copyDir, "people-completed")); err == nil {
+				faults++
+				return errors.New("synthetic completion parent sync failure")
+			}
+		}
+		return original.sync(f)
+	}
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil || faults == 0 {
+		t.Fatalf("undurable completion accepted: %v faults=%d", err, faults)
+	}
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+		t.Fatal("retry released pending before repair")
+	}
+	peopleRecordIO = original
+	if _, err := ReadPeoplePending(dir, id, pending.Key); err != nil {
+		t.Fatalf("pending lost: %v", err)
+	}
+	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
+		t.Fatal("pin released")
+	}
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	completion, err := ReadPeopleCompletion(dir, id, pending.Key)
+	if err != nil || completion.Seq != 1 || !reflect.DeepEqual(completion.Pending, pending) {
+		t.Fatalf("receipt changed: %v", err)
+	}
+}
+
 func TestPeoplePendingTransientSyncRepairKeepsConcurrentIdentity(t *testing.T) {
 	dir, id, stage := t.TempDir(), sampleCopyID(), syntheticPeopleStage()
 	pending := syntheticPeoplePending(stage)
@@ -262,10 +321,20 @@ func TestPeoplePendingWriteFailuresPreserveStagesAndRetryIdentity(t *testing.T) 
 			pending := syntheticPeoplePending(stage)
 			original := peopleRecordIO
 			t.Cleanup(func() { peopleRecordIO = original })
-			calls := 0
+			linked := false
+			peopleRecordIO.link = func(r *os.Root, old, name string) error {
+				err := original.link(r, old, name)
+				if err == nil {
+					linked = true
+				}
+				return err
+			}
 			peopleRecordIO.sync = func(f *os.File) error {
-				calls++
-				if (fault == "file sync" && calls == 1) || (fault == "directory sync" && calls == 2) {
+				info, err := f.Stat()
+				if err != nil {
+					return err
+				}
+				if (fault == "file sync" && !info.IsDir()) || (fault == "directory sync" && linked && info.IsDir() && strings.Contains(f.Name(), "people-pending")) {
 					return errors.New("synthetic sync failure")
 				}
 				return f.Sync()
@@ -396,7 +465,12 @@ func TestPeoplePendingInspectionFailuresKeepStagePinned(t *testing.T) {
 					return r.Lstat(name)
 				}
 			case "open directory":
-				peopleRecordIO.openDir = func(*os.Root) (*os.File, error) { return nil, failure }
+				peopleRecordIO.openDir = func(r *os.Root) (*os.File, error) {
+					if filepath.Base(r.Name()) == "people-pending" {
+						return nil, failure
+					}
+					return original.openDir(r)
+				}
 			case "read directory":
 				peopleRecordIO.readDir = func(*os.File) ([]os.DirEntry, error) { return nil, failure }
 			}
@@ -1348,5 +1422,59 @@ func TestPeopleConfirmationRecoversAfterCompletionWrittenBeforeUnpin(t *testing.
 				}
 			}
 		})
+	}
+}
+func TestPeopleCompletionRestartBeforePendingRemoval(t *testing.T) {
+	if dir := os.Getenv("SCIMUX_TEST_COMPLETION_RESTART_DIR"); dir != "" {
+		id, stage := sampleCopyID(), syntheticPeopleStage()
+		pending := syntheticPeoplePending(stage)
+		receipt, err := ReadPeopleCompletion(dir, id, pending.Key)
+		if err != nil || receipt.Seq != 1 || !reflect.DeepEqual(receipt.Pending, pending) {
+			t.Fatalf("receipt: %v", err)
+		}
+		if _, err := ReadPeoplePending(dir, id, pending.Key); err != nil {
+			t.Fatalf("pending: %v", err)
+		}
+		if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
+			t.Fatal("premature unpin")
+		}
+		if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := DeletePeopleStage(dir, id, stage.ID); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	dir, id, stage := t.TempDir(), sampleCopyID(), syntheticPeopleStage()
+	pending := syntheticPeoplePending(stage)
+	if err := SavePeopleStage(dir, id, stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePending(dir, id, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePublished(dir, id, 1, stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
+		t.Fatal(err)
+	}
+	original := peopleRecordIO
+	t.Cleanup(func() { peopleRecordIO = original })
+	peopleRecordIO.remove = func(root *os.Root, name string) error {
+		if name == pending.Key+".json" {
+			return errors.New("synthetic interruption")
+		}
+		return original.remove(root, name)
+	}
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+		t.Fatal("interruption accepted")
+	}
+	peopleRecordIO = original
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPeopleCompletionRestartBeforePendingRemoval$", "-test.v")
+	cmd.Env = append(os.Environ(), "SCIMUX_TEST_COMPLETION_RESTART_DIR="+dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("restart: %v\n%s", err, out)
 	}
 }

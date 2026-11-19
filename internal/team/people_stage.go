@@ -55,6 +55,7 @@ var peopleStageAfterWrite = func() {}
 // peopleRecordIO preserves descriptor-rooted operations while allowing the
 // existing atomic-write failure paths to be exercised with synthetic faults.
 var peopleRecordIO = struct {
+	mkdir    func(*os.Root, string, os.FileMode) error
 	openFile func(*os.Root, string, int, os.FileMode) (*os.File, error)
 	write    func(*os.File, []byte) (int, error)
 	sync     func(*os.File) error
@@ -69,6 +70,7 @@ var peopleRecordIO = struct {
 	readDir  func(*os.File) ([]os.DirEntry, error)
 	walk     func(fs.FS, string, fs.WalkDirFunc) error
 }{
+	mkdir: func(r *os.Root, name string, mode os.FileMode) error { return r.Mkdir(name, mode) },
 	openFile: func(r *os.Root, name string, flag int, mode os.FileMode) (*os.File, error) {
 		return r.OpenFile(name, flag, mode)
 	},
@@ -121,7 +123,7 @@ func peopleRecordDir(dataDir string, id CopyID, create bool, parts ...string) (*
 	}
 	for _, name := range append([]string{CopiesDir, id.Server, id.Owner, id.Chat, id.Generation}, parts...) {
 		if create {
-			if err := root.Mkdir(name, 0700); err != nil && !errors.Is(err, fs.ErrExist) {
+			if err := peopleRecordIO.mkdir(root, name, 0700); err != nil && !errors.Is(err, fs.ErrExist) {
 				root.Close()
 				return nil, ErrPeopleStage
 			}
@@ -142,6 +144,21 @@ func peopleRecordDir(dataDir string, id CopyID, create bool, parts ...string) (*
 		}
 		after, err := copyOps.stat(child, ".")
 		if err != nil || !os.SameFile(before, after) {
+			child.Close()
+			root.Close()
+			return nil, ErrPeopleStage
+		}
+		// A visible directory may be left by a failed sync or an interrupted
+		// creation. Repair each parent link on reads as well as writes.
+		dir, err := peopleRecordIO.openDir(root)
+		if err != nil {
+			child.Close()
+			root.Close()
+			return nil, ErrPeopleStage
+		}
+		err = peopleRecordIO.sync(dir)
+		_ = dir.Close()
+		if err != nil {
 			child.Close()
 			root.Close()
 			return nil, ErrPeopleStage

@@ -11,7 +11,7 @@ This guide holds universal rules; read the matching detailed rules before edits.
 go build -o scimux ./cmd/scimux
 go test ./...                    # unit + integration; integration needs tmux
 go test -short ./...             # unit only; offline CI lane
-node --test web/test/*.test.js   # browser unit suite; no browser needed
+node --test web/test/*.test.js web/test/testdata/team-e2e/unit/*.test.js # browser unit suite; no browser needed
 go vet ./...
 ```
 

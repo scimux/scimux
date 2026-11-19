@@ -68,7 +68,16 @@ func TestPeopleStageAtomicWriteFailuresKeepRecoverableState(t *testing.T) {
 			case "short write":
 				peopleRecordIO.write = func(f *os.File, p []byte) (int, error) { return f.Write(p[:len(p)/2]) }
 			case "file sync":
-				peopleRecordIO.sync = func(*os.File) error { return failure }
+				peopleRecordIO.sync = func(f *os.File) error {
+					info, err := f.Stat()
+					if err != nil {
+						return err
+					}
+					if !info.IsDir() {
+						return failure
+					}
+					return original.sync(f)
+				}
 			case "file close":
 				peopleRecordIO.close = func(f *os.File) error { _ = f.Close(); return failure }
 			case "link":
@@ -76,12 +85,19 @@ func TestPeopleStageAtomicWriteFailuresKeepRecoverableState(t *testing.T) {
 			case "temp remove":
 				peopleRecordIO.remove = func(*os.Root, string) error { return failure }
 			case "directory open":
-				peopleRecordIO.openDir = func(*os.Root) (*os.File, error) { return nil, failure }
+				peopleRecordIO.openDir = func(r *os.Root) (*os.File, error) {
+					if filepath.Base(r.Name()) == "people-stages" {
+						return nil, failure
+					}
+					return original.openDir(r)
+				}
 			case "directory sync":
-				calls := 0
 				peopleRecordIO.sync = func(f *os.File) error {
-					calls++
-					if calls == 2 {
+					info, err := f.Stat()
+					if err != nil {
+						return err
+					}
+					if info.IsDir() && strings.Contains(f.Name(), "people-stages") {
 						return failure
 					}
 					return f.Sync()
@@ -303,7 +319,7 @@ func TestPeopleCopyInstanceRequiresDirectoryDurability(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if fail && info.IsDir() {
+		if fail && info.IsDir() && strings.Contains(f.Name(), "people-identity") {
 			return errors.New("synthetic directory sync failure")
 		}
 		return original.sync(f)
@@ -331,6 +347,106 @@ func TestPeopleCopyInstanceRequiresDirectoryDurability(t *testing.T) {
 	}
 }
 
+func TestPeopleCopyInstanceReadRequiresDurableNamespace(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	first, err := EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := peopleRecordIO
+	t.Cleanup(func() { peopleRecordIO = original })
+	peopleRecordIO.sync = func(f *os.File) error {
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if os.SameFile(info, parent) {
+			return errors.New("synthetic parent sync failure")
+		}
+		return original.sync(f)
+	}
+	if value, err := ReadPeopleCopyInstance(dir, id); err == nil || value != "" {
+		t.Fatalf("read accepted an unsynced namespace: %q %v", value, err)
+	}
+	peopleRecordIO = original
+	if value, err := ReadPeopleCopyInstance(dir, id); err != nil || value != first {
+		t.Fatalf("retry changed identity: %q %v", value, err)
+	}
+}
+
+func TestPeopleNamespaceRepairsEveryParentLink(t *testing.T) {
+	id := sampleCopyID()
+	for _, parts := range [][]string{
+		{"people-identity"}, {"people-stages"}, {"people-pending"}, {"people-completed"},
+		{"people-records", "comments", "1"},
+	} {
+		components := append([]string{CopiesDir, id.Server, id.Owner, id.Chat, id.Generation}, parts...)
+		for index := range components {
+			for _, fault := range []string{"mkdir", "open", "sync"} {
+				t.Run(fmt.Sprintf("%s/%d/%s", strings.Join(parts, "/"), index, fault), func(t *testing.T) {
+					dir := t.TempDir()
+					parent := filepath.Join(append([]string{dir}, components[:index]...)...)
+					if err := os.MkdirAll(parent, 0700); err != nil {
+						t.Fatal(err)
+					}
+					info, err := os.Stat(parent)
+					if err != nil {
+						t.Fatal(err)
+					}
+					original := peopleRecordIO
+					t.Cleanup(func() { peopleRecordIO = original })
+					failed := 0
+					peopleRecordIO.mkdir = func(root *os.Root, name string, mode os.FileMode) error {
+						if fault == "mkdir" && root.Name() == parent {
+							failed++
+							return errors.New("synthetic mkdir failure")
+						}
+						return original.mkdir(root, name, mode)
+					}
+					peopleRecordIO.openDir = func(root *os.Root) (*os.File, error) {
+						if fault == "open" && root.Name() == parent {
+							failed++
+							return nil, errors.New("synthetic open failure")
+						}
+						return original.openDir(root)
+					}
+					peopleRecordIO.sync = func(f *os.File) error {
+						got, err := f.Stat()
+						if err != nil {
+							return err
+						}
+						if fault == "sync" && os.SameFile(info, got) {
+							failed++
+							return errors.New("synthetic sync failure")
+						}
+						return original.sync(f)
+					}
+					if root, err := peopleRecordDir(dir, id, true, parts...); err == nil {
+						root.Close()
+						t.Fatal("undurable namespace accepted")
+					}
+					if failed != 1 {
+						t.Fatalf("faults=%d", failed)
+					}
+					if _, err := os.Stat(filepath.Join(parent, components[index])); (err != nil) != (fault == "mkdir") {
+						t.Fatalf("unexpected link after failure: %v", err)
+					}
+					peopleRecordIO = original
+					root, err := peopleRecordDir(dir, id, true, parts...)
+					if err != nil {
+						t.Fatalf("repair failed: %v", err)
+					}
+					root.Close()
+				})
+			}
+		}
+	}
+}
+
 func TestPeopleCopyInstanceReconcilesTransientSyncAndConcurrentReaders(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
 	original := peopleRecordIO
@@ -341,7 +457,7 @@ func TestPeopleCopyInstanceReconcilesTransientSyncAndConcurrentReaders(t *testin
 		if err != nil {
 			return err
 		}
-		if info.IsDir() && failures == 0 {
+		if info.IsDir() && strings.Contains(f.Name(), "people-identity") && failures == 0 {
 			failures++
 			return errors.New("synthetic transient sync failure")
 		}
@@ -384,7 +500,7 @@ func TestPeopleStageReadRequiresDurableDirectoryAfterFailedAdmission(t *testing.
 		if err != nil {
 			return err
 		}
-		if fail && info.IsDir() {
+		if fail && info.IsDir() && strings.Contains(f.Name(), "people-stages") {
 			failures++
 			return errors.New("synthetic directory sync failure")
 		}
@@ -424,7 +540,7 @@ func TestPeopleStageReadRepairsTransientDirectorySyncFailure(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() && failures == 0 {
+		if info.IsDir() && strings.Contains(f.Name(), "people-stages") && failures == 0 {
 			failures++
 			return errors.New("synthetic transient directory sync failure")
 		}
@@ -459,7 +575,12 @@ func TestPeopleStageReadFailsWhenDurabilityDirectoryUnavailable(t *testing.T) {
 	}
 	original := peopleRecordIO
 	t.Cleanup(func() { peopleRecordIO = original })
-	peopleRecordIO.openDir = func(*os.Root) (*os.File, error) { return nil, errors.New("synthetic directory open failure") }
+	peopleRecordIO.openDir = func(r *os.Root) (*os.File, error) {
+		if filepath.Base(r.Name()) == "people-stages" {
+			return nil, errors.New("synthetic directory open failure")
+		}
+		return original.openDir(r)
+	}
 	if _, err := ReadPeopleStage(dir, id, stage.ID); err == nil {
 		t.Fatal("stage read accepted without durability directory")
 	}
@@ -605,7 +726,12 @@ func TestPeopleCopyInstanceReadFailsWhenDurabilityDirectoryUnavailable(t *testin
 	}
 	original := peopleRecordIO
 	t.Cleanup(func() { peopleRecordIO = original })
-	peopleRecordIO.openDir = func(*os.Root) (*os.File, error) { return nil, errors.New("synthetic directory open failure") }
+	peopleRecordIO.openDir = func(r *os.Root) (*os.File, error) {
+		if filepath.Base(r.Name()) == "people-identity" {
+			return nil, errors.New("synthetic directory open failure")
+		}
+		return original.openDir(r)
+	}
 	if value, err := ReadPeopleCopyInstance(dir, id); err == nil || value != "" {
 		t.Fatalf("unverified identity returned: %q %v", value, err)
 	}

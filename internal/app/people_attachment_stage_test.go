@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -392,11 +393,19 @@ func TestPeopleStageAdmissionRefusesUnavailableLocalSubscription(t *testing.T) {
 }
 
 func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T) {
-	for _, mode := range []string{"already retained", "damaged local log", "relay failure", "empty page", "wrong generation", "retired copy", "valid page", "gap page", "two pages", "page limit"} {
+	for _, mode := range []string{"already retained", "retired retained", "cancelled retained", "changed access retained", "damaged local log", "relay failure", "empty page", "wrong generation", "retired copy", "retired during read", "valid page", "gap page", "two pages", "page limit", "nonprogress"} {
 		t.Run(mode, func(t *testing.T) {
 			var calls atomic.Int32
+			var testHandler *teamHandler
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
+				if mode == "retired during read" {
+					testHandler.mu.Lock()
+					for _, state := range testHandler.copyRemovalEpoch {
+						state.epoch++
+					}
+					testHandler.mu.Unlock()
+				}
 				if mode == "relay failure" {
 					http.Error(w, "synthetic failure", http.StatusServiceUnavailable)
 					return
@@ -407,7 +416,7 @@ func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T)
 				}
 				entries := []any{}
 				last, more := 0, false
-				if mode == "retired copy" || mode == "valid page" || mode == "gap page" || mode == "two pages" || mode == "page limit" || mode == "wrong generation" {
+				if mode == "retired copy" || mode == "retired during read" || mode == "valid page" || mode == "gap page" || mode == "two pages" || mode == "page limit" || mode == "nonprogress" || mode == "wrong generation" {
 					seq := 1
 					if mode == "page limit" {
 						seq = int(calls.Load())
@@ -421,7 +430,7 @@ func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T)
 						last, more = 2, true
 					}
 					if mode == "page limit" {
-						last, more = 9, true
+						last, more = 9, seq < 9
 					}
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"generation": generation, "entries": entries, "last": last, "more": more})
@@ -429,6 +438,7 @@ func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T)
 			t.Cleanup(srv.Close)
 			handler, dir := testTeamSurface(t, clientFor(srv))
 			h := handler.(*teamHandler)
+			testHandler = h
 			server := labEntry(teamServerID, srv.URL, teamToken)
 			seedTeam(t, dir, server)
 			sub := baseSub()
@@ -438,7 +448,7 @@ func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T)
 			if _, err := team.EnsurePeopleCopyInstance(dir, id); err != nil {
 				t.Fatal(err)
 			}
-			if mode == "already retained" || mode == "damaged local log" {
+			if mode == "already retained" || mode == "retired retained" || mode == "cancelled retained" || mode == "changed access retained" || mode == "damaged local log" {
 				record := team.MirrorRecord{Seq: 1, Key: "c/0123456789abcdef", Author: strings.Repeat("b", 32), At: "2026-01-01T00:00:00.000Z", Body: json.RawMessage(`{"v":1,"t":"comment","text":"synthetic","anchor":0}`)}
 				if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{record}); err != nil {
 					t.Fatal(err)
@@ -451,38 +461,50 @@ func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T)
 			}
 			req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, "/", nil), id, "")
 			defer finish()
-			if mode == "retired copy" {
+			if mode == "retired copy" || mode == "retired retained" {
 				h.mu.Lock()
 				h.copyRemovalEpoch[id].epoch++
 				h.mu.Unlock()
 			}
+			if mode == "changed access retained" {
+				changed := sub
+				changed.Access = "read"
+				if err := team.SaveSubs(dir, []team.Subscription{changed}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "cancelled retained" {
+				ctx, cancel := context.WithCancel(req.Context())
+				cancel()
+				req = req.WithContext(ctx)
+			}
 			seq := uint64(1)
-			if mode == "two pages" {
+			if mode == "two pages" || mode == "nonprogress" {
 				seq = 2
 			}
 			if mode == "page limit" {
 				seq = 9
 			}
 			err := h.retainPeopleComment(req, id, sub, server, "", seq)
-			if mode == "already retained" || mode == "valid page" || mode == "two pages" {
+			if mode == "already retained" || mode == "valid page" || mode == "two pages" || mode == "page limit" {
 				if err != nil {
 					t.Fatalf("retention failed: %v", err)
 				}
 			} else if err == nil {
 				t.Fatal("invalid or retired retention succeeded")
 			}
-			if mode == "already retained" || mode == "damaged local log" {
+			if mode == "already retained" || mode == "retired retained" || mode == "cancelled retained" || mode == "changed access retained" || mode == "damaged local log" || mode == "retired copy" {
 				if calls.Load() != 0 {
 					t.Fatal("local outcome contacted relay")
 				}
-			} else if mode == "page limit" && calls.Load() != 8 {
+			} else if mode == "page limit" && calls.Load() != 9 {
 				t.Fatalf("bounded relay requests=%d", calls.Load())
-			} else if mode == "two pages" && calls.Load() != 2 {
+			} else if (mode == "two pages" || mode == "nonprogress") && calls.Load() != 2 {
 				t.Fatalf("two-page relay requests=%d", calls.Load())
-			} else if mode != "two pages" && mode != "page limit" && calls.Load() != 1 {
+			} else if mode != "two pages" && mode != "nonprogress" && mode != "page limit" && calls.Load() != 1 {
 				t.Fatalf("relay requests=%d", calls.Load())
 			}
-			if mode == "retired copy" || mode == "wrong generation" || mode == "gap page" {
+			if mode == "retired copy" || mode == "retired during read" || mode == "wrong generation" || mode == "gap page" {
 				_, last, readErr := team.ReadCopy(dir, id, team.CommentsLog, 0, 1, 4<<20)
 				if readErr != nil || last != 0 {
 					t.Fatalf("rejected page wrote history: last=%d err=%v", last, readErr)
@@ -490,7 +512,7 @@ func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T)
 			}
 			if mode == "page limit" {
 				_, last, err := team.ReadCopy(dir, id, team.CommentsLog, 0, 16, 4<<20)
-				if err != nil || last != 8 {
+				if err != nil || last != 9 {
 					t.Fatalf("bounded copied history: last=%d err=%v", last, err)
 				}
 			}

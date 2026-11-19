@@ -850,8 +850,14 @@ func peopleCompletionMatches(pending team.PeoplePending, text string, anchor uin
 // be released. The network is outside h.mu; each local append is admitted
 // again under the same lock as subscription removal.
 func (h *teamHandler) retainPeopleComment(r *http.Request, id team.CopyID, sub team.Subscription, server team.Entry, instance string, seq uint64) error {
-	for pageNo := 0; pageNo < 8; pageNo++ {
+	for {
+		h.mu.Lock()
+		if !peopleCopyCurrentLocked(r) || !h.peopleWriteCurrentLocked(id, sub, server, instance) {
+			h.mu.Unlock()
+			return team.ErrPeoplePublicationConflict
+		}
 		_, last, err := team.ReadCopy(h.dataDir, id, team.CommentsLog, ^uint64(0), 1, 4<<20)
+		h.mu.Unlock()
 		if err != nil {
 			return err
 		}
@@ -862,6 +868,7 @@ func (h *teamHandler) retainPeopleComment(r *http.Request, id team.CopyID, sub t
 		if err != nil {
 			return err
 		}
+		// ReadComments rejects entries that do not advance beyond last.
 		if page.Generation != id.Generation || len(page.Entries) == 0 {
 			return team.ErrPeoplePublicationConflict
 		}
@@ -879,5 +886,4 @@ func (h *teamHandler) retainPeopleComment(r *http.Request, id team.CopyID, sub t
 			return nil
 		}
 	}
-	return team.ErrPeoplePublicationConflict
 }
