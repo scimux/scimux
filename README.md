@@ -286,7 +286,7 @@ running on your machine.
 ```sh
 env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux
 env GOTOOLCHAIN=auto go test ./... # integration tests require tmux
-node --test web/test/*.test.js   # Node 22+
+node --test web/test/*.test.js web/test/testdata/team-e2e/unit/*.test.js   # Node 22+
 env GOTOOLCHAIN=auto go vet ./...
 ```
 

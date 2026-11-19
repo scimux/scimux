@@ -36,4 +36,4 @@ jobs:
       - name: Run JavaScript tests
         run: |
           node -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 22) { console.error("Node 22+ required"); process.exit(1); }'
-          node --test web/test/*.test.js
+          node --test web/test/*.test.js web/test/testdata/team-e2e/unit/*.test.js

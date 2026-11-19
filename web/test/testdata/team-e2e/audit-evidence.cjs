@@ -261,6 +261,31 @@ function supported(platform, nofollow, nonblock) {
   return ['linux', 'darwin', 'freebsd', 'openbsd', 'netbsd', 'aix', 'sunos'].includes(platform) &&
     Number.isInteger(nofollow) && nofollow > 0 && Number.isInteger(nonblock) && nonblock > 0;
 }
-module.exports = {compare, readFlat, png, audit, bindRoot, runCLI, supported};
+function auditDiagnostic(manifest) {
+  const {counters,observationKey,assertionID}=require('./evidence-project.cjs');
+  if(!manifest||typeof manifest!=='object'||Array.isArray(manifest))return {ok:false};
+  const outcomes={focused:'pass',failure:'fail',interrupted:'interrupted'};
+  if(manifest.version!==1||!Object.hasOwn(outcomes,manifest.scope)||manifest.result!==outcomes[manifest.scope]||
+     Object.keys(manifest).some(key=>!['version','scope','result','signal','assertions','artifacts','counters','cleanup','failureCode'].includes(key)&&!observationKey(key))||
+     !Array.isArray(manifest.assertions)||!Array.isArray(manifest.artifacts)||!manifest.counters||
+     (manifest.scope==='interrupted'?!['SIGINT','SIGTERM'].includes(manifest.signal):manifest.scope==='failure'&&Object.hasOwn(manifest,'signal')?!['SIGINT','SIGTERM'].includes(manifest.signal):Object.hasOwn(manifest,'signal')))return {ok:false};
+  try {counters(manifest.counters,true);for(const [key,value] of Object.entries(manifest))if(observationKey(key))counters(value,true);}catch{return {ok:false};}
+  if(Object.hasOwn(manifest,'failureCode')&&(manifest.scope!=='failure'||manifest.failureCode!=='controlled-native-cleanup'))return {ok:false};
+  if(Object.hasOwn(manifest,'cleanup')) {
+    const value=manifest.cleanup,allowed=['coverage','browser','seat','children','socket','worker','native','fatal'];
+    if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!['failures','childrenStopped','socketRemoved'].includes(key))||(Object.hasOwn(value,'childrenStopped')&&value.childrenStopped!==true)||(Object.hasOwn(value,'socketRemoved')&&value.socketRemoved!==true)||!Array.isArray(value.failures)||value.failures.some(name=>!allowed.includes(name))||new Set(value.failures).size!==value.failures.length)return {ok:false};
+  }
+  const ids=new Set(),names=new Set();
+  for(const item of manifest.assertions) {
+    if(!item||Object.keys(item).sort().join(',')!=='id,result'||!assertionID(item.id)||item.result!=='pass'||ids.has(item.id))return {ok:false};
+    ids.add(item.id);
+  }
+  for(const name of manifest.artifacts) {
+    if(typeof name!=='string'||!(/^[a-z0-9][a-z0-9-]*\.png$/.test(name)||name==='browser-coverage.json')||names.has(name))return {ok:false};
+    names.add(name);
+  }
+  return {ok:true,scope:manifest.scope,result:manifest.result,acceptance:false};
+}
+module.exports = {compare, readFlat, png, audit, auditDiagnostic, bindRoot, runCLI, supported};
 
 if (require.main === module) process.exitCode = runCLI(process.argv.slice(2), text => process.stdout.write(text));

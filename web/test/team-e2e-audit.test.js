@@ -8,6 +8,11 @@ import {spawnSync} from 'node:child_process';
 const require = createRequire(import.meta.url);
 const {compare, readFlat, png, audit, bindRoot, runCLI, supported} = require('./testdata/team-e2e/audit-evidence.cjs');
 
+test('diagnostic auditor rejects non-object manifests',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  for(const value of [null,[],42])assert.deepEqual(auditDiagnostic(value),{ok:false});
+});
+
 test('counter comparison rejects an unexpected agent dispatch', () => {
   const before = {attempted: 2, accepted: 2, controls: 0};
   const after = {attempted: 3, accepted: 3, controls: 0};
@@ -69,60 +74,7 @@ test('a nonempty incomplete manifest cannot pass as a full profile', () => {
 });
 
 // A small handwritten synthetic run; its values are unrelated to recorded runs.
-function synthetic(profile) {
-  const m = {version: 1, result: 'pass', assertions: [
-    {id: 'comments-zero-agent-attempts', result: 'pass'},
-    {id: 'native-exact-one-prompt', result: 'pass'},
-    {id: 'native-authoritative-response', result: 'pass'},
-  ], artifacts: ['screen.png'], counters: {}};
-  const z = () => ({attempted: 0, accepted: 0, controls: 0});
-  const counts = n => ({attempted: n, accepted: n, controls: 0});
-  const seats = () => ({'owner-a': z(), 'owner-b': z(), recipient: z(), observer: z()});
-  const ordinary = ['boundary', 'leave', 'permission-ended-debug', 'permission', 'reshare',
-    'coordinator-header-focus', 'coordinator-description-save', 'description-recreated-choice',
-    'description-choice-order', 'received-offline', 'stage2-pages', 'draft-recovery',
-    'delete-recreation', 'legacy-closed'];
-  const intentional = ['native-trace-debug', 'native-trace', 'ai-source', 'held-evidence',
-    'dropped-send', 'stage1-scanner', 'stage1-owner-files', 'no-selection'];
-  const discussion = ['people-uncertain-retry', 'people-upload-permission', 'people-midbody-permission',
-    'people-image-bookmark', 'people-quota', 'people-local-budget', 'people-file-unread',
-    'people-recovery', 'people-relay-missing', 'people-relay-corrupt', 'people-unavailable',
-    'people-retired-draft', 'people-copy-replacement', 'people-stale-preparation', 'people-real-tunnel'];
-  const local = ['owner-a', 'owner-b', 'recipient', 'observer', 'empty-desktop', 'empty-phone',
-    'legacy-closed-desktop', 'legacy-closed-phone', 'no-selection'];
-  for (const mode of ['desktop', 'phone']) {
-    const required = ['early-native-visible-no-agent-dispatch', 'no-selection-explicit-send-only', 'stage1-scanner-explicit-dispatch-only', 'stage1-shared-owner-idle', 'stage1-discussion-zero-agent-dispatch', 'stage1-owner-file-delivered', 'stage2-fork-fresh-local', 'stage2-prompt-one-dispatch', 'dropped-response-explicit-retry-once', 'held-evidence-confirmed-after-release', 'ai-source-explicit-exact-mirrored', 'trace-explicit-one-dispatch', 'trace-second-explicit-dispatch', 'native-trace-one-exact-multiline'];
-    if (profile === 'people-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery');
-    for (const id of required) m.assertions.push({id: id+'-'+mode, result: 'pass'});
-    for (const value of ['false', 'true']) m.assertions.push({id: 'refusal-no-retry-'+mode+'-'+value, result: 'pass'});
-    m['native-start-failure-'+mode] = {counters: z()};
-    for (const key of ['stale-membership', 'stale-removed-membership', 'early-native']) m[key+'-'+mode] = {before: seats(), after: seats()};
-    for (const key of ordinary) m[key+'-'+mode] = {before: z(), after: z()};
-    for (const key of intentional) m[key+'-'+mode] = {before: z(), after: counts(1)};
-    for (const newer of ['false', 'true']) m['refusal-'+mode+'-'+newer] = {before: z(), after: {attempted: 1, accepted: 0, controls: 0}};
-    for (const name of ['membership', 'activities', 'recovery']) m.counters[name+'-'+mode] = {before: seats(), after: seats()};
-    m['stage1-scanner-owner-'+mode] = {beforeOwner: z(), afterOwner: counts(1)};
-    m['stage1-unread-'+mode] = {beforeOwner: z(), afterOwner: z(), beforeReader: z(), afterReader: z()};
-    m['stage2-shared-'+mode] = {beforeOwner: z(), afterOwner: counts(1), beforeReader: z(), afterReader: counts(1), beforeOther: z(), afterOther: z()};
-    m['trace-address-'+mode] = {beforeSend: z(), afterSend: counts(1)};
-    m['trace-choices-'+mode] = {beforeSecond: z(), secondCounts: counts(1)};
-    m['dropped-send-'+mode].final = counts(2);
-    m['held-evidence-'+mode].during = counts(1);
-    for (const pending of ['false', 'true']) m['recreated-'+mode+'-'+pending] = {afterCreate: z(), after: z()};
-    if (profile === 'people-attachments') {
-      for (const key of discussion) m[key+'-'+mode] = {before: {owner: z(), recipient: z()}, after: {owner: z(), recipient: z()}};
-      m['people-files-'+mode] = {before: {owner: z(), recipient: z()}, after: {owner: counts(3), recipient: z()}};
-      m['people-source-cancel-'+mode] = {before: {owner: z(), recipient: z()}, after: {owner: counts(1), recipient: z()}};
-      m['people-cross-channel-'+mode] = {before: {first: z(), second: z(), recipient: z()}, after: {first: z(), second: z(), recipient: z()}};
-      m['legacy-reader-'+mode] = {before: {owner: z(), legacy: z()}, after: {owner: z(), legacy: z()}};
-      m['old-relay-'+mode] = {before: z(), after: z()};
-      local.push('legacy-reader-'+mode, 'old-owner-'+mode, 'old-reader-'+mode);
-    }
-  }
-  m.counters.beforeComments = seats(); m.counters.afterComments = seats(); m.counters.afterExtraSetup = seats();
-  m.counters.afterNative = Object.fromEntries(local.map(name => [name, z()]));
-  return m;
-}
+const {synthetic} = require('./testdata/team-e2e/synthetic-audit-manifest.cjs');
 
 test('source-defined profiles accept a complete synthetic run and reject tampering', () => {
   for (const profile of ['owner-agent-attachments', 'people-attachments']) {
@@ -590,4 +542,93 @@ test('unknown nested window rejects role-key substitution on either side', () =>
   const m = synthetic('people-attachments');
   m.observation = {nested: {before: {unrelated: 'x', removed: 'y'}, after: {unrelated: 'x', added: {attempted: 1, accepted: 1, controls: 0}}}};
   assert.throws(() => audit(m, 'people-attachments'));
+});
+
+for(const [scope,result] of [['focused','pass'],['failure','fail'],['interrupted','interrupted']]) {
+  test(`diagnostic ${scope} remains distinct from full acceptance`,()=>{
+    const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+    const manifest={version:1,scope,result,assertions:[],artifacts:[],counters:{before:{attempted:0,accepted:0,controls:0},after:{attempted:0,accepted:0,controls:0}}};
+    if(scope==='interrupted')manifest.signal='SIGINT';
+    assert.deepEqual(auditDiagnostic(manifest),{ok:true,scope,result,acceptance:false});
+    assert.throws(()=>audit(manifest,'people-attachments'));
+  });
+}
+
+test('diagnostic evidence refuses unsafe content and invalid outcome',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  const base={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{before:{attempted:0,accepted:0,controls:0},after:{attempted:0,accepted:0,controls:0}}};
+  for(const mutation of [m=>{m.path='/synthetic/private';},m=>{m.result='pass';},m=>{m.artifacts=['../synthetic.png'];}]) {
+    const m=structuredClone(base);mutation(m);assert.deepEqual(auditDiagnostic(m),{ok:false});
+  }
+});
+
+test('interrupted diagnostic requires its first signal',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  const manifest={version:1,scope:'interrupted',result:'interrupted',assertions:[],artifacts:[],counters:{before:{attempted:0,accepted:0,controls:0},after:{attempted:0,accepted:0,controls:0}}};
+  assert.deepEqual(auditDiagnostic(manifest),{ok:false});
+});
+
+test('diagnostic scope does not invent counters absent from a focused probe',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  const manifest={version:1,scope:'focused',result:'pass',assertions:[{id:'browser-lifecycle-retains-coverage-desktop',result:'pass'}],artifacts:['lifecycle-desktop.png'],counters:{}};
+  assert.deepEqual(auditDiagnostic(manifest),{ok:true,scope:'focused',result:'pass',acceptance:false});
+  assert.throws(()=>audit(manifest,'people-attachments'));
+});
+
+test('failed diagnostic may retain the first signal as evidence of intent',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  const manifest={version:1,scope:'failure',result:'fail',signal:'SIGINT',assertions:[],artifacts:[],counters:{}};
+  assert.deepEqual(auditDiagnostic(manifest),{ok:true,scope:'failure',result:'fail',acceptance:false});
+});
+
+test('diagnostic audit accepts only fixed sanitized cleanup categories',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  const manifest={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{},cleanup:{failures:['coverage','socket']}};
+  assert.deepEqual(auditDiagnostic(manifest),{ok:true,scope:'failure',result:'fail',acceptance:false});
+  manifest.cleanup.failures.push('synthetic private detail');assert.deepEqual(auditDiagnostic(manifest),{ok:false});
+});
+
+test('diagnostic audit accepts bounded positive cleanup observations and fixed failure identity',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  const manifest={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{},cleanup:{failures:[],childrenStopped:true,socketRemoved:true},failureCode:'controlled-native-cleanup'};
+  assert.equal(auditDiagnostic(manifest).ok,true);
+  manifest.failureCode='synthetic private detail';assert.equal(auditDiagnostic(manifest).ok,false);
+});
+
+test('diagnostic audit rejects unsupported failure codes, invalid positives and unknown cleanup keys',()=>{
+  const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+  const base={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{}};
+  for(const failureCode of ['other',false,null])assert.equal(auditDiagnostic({...base,failureCode}).ok,false);
+  for(const value of [false,'true',1,null])for(const key of ['childrenStopped','socketRemoved'])assert.equal(auditDiagnostic({...base,cleanup:{failures:[],[key]:value}}).ok,false);
+  assert.equal(auditDiagnostic({...base,cleanup:{failures:[],other:true}}).ok,false);
+  assert.equal(auditDiagnostic({...base,other:true}).ok,false);
+  assert.equal(auditDiagnostic({...base,scope:'interrupted',result:'interrupted',signal:'SIGINT',failureCode:'controlled-native-cleanup'}).ok,false);
+  assert.equal(auditDiagnostic({...base,cleanup:{failures:['children','socket'],childrenStopped:true,socketRemoved:true}}).ok,true);
+});
+
+test('diagnostic audit validates cleanup container shape and assertion entries',()=>{
+ const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+ const base={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{}};
+ for(const cleanup of [null,1,[],{}, {failures:'bad'}, {failures:['children','children']}])assert.equal(auditDiagnostic({...base,cleanup}).ok,false);
+ for(const assertions of [[null],[{id:'synthetic',result:'pass',other:true}],[{id:'synthetic',result:'pass'},{id:'synthetic',result:'pass'}]])assert.equal(auditDiagnostic({...base,assertions}).ok,false);
+});
+
+test('partial diagnostic retains anomalous observed counts without accepting incomplete evidence',()=>{
+ const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+ const manifest={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{before:{attempted:2,accepted:1,controls:0},after:{attempted:3,accepted:2,controls:1}},'people-files-desktop':{beforeSend:{attempted:2,accepted:1,controls:0},afterSend:{attempted:3,accepted:2,controls:1}}};
+ const original=structuredClone(manifest);assert.deepEqual(auditDiagnostic(manifest),{ok:true,scope:'failure',result:'fail',acceptance:false});assert.deepEqual(manifest,original);assert.throws(()=>audit(manifest,'people-attachments'));
+});
+
+test('diagnostic audit rejects unsafe or unknown counter shapes',()=>{
+ const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+ const base={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{}};
+ for(const counters of [[],{before:'synthetic path'}, {before:[1]}, {before:{attempted:-1}}, {before:{attempted:1.5}}, {before:{attempted:Number.MAX_SAFE_INTEGER+1}}, {unexpected:{attempted:1}}, {before:{accepted:['synthetic']}}])assert.equal(auditDiagnostic({...base,counters}).ok,false);
+ assert.equal(auditDiagnostic({...base,'unknown-desktop':{before:{attempted:1}}}).ok,false);
+ assert.equal(auditDiagnostic({...base,'people-files-desktop':{before:'synthetic'}}).ok,false);
+});
+
+test('diagnostic audit rejects incomplete or mixed counter snapshots',()=>{
+ const {auditDiagnostic}=require('./testdata/team-e2e/audit-evidence.cjs');
+ const base={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{}};
+ for(const value of [{attempted:1},{accepted:1,controls:0},{attempted:1,accepted:1,controls:0,before:{attempted:0,accepted:0,controls:0}}])assert.equal(auditDiagnostic({...base,counters:{before:value}}).ok,false);
 });

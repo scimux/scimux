@@ -10,7 +10,7 @@ For application changes, read the relevant subsystem rules as well.
 env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux # static; web is embedded
 env GOTOOLCHAIN=auto go test ./...        # unit + integration (integration needs tmux)
 env GOTOOLCHAIN=auto go test -short ./... # unit only; CI also runs the full suite
-node --test web/test/*.test.js  # browser unit suite; no browser needed
+node --test web/test/*.test.js web/test/testdata/team-e2e/unit/*.test.js  # browser unit suite; no browser needed
 go test -cover ./internal/testowned/testdata/supervisor # non-shipped supervisor command entry
 go test -cover -tags testowned_unsupported ./internal/testowned # unsupported-platform refusal
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
@@ -21,13 +21,21 @@ go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
 ```
 
+The combined Node command runs both browser unit tests and the test-infrastructure
+unit lane. The latter tests the runner tools in `web/test/testdata/team-e2e` and
+does not require a browser or add a shipped dependency. Both lanes are required.
+
 The non-shipped Linux supervisor command reports cleanup status separately from
 `runner_exit`. `status clean` and command exit 0 mean the supervisor proved its
 owned children were reaped; the runner may still have exited nonzero or by a
 signal. A caller must check both results before accepting a run. Invalid command
 arguments and unavailable supervisor prerequisites exit 2; cleanup failures
-exit 1. The current interrupt grace is for this focused test tool; integration
-must measure an adequate bounded teardown grace before using it for browser E2E.
+exit 1. After the first interrupt, ordinary runners receive one forwarded signal,
+then a kill at 20 nominal 100 ms ticks and a timeout at 40 ticks. The browser
+runner uses 6000 and 6300 ticks instead. Repeated signals do not reset the
+deadline. These are nominal ticks, not wall-clock guarantees. Descendant
+cleanup separately uses 20 and 400 ticks with 10 ms pauses; the owned-removal
+child has a separate 210-second bound.
 The optional explicit-handle adapter is only for a fresh, dedicated test
 supervisor process. On Linux amd64 and arm64 it requires `close_range` with
 `CLOSE_RANGE_CLOEXEC`; other architectures or an unavailable syscall fail
@@ -249,6 +257,11 @@ Supply absolute paths:
 ```sh
 CGO_ENABLED=0 go build -o /some/output/scimux ./cmd/scimux
 (cd /some/scimux-team && CGO_ENABLED=0 go build -o /some/output/scimux-team ./cmd/scimux-team)
+CGO_ENABLED=0 go build -o /some/output/scimux-test-supervisor ./internal/testowned/testdata/supervisor
+mkdir -m 700 /some/private-runtime /some/private-evidence
+SCIMUX_E2E_SUPERVISOR=/some/output/scimux-test-supervisor \
+SCIMUX_E2E_RUNTIME_PARENT=/some/private-runtime \
+SCIMUX_E2E_EVIDENCE_PARENT=/some/private-evidence \
 SCIMUX_E2E_BINARY=/some/output/scimux \
 SCIMUX_TEAM_E2E_BINARY=/some/output/scimux-team \
 SCIMUX_E2E_LEGACY_BINARY=/some/output/scimux-compatibility \
@@ -259,7 +272,29 @@ SCIMUX_E2E_GO=/absolute/path/to/go \
 node web/test/team-e2e.cjs
 ```
 
-The codec over net.Pipe and HTTP bridge fixture requires Go 1.26 or newer.
+The two parents must be distinct, owner-only mode-0700 directories. The
+test-only supervisor needs Linux on amd64 or arm64 with its documented
+descriptor-isolation and child-ownership prerequisites; an unsupported system
+fails before launch. The runner owns a registered runtime beneath the runtime
+parent and removes that exact runtime only after direct supervisor wait and
+clean child proof. Missing proof, changed identity, unknown contents, or cleanup
+failure preserves the affected data and reports failure; no prefix sweep is
+used. A launch that never starts is handled separately from a started runner.
+
+The evidence parent maintains a 7-day retention policy for eligible completed
+bundles, a 2 GiB aggregate limit, and a 1 GiB reservation per run. Source,
+staging, metadata, and diagnostics count toward admission and peak limits;
+diagnostics have a separate 1 MiB cap. Quota or validation failures refuse
+publication rather than discarding required evidence. Keep protected acceptance
+bundles separately from the expiry-managed parent until their review. Focused,
+failed, and interrupted evidence is diagnostic and does not establish full
+acceptance. The command exits 0 only for a successful run with proven removal;
+prerequisite failures exit 2 and unproven cleanup or evidence failure exits 1.
+Catchable interruption reports its signal exit when cleanup is proved.
+
+The codec over net.Pipe and HTTP bridge fixture requires Go 1.26 or newer. The
+bridge exercises the codec and HTTP boundary; it does not exercise WebRTC or
+the rendezvous service.
 `SCIMUX_E2E_GO` selects an absolute executable; if omitted, the runner resolves `go` from its incoming
 preflight PATH. It verifies the selected version with local toolchain
 selection, then invokes that exact executable with an offline module setting
@@ -269,10 +304,10 @@ executable digest; it does not record the path.
 
 Set `PLAYWRIGHT_BROWSERS_PATH` for a custom browser location. The runner fails
 on missing prerequisites. Its default executes all implemented scenarios and
-records only assertions that passed. The printed private artifact directory
-contains a manifest, screenshots, logs, and raw browser JavaScript coverage
-with each page checked against its matching current or compatibility client
-source. It can contain synthetic credentials: keep it private.
+records only assertions that passed. Retained bundles contain projected
+manifests, screenshots, and browser JavaScript coverage, with each page checked
+against its matching current or compatibility client source. Runtime diagnostics
+and intermediate data can contain synthetic credentials and remain private.
 To check the retained manifest and its declared screenshot files, select the
 source-defined profile independently of the evidence:
 

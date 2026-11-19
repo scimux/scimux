@@ -1,9 +1,22 @@
 #!/usr/bin/env node
 // Opt-in synthetic real-browser acceptance. No test dependency ships with scimux.
 'use strict';
+const {validMidbodyProbe}=require('./testdata/team-e2e/runner-bootstrap.cjs');
+if(!validMidbodyProbe(process.env.SCIMUX_E2E_MIDBODY_PROBE,process.env.SCIMUX_E2E_SCENARIO)) {
+  console.error('midbody cleanup probe requires its selected scenario');
+  process.exitCode=2;
+  return;
+}
+if(process.env.SCIMUX_E2E_INNER!=='1') {
+  const {configureRunner,runnerExitCode,formatRunnerSummary}=require('./testdata/team-e2e/runner-bootstrap.cjs');
+  configureRunner({env:process.env,runnerPath:__filename}).then(result=>{
+    process.exitCode=runnerExitCode(result);
+    if(process.exitCode)console.error(formatRunnerSummary(result));
+  }).catch(()=>{console.error('E2E infrastructure failed');process.exitCode=1;});
+  return;
+}
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const net = require('node:net');
 const http = require('node:http');
 const crypto = require('node:crypto');
@@ -14,11 +27,20 @@ const { selectSharedSubscription } = require('./testdata/team-e2e/share-select.c
 const { retireCompletedContexts } = require('./testdata/team-e2e/browser-lifecycle.cjs');
 const { contrastSample } = require('./testdata/team-e2e/contrast.cjs');
 const { createCleanupOnce } = require('./testdata/team-e2e/cleanup-once.cjs');
+const { installRunnerSignals,finishScenario,controlledFailureCode } = require('./testdata/team-e2e/runner-signals.cjs');
+const { summarizeNative } = require('./testdata/team-e2e/native-process-state.cjs');
 const { createPageCapture } = require('./testdata/team-e2e/capture-once.cjs');
+const { captureEvidencePage,scenarioNames } = require('./testdata/team-e2e/evidence-project.cjs');
+const { createCaptureRegistry } = require('./testdata/team-e2e/capture-identity.cjs');
+const { createDiagnosticBudget } = require('./testdata/team-e2e/diagnostic-log.cjs');
 const { verifiedCoverageEntry } = require('./testdata/team-e2e/coverage-source.cjs');
 const { verifyMidbodyWitness } = require('./testdata/team-e2e/verify-midbody-witness.cjs');
 const { verifyLocalBudget } = require('./testdata/team-e2e/verify-local-budget.cjs');
 const { prepareTunnelGo } = require('./testdata/team-e2e/tunnel-toolchain.cjs');
+const { validateInnerRuntime } = require('./testdata/team-e2e/runtime-io.cjs');
+
+const root=validateInnerRuntime(process.env);
+if(!root){console.error('E2E runtime invalid');process.exit(2);}
 
 function prerequisite(name) {
   const value = process.env[name];
@@ -27,7 +49,6 @@ function prerequisite(name) {
 }
 let scimux, relayBin, playwright, legacyScimux, legacyRelayBin, legacySource;
 try {
-  if (process.env.SCIMUX_E2E_MIDBODY_PROBE && (process.env.SCIMUX_E2E_SCENARIO !== 'people-midbody-permission' || !['failure','signal','forward-error'].includes(process.env.SCIMUX_E2E_MIDBODY_PROBE))) throw Error('midbody cleanup probe requires its selected scenario');
   scimux = prerequisite('SCIMUX_E2E_BINARY'); relayBin = prerequisite('SCIMUX_TEAM_E2E_BINARY');
   if (scimux === relayBin) throw Error('scimux and relay must be distinct binaries');
   for (const p of [scimux, relayBin]) fs.accessSync(p, fs.constants.X_OK);
@@ -46,11 +67,9 @@ try {
   }
   if (!playwright.chromium || !playwright.devices) throw Error('Playwright Chromium is required');
   execFileSync('tmux', ['-V'], {stdio:'ignore'});
-} catch (e) { console.error('E2E prerequisite error:', e.message); process.exit(2); }
+} catch (e) { console.error('E2E prerequisite failed'); process.exit(2); }
 
 const fixtureDir = path.join(__dirname, 'testdata', 'team-e2e');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scimux-team-e2e-'));
-fs.chmodSync(root, 0o700);
 const manifest = {version:1, scope:'implemented synthetic browser acceptance scenarios', assertions:[], artifacts:[], counters:{}, cleanup:[]};
 const seats = [], children = [], pages = [], contexts = [];
 const coverageArchive = [];
@@ -59,14 +78,16 @@ const pending = new Set();
 const heldReleases = new Set();
 let browser, relay, shutting = false, signalCode = 0;
 let cleanupProbeGate, cleanupProbeRelease;
+const controlledNativeCleanupFailure=Error('controlled native cleanup failure');
 let captureProbeGate, captureProbeRelease, captureProbeStarted=false;
 const launchBrowser=()=>playwright.chromium.launch({handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false});
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const assertID = (id, condition) => { assert.ok(condition, id); manifest.assertions.push({id, result:'pass'}); };
 const record = () => fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify(manifest, null, 2));
 const artifacts = name => path.join(root, name);
+const captureRegistry=createCaptureRegistry({write:value=>fs.promises.writeFile(path.join(root,'capture-identities.private.json'),value,{mode:0o600})});
 const jsonLines = p => fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
-const logFile = name => fs.openSync(artifacts(name + '.log'), 'a', 0o600);
+const diagnosticBudget = createDiagnosticBudget(root);
 const fixtureBin = artifacts('bin'); fs.mkdirSync(fixtureBin, {mode:0o700});
 const names = ['claude','codex','pi','pi-acp','opencode','grok','cursor-agent','dsh','muse','vibe-acp'];
 for (const name of names) {
@@ -85,9 +106,8 @@ delete baseEnv.TMUX;
 delete baseEnv.TMUX_PANE;
 function start(binary,args,env,label,stdout='ignore') {
   if(shutting)throw Error('runner shutting down');
-  const log = logFile(label);
-  const c = spawn(binary,args,{env,stdio:['ignore',stdout,log]});
-  fs.closeSync(log); children.push(c); return c;
+  const c = spawn(binary,args,{env,stdio:['ignore',stdout,'pipe']});
+  children.push(c);diagnosticBudget.attach(label,c.stderr);return c;
 }
 async function until(fn, ms, label) {
   const end = Date.now() + ms;
@@ -145,7 +165,7 @@ async function pageFor(s,mode,label) {
   await page.coverage.startJSCoverage({resetOnNavigation:false});
   await page.goto(s.base,{waitUntil:'networkidle'});return page;
 }
-async function screenshot(p,name) { await p.screenshot({path:artifacts(name),fullPage:true});manifest.artifacts.push(name); }
+async function screenshot(p,name) { assert.ok((await captureEvidencePage({page:p,destination:artifacts(name),register:captureRegistry.register})).ok,'screenshot capture failed');manifest.artifacts.push(name); }
 async function open(p,id) {await p.locator('[data-open="'+id+'"]').click({position:{x:20,y:12}});}
 async function staleMembership(mode,a,b,r,observer) {
   const sharePath='/api/team/shares/'+b.node.id;
@@ -2272,6 +2292,8 @@ async function performCleanup() {
     }catch(e){manifest.cleanup.push({seat:s.name,deleteError:String(e)});manifest.result='fail';process.exitCode=1;}}
   }
   for(const c of children.slice().reverse()) await terminate(c);
+  const diagnostics=await diagnosticBudget.finish();
+  if(diagnostics.failed){manifest.cleanup.push({fatal:'diagnostic capture failed'});manifest.result='fail';process.exitCode=1;}
   const stopped=children.every(c=>c.exitCode!==null||c.signalCode!==null);
   manifest.cleanup.push({childrenStopped:stopped});
   if(!stopped){manifest.result='fail';process.exitCode=1;}
@@ -2292,20 +2314,23 @@ async function performCleanup() {
     if(remaining.length){manifest.result='fail';process.exitCode=1;}
     const pidsPath=path.join(s.data,'counter.native-pids');
     const pids=fs.existsSync(pidsPath)?fs.readFileSync(pidsPath,'utf8').trim().split('\n').filter(Boolean).map(Number):[];
-    const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code!=='ESRCH';}};
-    for(let i=0;i<50 && pids.some(alive);i++)await delay(100);
-    const remainingNativeHelpers=pids.filter(alive).length;
-    manifest.cleanup.push({seat:s.name,remainingNativeHelpers});
+    let native=summarizeNative(pids);
+    for(let i=0;i<50 && native.active;i++){await delay(100);native=summarizeNative(pids);}
+    const remainingNativeHelpers=native.active;
+    manifest.cleanup.push({seat:s.name,remainingNativeHelpers,remainingNativeZombies:native.zombies});
     if(remainingNativeHelpers){manifest.result='fail';process.exitCode=1;}
   }
   record();
 }
 const cleanup=createCleanupOnce(async()=>{try{await performCleanup();}catch(e){manifest.result='fail';manifest.cleanup.push({fatal:String(e)});process.exitCode=1;record();throw e;}});
-for(const [sig,code] of [['SIGINT',130],['SIGTERM',143]])process.once(sig,()=>{signalCode=code;if(manifest.result!=='fail')manifest.result='interrupted';manifest.signal=sig;const finished=cleanup();cleanupProbeRelease?.();captureProbeRelease?.();finished.then(()=>{record();process.stdout.write('Artifacts: '+root+'\n',()=>process.exit(code));}).catch(e=>{process.stderr.write(String(e)+'\n',()=>process.exit(code));});});
+// Opt-in probe only: keep the existing overlap gate blocked until the test releases it.
+const holdCleanupProbe = process.env.SCIMUX_E2E_CLEANUP_PROBE === 'overlap' && process.env.SCIMUX_E2E_HOLD_CLEANUP === '1';
+if (holdCleanupProbe) process.stdin.once('data',()=>cleanupProbeRelease?.());
+installRunnerSignals({events:process,manifest,cleanup,record,exit:code=>process.exit(code),notify:message=>{if(holdCleanupProbe&&message==='received')console.log('Cleanup signal received');},release:()=>{signalCode=manifest.signal==='SIGINT'?130:143;if(!holdCleanupProbe)cleanupProbeRelease?.();captureProbeRelease?.();}});
 
 async function run() {
  const selected=process.env.SCIMUX_E2E_SCENARIO||'default';
- if(!['default','people-files','people-uncertain-retry','people-upload-permission','people-midbody-permission','people-image-bookmark','people-source-cancel','people-quota','people-local-budget','people-file-unread','people-attachment-recovery','people-relay-blob-recovery','people-cross-channel-forgery','people-retained-unavailable','people-retired-drafts','people-copy-replacement','people-stale-preparation','people-real-tunnel','legacy-reader','old-relay','stale-membership','stale-removed-membership','conversation-trace','conversation-native','conversation-refusal','conversation-core','early-native','native-start-failure','recipient-boundary','ai-source','ui-join','recipient-leave','permission-lifecycle','leave-empty','leave-stale','held-evidence','viewport-keyboard','dropped-send','reshare-stale','media-contrast','unshared','held-chat-loading','received-offline','stage1-scanner','stage1-unread','stage1-owner-files','stage2-shared-actions','stage2-bookmark-pages','recreated-chat-isolation','bubble-selection','draft-recovery','header-focus','description-save-isolation','description-recreated-choice','description-choice-order','no-selection','delete-recreation-isolation','legacy-closed-recreation','browser-lifecycle'].includes(selected))throw Error('unknown SCIMUX_E2E_SCENARIO');
+ if(!scenarioNames.includes(selected))throw Error('unknown SCIMUX_E2E_SCENARIO');
  if(selected!=='default')manifest.scope=selected+' scenario only';
  relay=await launchRelay();
  for(const name of ['owner-a','owner-b','recipient','observer']) await makeSeat(name);
@@ -2321,7 +2346,7 @@ async function run() {
  if(['failure','signal','overlap','capture-overlap'].includes(process.env.SCIMUX_E2E_CLEANUP_PROBE)) {
   manifest.scope='cleanup probe only';
   const native=await node(a,'claude','native cleanup probe','Synthetic native initial');
-  if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='failure')throw Error('controlled native cleanup failure');
+  if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='failure')throw controlledNativeCleanupFailure;
   if(['overlap','capture-overlap'].includes(process.env.SCIMUX_E2E_CLEANUP_PROBE)){
    browser=await launchBrowser();const page=await pageFor(a,'desktop','cleanup-overlap');await open(page,native.id);await page.locator('#msgs').getByText('Synthetic native initial',{exact:true}).waitFor({timeout:30000});
    if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='overlap'){
@@ -2717,4 +2742,4 @@ async function run() {
  assertID('native-authoritative-response',true);
  if(process.env.SCIMUX_E2E_FAIL_AFTER_NATIVE==='1')throw Error('controlled failure with native node');
 }
-(async()=>{try{await run();manifest.result='pass';}catch(e){if(!signalCode)manifest.result='fail';manifest.error=String(e);console.error(e.stack||e);if(!signalCode)process.exitCode=1;for(const {page,label} of [...pages].reverse()){try{if(!page.isClosed()){const name='failure-'+label+'.png';await page.screenshot({path:artifacts(name),fullPage:true,timeout:5000});manifest.artifacts.push(name);}}catch{}}}finally{await cleanup();console.log('Artifacts: '+root);if(signalCode)process.exitCode=signalCode;}})();
+(async()=>{try{await run();finishScenario(manifest,signalCode);}catch(e){if(!signalCode)manifest.result='fail';const failureCode=controlledFailureCode(e,controlledNativeCleanupFailure);if(failureCode&&!signalCode)manifest.failureCode=failureCode;manifest.error='scenario-failure';console.error('E2E scenario failed');if(!signalCode)process.exitCode=1;for(const {page,label} of [...pages].reverse()){try{if(!page.isClosed()){const name='failure-'+label+'.png';if((await captureEvidencePage({page,destination:artifacts(name),timeout:5000,register:captureRegistry.register})).ok)manifest.artifacts.push(name);}}catch{}}}finally{await cleanup();if(signalCode)process.exitCode=signalCode;}})();

@@ -14,6 +14,6 @@ async function retire(socket, ops) {
   }
   if(state!=='dead') return {removed:false,error:killError || 'private tmux server remains reachable',killError};
   try { ops.unlink(socket); } catch(e) { if(e.code!=='ENOENT')return {removed:false,error:'socket unlink failed: '+String(e),killError}; }
-  return {removed:!ops.exists(socket),killError};
+  return {removed:!ops.exists(socket)};
 }
 module.exports = {retire};
