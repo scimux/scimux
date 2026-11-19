@@ -48,6 +48,10 @@ func (n *nativeKernel) wait(pid int) (bool, error) {
 func (n *nativeKernel) signal(pid, sig int) error { return n.ops.kill(pid, sig) }
 
 func listProcChildren(root string, parent int) ([]int, error) {
+	return listProcChildrenRead(root, parent, os.ReadFile)
+}
+
+func listProcChildrenRead(root string, parent int, read func(string) ([]byte, error)) ([]int, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -58,8 +62,8 @@ func listProcChildren(root string, parent int) ([]int, error) {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(root, entry.Name(), "stat"))
-		if errors.Is(err, os.ErrNotExist) {
+		raw, err := read(filepath.Join(root, entry.Name(), "stat"))
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 			continue
 		}
 		if err != nil {

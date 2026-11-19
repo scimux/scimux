@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -2363,63 +2364,77 @@ func TestClientCloseNilPeerAndTransport(t *testing.T) {
 }
 
 func TestClientCloseConcurrentWaitersShareError(t *testing.T) {
-	c2sR, c2sW := io.Pipe()
-	s2cR, s2cW := io.Pipe()
-	base := &pipeTr{w: c2sW, r: s2cR}
-	entered := make(chan struct{})
-	block := make(chan struct{})
-	cw := &closeWrap{Transport: base, entered: entered, block: block, err: errors.New("shared-boom")}
-	c := NewClient(cw, nil, nil)
-	t.Cleanup(func() {
-		select {
-		case <-block:
-		default:
-			close(block)
-		}
-		_ = c2sR.Close()
-		_ = s2cW.Close()
-	})
-	var wg sync.WaitGroup
-	errs := make(chan error, 8)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		errs <- c.Close()
-	}()
-	select {
-	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("transport Close not entered")
-	}
-	for i := 0; i < 7; i++ {
+	synctest.Test(t, func(t *testing.T) {
+		c2sR, c2sW := io.Pipe()
+		s2cR, s2cW := io.Pipe()
+		base := &pipeTr{w: c2sW, r: s2cR}
+		entered := make(chan struct{})
+		block := make(chan struct{})
+		want := errors.New("shared-boom")
+		cw := &closeWrap{Transport: base, entered: entered, block: block, err: want}
+		c := NewClient(cw, nil, nil)
+		t.Cleanup(func() {
+			select {
+			case <-block:
+			default:
+				close(block)
+			}
+			_ = c2sR.Close()
+			_ = s2cW.Close()
+		})
+		var wg sync.WaitGroup
+		errs := make(chan error, 8)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			errs <- c.Close()
 		}()
-	}
-	close(block)
-	wg.Wait()
-	close(errs)
-	if cw.count() != 1 {
-		t.Fatalf("transport closed %d times", cw.count())
-	}
-	var first error
-	n := 0
-	for err := range errs {
-		n++
-		if err == nil || !strings.Contains(err.Error(), "shared-boom") {
-			t.Fatalf("err=%v", err)
+		<-entered
+		started := make(chan struct{}, 7)
+		for i := 0; i < 7; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				started <- struct{}{}
+				errs <- c.Close()
+			}()
 		}
-		if first == nil {
-			first = err
-		} else if first.Error() != err.Error() {
-			t.Fatalf("divergent Close errors %v vs %v", first, err)
+		synctest.Wait()
+		if len(started) != 7 {
+			t.Fatalf("started %d waiters, want 7", len(started))
 		}
-	}
-	if n != 8 {
-		t.Fatalf("got %d close results", n)
-	}
+		if len(errs) != 0 {
+			t.Fatalf("%d Close calls returned before transport completion", len(errs))
+		}
+		close(block)
+		wg.Wait()
+		close(errs)
+		if cw.count() != 1 {
+			t.Fatalf("transport closed %d times", cw.count())
+		}
+		var first error
+		n := 0
+		for err := range errs {
+			n++
+			if err != want {
+				t.Fatalf("err=%v", err)
+			}
+			if first == nil {
+				first = err
+			} else if first.Error() != err.Error() {
+				t.Fatalf("divergent Close errors %v vs %v", first, err)
+			}
+		}
+		if n != 8 {
+			t.Fatalf("got %d close results", n)
+		}
+		if err := c.Close(); err != want {
+			t.Fatalf("stored Close error = %v", err)
+		}
+		if cw.count() != 1 {
+			t.Fatalf("transport closed %d times after repeated Close", cw.count())
+		}
+	})
 }
 
 func TestMalformedApprovalUpdatedKeepsPending(t *testing.T) {

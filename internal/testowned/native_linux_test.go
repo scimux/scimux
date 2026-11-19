@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -201,6 +202,95 @@ func TestListProcFailures(t *testing.T) {
 		if _, err := listProcChildren(root, 1); err == nil {
 			t.Fatalf("invalid stat accepted: %q", raw)
 		}
+	}
+}
+
+func TestListProcChildrenSkipsExitedEntryRead(t *testing.T) {
+	child := exec.Command("/bin/bash", "--norc", "-c", "exec sleep 30")
+	if err := child.Start(); err != nil {
+		t.Fatal("synthetic child start failed")
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		}
+	})
+	stat, err := os.Open(filepath.Join("/proc", strconv.Itoa(child.Process.Pid), "stat"))
+	if err != nil {
+		t.Fatal("synthetic child stat open failed")
+	}
+	defer stat.Close()
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal("synthetic child termination failed")
+	}
+	waitErr := child.Wait()
+	waited = child.ProcessState != nil
+	var exitErr *exec.ExitError
+	if !waited || !errors.As(waitErr, &exitErr) {
+		t.Fatal("synthetic child wait unconfirmed")
+	}
+
+	root := t.TempDir()
+	for _, name := range []string{"11", "12"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
+			t.Fatal("synthetic entry creation failed")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "11", "stat"), []byte("11 (synthetic) S 9 0"), 0600); err != nil {
+		t.Fatal("synthetic stat creation failed")
+	}
+	if err := os.Symlink(filepath.Join("/proc/self/fd", strconv.Itoa(int(stat.Fd()))), filepath.Join(root, "12", "stat")); err != nil {
+		t.Fatal("synthetic stat link failed")
+	}
+	got, err := listProcChildren(root, 9)
+	if err != nil || !reflect.DeepEqual(got, []int{11}) {
+		t.Fatalf("exited entry rejected: ESRCH=%t; matching entries=%d", errors.Is(err, syscall.ESRCH), len(got))
+	}
+}
+
+func TestListProcEntryReadErrors(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"11", "12"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
+			t.Fatal("synthetic entry creation failed")
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want []int
+	}{
+		{"success", nil, []int{11, 12}},
+		{"gone", syscall.ENOENT, []int{11}},
+		{"exited", syscall.ESRCH, []int{11}},
+		{"permission", syscall.EPERM, nil},
+		{"other", syscall.EIO, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := listProcChildrenRead(root, 9, func(path string) ([]byte, error) {
+				if filepath.Base(filepath.Dir(path)) == "12" {
+					return []byte("12 (synthetic) S 9 0"), tc.err
+				}
+				return []byte("11 (synthetic) S 9 0"), nil
+			})
+			if tc.err == syscall.EPERM || tc.err == syscall.EIO {
+				if !errors.Is(err, tc.err) || got != nil {
+					t.Fatal("entry error not preserved")
+				}
+			} else if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatal("matching entries not preserved")
+			}
+		})
+	}
+	called := false
+	_, err := listProcChildrenRead(filepath.Join(root, "missing"), 9, func(string) ([]byte, error) {
+		called = true
+		return nil, nil
+	})
+	if err == nil || called {
+		t.Fatal("root enumeration failure hidden")
 	}
 }
 

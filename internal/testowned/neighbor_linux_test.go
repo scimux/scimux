@@ -3,6 +3,7 @@
 package testowned
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -106,9 +107,70 @@ func TestFixtureCleanupActuallyRetiresAndReaps(t *testing.T) {
 // finish before it asks the kernel to retire any adopted descendants.
 type fixtureReaper struct {
 	nativeKernel
-	prior   int32
-	blocked bool
-	clean   bool
+	prior      int32
+	blocked    bool
+	clean      bool
+	diagnostic string
+}
+
+func fixtureErrClass(err error) string {
+	switch {
+	case errors.Is(err, syscall.ESRCH):
+		return "esrch"
+	case errors.Is(err, syscall.ENOENT):
+		return "enoent"
+	case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+		return "permission"
+	case errors.Is(err, syscall.EINTR):
+		return "interrupted"
+	case errors.Is(err, syscall.ECHILD):
+		return "echild"
+	case err != nil && (err.Error() == "invalid process status" || err.Error() == "invalid process parent"):
+		return "parse"
+	default:
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			return "errno-other"
+		}
+		return "other"
+	}
+}
+
+func fixtureWaitClass(pid int, err error) string {
+	if err != nil {
+		return "wait-" + fixtureErrClass(err)
+	}
+	if pid == 0 {
+		return "wait-live"
+	}
+	return "wait-reaped"
+}
+
+func TestFixtureDiagnosticClasses(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{syscall.ESRCH, "esrch"}, {syscall.ENOENT, "enoent"},
+		{syscall.EPERM, "permission"}, {syscall.EACCES, "permission"},
+		{syscall.EINTR, "interrupted"}, {syscall.ECHILD, "echild"},
+		{errors.New("invalid process status"), "parse"},
+		{errors.New("invalid process parent"), "parse"},
+		{syscall.EIO, "errno-other"}, {errors.New("synthetic"), "other"}, {nil, "other"},
+	} {
+		if got := fixtureErrClass(tc.err); got != tc.want {
+			t.Fatalf("error class = %s, want %s", got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		pid  int
+		err  error
+		want string
+	}{{0, nil, "wait-live"}, {11, nil, "wait-reaped"}, {0, syscall.ECHILD, "wait-echild"}, {0, syscall.EPERM, "wait-permission"}} {
+		if got := fixtureWaitClass(tc.pid, tc.err); got != tc.want {
+			t.Fatalf("wait class = %s, want %s", got, tc.want)
+		}
+	}
 }
 
 func (r *fixtureReaper) prepare() error           { return nil }
@@ -120,14 +182,25 @@ func installFixtureReaper(t *testing.T) *fixtureReaper {
 	if err := noExistingChildren(); err != nil {
 		t.Fatalf("fixture process already has a child: %v", err)
 	}
-	r := &fixtureReaper{nativeKernel: nativeKernel{ops: nativeOps{
-		list: func() ([]int, error) { return listProcChildren("/proc", os.Getpid()) },
+	r := &fixtureReaper{}
+	r.nativeKernel = nativeKernel{ops: nativeOps{
+		list: func() ([]int, error) {
+			pids, err := listProcChildren("/proc", os.Getpid())
+			if err != nil {
+				r.diagnostic = "list-" + fixtureErrClass(err)
+			}
+			return pids, err
+		},
 		wait4: func(pid int) (int, error) {
 			var status syscall.WaitStatus
-			return syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
+			got, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
+			if pid == -1 {
+				r.diagnostic = fixtureWaitClass(got, err)
+			}
+			return got, err
 		},
 		kill: func(pid, sig int) error { return syscall.Kill(pid, syscall.Signal(sig)) },
-	}}}
+	}}
 	_, _, errno := syscall.Syscall6(syscall.SYS_PRCTL, 37, uintptr(unsafe.Pointer(&r.prior)), 0, 0, 0, 0)
 	if errno != 0 {
 		t.Fatalf("inspect fixture subreaper: %v", errno)
@@ -139,7 +212,7 @@ func installFixtureReaper(t *testing.T) *fixtureReaper {
 		if r.blocked {
 			t.Error("direct fixture wait unconfirmed; adopted-child cleanup withheld")
 		} else if result := cleanupOwnedFixtures(r); !result.Clean {
-			t.Errorf("fixture descendant cleanup unproven: %s", result.Category)
+			t.Errorf("fixture descendant cleanup unproven: %s detail=%s", result.Category, r.diagnostic)
 		} else {
 			r.clean = true
 		}
@@ -228,7 +301,7 @@ func TestFixtureCleanupReapsAdoptedAfterRunnerExit(t *testing.T) {
 	}
 	result := cleanupOwnedFixtures(guard)
 	if !result.Clean || result.Reaped < 1 {
-		t.Fatalf("cleanup unproven: %+v", result)
+		t.Fatalf("cleanup unproven: clean=%t category=%s reaped=%d detail=%s", result.Clean, result.Category, result.Reaped, guard.diagnostic)
 	}
 	if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
 		t.Fatalf("adopted fixture still present: %v", err)
