@@ -66,7 +66,16 @@ func TestAT_NFR_02_a_PionLicenseNoticesEmbedded(t *testing.T) {
 // types exist); load-bearing once R2 takes the dependency.
 func TestAT_NFR_02_a_PionTypesStayInsideRemote(t *testing.T) {
 	const at = "AT-NFR-02-a"
-	root := repoRootFromTest(t)
+	leaks, err := scanPionLeaks(repoRootFromTest(t))
+	if err != nil {
+		t.Fatalf("%s: walk: %v", at, err)
+	}
+	if len(leaks) > 0 {
+		t.Fatalf("%s: pion type leaked outside internal/remote/:\n\t%s", at, strings.Join(leaks, "\n\t"))
+	}
+}
+
+func scanPionLeaks(root string) ([]string, error) {
 	fset := token.NewFileSet()
 	var leaks []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -74,6 +83,9 @@ func TestAT_NFR_02_a_PionTypesStayInsideRemote(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
+			if path == filepath.Join(root, "attic") {
+				return filepath.SkipDir
+			}
 			switch d.Name() {
 			case ".git", "node_modules", "testdata":
 				return filepath.SkipDir
@@ -119,12 +131,7 @@ func TestAT_NFR_02_a_PionTypesStayInsideRemote(t *testing.T) {
 		})
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("%s: walk: %v", at, err)
-	}
-	if len(leaks) > 0 {
-		t.Fatalf("%s: pion type leaked outside internal/remote/:\n\t%s", at, strings.Join(leaks, "\n\t"))
-	}
+	return leaks, err
 }
 
 func exportedRecv(fl *ast.FieldList) bool {

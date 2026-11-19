@@ -17,6 +17,9 @@ toolchain go1.26.11
 // above: the ignore directive is go 1.25.
 ignore builds
 
+// Scratch is not part of package discovery, but nested packages remain in scope.
+ignore ./attic
+
 require (
 	github.com/coder/acp-go-sdk v0.13.5
 	github.com/pion/webrtc/v4 v4.2.18

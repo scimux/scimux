@@ -81,7 +81,11 @@ type goImport struct {
 // the S6 reviewer's focus note calls that out specifically.
 func scanGoImports(t *testing.T) []goImport {
 	t.Helper()
-	root := repoRootFromTest(t)
+	return scanGoImportsAt(t, repoRootFromTest(t))
+}
+
+func scanGoImportsAt(t *testing.T, root string) []goImport {
+	t.Helper()
 	fset := token.NewFileSet()
 	var out []goImport
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -89,6 +93,9 @@ func scanGoImports(t *testing.T) []goImport {
 			return err
 		}
 		if d.IsDir() {
+			if path == filepath.Join(root, "attic") {
+				return filepath.SkipDir
+			}
 			switch d.Name() {
 			case ".git", "node_modules", "testdata":
 				return filepath.SkipDir
