@@ -20,17 +20,24 @@ launch mints a fresh hook bundle under `~/.scimux/claude-hooks/<hex-id>/`
 (`settings.json` 0600, subdirectories 0700) and passes it as `--settings`;
 that file registers scimux itself as the `SessionStart` command, so the hook
 firing *is* both the process→transcript ownership proof and the
-startup/hook-health acknowledgement. The undocumented transcript
+startup/hook-health acknowledgement. When attachment staging is configured,
+the same file also grants the node's staging dir through
+`permissions.additionalDirectories`. The undocumented transcript
 `bridge_status` record is not a readiness condition.
 - Flags: `--session-id` seeds the first transcript, `--continue` is
   forbidden, and `--settings` must precede `--remote-control` (an
   optional-value flag that would otherwise swallow it). Owned launches also
   set `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, pass `--ax-screen-reader`, and
-  pass an `--add-dir` per genuinely additional
-  directory (including attachment staging). `--add-dir` does **not** bypass
-  Claude workspace trust, and scimux never edits undocumented trust-state
-  files. An exact pre-session workspace-trust dialog is instead surfaced as
-  an audited `y`/`n` web decision; generic lettered menus remain inert.
+  pass **no** `--add-dir`: Claude 2.1.328+ asks a per-session trust question
+  before the session starts for every untrusted `--add-dir` folder, while
+  command-line settings grants apply without it, so the attachment staging
+  dir is granted through the bundle settings instead. The staging dir only
+  ever holds flat `<random-token>-<basename>` uploads
+  (`storeAttachmentSized`), so the grant cannot load project configuration
+  from it. The working directory (`n.Dir`) is never passed as an added
+  directory, and scimux never edits undocumented trust-state files. An exact
+  pre-session workspace-trust dialog is instead surfaced as an audited
+  `y`/`n` web decision; generic lettered menus remain inert.
   Throwaway usage and model-probe sessions set the same narrow suppression:
   no Claude process scimux starts may surface the survey.
 - Only Claude's default `~/.claude` state root is supported;
