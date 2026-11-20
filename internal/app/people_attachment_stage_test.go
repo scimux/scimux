@@ -697,14 +697,14 @@ func TestPeopleCachedAttachmentDoesNotServeAfterSharingDisabled(t *testing.T) {
 	sub := baseSub()
 	seedSub(t, dir, sub)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	instance, err := team.EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	data := []byte("synthetic retained bytes")
 	sum := sha256.Sum256(data)
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
 	if err := team.SavePeoplePublished(dir, id, 1, stage); err != nil {
-		t.Fatal(err)
-	}
-	instance, err := team.EnsurePeopleCopyInstance(dir, id)
-	if err != nil {
 		t.Fatal(err)
 	}
 	checks := 0
@@ -730,14 +730,14 @@ func TestPeopleRetainedDownloadPreservesSafeFilename(t *testing.T) {
 	sub := baseSub()
 	seedSub(t, dir, sub)
 	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	instance, err := team.EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	data := []byte("synthetic retained bytes")
 	sum := sha256.Sum256(data)
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: `report "quoted" café.txt`, MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
 	if err := team.SavePeoplePublished(dir, id, 1, stage); err != nil {
-		t.Fatal(err)
-	}
-	instance, err := team.EnsurePeopleCopyInstance(dir, id)
-	if err != nil {
 		t.Fatal(err)
 	}
 	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, "/?copy_instance="+instance, nil), id, "")
@@ -777,6 +777,10 @@ func TestPeopleStageReadRequiresCurrentWritableAssociation(t *testing.T) {
 				seedSub(t, dir, sub)
 			}
 			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			instance, err := team.EnsurePeopleCopyInstance(dir, id)
+			if err != nil {
+				t.Fatal(err)
+			}
 			data := []byte("synthetic staged file")
 			sum := sha256.Sum256(data)
 			stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
@@ -790,10 +794,6 @@ func TestPeopleStageReadRequiresCurrentWritableAssociation(t *testing.T) {
 				if err := team.SavePeopleStage(dir, id, stage); err != nil {
 					t.Fatal(err)
 				}
-			}
-			instance, err := team.EnsurePeopleCopyInstance(dir, id)
-			if err != nil {
-				t.Fatal(err)
 			}
 			if mode == "stale copy" {
 				instance = strings.Repeat("f", 32)
@@ -843,14 +843,14 @@ func TestPeopleStageRemovalRechecksChangedLocalStage(t *testing.T) {
 	sub.Access = "write"
 	seedSub(t, dir, sub)
 	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	instance, err := team.EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	data := []byte("original synthetic stage")
 	sum := sha256.Sum256(data)
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
 	if err := team.SavePeopleStage(dir, id, stage); err != nil {
-		t.Fatal(err)
-	}
-	instance, err := team.EnsurePeopleCopyInstance(dir, id)
-	if err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -906,6 +906,10 @@ func TestPeopleConcurrentStageRemovalsKeepIndependentIdentities(t *testing.T) {
 	sub.Access = "write"
 	seedSub(t, dir, sub)
 	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	instance, err := team.EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	data := []byte("synthetic stage")
 	sum := sha256.Sum256(data)
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
@@ -915,10 +919,6 @@ func TestPeopleConcurrentStageRemovalsKeepIndependentIdentities(t *testing.T) {
 	other := stage
 	other.ID = "fedcba9876543210"
 	if err := team.SavePeopleStage(dir, id, other); err != nil {
-		t.Fatal(err)
-	}
-	instance, err := team.EnsurePeopleCopyInstance(dir, id)
-	if err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})

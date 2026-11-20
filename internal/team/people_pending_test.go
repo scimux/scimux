@@ -506,7 +506,7 @@ func TestPeoplePendingAdmissionStatFailurePreservesStageForRetry(t *testing.T) {
 	peopleRecordIO.lstat = func(r *os.Root, name string) (os.FileInfo, error) {
 		if name == pending.Key+".json" {
 			calls++
-			if calls == 2 {
+			if calls == 1 {
 				return nil, errors.New("synthetic pending stat failure")
 			}
 		}
@@ -516,8 +516,8 @@ func TestPeoplePendingAdmissionStatFailurePreservesStageForRetry(t *testing.T) {
 		t.Fatal("failed pending inspection was accepted")
 	}
 	peopleRecordIO = original
-	if calls != 2 {
-		t.Fatalf("expected admission and initial lookup, got %d", calls)
+	if calls != 1 {
+		t.Fatalf("expected admission lookup, got %d", calls)
 	}
 	if got, err := ReadPeopleStage(dir, id, stage.ID); err != nil || !bytes.Equal(got.Data, stage.Data) {
 		t.Fatalf("stage changed: %v", err)
@@ -549,12 +549,15 @@ func TestPeoplePendingRetriesTransientInitialReadWithoutReplacingFrozenPublicati
 		}
 		return r.Open(name)
 	}
-	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err != nil {
-		t.Fatalf("exact retry after transient read: %v", err)
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err == nil {
+		t.Fatal("failed pending read was acknowledged")
 	}
 	peopleRecordIO = original
 	if failures != 1 {
 		t.Fatalf("transient read not exercised: %d", failures)
+	}
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err != nil {
+		t.Fatalf("exact retry after transient read: %v", err)
 	}
 	got, err := ReadPeoplePending(dir, id, pending.Key)
 	if err != nil || !reflect.DeepEqual(got, pending) {
@@ -812,6 +815,94 @@ func TestPeoplePendingPinBlocksStageRemoval(t *testing.T) {
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
 		t.Fatal("existing pending association did not prevent deletion")
+	}
+}
+
+func TestPeopleRetiredPublicationCannotBeAdmittedAgain(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	stage := syntheticPeopleStage()
+	pending := syntheticPeoplePending(stage)
+	if err := SavePeopleStage(dir, id, stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := peopleRecordDir(dir, id, false, "people-pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Rename(pending.Key+".json", pending.Key+".retired"); err != nil {
+		t.Fatal(err)
+	}
+	root.Close()
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err == nil {
+		t.Fatal("retired publication was admitted again")
+	}
+	if err := DeletePeopleStage(dir, id, stage.ID); err != nil {
+		t.Fatalf("retired publication still pins stage: %v", err)
+	}
+}
+
+func TestPeoplePendingRetryRejectsFailedDurabilityBarrier(t *testing.T) {
+	dir, id, stage := t.TempDir(), sampleCopyID(), syntheticPeopleStage()
+	pending := syntheticPeoplePending(stage)
+	if err := SavePeopleStage(dir, id, stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err != nil {
+		t.Fatal(err)
+	}
+	original := peopleRecordIO
+	t.Cleanup(func() { peopleRecordIO = original })
+	faults := 0
+	peopleRecordIO.sync = func(f *os.File) error {
+		if strings.Contains(f.Name(), "people-pending") && faults == 0 {
+			faults++
+			return errors.New("synthetic barrier failure")
+		}
+		return original.sync(f)
+	}
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err == nil {
+		t.Fatal("retry accepted after its pending barrier failed")
+	}
+	peopleRecordIO = original
+	if faults != 1 {
+		t.Fatalf("barrier fault not exercised: %d", faults)
+	}
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err != nil {
+		t.Fatalf("retry did not repair barrier: %v", err)
+	}
+	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
+		t.Fatal("pending stage became unpinned")
+	}
+}
+
+func TestPeopleDamagedRetirementCannotReleaseStage(t *testing.T) {
+	dir, id, stage := t.TempDir(), sampleCopyID(), syntheticPeopleStage()
+	pending := syntheticPeoplePending(stage)
+	if err := SavePeopleStage(dir, id, stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := peopleRecordDir(dir, id, false, "people-pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Rename(pending.Key+".json", pending.Key+".retired"); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFile(pending.Key+".retired", []byte("damaged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root.Close()
+	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
+		t.Fatal("damaged retired record released the stage")
+	}
+	if _, err := ReadPeopleStage(dir, id, stage.ID); err != nil {
+		t.Fatalf("stage bytes lost: %v", err)
 	}
 }
 
@@ -1302,6 +1393,10 @@ func TestPeopleCompletionRejectsDamagedOrMismatchedReceipt(t *testing.T) {
 	wrongKey.Key = "0011223344556677"
 	wrongConfig := pending
 	wrongConfig.ConfigHash = strings.Repeat("b", 64)
+	wrongOwner := pending
+	wrongOwner.OwnerInstance = "synthetic-instance"
+	invalidPending := pending
+	invalidPending.Author = "invalid"
 	encode := func(p PeoplePending, seq uint64) []byte {
 		data, err := json.Marshal(PeopleCompletion{Pending: p, Seq: seq})
 		if err != nil {
@@ -1317,8 +1412,10 @@ func TestPeopleCompletionRejectsDamagedOrMismatchedReceipt(t *testing.T) {
 		{"unknown field", append(append([]byte(nil), valid[:len(valid)-1]...), []byte(`,"extra":true}`)...)},
 		{"trailing value", append(append([]byte(nil), valid...), []byte(` {}`)...)},
 		{"zero sequence", encode(pending, 0)},
+		{"invalid pending", encode(invalidPending, 1)},
 		{"wrong key", encode(wrongKey, 1)},
 		{"wrong configuration", encode(wrongConfig, 1)},
+		{"wrong owner", encode(wrongOwner, 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, id := t.TempDir(), sampleCopyID()

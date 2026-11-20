@@ -61,6 +61,7 @@ var peopleRecordIO = struct {
 	sync     func(*os.File) error
 	close    func(*os.File) error
 	link     func(*os.Root, string, string) error
+	rename   func(*os.Root, string, string) error
 	remove   func(*os.Root, string) error
 	openDir  func(*os.Root) (*os.File, error)
 	lstat    func(*os.Root, string) (os.FileInfo, error)
@@ -78,6 +79,7 @@ var peopleRecordIO = struct {
 	sync:     func(f *os.File) error { return f.Sync() },
 	close:    func(f *os.File) error { return f.Close() },
 	link:     func(r *os.Root, old, name string) error { return r.Link(old, name) },
+	rename:   func(r *os.Root, old, name string) error { return r.Rename(old, name) },
 	remove:   func(r *os.Root, name string) error { return r.Remove(name) },
 	openDir:  func(r *os.Root) (*os.File, error) { return r.Open(".") },
 	lstat:    func(r *os.Root, name string) (os.FileInfo, error) { return r.Lstat(name) },
@@ -89,7 +91,15 @@ var peopleRecordIO = struct {
 }
 
 func validPeopleStage(s PeopleStage) bool {
-	if !validHex(s.ID, 16) || !validHex(s.Hash, 64) || !validHex(s.ConfigHash, 64) || len(s.Data) == 0 || len(s.Data) > 4<<20 || s.Name == "" || len(s.Name) > 255 || !utf8.ValidString(s.Name) || s.Name == "." || s.Name == ".." || strings.ContainsAny(s.Name, "/\\") || len(s.MIME) > 255 {
+	if !validPeopleStageMetadata(s) || len(s.Data) == 0 || len(s.Data) > 4<<20 {
+		return false
+	}
+	sum := sha256.Sum256(s.Data)
+	return hex.EncodeToString(sum[:]) == s.Hash
+}
+
+func validPeopleStageMetadata(s PeopleStage) bool {
+	if !validHex(s.ID, 16) || !validHex(s.Hash, 64) || !validHex(s.ConfigHash, 64) || s.Name == "" || len(s.Name) > 255 || !utf8.ValidString(s.Name) || s.Name == "." || s.Name == ".." || strings.ContainsAny(s.Name, "/\\") || len(s.MIME) > 255 {
 		return false
 	}
 	for _, r := range s.Name {
@@ -103,8 +113,7 @@ func validPeopleStage(s PeopleStage) bool {
 	if s.OwnerInstance != "" && !ValidPeopleOwnerInstance(s.OwnerInstance) {
 		return false
 	}
-	sum := sha256.Sum256(s.Data)
-	return hex.EncodeToString(sum[:]) == s.Hash
+	return true
 }
 
 // peopleStageDir walks descriptor-backed roots and rejects symlink components.
@@ -177,13 +186,17 @@ func SavePeopleStage(dataDir string, id CopyID, stage PeopleStage) error {
 
 // ReadPeopleCopyInstance reads the identity without creating missing metadata.
 func ReadPeopleCopyInstance(dataDir string, id CopyID) (string, error) {
-	const recordID = "0000000000000000"
 	path, err := copyPath(dataDir, id)
 	if err != nil {
 		return "", err
 	}
 	unlock := lockCopy(filepath.Dir(path))
 	defer unlock()
+	return readPeopleCopyInstanceLocked(dataDir, id)
+}
+
+func readPeopleCopyInstanceLocked(dataDir string, id CopyID) (string, error) {
+	const recordID = "0000000000000000"
 	root, err := peopleRecordDir(dataDir, id, false, "people-identity")
 	if err != nil {
 		return "", err
@@ -224,8 +237,30 @@ func EnsurePeopleCopyInstance(dataDir string, id CopyID) (string, error) {
 	data := []byte(hex.EncodeToString(random[:]))
 	sum := sha256.Sum256(data)
 	record := PeopleStage{ID: recordID, Hash: hex.EncodeToString(sum[:]), Name: "identity", MIME: "text/plain", ConfigHash: strings.Repeat("0", 64), Data: data}
-	if err := savePeopleRecord(dataDir, id, record, "people-identity"); err != nil {
-		if value, readErr := ReadPeopleCopyInstance(dataDir, id); readErr == nil {
+	encoded, _ := json.Marshal(record) // The generated identity is always encodable.
+	path, _ := copyPath(dataDir, id)   // The preceding read validated the tuple.
+	unlock := lockCopy(filepath.Dir(path))
+	defer unlock()
+	release, err := storagebudget.ReserveSerializedAfter(dataDir, "", int64(len(encoded)), func() error {
+		if _, err := readPeopleCopyInstanceLocked(dataDir, id); err == nil {
+			return fs.ErrExist
+		} else if !errors.Is(err, ErrPeopleStageMissing) {
+			return err
+		}
+		if err := rejectProtectedPeopleRecords(dataDir, id); err != nil {
+			return err
+		}
+		return recoverPeopleTemps(dataDir, id)
+	})
+	if errors.Is(err, fs.ErrExist) {
+		return readPeopleCopyInstanceLocked(dataDir, id)
+	}
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	if err := savePeopleRecordLocked(dataDir, id, record, encoded, "people-identity"); err != nil {
+		if value, readErr := readPeopleCopyInstanceLocked(dataDir, id); readErr == nil {
 			return value, nil
 		}
 		return "", err
@@ -288,6 +323,10 @@ func recoverPeopleTemps(dataDir string, id CopyID) error {
 
 // savePeopleRecordLocked requires the copy lock and serialized budget reserve.
 func savePeopleRecordLocked(dataDir string, id CopyID, stage PeopleStage, encoded []byte, parts ...string) error {
+	return savePeopleNamedRecordLocked(dataDir, id, stage, encoded, false, parts...)
+}
+
+func savePeopleNamedRecordLocked(dataDir string, id CopyID, stage PeopleStage, encoded []byte, retired bool, parts ...string) error {
 	root, err := peopleRecordDir(dataDir, id, true, parts...)
 	if err != nil {
 		return err
@@ -299,6 +338,10 @@ func savePeopleRecordLocked(dataDir string, id CopyID, stage PeopleStage, encode
 	}
 	var used int64
 	count := 0
+	peak := int64(len(encoded))
+	if retired {
+		peak *= 2
+	}
 	for _, tree := range []string{"people-stages", "people-records", "people-pending", "people-completed", "people-identity"} {
 		err = peopleRecordIO.walk(copyRoot.FS(), tree, func(name string, entry fs.DirEntry, walkErr error) error {
 			if errors.Is(walkErr, fs.ErrNotExist) {
@@ -322,7 +365,7 @@ func savePeopleRecordLocked(dataDir string, id CopyID, stage PeopleStage, encode
 			}
 			used += info.Size()
 			count++
-			if count >= 4096 || used+int64(len(encoded)) > 256<<20 {
+			if count >= 4096 || used+peak > 256<<20 || (retired && count >= 4095) {
 				return storagebudget.ErrBudget
 			}
 			return nil
@@ -334,6 +377,9 @@ func savePeopleRecordLocked(dataDir string, id CopyID, stage PeopleStage, encode
 	}
 	_ = copyRoot.Close()
 	name := stage.ID + ".json"
+	if retired {
+		name = stage.ID + ".retired"
+	}
 	var nonce [8]byte
 	_, _ = rand.Read(nonce[:]) // Go 1.26 fills the buffer or terminates the process.
 	temp := stage.ID + "-" + hex.EncodeToString(nonce[:]) + ".tmp"
@@ -436,7 +482,10 @@ func readDurablePeopleRecord(dataDir string, id CopyID, stageID string, parts ..
 }
 
 func readPeopleRecordFile(root *os.Root, stageID string) (PeopleStage, error) {
-	name := stageID + ".json"
+	return readPeopleNamedRecord(root, stageID, stageID+".json")
+}
+
+func readPeopleNamedRecord(root *os.Root, stageID, name string) (PeopleStage, error) {
 	before, err := peopleRecordIO.lstat(root, name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return PeopleStage{}, ErrPeopleStageMissing
@@ -468,6 +517,19 @@ func readPeopleRecordFile(root *os.Root, stageID string) (PeopleStage, error) {
 
 // DeletePeopleStage removes a staged file after its association is cancelled.
 func DeletePeopleStage(dataDir string, id CopyID, stageID string) error {
+	return deletePeopleStage(dataDir, id, stageID, "", "")
+}
+
+// DeletePeopleStageExact removes only the reviewed stage in the current copy.
+// An absent stage is an idempotent success after its directory barrier is repaired.
+func DeletePeopleStageExact(dataDir string, id CopyID, stageID, instance, revision string) error {
+	if !validHex(instance, 32) || !validHex(revision, 64) {
+		return ErrPeopleStage
+	}
+	return deletePeopleStage(dataDir, id, stageID, instance, revision)
+}
+
+func deletePeopleStage(dataDir string, id CopyID, stageID, instance, revision string) error {
 	if !validHex(stageID, 16) {
 		return ErrPeopleStage
 	}
@@ -482,6 +544,12 @@ func DeletePeopleStage(dataDir string, id CopyID, stageID string) error {
 		return err
 	}
 	defer release()
+	if instance != "" {
+		actual, err := readPeopleCopyInstanceLocked(dataDir, id)
+		if err != nil || actual != instance {
+			return ErrPeopleStage
+		}
+	}
 	pinned, err := pendingReferencesLocked(dataDir, id, stageID)
 	if err != nil || pinned {
 		return ErrPeopleStage
@@ -491,7 +559,26 @@ func DeletePeopleStage(dataDir string, id CopyID, stageID string) error {
 		return err
 	}
 	defer root.Close()
-	if err := root.Remove(stageID + ".json"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if instance != "" {
+		stage, err := readPeopleRecordFile(root, stageID)
+		if err == nil {
+			if PeopleStageRevision(stage) != revision {
+				return ErrPeopleStage
+			}
+		} else if !errors.Is(err, ErrPeopleStageMissing) {
+			return err
+		}
+	}
+	if err := peopleRecordIO.remove(root, stageID+".json"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return ErrPeopleStage
+	}
+	dir, err := peopleRecordIO.openDir(root)
+	if err != nil {
+		return ErrPeopleStage
+	}
+	err = peopleRecordIO.sync(dir)
+	dir.Close()
+	if err != nil {
 		return ErrPeopleStage
 	}
 	return nil

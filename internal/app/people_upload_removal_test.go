@@ -249,14 +249,14 @@ func TestPeopleStaleStageReadCannotExposeOrRestoreRecreatedCopy(t *testing.T) {
 	sub.Access = "write"
 	seedSub(t, dir, sub)
 	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	old, err := team.EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	data := []byte("synthetic old stage")
 	sum := sha256.Sum256(data)
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "old-synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
 	if err := team.SavePeopleStage(dir, id, stage); err != nil {
-		t.Fatal(err)
-	}
-	old, err := team.EnsurePeopleCopyInstance(dir, id)
-	if err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -417,6 +417,9 @@ func TestPeopleStageRemovalRechecksPermission(t *testing.T) {
 		t.Fatalf("synthetic setup: %v", err)
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	if _, err := team.EnsurePeopleCopyInstance(dir, id); err != nil {
+		t.Fatal(err)
+	}
 	data := []byte("synthetic retained stage")
 	sum := sha256.Sum256(data)
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(entries[0]), Data: data}

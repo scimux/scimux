@@ -28,6 +28,9 @@ func (c *Client) PutPeopleBlob(ctx context.Context, baseURL, token, serverID, ow
 	if err != nil {
 		return err
 	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	server, err := c.Hello(ctx, baseURL)
 	if err != nil {
 		return err
@@ -37,6 +40,9 @@ func (c *Client) PutPeopleBlob(ctx context.Context, baseURL, token, serverID, ow
 	}
 	if !server.BlobGeneration {
 		return ErrBlobUnsupported
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
 	}
 	status, raw, err := c.doAuthedQuery(ctx, http.MethodPut, baseURL, path, url.Values{"generation": {generation}}.Encode(), token, data, maxResponseBody)
 	if err != nil {

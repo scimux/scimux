@@ -244,6 +244,9 @@ func TestPeoplePublicationStopsAfterAccessChangesDuringAppendReconciliation(t *t
 	seedSub(t, dir, sub)
 	author = installationOf(t, dir)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	if _, err := team.EnsurePeopleCopyInstance(dir, id); err != nil {
+		t.Fatal(err)
+	}
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hash, Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
 	if err := team.SavePeopleStage(dir, id, stage); err != nil {
 		t.Fatal(err)

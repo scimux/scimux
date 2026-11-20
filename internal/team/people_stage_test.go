@@ -1012,7 +1012,7 @@ func TestPeopleCopyInstanceBudgetFailureDoesNotInventIdentity(t *testing.T) {
 }
 
 func TestPeopleStageRejectsUnsafeNames(t *testing.T) {
-	for _, name := range []string{"../secret", "a/b", "a\\b", "bad\nname", "."} {
+	for _, name := range []string{"../secret", "a/b", "a\\b", "bad\nname", ".", ".."} {
 		t.Run(name, func(t *testing.T) {
 			s := syntheticPeopleStage()
 			s.Name = name

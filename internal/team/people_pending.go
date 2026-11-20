@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -31,10 +32,56 @@ type PeopleCompletion struct {
 }
 
 func ReadPeopleCompletion(dataDir string, id CopyID, key string) (PeopleCompletion, error) {
-	record, err := readDurablePeopleRecord(dataDir, id, key, "people-completed")
+	if !validHex(key, 16) {
+		return PeopleCompletion{}, ErrPeopleStage
+	}
+	path, err := copyPath(dataDir, id)
 	if err != nil {
 		return PeopleCompletion{}, err
 	}
+	unlock := lockCopy(filepath.Dir(path))
+	defer unlock()
+	release, err := storagebudget.Lock(dataDir)
+	if err != nil {
+		return PeopleCompletion{}, err
+	}
+	defer release()
+	pendingRoot, pendingErr := peopleRecordDir(dataDir, id, false, "people-pending")
+	if pendingErr == nil {
+		retired, retiredErr := readPeopleNamedRecord(pendingRoot, key, key+".retired")
+		if retiredErr == nil {
+			if err := retirementIsValid(dataDir, id, retired); err != nil {
+				pendingRoot.Close()
+				return PeopleCompletion{}, err
+			}
+			dir, openErr := peopleRecordIO.openDir(pendingRoot)
+			if openErr == nil {
+				_ = peopleRecordIO.sync(dir)
+				dir.Close()
+			}
+			pendingRoot.Close()
+			return PeopleCompletion{}, ErrPeopleStage
+		}
+		pendingRoot.Close()
+		if !errors.Is(retiredErr, ErrPeopleStageMissing) {
+			return PeopleCompletion{}, retiredErr
+		}
+	} else if !errors.Is(pendingErr, ErrPeopleStageMissing) {
+		return PeopleCompletion{}, pendingErr
+	}
+	root, err := peopleRecordDir(dataDir, id, false, "people-completed")
+	if err != nil {
+		return PeopleCompletion{}, err
+	}
+	defer root.Close()
+	record, err := readDurablePeopleRecordFile(root, key)
+	if err != nil {
+		return PeopleCompletion{}, err
+	}
+	return decodePeopleCompletion(record, key)
+}
+
+func decodePeopleCompletion(record PeopleStage, key string) (PeopleCompletion, error) {
 	var result PeopleCompletion
 	dec := json.NewDecoder(bytes.NewReader(record.Data))
 	dec.DisallowUnknownFields()
@@ -76,20 +123,6 @@ func SavePeoplePending(dataDir string, id CopyID, pending PeoplePending, reviewe
 	}
 	// The fixed fields and the JSON body validated above cannot fail encoding.
 	raw, _ := json.Marshal(pending)
-	same := func() (bool, bool) {
-		old, err := ReadPeoplePending(dataDir, id, pending.Key)
-		if err != nil {
-			return false, false
-		}
-		prior, err := json.Marshal(old)
-		return true, err == nil && bytes.Equal(prior, raw)
-	}
-	if exists, equal := same(); exists {
-		if equal {
-			return nil
-		}
-		return ErrPeopleStage
-	}
 	sum := sha256.Sum256(raw)
 	envelope := PeopleStage{ID: pending.Key, Hash: hex.EncodeToString(sum[:]), Name: "pending.json", MIME: "application/json", ConfigHash: pending.ConfigHash, OwnerInstance: pending.OwnerInstance, Data: raw}
 	encoded, _ := json.Marshal(envelope) // PeopleStage contains only strings and bytes.
@@ -99,17 +132,60 @@ func SavePeoplePending(dataDir string, id CopyID, pending PeoplePending, reviewe
 	}
 	unlock := lockCopy(filepath.Dir(path))
 	defer unlock()
-	completed, completedErr := peopleRecordDir(dataDir, id, false, "people-completed")
-	if completedErr == nil {
-		_, readErr := readPeopleRecordFile(completed, pending.Key)
-		completed.Close()
-		if readErr == nil || !errors.Is(readErr, ErrPeopleStageMissing) {
-			return ErrPeopleStage
+	already := errors.New("identical pending record")
+	release, err := storagebudget.ReserveSerializedAfter(dataDir, "", int64(len(encoded)), func() error {
+		completed, completedErr := peopleRecordDir(dataDir, id, false, "people-completed")
+		if completedErr == nil {
+			_, readErr := readDurablePeopleRecordFile(completed, pending.Key)
+			completed.Close()
+			if readErr == nil || !errors.Is(readErr, ErrPeopleStageMissing) {
+				return ErrPeopleStage
+			}
+		} else if !errors.Is(completedErr, ErrPeopleStageMissing) {
+			return completedErr
 		}
-	} else if !errors.Is(completedErr, ErrPeopleStageMissing) {
-		return completedErr
+		pendingRoot, pendingErr := peopleRecordDir(dataDir, id, false, "people-pending")
+		if pendingErr == nil {
+			retired, readErr := readPeopleNamedRecord(pendingRoot, pending.Key, pending.Key+".retired")
+			if readErr == nil {
+				if err := retirementIsValid(dataDir, id, retired); err != nil {
+					pendingRoot.Close()
+					return err
+				}
+				dir, openErr := peopleRecordIO.openDir(pendingRoot)
+				if openErr == nil {
+					_ = peopleRecordIO.sync(dir)
+					dir.Close()
+				}
+				pendingRoot.Close()
+				return ErrPeopleStage
+			}
+			if errors.Is(readErr, ErrPeopleStageMissing) {
+				old, oldErr := readDurablePeopleRecordFile(pendingRoot, pending.Key)
+				if oldErr == nil {
+					pendingRoot.Close()
+					if bytes.Equal(old.Data, raw) {
+						return already
+					}
+					return ErrPeopleStage
+				}
+				if !errors.Is(oldErr, ErrPeopleStageMissing) {
+					pendingRoot.Close()
+					return oldErr
+				}
+			}
+			pendingRoot.Close()
+			if !errors.Is(readErr, ErrPeopleStageMissing) {
+				return readErr
+			}
+		} else if !errors.Is(pendingErr, ErrPeopleStageMissing) {
+			return pendingErr
+		}
+		return recoverPeopleTemps(dataDir, id)
+	})
+	if errors.Is(err, already) {
+		return nil
 	}
-	release, err := storagebudget.ReserveSerializedAfter(dataDir, "", int64(len(encoded)), func() error { return recoverPeopleTemps(dataDir, id) })
 	if err != nil {
 		return err
 	}
@@ -129,36 +205,60 @@ func SavePeoplePending(dataDir string, id CopyID, pending PeoplePending, reviewe
 			return ErrPeopleStage
 		}
 	}
-	pendingRoot, err := peopleRecordDir(dataDir, id, true, "people-pending")
-	if err != nil {
-		return err
-	}
-	prior, statErr := peopleRecordIO.lstat(pendingRoot, pending.Key+".json")
-	if statErr == nil {
-		if !prior.Mode().IsRegular() {
-			pendingRoot.Close()
-			return ErrPeopleStage
-		}
-		old, err := readDurablePeopleRecordFile(pendingRoot, pending.Key)
-		pendingRoot.Close()
-		if err == nil && bytes.Equal(old.Data, raw) {
-			return nil
-		}
-		return ErrPeopleStage
-	}
-	pendingRoot.Close()
-	if !errors.Is(statErr, fs.ErrNotExist) {
-		return ErrPeopleStage
-	}
 	return savePeopleRecordLocked(dataDir, id, envelope, encoded, "people-pending")
 }
 
 func ReadPeoplePending(dataDir string, id CopyID, key string) (PeoplePending, error) {
-	stage, err := readDurablePeopleRecord(dataDir, id, key, "people-pending")
+	if !validHex(key, 16) {
+		return PeoplePending{}, ErrPeopleStage
+	}
+	path, err := copyPath(dataDir, id)
+	if err != nil {
+		return PeoplePending{}, err
+	}
+	unlock := lockCopy(filepath.Dir(path))
+	defer unlock()
+	release, err := storagebudget.Lock(dataDir)
+	if err != nil {
+		return PeoplePending{}, err
+	}
+	defer release()
+	root, err := peopleRecordDir(dataDir, id, false, "people-pending")
+	if err != nil {
+		return PeoplePending{}, err
+	}
+	defer root.Close()
+	stage, err := readPendingEnvelopeLocked(dataDir, id, root, key)
 	if err != nil {
 		return PeoplePending{}, err
 	}
 	return decodePeoplePending(stage)
+}
+
+func readPendingEnvelopeLocked(dataDir string, id CopyID, root *os.Root, key string) (PeopleStage, error) {
+	retired, retiredErr := readPeopleNamedRecord(root, key, key+".retired")
+	if retiredErr == nil {
+		if err := retirementIsValid(dataDir, id, retired); err != nil {
+			return PeopleStage{}, err
+		}
+		dir, err := peopleRecordIO.openDir(root)
+		if err != nil {
+			return PeopleStage{}, ErrPeopleStage
+		}
+		err = peopleRecordIO.sync(dir)
+		dir.Close()
+		if err != nil {
+			return PeopleStage{}, ErrPeopleStage
+		}
+		if _, err := peopleRecordIO.lstat(root, key+".json"); !errors.Is(err, fs.ErrNotExist) {
+			return PeopleStage{}, ErrPeopleStage
+		}
+		return PeopleStage{}, ErrPeopleStageMissing
+	}
+	if !errors.Is(retiredErr, ErrPeopleStageMissing) {
+		return PeopleStage{}, retiredErr
+	}
+	return readDurablePeopleRecordFile(root, key)
 }
 
 // pendingReferencesLocked is called only with the copy and budget locks held.
@@ -185,12 +285,35 @@ func pendingReferencesLocked(dataDir string, id CopyID, stageID string) (bool, e
 	if err != nil {
 		return false, ErrPeopleStage
 	}
+	// A rename can be visible after its directory sync failed. Repair that
+	// barrier before absence of a pending name can release a pin.
+	if err := peopleRecordIO.sync(dir); err != nil {
+		dir.Close()
+		return false, ErrPeopleStage
+	}
 	entries, err := peopleRecordIO.readDir(dir)
 	dir.Close()
 	if err != nil {
 		return false, ErrPeopleStage
 	}
 	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".retired") {
+			key := strings.TrimSuffix(entry.Name(), ".retired")
+			if !validHex(key, 16) {
+				return false, ErrPeopleStage
+			}
+			record, err := readPeopleNamedRecord(root, key, entry.Name())
+			if err != nil {
+				return false, err
+			}
+			if err := retirementIsValid(dataDir, id, record); err != nil {
+				return false, err
+			}
+			if _, err := peopleRecordIO.lstat(root, key+".json"); !errors.Is(err, fs.ErrNotExist) {
+				return false, ErrPeopleStage
+			}
+			continue
+		}
 		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
@@ -231,7 +354,7 @@ func ConfirmPeoplePending(dataDir string, id CopyID, key string, seq uint64) err
 		return err
 	}
 	defer pendingRoot.Close()
-	envelope, err := readDurablePeopleRecordFile(pendingRoot, key)
+	envelope, err := readPendingEnvelopeLocked(dataDir, id, pendingRoot, key)
 	if err != nil {
 		return err
 	}
@@ -264,38 +387,38 @@ func ConfirmPeoplePending(dataDir string, id CopyID, key string, seq uint64) err
 	if exists {
 		incoming = 0
 	}
-	release, err := storagebudget.ReserveSerializedAfter(dataDir, "", incoming, func() error { return recoverPeopleTemps(dataDir, id) })
+	release, err := storagebudget.ReserveSerializedAfter(dataDir, "", incoming, func() error {
+		current, err := readPendingEnvelopeLocked(dataDir, id, pendingRoot, key)
+		if err != nil || !bytes.Equal(current.Data, envelope.Data) {
+			return ErrPeopleStage
+		}
+		root, rootErr := peopleRecordDir(dataDir, id, false, "people-completed")
+		currentExists := false
+		if rootErr == nil {
+			prior, readErr := readDurablePeopleRecordFile(root, key)
+			root.Close()
+			if readErr == nil {
+				if !bytes.Equal(prior.Data, raw) {
+					return ErrPeopleStage
+				}
+				currentExists = true
+			} else if !errors.Is(readErr, ErrPeopleStageMissing) {
+				return readErr
+			}
+		} else if !errors.Is(rootErr, ErrPeopleStageMissing) {
+			return rootErr
+		}
+		if exists != currentExists {
+			return ErrPeopleStage
+		}
+		return recoverPeopleTemps(dataDir, id)
+	})
 	if err != nil {
 		return err
 	}
 	defer release()
-	// copyPath already validated this unchanged value; CommentsLog is valid.
-	logPath, _ := copyLogPath(dataDir, id, CommentsLog)
-	entries, _, err := readCopyLocked(logPath, seq-1, 1, 4<<20)
-	if err != nil || len(entries) != 1 || entries[0].Seq != seq || entries[0].Key != "c/"+key || entries[0].Author != pending.Author {
-		return ErrPeopleStage
-	}
-	want, wantErr := json.Marshal(pending.Body)
-	got, gotErr := json.Marshal(entries[0].Body)
-	if wantErr != nil || gotErr != nil || !bytes.Equal(want, got) {
-		return ErrPeopleStage
-	}
-	stages, err := peopleStageDir(dataDir, id, false)
-	if err != nil {
+	if _, err := validateRetainedPeoplePublication(dataDir, id, pending, seq); err != nil {
 		return err
-	}
-	defer stages.Close()
-	retained, err := peopleRecordDir(dataDir, id, false, "people-records", "comments", strconv.FormatUint(seq, 10))
-	if err != nil {
-		return err
-	}
-	defer retained.Close()
-	for _, stageID := range pending.StageIDs {
-		stage, stageErr := readDurablePeopleRecordFile(stages, stageID)
-		copy, copyErr := readDurablePeopleRecordFile(retained, stageID)
-		if stageErr != nil || copyErr != nil || stage.Hash != copy.Hash || stage.Name != copy.Name || stage.MIME != copy.MIME || !bytes.Equal(stage.Data, copy.Data) {
-			return ErrPeopleStage
-		}
 	}
 	if !exists {
 		if err := savePeopleRecordLocked(dataDir, id, completion, encoded, "people-completed"); err != nil {
@@ -312,6 +435,52 @@ func ConfirmPeoplePending(dataDir string, id CopyID, key string, seq uint64) err
 	err = peopleRecordIO.sync(dir)
 	_ = dir.Close()
 	if err != nil {
+		return ErrPeopleStage
+	}
+	return nil
+}
+
+// validateRetainedPeoplePublication requires the copy lock and budget lock.
+func validateRetainedPeoplePublication(dataDir string, id CopyID, pending PeoplePending, seq uint64) ([]PeopleStage, error) {
+	if err := validateRetainedPeopleComment(dataDir, id, pending, seq); err != nil {
+		return nil, err
+	}
+	stages, err := peopleStageDir(dataDir, id, false)
+	if err != nil {
+		return nil, err
+	}
+	defer stages.Close()
+	retained, err := peopleRecordDir(dataDir, id, false, "people-records", "comments", strconv.FormatUint(seq, 10))
+	if err != nil {
+		return nil, err
+	}
+	defer retained.Close()
+	result := make([]PeopleStage, 0, len(pending.StageIDs))
+	for _, stageID := range pending.StageIDs {
+		copy, copyErr := readDurablePeopleRecordFile(retained, stageID)
+		if copyErr != nil {
+			return nil, ErrPeopleStage
+		}
+		stage, stageErr := readDurablePeopleRecordFile(stages, stageID)
+		// Both records were hash-verified on read, so equal bytes also imply
+		// equal hashes. Compare bytes directly to preserve the exact snapshot.
+		if stageErr != nil || !bytes.Equal(stage.Data, copy.Data) || stage.Name != copy.Name || stage.MIME != copy.MIME {
+			return nil, ErrPeopleStage
+		}
+		result = append(result, copy)
+	}
+	return result, nil
+}
+
+func validateRetainedPeopleComment(dataDir string, id CopyID, pending PeoplePending, seq uint64) error {
+	logPath, _ := copyLogPath(dataDir, id, CommentsLog)
+	entries, _, err := readCopyLocked(logPath, seq-1, 1, 4<<20)
+	if err != nil || len(entries) != 1 || entries[0].Seq != seq || entries[0].Key != "c/"+pending.Key || entries[0].Author != pending.Author {
+		return ErrPeopleStage
+	}
+	want, wantErr := json.Marshal(pending.Body)
+	got, gotErr := json.Marshal(entries[0].Body)
+	if wantErr != nil || gotErr != nil || !bytes.Equal(want, got) {
 		return ErrPeopleStage
 	}
 	return nil

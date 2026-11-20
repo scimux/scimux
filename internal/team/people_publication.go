@@ -17,6 +17,9 @@ func (c *Client) AppendPeopleComment(ctx context.Context, baseURL, token, owner,
 	if !validHex(author, 32) {
 		return 0, ErrProtocol
 	}
+	if ctx != nil && ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
 	gen, last, results, err := c.appendLog(ctx, baseURL, token, owner, chat, generation, "/comments", []MirrorEntry{{Key: key, Body: body}})
 	if err != nil {
 		return 0, err
@@ -25,6 +28,9 @@ func (c *Client) AppendPeopleComment(ctx context.Context, baseURL, token, owner,
 		return 0, ErrProtocol
 	}
 	seq := results[0].Seq
+	if ctx != nil && ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
 	page, err := c.ReadComments(ctx, baseURL, token, owner, chat, seq-1)
 	if err != nil {
 		return 0, err
