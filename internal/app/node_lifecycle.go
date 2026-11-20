@@ -942,21 +942,19 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		}
 		return 0, nil
 	}
-	// Extra directories for Claude --add-dir. Only genuinely additional
-	// directories outside the working directory — today the node's attachment
-	// staging dir. n.Dir is already the process cwd (passing it is a no-op
-	// and does not bypass workspace trust). Skip when attachmentsDir is unset
-	// so an empty or relative path never reaches the CLI. MkdirAll here
-	// because the CLI rejects a non-existent path and storeAttachment
-	// otherwise creates the dir lazily on first upload. A persistent
-	// permissions.additionalDirectories setting is not required.
-	var addDirs []string
+	// The node's attachment staging dir lives outside the working directory.
+	// It is granted through the hook bundle's settings
+	// (permissions.additionalDirectories, see prepareClaudeHookBundleWith),
+	// not --add-dir: Claude 2.1.328+ asks a per-session trust question before
+	// the session starts for every untrusted --add-dir folder. n.Dir is
+	// already the process cwd and is never passed as an added directory.
+	// MkdirAll here because storeAttachment otherwise creates the dir lazily
+	// on first upload. Skipped when attachmentsDir is unset so an empty path
+	// never reaches the CLI.
 	if n.Agent == "claude" && a.attachmentsDir != "" {
-		dir := a.attachmentDir(n.ID)
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if err := os.MkdirAll(a.attachmentDir(n.ID), 0o700); err != nil {
 			return 500, fmt.Errorf("create attachment dir: %w", err)
 		}
-		addDirs = []string{dir}
 	}
 	var hookID, settingsPath string
 	if n.Agent == "claude" {
@@ -969,7 +967,7 @@ func (a *app) launchNode(n *Node, pm procManager) (int, error) {
 		// Capability becomes authoritative only after this live process delivers a
 		// valid SessionStart event (processClaudeHookEventAt).
 	}
-	cmd, err := agentCommandSettings(launch, addDirs, settingsPath)
+	cmd, err := agentCommandSettings(launch, nil, settingsPath)
 	if err != nil {
 		a.archiveHookBundle(hookID)
 		return 400, err

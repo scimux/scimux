@@ -185,7 +185,13 @@ func (a *app) prepareClaudeHookBundle(nodeID string) (hookID, settingsPath strin
 }
 
 func (a *app) prepareClaudeHookBundleWith(ops hookOps, nodeID string) (hookID, settingsPath string, err error) {
-	_ = nodeID
+	var addDirs []string
+	if a.attachmentsDir != "" {
+		// The node's upload staging dir, granted as a settings working
+		// directory rather than --add-dir (see claudeHookSettingsJSON).
+		// launchNode creates the dir before this runs.
+		addDirs = []string{a.attachmentDir(nodeID)}
+	}
 	hookID, err = newHookID()
 	if err != nil {
 		return "", "", err
@@ -194,7 +200,7 @@ func (a *app) prepareClaudeHookBundleWith(ops hookOps, nodeID string) (hookID, s
 	if root == "" {
 		return "", "", fmt.Errorf("claude hook root: %w", errClaudeHookRejected)
 	}
-	settingsPath, err = writeClaudeHookBundle(ops, root, hookID)
+	settingsPath, err = writeClaudeHookBundle(ops, root, hookID, addDirs)
 	if err != nil {
 		return "", "", err
 	}
@@ -217,7 +223,7 @@ var claudeHookBundleSubdirs = []string{
 	filepath.Join("perm", "processed"), filepath.Join("perm", claudeAskedDirName),
 }
 
-func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath string, err error) {
+func writeClaudeHookBundle(ops hookOps, root, hookID string, addDirs []string) (settingsPath string, err error) {
 	dir := filepath.Join(root, hookID)
 	if err := ops.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -242,7 +248,7 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 		ops.RemoveAll(dir)
 		return "", err
 	}
-	raw, err := claudeHookSettingsJSON(execPath, dir)
+	raw, err := claudeHookSettingsJSON(execPath, dir, addDirs...)
 	if err != nil {
 		ops.RemoveAll(dir)
 		return "", err
@@ -297,7 +303,13 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string) (settingsPath strin
 	return settingsPath, nil
 }
 
-func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
+// claudeHookSettingsJSON builds the per-launch --settings document: the scimux
+// hooks and, when addDirs is non-empty, permissions.additionalDirectories.
+// Granting a directory here instead of --add-dir matters: Claude 2.1.328+
+// asks a per-session trust question before the session starts for every
+// untrusted --add-dir folder, while command-line settings grants apply
+// without that prompt.
+func claudeHookSettingsJSON(execPath, hookDir string, addDirs ...string) ([]byte, error) {
 	if execPath == "" || hookDir == "" {
 		return nil, fmt.Errorf("claude hook settings: %w", errClaudeHookRejected)
 	}
@@ -369,6 +381,9 @@ func claudeHookSettingsJSON(execPath, hookDir string) ([]byte, error) {
 			"Elicitation":       entry(elicitationCmd),
 			"ElicitationResult": entry(elicitationCmd),
 		},
+	}
+	if len(addDirs) > 0 {
+		doc["permissions"] = map[string]any{"additionalDirectories": addDirs}
 	}
 	return json.Marshal(doc)
 }

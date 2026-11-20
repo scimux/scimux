@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -1290,12 +1291,16 @@ func TestLaunchNodeFailureDoesNotMarkAX(t *testing.T) {
 	}
 }
 
-// ---------- 6. Claude --add-dir for the node's attachment staging dir ----------
+// ---------- 6. Claude access to the node's attachment staging dir ----------
 //
 // Uploads stage at ~/.scimux/attachments/<node-id>/, which sits outside the
-// workspace cwd. --add-dir grants the CLI tool access there so every attached
-// file does not prompt for out-of-workspace permission. n.Dir is already the
-// process cwd and must not be passed to this flag.
+// workspace cwd. The per-launch --settings bundle grants the CLI tool access
+// there (permissions.additionalDirectories) so every attached file does not
+// prompt for out-of-workspace permission. It is deliberately not --add-dir:
+// Claude 2.1.328+ asks a per-session trust question before the session
+// starts for every untrusted --add-dir folder. n.Dir is already the process
+// cwd and is never passed as an added directory. The agentCommand --add-dir
+// plumbing below stays covered for callers that pass explicit dirs.
 
 func fakeNewSessionArgv(f *fakeTmux) string {
 	f.mu.Lock()
@@ -1324,12 +1329,26 @@ func TestClaudeLaunchAddsTheNodesAttachmentDir(t *testing.T) {
 		t.Fatalf("attachmentDir(%q) = %q, want <attachmentsDir>/<id>", n.ID, wantDir)
 	}
 	launch := fakeNewSessionArgv(f)
-	if c := strings.Count(launch, "--add-dir"); c != 1 {
-		t.Errorf("new-session argv must contain exactly one --add-dir (got %d): %q", c, launch)
+	if strings.Contains(launch, "--add-dir") {
+		t.Errorf("owned Claude launch must not pass --add-dir (it triggers a per-session trust prompt): %q", launch)
 	}
-	wantFlag := "--add-dir " + shellQuote(wantDir)
-	if !strings.Contains(launch, wantFlag) {
-		t.Errorf("new-session argv missing %q: %q", wantFlag, launch)
+	bundles, err := filepath.Glob(filepath.Join(a.claudeHooksDir(), "*", "settings.json"))
+	if err != nil || len(bundles) != 1 {
+		t.Fatalf("want exactly one hook settings file after one launch, got %v (err %v)", bundles, err)
+	}
+	if !strings.Contains(launch, "--settings "+shellQuote(bundles[0])) {
+		t.Fatalf("launch does not pass the bundle settings %q: %q", bundles[0], launch)
+	}
+	got := grantedClaudeDirs(t, readClaudeSettingsFile(t, bundles[0]))
+	if want := []string{wantDir}; !reflect.DeepEqual(got, want) {
+		t.Errorf("settings grant = %v, want %v", got, want)
+	}
+	st, err := os.Stat(wantDir)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("attachment dir must exist before launch: %v", err)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		t.Errorf("attachment dir mode = %v, want owner-only", st.Mode().Perm())
 	}
 }
 
