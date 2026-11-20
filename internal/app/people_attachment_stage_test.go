@@ -193,7 +193,7 @@ func TestPeopleAttachmentStageUsesGuardedRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending := team.PeoplePending{Key: "0123456789abcdef", Author: installationOf(t, dir), ConfigHash: stage.ConfigHash, Body: json.RawMessage(`{"v":1}`), StageIDs: []string{stage.ID}}
-	if err := team.SavePeoplePending(dir, copyID, pending); err != nil {
+	if err := team.SavePeoplePending(dir, copyID, pending, []team.PeopleStage{stage}); err != nil {
 		t.Fatal(err)
 	}
 	pinned := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, path+"/stage/"+stage.ID), "")

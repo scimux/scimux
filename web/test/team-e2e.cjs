@@ -1250,6 +1250,68 @@ async function peopleQuota(mode,ownerSeat,readerSeat) {
   }
 }
 
+async function peopleStageCompetition(mode, ownerSeat, readerSeat) {
+  const testRelay=await launchRelay(relayBin,'competition-relay-'+mode),target=new URL(testRelay.url);let appends=0;
+  const proxy=http.createServer((req,res)=>{
+    if(req.method==='POST'&&new URL(req.url,'http://synthetic.invalid').pathname.endsWith('/comments'))appends++;
+    const upstream=http.request({hostname:target.hostname,port:target.port,path:req.url,method:req.method,headers:{...req.headers,host:target.host}},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res)});
+    upstream.on('error',()=>{if(!res.headersSent)res.writeHead(502);res.end();});req.pipe(upstream);
+  });
+  await new Promise((resolve,reject)=>proxy.once('error',reject).listen(0,'127.0.0.1',resolve));
+  const stopProxy=()=>proxy.close();heldReleases.add(stopProxy);
+  try {
+  const relayURL='http://127.0.0.1:'+proxy.address().port,identities=[];
+  for(const seat of [ownerSeat,readerSeat]) {
+    const issue=JSON.parse(execFileSync(relayBin,['-state-dir',testRelay.dir,'-url',relayURL,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
+    const joined=await seat.api('/api/team/servers','POST',{link:issue.link,name:'Synthetic competition'});
+    identities.push({server:joined.id,self:(await seat.api('/api/team/servers/'+joined.id+'/seats')).self});
+  }
+  const [ownerIdentity,readerIdentity]=identities;
+  const chat=await node(ownerSeat,'codex','Synthetic stage competition '+mode,'Synthetic setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerIdentity.server,scope:'all',members:[{seat:readerIdentity.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.server===ownerIdentity.server&&x.owner===ownerIdentity.self&&x.chat===share.uid&&x.generation===share.generation&&x.access==='write'),40000,'competition subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),base='/api/team/subscriptions/'+key;
+  const page=await pageFor(readerSeat,mode,'people-stage-competition-'+mode);await open(page,'team/'+key);
+  await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await page.locator('#prompt').fill('Newer synthetic draft '+mode);
+  const upload=page.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname===base+'/attachments');
+  await page.locator('#attfile').setInputFiles({name:'first.txt',mimeType:'text/plain',buffer:Buffer.from('first synthetic bytes')});
+  const stageID=new URL((await upload).url()).searchParams.get('stage_id');
+  await page.locator('#attstage .stagechip.done[title="first.txt"]').waitFor({timeout:30000});
+  assert.equal(appends,0,'no implicit append before publication');
+  const result=await page.evaluate(async ({base,instance,stageID,mode})=>{
+    const token=document.querySelector('meta[name="scimux-csrf"]').content, q='?copy_instance='+encodeURIComponent(instance), headers={'X-Scimux-CSRF':token};
+    const body={text:'Synthetic competing publication '+mode,anchor:0,key:'0123456789abcdef',attachments:[stageID]};
+    const send=()=>fetch(base+'/comments'+q,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const [publication,removal]=await Promise.all([send(),fetch(base+'/attachments/stage/'+stageID+q,{method:'DELETE',headers})]);
+    const replace=async()=>{const form=new FormData();form.append('files',new File(['replacement synthetic bytes'],'replacement.txt',{type:'text/plain'}));return (await fetch(base+'/attachments'+q+'&stage_id='+stageID,{method:'POST',headers,body:form})).status;};
+    let replacement=0;
+    if(removal.ok)replacement=await replace();
+    const retry=await send();
+    if(!removal.ok){const later=await fetch(base+'/attachments/stage/'+stageID+q,{method:'DELETE',headers});if(later.ok)replacement=await replace();}
+    const finalRetry=await send();
+    return {publication:publication.status,removal:removal.status,replacement,retry:retry.status,finalRetry:finalRetry.status};
+  },{base,instance:sub.people_copy_instance,stageID,mode});
+  assert.ok(result.retry===200,'explicit retry must confirm');
+  assert.ok(result.publication===200||result.publication===409,'publication race outcome');
+  assert.ok(result.removal===200||result.removal===204||result.removal===409,'removal race outcome');
+  assert.ok(result.replacement>=200&&result.replacement<300&&result.finalRetry===200,'replacement created and completion retry preserved');
+  const entries=(await readerSeat.api(base+'/comments?after=0')).entries.filter(x=>x.text==='Synthetic competing publication '+mode);
+  assert.equal(entries.length,1);const entry=entries[0],file=entry.attachments.find(x=>x.id===stageID);assert.ok(file);
+  const response=await fetch(readerSeat.base+base+'/attachments/'+entry.seq+'/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance),{headers:{Origin:readerSeat.base,'X-Scimux-CSRF':readerSeat.csrf}});
+  const bytes=Buffer.from(await response.arrayBuffer()),hash=crypto.createHash('sha256').update(bytes).digest('hex');
+  assertID('people-stage-competition-consistent-'+mode,response.ok&&file.sha256===hash&&file.size===bytes.length&&file.mime==='text/plain; charset=utf-8'&&((file.name==='first.txt'&&bytes.toString()==='first synthetic bytes')||(file.name==='replacement.txt'&&bytes.toString()==='replacement synthetic bytes')));
+  const current=await readerSeat.api(base+'/attachments/stage/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance));assert.equal(current.name,'replacement.txt');
+  assertID('people-stage-competition-one-append-'+mode,appends===1);
+  assertID('people-stage-competition-draft-'+mode,(await page.locator('#prompt').innerText())==='Newer synthetic draft '+mode);
+  assertID('people-stage-competition-zero-agent-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await page.locator('#msgs .gmsg').filter({hasText:'Synthetic competing publication '+mode}).last().waitFor({timeout:40000});
+  await screenshot(page,'people-stage-competition-'+mode+'.png');manifest['people-stage-competition-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {heldReleases.delete(stopProxy);await new Promise(resolve=>proxy.close(resolve));}
+}
+
 async function peopleUncertainRetry(mode,ownerSeat,readerSeat) {
   const chat=await node(ownerSeat,'codex','People uncertain '+mode,'Synthetic uncertain setup');
   const sharePath='/api/team/shares/'+chat.id;
@@ -2402,6 +2464,7 @@ async function run() {
  if(selected==='people-image-bookmark'){for(const mode of ['desktop','phone'])await peopleImageBookmark(mode,a,r);return;}
  if(selected==='people-upload-permission'){for(const mode of ['desktop','phone'])await peoplePermissionDuringUpload(mode,a,r);return;}
  if(selected==='people-midbody-permission'){for(const mode of ['desktop','phone'])await peoplePermissionMidBody(mode,a,r);return;}
+ if(selected==='people-stage-competition'){for(const mode of ['desktop','phone'])await peopleStageCompetition(mode,a,r);return;}
  if(selected==='people-uncertain-retry'){for(const mode of ['desktop','phone'])await peopleUncertainRetry(mode,a,r);return;}
  if(selected==='people-files'){for(const mode of ['desktop','phone'])await peopleFiles(mode,a,r);return;}
  if(selected==='people-quota'){for(const mode of ['desktop','phone'])await peopleQuota(mode,a,r);return;}
@@ -2713,6 +2776,7 @@ async function run() {
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>stage2SharedActions(mode,a,b,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleFiles(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleUncertainRetry(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleStageCompetition(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peoplePermissionDuringUpload(mode,a,r));
   for(const mode of ['desktop','phone'])await runCompletedCase(()=>peoplePermissionMidBody(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleImageBookmark(mode,a,r));

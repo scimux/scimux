@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -115,7 +116,7 @@ func TestPeoplePublicationRejectsInvalidOrForeignStageBeforeRelayWrite(t *testin
 		t.Fatal(err)
 	}
 	prior := team.PeoplePending{Key: "aabbccddeeff0011", Author: strings.Repeat("a", 32), ConfigHash: stage.ConfigHash, Body: json.RawMessage(`{"v":1,"text":"earlier frozen publication"}`), StageIDs: []string{stage.ID}}
-	if err := team.SavePeoplePending(dir, id, prior); err != nil {
+	if err := team.SavePeoplePending(dir, id, prior, []team.PeopleStage{stage}); err != nil {
 		t.Fatal(err)
 	}
 	conflicting, err := json.Marshal(map[string]any{"text": "new synthetic caption", "anchor": 0, "key": prior.Key, "attachments": []string{stage.ID}})
@@ -757,5 +758,86 @@ func TestPeoplePublicationPreservesQuotaRefusalAndFrozenKey(t *testing.T) {
 	retry := doTeam(h, http.MethodPost, peopleTestURL(t, dir, path+"/comments"), string(requestBody))
 	if retry.Code != http.StatusInsufficientStorage || posts != 0 {
 		t.Fatalf("quota retry changed outcome: %d posts=%d", retry.Code, posts)
+	}
+}
+
+func TestPeoplePublicationRejectsReplacedStageBeforeRelayWrites(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(*team.PeopleStage)
+	}{
+		{"bytes", func(s *team.PeopleStage) {
+			s.Data = []byte("replacement synthetic bytes")
+			sum := sha256.Sum256(s.Data)
+			s.Hash = hex.EncodeToString(sum[:])
+		}},
+		{"name", func(s *team.PeopleStage) { s.Name = "second.txt" }},
+		{"mime", func(s *team.PeopleStage) { s.MIME = "application/octet-stream" }},
+		{"compound", func(s *team.PeopleStage) {
+			s.Data = []byte("replacement synthetic bytes")
+			sum := sha256.Sum256(s.Data)
+			s.Hash = hex.EncodeToString(sum[:])
+			s.Name = "second.txt"
+			s.MIME = "application/octet-stream"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var writes atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/hello" {
+					w.Header().Set("Scimux-Blob-Generation", "1")
+					fmt.Fprint(w, helloJSON(teamServerID, "Synthetic relay"))
+					return
+				}
+				writes.Add(1)
+				http.Error(w, "unexpected write", http.StatusServiceUnavailable)
+			}))
+			t.Cleanup(srv.Close)
+			handler, dir := testTeamSurface(t, clientFor(srv))
+			h := handler.(*teamHandler)
+			server := labEntry(teamServerID, srv.URL, teamToken)
+			seedTeam(t, dir, server)
+			sub := baseSub()
+			sub.Access = "write"
+			seedSub(t, dir, sub)
+			id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+			data := []byte("first synthetic bytes")
+			sum := sha256.Sum256(data)
+			stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "first.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
+			if err := team.SavePeopleStage(dir, id, stage); err != nil {
+				t.Fatal(err)
+			}
+			replacement := stage
+			tc.change(&replacement)
+			h.stageRead = func(dir string, id team.CopyID, stageID string) (team.PeopleStage, error) {
+				reviewed, err := team.ReadPeopleStage(dir, id, stageID)
+				if err != nil {
+					return reviewed, err
+				}
+				if err := team.DeletePeopleStage(dir, id, stageID); err != nil {
+					t.Fatal(err)
+				}
+				if err := team.SavePeopleStage(dir, id, replacement); err != nil {
+					t.Fatal(err)
+				}
+				return reviewed, nil
+			}
+			req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, "/", nil), id, "")
+			defer finish()
+			rec := httptest.NewRecorder()
+			h.postPeopleFileComment(rec, req, id, sub, server, "synthetic", 0, "fedcba9876543210", []string{stage.ID})
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "publication_conflict") || writes.Load() != 0 {
+				t.Fatalf("status=%d writes=%d body=%s", rec.Code, writes.Load(), rec.Body.String())
+			}
+			got, err := team.ReadPeopleStage(dir, id, stage.ID)
+			if err != nil || !bytes.Equal(got.Data, replacement.Data) || got.Name != replacement.Name || got.MIME != replacement.MIME || got.Hash != replacement.Hash {
+				t.Fatalf("replacement lost: %v", err)
+			}
+			if _, err := team.ReadPeoplePending(dir, id, "fedcba9876543210"); !errors.Is(err, team.ErrPeopleStageMissing) {
+				t.Fatalf("unexpected pending: %v", err)
+			}
+
+		})
 	}
 }

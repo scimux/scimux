@@ -70,7 +70,7 @@ func decodePeoplePending(stage PeopleStage) (PeoplePending, error) {
 
 // SavePeoplePending freezes body, key and ordered stage identities. It checks
 // and pins the stages under copy-lock then serialized-budget-lock ordering.
-func SavePeoplePending(dataDir string, id CopyID, pending PeoplePending) error {
+func SavePeoplePending(dataDir string, id CopyID, pending PeoplePending, reviewed []PeopleStage) error {
 	if !validPeoplePending(pending) {
 		return ErrPeopleStage
 	}
@@ -119,9 +119,13 @@ func SavePeoplePending(dataDir string, id CopyID, pending PeoplePending) error {
 		return err
 	}
 	defer stages.Close()
-	for _, stageID := range pending.StageIDs {
+	if len(reviewed) != len(pending.StageIDs) {
+		return ErrPeopleStage
+	}
+	for i, stageID := range pending.StageIDs {
 		stage, err := readDurablePeopleRecordFile(stages, stageID)
-		if err != nil || stage.ConfigHash != pending.ConfigHash || stage.OwnerInstance != pending.OwnerInstance {
+		want := reviewed[i]
+		if err != nil || stage.ID != want.ID || stage.Hash != want.Hash || stage.Name != want.Name || stage.MIME != want.MIME || stage.ConfigHash != pending.ConfigHash || stage.ConfigHash != want.ConfigHash || stage.OwnerInstance != pending.OwnerInstance || stage.OwnerInstance != want.OwnerInstance || !bytes.Equal(stage.Data, want.Data) {
 			return ErrPeopleStage
 		}
 	}

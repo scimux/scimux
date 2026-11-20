@@ -632,3 +632,20 @@ test('diagnostic audit rejects incomplete or mixed counter snapshots',()=>{
  const base={version:1,scope:'failure',result:'fail',assertions:[],artifacts:[],counters:{}};
  for(const value of [{attempted:1},{accepted:1,controls:0},{attempted:1,accepted:1,controls:0,before:{attempted:0,accepted:0,controls:0}}])assert.equal(auditDiagnostic({...base,counters:{before:value}}).ok,false);
 });
+
+test('corrective profile requires stage competition evidence in both viewports', () => {
+  const m = synthetic('people-attachments');
+  for (const mode of ['desktop','phone']) {
+    for (const suffix of ['consistent','draft','zero-agent','one-append']) m.assertions.push({id:`people-stage-competition-${suffix}-${mode}`,result:'pass'});
+    const z = {attempted:0,accepted:0,controls:0};
+    m[`people-stage-competition-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+  }
+  assert.doesNotThrow(()=>audit(m,'corrective'));
+  const missing=structuredClone(m);missing.assertions=missing.assertions.filter(x=>x.id!=='people-stage-competition-consistent-phone');
+  assert.throws(()=>audit(missing,'corrective'));
+  const missingAppend=structuredClone(m);missingAppend.assertions=missingAppend.assertions.filter(x=>x.id!=='people-stage-competition-one-append-desktop');
+  assert.throws(()=>audit(missingAppend,'corrective'));
+  const sent=structuredClone(m);sent['people-stage-competition-desktop'].after.recipient.attempted=1;
+  assert.throws(()=>audit(sent,'corrective'));
+  assert.doesNotThrow(()=>audit(synthetic('people-attachments'),'people-attachments'));
+});

@@ -40,7 +40,7 @@ function png(bytes) {
     bytes.readUInt32BE(16) > 0 && bytes.readUInt32BE(20) > 0;
 }
 function audit(manifest, profile) {
-  if (!['owner-agent-attachments', 'people-attachments'].includes(profile) ||
+  if (!['owner-agent-attachments', 'people-attachments', 'corrective'].includes(profile) ||
       manifest === null || typeof manifest !== 'object' || manifest.result !== 'pass' ||
       manifest.version !== 1 || !Array.isArray(manifest.assertions) ||
       !Array.isArray(manifest.artifacts) || !manifest.counters) throw Error('invalid evidence');
@@ -83,7 +83,8 @@ function auditManifest(manifest, profile) {
       'dropped-response-explicit-retry-once', 'held-evidence-confirmed-after-release',
       'ai-source-explicit-exact-mirrored', 'trace-explicit-one-dispatch', 'trace-second-explicit-dispatch',
       'native-trace-one-exact-multiline'];
-    if (profile === 'people-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery');
+    if (profile !== 'owner-agent-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery');
+    if (profile === 'corrective') required.push('people-stage-competition-consistent', 'people-stage-competition-draft', 'people-stage-competition-zero-agent', 'people-stage-competition-one-append');
     for (const id of required) if (!assertions.has(id + '-' + mode)) throw Error('invalid evidence');
     for (const newer of ['false', 'true']) if (!assertions.has('refusal-no-retry-' + mode + '-' + newer)) throw Error('invalid evidence');
   }
@@ -126,7 +127,7 @@ function auditManifest(manifest, profile) {
       const label = 'refusal-' + mode + '-' + newer;
       window(manifest[label], label, 'before', 'after', null, {'': [1, 0, 0]}, true);
     }
-    if (profile === 'people-attachments') {
+    if (profile !== 'owner-agent-attachments') {
       for (const name of people) {
         const label = name + '-' + mode;
         const expected = name === 'people-files' ? [3, 3, 0] : name === 'people-source-cancel' ? [1, 1, 0] : [0, 0, 0];
@@ -139,6 +140,7 @@ function auditManifest(manifest, profile) {
       const label = 'old-relay-' + mode;
       window(manifest[label], label, 'before', 'after', null, {}, true);
     }
+    if (profile === 'corrective') window(manifest['people-stage-competition-' + mode], 'people-stage-competition-' + mode, 'before', 'after', ['owner', 'recipient'], {}, true);
     for (const family of ['membership', 'activities', 'recovery']) {
       const label = family + '-' + mode;
       window(manifest.counters[label], 'counters/' + label, 'before', 'after', initialSeats, {}, true);
@@ -166,7 +168,7 @@ function auditManifest(manifest, profile) {
   }
   window(manifest.counters, 'counters', 'beforeComments', 'afterComments', initialSeats, {}, false);
   const seats = [...initialSeats, 'empty-desktop', 'empty-phone', 'legacy-closed-desktop', 'legacy-closed-phone', 'no-selection'];
-  if (profile === 'people-attachments') seats.push('legacy-reader-desktop', 'legacy-reader-phone', 'old-owner-desktop', 'old-reader-desktop', 'old-owner-phone', 'old-reader-phone');
+  if (profile !== 'owner-agent-attachments') seats.push('legacy-reader-desktop', 'legacy-reader-phone', 'old-owner-desktop', 'old-reader-desktop', 'old-owner-phone', 'old-reader-phone');
   const setup = manifest.counters.afterExtraSetup;
   if (!setup || Object.keys(setup).length !== initialSeats.length || initialSeats.some(seat => !counter(setup[seat]) || setup[seat].controls !== 0)) throw Error('invalid evidence');
   for (const mode of modes) {
@@ -238,7 +240,7 @@ function runCLI(args, write) {
     const flags = require('node:fs').constants;
     if (!supported(process.platform, flags.O_NOFOLLOW, flags.O_NONBLOCK)) throw Error('invalid evidence');
     if (args.length !== 3 || args[0] !== '--profile' ||
-        !['owner-agent-attachments', 'people-attachments'].includes(args[1]) ||
+        !['owner-agent-attachments', 'people-attachments', 'corrective'].includes(args[1]) ||
         !args[2]) throw Error('invalid evidence');
     bindRoot(args[2]);
     const manifest = JSON.parse(readFlat('manifest.json', 16 * 1024 * 1024).toString('utf8'));

@@ -316,7 +316,8 @@ node web/test/testdata/team-e2e/audit-evidence.cjs --profile people-attachments 
 ```
 
 Use `owner-agent-attachments` for the pre-attachment scenario source and
-`people-attachments` for the People attachment scenario source. The auditor
+`people-attachments` for the People attachment scenario source. The `corrective`
+profile additionally requires the stage competition journey. The auditor
 checks assertion results, scoped counter changes and the PNG signature and
 minimum header structure; it does not decode images. It emits counts and
 PASS or FAIL without evidence content. Its structural checks do not attest
@@ -348,7 +349,7 @@ checks both SIGINT and SIGTERM, the final manifest, coverage and private cleanup
 The same test also holds an in-flight page coverage capture across each signal
 and verifies that its scripts are collected exactly once.
 
-Use `SCIMUX_E2E_SCENARIO` for a bounded run. The available selections are
+Use `SCIMUX_E2E_SCENARIO` for a bounded run. Set it to `people-stage-competition` for the focused competing publication and stage replacement journey. The available selections are
 `ui-join`, `stale-membership`, `stale-removed-membership`, `early-native`,
 `conversation-core`, `conversation-native`, `conversation-refusal`,
 `conversation-trace`, `native-start-failure`, `recipient-boundary`,
@@ -415,6 +416,7 @@ The manifest's assertion IDs map the principal requirements to real journeys:
 | People files and copy replacement | `people-files`: its file, preview and explicit-owner-send assertions; `people-copy-replacement`: its distinct identity, stale-upload, recovery and actionable-control assertions |
 | People file recovery and unread | `people-attachment-recovery`: its retry and download assertions; `people-retired-drafts` and `people-file-unread`: their saved-draft and unread assertions |
 | Uncertain People publication | `people-uncertain-retry`: its accepted-server, identical retry, newer-draft and no-agent-dispatch assertions |
+| Competing People publication and stage replacement | `people-stage-competition`: competing production requests, exactly one relay append, explicit retry, recreated stage, matching retained manifest and bytes, surviving draft and no agent dispatch on desktop and Chromium phone emulation |
 | People upload permission change | `people-upload-permission`: its empty-file feedback, held-before-admission upload denial, partial draft retention and no-agent-dispatch assertions |
 | People upload permission change during body | `people-midbody-permission`: the test-owned forwarder uses the isolated seat's private muxer socket and waits for its direct HTTP 100 Continue, which the muxer's Go server emits on the attachment handler's first body read after admission. It sends only part of the multipart body before changing access. A read-only direct request is refused without muxer Continue; a separate frontend request demonstrates that frontend Continue and partial bytes do not establish muxer admission. The test checks the same live copy, `409 not_active`, preserved draft and earlier stage, no publication, and explicit recovery. The private socket capability is never recorded in artifacts |
 | Local managed storage budget | `people-local-budget`: an exclusive sparse synthetic file in the isolated seat's managed assets and a temporary server-owned global limit produce an actual local `507 storage_full`, with no corresponding relay blob. The test removes only that filler, retries the same stage ID explicitly, verifies exact retained bytes and one comment, and restores the settings; screenshots, source/draft isolation and zero agent counters are checked in both viewports |

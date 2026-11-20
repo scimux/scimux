@@ -638,7 +638,7 @@ func (h *teamHandler) postPeopleFileComment(w http.ResponseWriter, r *http.Reque
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
-	err = team.SavePeoplePending(h.dataDir, id, pending)
+	err = team.SavePeoplePending(h.dataDir, id, pending, stages)
 	h.mu.Unlock()
 	if err != nil {
 		if errors.Is(err, storagebudget.ErrBudget) {
