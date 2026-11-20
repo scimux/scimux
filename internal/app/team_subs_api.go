@@ -120,14 +120,16 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if len(parts) != 4 {
-		if len(parts) == 7 && parts[4] == "attachments" {
+		if len(parts) == 7 && (parts[4] == "attachments" || (parts[4] == "pending" && parts[6] == "retire-absent")) {
 			// The sequence and attachment identity are validated below.
+		} else if len(parts) == 6 && parts[4] == "pending" {
+			// The pending key is validated below.
 		} else if len(parts) != 5 {
 			writeTeamError(w, http.StatusNotFound, "not_found")
 			return
 		} else {
 			switch parts[4] {
-			case "seen", "comments", "attachments":
+			case "seen", "comments", "attachments", "local":
 			default:
 				writeTeamError(w, http.StatusNotFound, "not_found")
 				return
@@ -141,7 +143,7 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	id := team.CopyID{Server: parts[0], Owner: parts[1], Chat: parts[2], Generation: parts[3]}
-	if (len(parts) == 4 && (r.Method == http.MethodGet || r.Method == http.MethodDelete)) || (len(parts) >= 5 && (parts[4] == "attachments" || parts[4] == "comments" || (parts[4] == "seen" && r.Method == http.MethodPut))) {
+	if (len(parts) == 4 && (r.Method == http.MethodGet || r.Method == http.MethodDelete)) || (len(parts) >= 5 && (parts[4] == "attachments" || parts[4] == "comments" || parts[4] == "pending" || (parts[4] == "local" && r.Method == http.MethodGet) || (parts[4] == "seen" && r.Method == http.MethodPut))) {
 		stageID := ""
 		if len(parts) == 7 && parts[5] == "stage" {
 			stageID = parts[6]
@@ -151,6 +153,34 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		var release func()
 		r, release = h.beginPeopleCopyOperation(r, id, stageID)
 		defer release()
+	}
+	if len(parts) == 5 && parts[4] == "local" && r.Method == http.MethodGet {
+		h.localPeopleInventory(w, r, id)
+		return
+	}
+	if len(parts) == 7 && parts[4] == "pending" && parts[6] == "retire-absent" && r.Method == http.MethodPost {
+		if !subHex(parts[5], 16) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		h.retireAbsentPeople(w, r, id, parts[5])
+		return
+	}
+	if len(parts) == 6 && parts[4] == "pending" && r.Method == http.MethodDelete {
+		if !subHex(parts[5], 16) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		h.discardPeoplePending(w, r, id, parts[5])
+		return
+	}
+	if len(parts) == 6 && parts[4] == "pending" && r.Method == http.MethodGet && r.URL.RawQuery != "" {
+		if !subHex(parts[5], 16) {
+			writeTeamError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		h.localPeoplePublicationState(w, r, id, parts[5])
+		return
 	}
 	if len(parts) == 7 && parts[5] == "stage" && (r.Method == http.MethodDelete || r.Method == http.MethodGet) {
 		if !subHex(parts[6], 16) {
@@ -1901,7 +1931,10 @@ func (h *teamHandler) postComment(w http.ResponseWriter, r *http.Request, id tea
 		return
 	}
 	if req.Attachments != nil {
-		if !h.requirePeopleCopy(w, r) || h.tryPeopleCompletion(w, r, id, sub, server, *req.Text, *req.Anchor, *req.Key, *req.Attachments) {
+		if !h.requirePeopleCopy(w, r, *req.Key) {
+			return
+		}
+		if h.tryPeopleCompletion(w, r, id, sub, server, *req.Text, *req.Anchor, *req.Key, *req.Attachments) {
 			return
 		}
 	}

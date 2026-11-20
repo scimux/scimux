@@ -56,6 +56,8 @@ type teamHandler struct {
 	// Stage storage defaults to the managed team store; tests may inject failures.
 	stageRead func(string, team.CopyID, string) (team.PeopleStage, error)
 	stageSave func(string, team.CopyID, team.PeopleStage) error
+	// localDiscardBeforeDecision allows tests to interpose a copy replacement.
+	localDiscardBeforeDecision func()
 	// peopleCapabilitiesReady controls the advertised attachment capability.
 	peopleCapabilitiesReady bool
 	peopleProbeSerial       uint64

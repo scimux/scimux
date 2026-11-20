@@ -337,11 +337,12 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedCopyStage(t *testing.T) {
 		return true
 	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
+	oldPath := peopleTestURL(t, dir, base+"/attachments/stage/0123456789abcdef") + "&revision=" + localStageRevision(makeStage("old bytes"))
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, peopleTestURL(t, dir, base+"/attachments/stage/0123456789abcdef"), nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, oldPath, nil))
 	}()
 	select {
 	case <-entered:
@@ -352,7 +353,7 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedCopyStage(t *testing.T) {
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		h.ServeHTTP(second, httptest.NewRequest(http.MethodDelete, peopleTestURL(t, dir, base+"/attachments/stage/0123456789abcdef"), nil))
+		h.ServeHTTP(second, httptest.NewRequest(http.MethodDelete, oldPath, nil))
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -503,17 +504,18 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedStageInSameCopy(t *testing.T)
 		return true
 	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen + "/attachments/stage/0123456789abcdef"
+	oldPath := peopleTestURL(t, dir, base) + "&revision=" + localStageRevision(makeStage("old bytes"))
 	rec, done := httptest.NewRecorder(), make(chan struct{})
 	go func() {
 		defer close(done)
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, peopleTestURL(t, dir, base), nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, oldPath, nil))
 	}()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("old stage removal did not reach authorization")
 	}
-	removed := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, base), "")
+	removed := doTeam(h, http.MethodDelete, oldPath, "")
 	if removed.Code != http.StatusNoContent {
 		t.Fatalf("current stage removal: %d %s", removed.Code, removed.Body.String())
 	}
@@ -660,7 +662,7 @@ func TestPeopleRemovedStageCannotBeResurrectedByOldUpload(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("old upload did not reach admission")
 	}
-	if removed := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, base+"/attachments/stage/"+stage.ID), ""); removed.Code != http.StatusNoContent {
+	if removed := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, base+"/attachments/stage/"+stage.ID)+"&revision="+localStageRevision(stage), ""); removed.Code != http.StatusNoContent {
 		t.Fatalf("stage removal status %d", removed.Code)
 	}
 	releaseOnce.Do(func() { close(release) })

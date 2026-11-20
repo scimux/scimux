@@ -83,10 +83,11 @@ func TestPeopleAttachmentStageUsesGuardedRelay(t *testing.T) {
 	}
 	var result struct {
 		Attachments []struct {
-			ID     string `json:"id"`
-			SHA256 string `json:"sha256"`
-			Size   int    `json:"size"`
-			Name   string `json:"name"`
+			ID       string `json:"id"`
+			SHA256   string `json:"sha256"`
+			Size     int    `json:"size"`
+			Name     string `json:"name"`
+			Revision string `json:"revision"`
 		} `json:"attachments"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
@@ -94,6 +95,15 @@ func TestPeopleAttachmentStageUsesGuardedRelay(t *testing.T) {
 	}
 	if len(result.Attachments) != 1 || result.Attachments[0].ID != "0123456789abcdef" || result.Attachments[0].SHA256 != hash || result.Attachments[0].Size != len(payload) || result.Attachments[0].Name != "synthetic.txt" || puts != 1 {
 		t.Fatalf("unexpected stage result: %+v puts=%d", result, puts)
+	}
+	originalStage, err := team.ReadPeopleStage(dir, team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}, "0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(originalStage)
+	revision := sha256.Sum256(raw)
+	if result.Attachments[0].Revision != hex.EncodeToString(revision[:]) {
+		t.Fatalf("missing original stage revision: %+v", result.Attachments[0])
 	}
 	retry := func(data []byte) *httptest.ResponseRecorder {
 		var retryBody bytes.Buffer
@@ -187,6 +197,12 @@ func TestPeopleAttachmentStageUsesGuardedRelay(t *testing.T) {
 	if reloaded.Code != http.StatusOK || !strings.Contains(reloaded.Body.String(), result.Attachments[0].ID) || !strings.Contains(reloaded.Body.String(), "synthetic.txt") {
 		t.Fatalf("stage metadata unavailable for recovery: %d %s", reloaded.Code, reloaded.Body.String())
 	}
+	var metadata struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(reloaded.Body.Bytes(), &metadata); err != nil || metadata.Revision != result.Attachments[0].Revision {
+		t.Fatalf("stage metadata lost original revision: %s", reloaded.Body.String())
+	}
 	copyID := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	stage, err := team.ReadPeopleStage(dir, copyID, result.Attachments[0].ID)
 	if err != nil {
@@ -196,7 +212,7 @@ func TestPeopleAttachmentStageUsesGuardedRelay(t *testing.T) {
 	if err := team.SavePeoplePending(dir, copyID, pending, []team.PeopleStage{stage}); err != nil {
 		t.Fatal(err)
 	}
-	pinned := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, path+"/stage/"+stage.ID), "")
+	pinned := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, path+"/stage/"+stage.ID)+"&revision="+localStageRevision(stage), "")
 	if pinned.Code != http.StatusConflict {
 		t.Fatalf("pending stage removal status=%d", pinned.Code)
 	}
@@ -209,7 +225,7 @@ func TestPeopleAttachmentStageUsesGuardedRelay(t *testing.T) {
 	if err := team.ConfirmPeoplePending(dir, copyID, pending.Key, 1); err != nil {
 		t.Fatal(err)
 	}
-	remove := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, path+"/stage/"+result.Attachments[0].ID), "")
+	remove := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, path+"/stage/"+result.Attachments[0].ID)+"&revision="+localStageRevision(stage), "")
 	if remove.Code != http.StatusNoContent {
 		t.Fatalf("stage removal status=%d", remove.Code)
 	}
@@ -864,7 +880,7 @@ func TestPeopleStageRemovalRechecksChangedLocalStage(t *testing.T) {
 		}
 		return true
 	}
-	path := subReadPath() + "/attachments/stage/" + stage.ID + "?copy_instance=" + instance
+	path := subReadPath() + "/attachments/stage/" + stage.ID + "?copy_instance=" + instance + "&revision=" + localStageRevision(stage)
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- doTeam(h, http.MethodDelete, path, "") }()
 	select {
@@ -934,13 +950,15 @@ func TestPeopleConcurrentStageRemovalsKeepIndependentIdentities(t *testing.T) {
 	}
 	path := subReadPath() + "/attachments/stage/"
 	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodDelete, path+stage.ID+"?copy_instance="+instance, "") }()
+	go func() {
+		done <- doTeam(h, http.MethodDelete, path+stage.ID+"?copy_instance="+instance+"&revision="+localStageRevision(stage), "")
+	}()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("first removal not admitted")
 	}
-	second := doTeam(h, http.MethodDelete, path+other.ID+"?copy_instance="+instance, "")
+	second := doTeam(h, http.MethodDelete, path+other.ID+"?copy_instance="+instance+"&revision="+localStageRevision(other), "")
 	if second.Code != http.StatusNoContent {
 		t.Fatalf("second removal status=%d", second.Code)
 	}

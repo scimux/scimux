@@ -25,14 +25,15 @@ import (
 type peopleCopyOperationKey struct{}
 
 type peopleCopyOperation struct {
-	state      *peopleCopyRemovalEpoch
-	epoch      uint64
-	stageID    string
-	stageEpoch uint64
-	cancel     context.CancelFunc
-	copyID     team.CopyID
-	dataDir    string
-	instance   string
+	state          *peopleCopyRemovalEpoch
+	epoch          uint64
+	stageID        string
+	stageEpoch     uint64
+	cancel         context.CancelFunc
+	copyID         team.CopyID
+	dataDir        string
+	instance       string
+	publicationKey string
 }
 
 // beginPeopleCopyOperation captures a local copy incarnation before any body
@@ -86,7 +87,7 @@ func peopleCopyContextCurrentLocked(ctx context.Context) bool {
 
 // requirePeopleCopy binds file work to the local copy selected by the client.
 // The public instance is a concurrency precondition, not an authorization.
-func (h *teamHandler) requirePeopleCopy(w http.ResponseWriter, r *http.Request) bool {
+func (h *teamHandler) requirePeopleCopy(w http.ResponseWriter, r *http.Request, publicationKey ...string) bool {
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	values := query["copy_instance"]
 	if err != nil || len(values) != 1 || !subHex(values[0], 32) {
@@ -110,6 +111,9 @@ func (h *teamHandler) requirePeopleCopy(w http.ResponseWriter, r *http.Request) 
 		return false
 	}
 	op.instance = instance
+	if len(publicationKey) != 0 {
+		op.publicationKey = publicationKey[0]
+	}
 	return true
 }
 
@@ -274,7 +278,7 @@ func (h *teamHandler) stagePeopleAttachment(w http.ResponseWriter, r *http.Reque
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
-	writeJSONStatus(w, http.StatusOK, map[string]any{"attachments": []map[string]any{{"id": stage.ID, "sha256": stage.Hash, "size": len(stage.Data), "name": stage.Name, "mime": stage.MIME}}})
+	writeJSONStatus(w, http.StatusOK, map[string]any{"attachments": []map[string]any{{"id": stage.ID, "sha256": stage.Hash, "size": len(stage.Data), "name": stage.Name, "mime": stage.MIME, "revision": team.PeopleStageRevision(stage)}}})
 }
 
 func peopleServerFingerprint(server team.Entry) string {
@@ -325,7 +329,7 @@ func (h *teamHandler) readPeopleStage(w http.ResponseWriter, r *http.Request, id
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
-	writeJSONStatus(w, http.StatusOK, map[string]any{"id": stage.ID, "sha256": stage.Hash, "size": len(stage.Data), "name": stage.Name, "mime": stage.MIME})
+	writeJSONStatus(w, http.StatusOK, map[string]any{"id": stage.ID, "sha256": stage.Hash, "size": len(stage.Data), "name": stage.Name, "mime": stage.MIME, "revision": team.PeopleStageRevision(stage)})
 }
 
 func (h *teamHandler) removePeopleStage(w http.ResponseWriter, r *http.Request, id team.CopyID, stageID string) {
