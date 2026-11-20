@@ -84,7 +84,15 @@ function auditManifest(manifest, profile) {
       'ai-source-explicit-exact-mirrored', 'trace-explicit-one-dispatch', 'trace-second-explicit-dispatch',
       'native-trace-one-exact-multiline'];
     if (profile !== 'owner-agent-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery');
-    if (profile === 'corrective') required.push('people-stage-competition-consistent', 'people-stage-competition-draft', 'people-stage-competition-zero-agent', 'people-stage-competition-one-append');
+    if (profile === 'corrective') required.push('people-stage-competition-consistent', 'people-stage-competition-draft', 'people-stage-competition-zero-agent', 'people-stage-competition-one-append', 'people-local-stage-review-target', 'people-local-stage-review-body-contained', 'people-local-stage-review-composer-contained', 'people-local-stage-review-exact', 'people-local-stage-review-server', 'people-local-stage-review-preserves', 'people-local-stage-review-zero-agent');
+    if (profile === 'corrective') required.push('people-transactional-drafts-separate', 'people-transactional-drafts-stale-clear', 'people-transactional-drafts-legacy', 'people-transactional-drafts-zero-agent');
+    if (profile === 'corrective') required.push('people-transactional-retirement-missing', 'people-transactional-retirement-bodyless', 'people-transactional-retirement-marker', 'people-transactional-retirement-preserves', 'people-transactional-retirement-zero-agent');
+    if (profile === 'corrective') required.push('people-no-storage-text-send', 'people-no-storage-text-uncertain-same', 'people-no-storage-text-uncertain-different', 'people-no-storage-text-zero-agent', 'people-pending-layout-reachable', 'people-pending-layout-exact-discard', 'people-pending-layout-retained', 'people-pending-layout-zero-agent', 'people-pending-layout-ended-reachable', 'people-pending-layout-ended-exact-discard', 'people-pending-layout-ended-retained', 'people-pending-layout-ended-zero-agent');
+    if (profile === 'corrective') {
+      required.push('people-captured-discard-exact', 'people-captured-discard-preserves', 'people-captured-discard-zero-agent');
+      for (const suffix of ['prepared', 'retired', 'fresh', 'stale-safe', 'late', 'zero-agent']) required.push('people-stale-retry-' + suffix);
+      for (const variant of ['readonly', 'owner-ended-agent']) for (const suffix of ['prepared', 'reachable', 'local', 'preserves', 'late', 'zero-agent']) required.push('people-text-retirement-' + variant + '-' + suffix);
+    }
     for (const id of required) if (!assertions.has(id + '-' + mode)) throw Error('invalid evidence');
     for (const newer of ['false', 'true']) if (!assertions.has('refusal-no-retry-' + mode + '-' + newer)) throw Error('invalid evidence');
   }
@@ -141,6 +149,24 @@ function auditManifest(manifest, profile) {
       window(manifest[label], label, 'before', 'after', null, {}, true);
     }
     if (profile === 'corrective') window(manifest['people-stage-competition-' + mode], 'people-stage-competition-' + mode, 'before', 'after', ['owner', 'recipient'], {}, true);
+    if (profile === 'corrective') window(manifest['people-local-stage-review-' + mode], 'people-local-stage-review-' + mode, 'before', 'after', ['owner', 'recipient'], {}, false);
+    if (profile === 'corrective') window(manifest['people-transactional-drafts-' + mode], 'people-transactional-drafts-' + mode, 'before', 'after', ['owner', 'recipient'], {}, false);
+    if (profile === 'corrective') window(manifest['people-transactional-retirement-' + mode], 'people-transactional-retirement-' + mode, 'before', 'after', ['owner', 'recipient'], {}, false);
+    if (profile === 'corrective') window(manifest['people-no-storage-text-' + mode], 'people-no-storage-text-' + mode, 'before', 'after', ['owner', 'recipient'], {}, false);
+    if (profile === 'corrective') window(manifest['people-pending-layout-' + mode], 'people-pending-layout-' + mode, 'before', 'after', ['owner', 'recipient'], {}, false);
+    if (profile === 'corrective') window(manifest['people-pending-layout-ended-' + mode], 'people-pending-layout-ended-' + mode, 'before', 'after', ['owner', 'recipient'], {}, false);
+    if (profile === 'corrective') {
+      const capture = 'people-captured-discard-' + mode;
+      window(manifest[capture], capture, 'before', 'after', ['owner', 'recipient'], {}, false);
+      const stale = 'people-stale-retry-' + mode, staleRecord = manifest[stale];
+      window(staleRecord, stale, 'before', 'after', initialSeats, {}, false);
+      window(staleRecord, stale, 'beforeComments', 'afterComments', null, {}, false);
+      if (staleRecord.beforeComments.attempted !== 0 || staleRecord.afterComments.attempted !== 0) throw Error('invalid evidence');
+      for (const variant of ['readonly', 'owner-ended-agent']) {
+        const label = 'people-text-retirement-' + variant + '-' + mode;
+        window(manifest[label], label, 'before', 'after', initialSeats, {}, false);
+      }
+    }
     for (const family of ['membership', 'activities', 'recovery']) {
       const label = family + '-' + mode;
       window(manifest.counters[label], 'counters/' + label, 'before', 'after', initialSeats, {}, true);

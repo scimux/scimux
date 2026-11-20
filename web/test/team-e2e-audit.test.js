@@ -633,19 +633,101 @@ test('diagnostic audit rejects incomplete or mixed counter snapshots',()=>{
  for(const value of [{attempted:1},{accepted:1,controls:0},{attempted:1,accepted:1,controls:0,before:{attempted:0,accepted:0,controls:0}}])assert.equal(auditDiagnostic({...base,counters:{before:value}}).ok,false);
 });
 
-test('corrective profile requires stage competition evidence in both viewports', () => {
+function completeCorrectiveEvidence() {
   const m = synthetic('people-attachments');
   for (const mode of ['desktop','phone']) {
     for (const suffix of ['consistent','draft','zero-agent','one-append']) m.assertions.push({id:`people-stage-competition-${suffix}-${mode}`,result:'pass'});
     const z = {attempted:0,accepted:0,controls:0};
     m[`people-stage-competition-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['target','body-contained','composer-contained','exact','server','preserves','zero-agent']) m.assertions.push({id:`people-local-stage-review-${suffix}-${mode}`,result:'pass'});
+    m[`people-local-stage-review-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['separate','stale-clear','legacy','zero-agent']) m.assertions.push({id:`people-transactional-drafts-${suffix}-${mode}`,result:'pass'});
+    m[`people-transactional-drafts-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['missing','bodyless','marker','preserves','zero-agent']) m.assertions.push({id:`people-transactional-retirement-${suffix}-${mode}`,result:'pass'});
+    m[`people-transactional-retirement-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['send','uncertain-same','uncertain-different','zero-agent']) m.assertions.push({id:`people-no-storage-text-${suffix}-${mode}`,result:'pass'});
+    m[`people-no-storage-text-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['reachable','exact-discard','retained','zero-agent']) m.assertions.push({id:`people-pending-layout-${suffix}-${mode}`,result:'pass'});
+    m[`people-pending-layout-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['reachable','exact-discard','retained','zero-agent']) m.assertions.push({id:`people-pending-layout-ended-${suffix}-${mode}`,result:'pass'});
+    m[`people-pending-layout-ended-${mode}`] = {before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['exact','preserves','zero-agent']) m.assertions.push({id:`people-captured-discard-${suffix}-${mode}`,result:'pass'});
+    m[`people-captured-discard-${mode}`]={before:{owner:{...z},recipient:{...z}},after:{owner:{...z},recipient:{...z}}};
+    for (const suffix of ['prepared','retired','fresh','stale-safe','late','zero-agent']) m.assertions.push({id:`people-stale-retry-${suffix}-${mode}`,result:'pass'});
+    const staleRoles=()=>Object.fromEntries(['owner-a','owner-b','recipient','observer'].map(role=>[role,{...z}]));
+    m[`people-stale-retry-${mode}`]={before:staleRoles(),after:staleRoles(),beforeComments:{...z},afterComments:{...z}};
+    for (const variant of ['readonly','owner-ended-agent']) {
+      for (const suffix of ['prepared','reachable','local','preserves','late','zero-agent']) m.assertions.push({id:`people-text-retirement-${variant}-${suffix}-${mode}`,result:'pass'});
+      const roles=()=>Object.fromEntries(['owner-a','owner-b','recipient','observer'].map(role=>[role,{...z}]));
+      m[`people-text-retirement-${variant}-${mode}`]={before:roles(),after:roles()};
+    }
   }
+  return m;
+}
+
+test('corrective profile requires stage competition evidence in both viewports', () => {
+  const m=completeCorrectiveEvidence();
   assert.doesNotThrow(()=>audit(m,'corrective'));
   const missing=structuredClone(m);missing.assertions=missing.assertions.filter(x=>x.id!=='people-stage-competition-consistent-phone');
   assert.throws(()=>audit(missing,'corrective'));
   const missingAppend=structuredClone(m);missingAppend.assertions=missingAppend.assertions.filter(x=>x.id!=='people-stage-competition-one-append-desktop');
   assert.throws(()=>audit(missingAppend,'corrective'));
+  const missingReview=structuredClone(m);missingReview.assertions=missingReview.assertions.filter(x=>x.id!=='people-local-stage-review-composer-contained-phone');
+  assert.throws(()=>audit(missingReview,'corrective'));
+  const reviewSent=structuredClone(m);reviewSent['people-local-stage-review-phone'].after.recipient.attempted=1;assert.throws(()=>audit(reviewSent,'corrective'));
+  const missingDraft=structuredClone(m);missingDraft.assertions=missingDraft.assertions.filter(x=>x.id!=='people-transactional-drafts-stale-clear-desktop');assert.throws(()=>audit(missingDraft,'corrective'));
+  const draftSent=structuredClone(m);draftSent['people-transactional-drafts-phone'].after.owner.attempted=1;assert.throws(()=>audit(draftSent,'corrective'));
+  const missingRetirement=structuredClone(m);missingRetirement.assertions=missingRetirement.assertions.filter(x=>x.id!=='people-transactional-retirement-bodyless-phone');assert.throws(()=>audit(missingRetirement,'corrective'));
+  const retirementSent=structuredClone(m);retirementSent['people-transactional-retirement-desktop'].after.recipient.controls=1;assert.throws(()=>audit(retirementSent,'corrective'));
+  const missingLayout=structuredClone(m);missingLayout.assertions=missingLayout.assertions.filter(x=>x.id!=='people-pending-layout-exact-discard-phone');assert.throws(()=>audit(missingLayout,'corrective'));
+  const layoutControl=structuredClone(m);layoutControl['people-pending-layout-desktop'].after.recipient.controls=1;assert.throws(()=>audit(layoutControl,'corrective'));
+  const missingFallback=structuredClone(m);missingFallback.assertions=missingFallback.assertions.filter(x=>x.id!=='people-no-storage-text-send-desktop');assert.throws(()=>audit(missingFallback,'corrective'));
+  const missingEnded=structuredClone(m);missingEnded.assertions=missingEnded.assertions.filter(x=>x.id!=='people-pending-layout-ended-exact-discard-phone');assert.throws(()=>audit(missingEnded,'corrective'));
   const sent=structuredClone(m);sent['people-stage-competition-desktop'].after.recipient.attempted=1;
   assert.throws(()=>audit(sent,'corrective'));
   assert.doesNotThrow(()=>audit(synthetic('people-attachments'),'people-attachments'));
+  assert.doesNotThrow(()=>audit(m,'corrective'));
+  const missingCapture=structuredClone(m);missingCapture.assertions=missingCapture.assertions.filter(x=>x.id!=='people-captured-discard-exact-desktop');assert.throws(()=>audit(missingCapture,'corrective'));
+  const sentCapture=structuredClone(m);sentCapture['people-captured-discard-phone'].after.recipient.attempted=1;assert.throws(()=>audit(sentCapture,'corrective'));
+});
+
+for(const family of ['people-captured-discard','people-text-retirement-readonly','people-text-retirement-owner-ended-agent']) for(const mode of ['desktop','phone']) {
+ const text=family.startsWith('people-text-retirement'),suffixes=text?['prepared','reachable','local','preserves','late','zero-agent']:['exact','preserves','zero-agent'],roles=text?['owner-a','owner-b','recipient','observer']:['owner','recipient'],window=`${family}-${mode}`;
+ for(const suffix of suffixes) test(`corrective requires ${family} ${suffix} assertion in ${mode}`,()=>{const m=completeCorrectiveEvidence();m.assertions=m.assertions.filter(row=>row.id!==`${family}-${suffix}-${mode}`);assert.throws(()=>audit(m,'corrective'));});
+ test(`corrective requires ${window} counter window`,()=>{const m=completeCorrectiveEvidence();delete m[window];assert.throws(()=>audit(m,'corrective'));});
+ for(const role of roles) for(const side of ['before','after']) {
+  test(`corrective requires ${window} ${side} ${role}`,()=>{const m=completeCorrectiveEvidence();delete m[window][side][role];assert.throws(()=>audit(m,'corrective'));});
+  for(const field of ['attempted','accepted','controls']) test(`corrective requires ${window} ${side} ${role} ${field}`,()=>{const m=completeCorrectiveEvidence();delete m[window][side][role][field];assert.throws(()=>audit(m,'corrective'));});
+ }
+ for(const field of ['attempted','controls']) test(`corrective rejects forged ${field} in ${window}`,()=>{const m=completeCorrectiveEvidence();m[window].after[roles[0]][field]++;assert.throws(()=>audit(m,'corrective'));});
+ for(const shape of ['array','unknown']) test(`corrective rejects ${shape} snapshot in ${window}`,()=>{const m=completeCorrectiveEvidence();if(shape==='array')m[window].after=[];else m[window].after.unknown={attempted:0,accepted:0,controls:0};assert.throws(()=>audit(m,'corrective'));});
+}
+
+function completeStaleRetryEvidence(){ return completeCorrectiveEvidence(); }
+
+test('corrective accepts complete stale retry evidence without changing historical profiles',()=>{
+ assert.doesNotThrow(()=>audit(completeStaleRetryEvidence(),'corrective'));
+ assert.doesNotThrow(()=>audit(synthetic('people-attachments'),'people-attachments'));
+});
+for(const mode of ['desktop','phone']){
+ const label=`people-stale-retry-${mode}`;
+ for(const suffix of ['prepared','retired','fresh','stale-safe','late','zero-agent']) test(`corrective requires stale retry ${suffix} in ${mode}`,()=>{const m=completeStaleRetryEvidence();m.assertions=m.assertions.filter(row=>row.id!==`people-stale-retry-${suffix}-${mode}`);assert.throws(()=>audit(m,'corrective'));});
+ test(`corrective requires stale retry window in ${mode}`,()=>{const m=completeStaleRetryEvidence();delete m[label];assert.throws(()=>audit(m,'corrective'));});
+ for(const side of ['before','after'])for(const role of ['owner-a','owner-b','recipient','observer'])test(`corrective requires stale retry ${side} ${role} in ${mode}`,()=>{const m=completeStaleRetryEvidence();delete m[label][side][role];assert.throws(()=>audit(m,'corrective'));});
+ for(const side of ['beforeComments','afterComments'])test(`corrective requires stale retry ${side} in ${mode}`,()=>{const m=completeStaleRetryEvidence();delete m[label][side];assert.throws(()=>audit(m,'corrective'));});
+ test(`corrective rejects unexpected stale retry human POST in ${mode}`,()=>{const m=completeStaleRetryEvidence();m[label].afterComments.attempted=1;assert.throws(()=>audit(m,'corrective'));});
+}
+
+for(const mode of ['desktop','phone']){
+ const label=`people-stale-retry-${mode}`;
+ for(const side of ['before','after'])for(const role of ['owner-a','owner-b','recipient','observer'])for(const field of ['attempted','accepted','controls'])test(`corrective requires stale retry ${side} ${role} ${field} in ${mode}`,()=>{const m=completeStaleRetryEvidence();delete m[label][side][role][field];assert.throws(()=>audit(m,'corrective'));});
+ for(const side of ['beforeComments','afterComments'])for(const field of ['attempted','accepted','controls'])test(`corrective requires stale retry ${side} ${field} in ${mode}`,()=>{const m=completeStaleRetryEvidence();delete m[label][side][field];assert.throws(()=>audit(m,'corrective'));});
+}
+
+for(const mode of ['desktop','phone'])test(`corrective requires zero absolute unexpected human POSTs in ${mode}`,()=>{
+ const m=completeStaleRetryEvidence(),entry=m[`people-stale-retry-${mode}`];entry.beforeComments.attempted=1;entry.afterComments.attempted=1;assert.throws(()=>audit(m,'corrective'));
+});
+
+for(const mode of ['desktop','phone'])test(`corrective rejects equal nonzero attempted and accepted stale retry counters in ${mode}`,()=>{
+ const m=completeStaleRetryEvidence(),entry=m[`people-stale-retry-${mode}`];entry.beforeComments={attempted:1,accepted:1,controls:0};entry.afterComments={attempted:1,accepted:1,controls:0};assert.throws(()=>audit(m,'corrective'));
 });
