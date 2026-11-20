@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -405,7 +406,7 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedCopyStage(t *testing.T) {
 	}
 }
 
-func TestPeopleStageRemovalRechecksPermission(t *testing.T) {
+func TestPeopleLocalStageRemovalSurvivesPermissionLoss(t *testing.T) {
 	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "write", 0))}
 	srv := httptest.NewServer(script)
 	t.Cleanup(srv.Close)
@@ -418,15 +419,29 @@ func TestPeopleStageRemovalRechecksPermission(t *testing.T) {
 		t.Fatalf("synthetic setup: %v", err)
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	if _, err := team.EnsurePeopleCopyInstance(dir, id); err != nil {
-		t.Fatal(err)
-	}
 	data := []byte("synthetic retained stage")
 	sum := sha256.Sum256(data)
 	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(entries[0]), Data: data}
 	if err := team.SavePeopleStage(dir, id, stage); err != nil {
 		t.Fatal(err)
 	}
+	neighbor := stage
+	neighbor.ID = "fedcba9876543210"
+	if err := team.SavePeopleStage(dir, id, neighbor); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := team.ReadPeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := localStageRevision(stage)
+	var relayCalls atomic.Int32
+	var ownerChecks atomic.Int32
+	h.ownerInstance = func(string, string) bool { ownerChecks.Add(1); return false }
+	h.client.Transport = teamRoundTrip(func(*http.Request) (*http.Response, error) {
+		relayCalls.Add(1)
+		return nil, errors.New("unexpected network")
+	})
 	entered, release := make(chan struct{}), make(chan struct{})
 	var enteredOnce atomic.Bool
 	var releaseOnce sync.Once
@@ -441,9 +456,21 @@ func TestPeopleStageRemovalRechecksPermission(t *testing.T) {
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
+	app := newTestApp(t, &fakeTmux{})
+	app.teamHandler = h
+	proc := &stubProc{hasSession: true, live: "idle"}
+	app.testProc = proc
+	node := &Node{ID: "synthetic", Agent: "codex", Transport: "codex"}
+	app.nodes = append(app.nodes, node)
+	app.byID[node.ID] = node
+	core, err := newCoreMux(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := base + "/attachments/stage/" + stage.ID + "?copy_instance=" + instance + "&revision=" + revision
 	go func() {
 		defer close(done)
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, peopleTestURL(t, dir, base+"/attachments/stage/"+stage.ID), nil))
+		core.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
 	}()
 	select {
 	case <-entered:
@@ -463,11 +490,29 @@ func TestPeopleStageRemovalRechecksPermission(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stage removal did not finish")
 	}
-	if rec.Code == http.StatusNoContent {
-		t.Fatal("revoked write permission still allowed removal")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("local removal: %d %s", rec.Code, rec.Body.String())
 	}
-	if _, err := team.ReadPeopleStage(dir, id, stage.ID); err != nil {
-		t.Fatalf("permission change lost stage: %v", err)
+	if _, err := team.ReadPeopleStage(dir, id, stage.ID); !errors.Is(err, team.ErrPeopleStageMissing) {
+		t.Fatalf("stage remains: %v", err)
+	}
+	if got, err := team.ReadPeopleStage(dir, id, neighbor.ID); err != nil || !bytes.Equal(got.Data, neighbor.Data) {
+		t.Fatalf("neighbor changed: %v", err)
+	}
+	if got, err := team.ReadPeopleCopyInstance(dir, id); err != nil || got != instance {
+		t.Fatalf("copy changed: %v", err)
+	}
+	if relayCalls.Load() != 0 {
+		t.Fatalf("unexpected relay calls: %d", relayCalls.Load())
+	}
+	if ownerChecks.Load() != 0 {
+		t.Fatalf("unexpected owner checks: %d", ownerChecks.Load())
+	}
+	proc.mu.Lock()
+	sends, prepares, deliveries := proc.sendCalls, proc.prepareCalls, proc.deliverCalls
+	proc.mu.Unlock()
+	if sends != 0 || prepares != 0 || deliveries != 0 || proc.shutdownCalls.Load() != 0 {
+		t.Fatalf("unexpected agent operations: %d/%d/%d/%d", sends, prepares, deliveries, proc.shutdownCalls.Load())
 	}
 }
 

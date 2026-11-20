@@ -42,6 +42,7 @@ var productionJSURLs = []string{
 	"/js/people-local-review.js",
 	"/js/people-preparation.js",
 	"/js/people-retention.js",
+	"/js/people-stage-removal.js",
 	"/js/polling.js",
 	"/js/qr.js",
 	"/js/qrcodegen.js",

@@ -1742,6 +1742,52 @@ messages are not queued or copied by the post. Errors are `400 bad_request`,
 A successful comment append has no agent side effects: it cannot send a
 prompt, answer a tool request or select the owner's Agent destination.
 
+### Local People inventory
+
+`GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/local?copy_instance=ID`
+reads local review metadata without contacting the relay or an agent. It requires
+People files to be enabled, the exact current persisted copy identity and the
+local installation identity. It does not require current relay configuration,
+membership, writable access, or a live native owner. It does not authorize a
+send, upload, or deletion. An unavailable or damaged local identity or record
+fails closed with `409`; malformed or duplicate query parameters return `400`.
+
+The response has `entries` and, when more records remain, `next_cursor`. Each
+page examines at most eight records. Supply the returned cursor as `cursor` on
+the next request. Cursors consist of `p` or `s` followed by a 16-character
+lowercase hexadecimal record ID; ordering is pending then stage by ID. Pages
+are not a snapshot: changes before the cursor require restarting enumeration.
+An empty page can have a next cursor when terminal records were examined.
+Pending entries contain `kind`, `id`, `revision`, optional `text` and
+`stage_ids`. Stage entries contain `kind`, `id`, `revision`, `name`, `mime`,
+`size` and `hash`. Revisions hash the exact immutable record and are local
+concurrency preconditions. No file bytes, paths, credentials, or invented
+creation times are returned. Completed and retired pending keys are terminal
+and are not returned as active pending. Corrupt or ambiguous records report
+unavailability rather than being silently omitted. Inventory never creates a
+copy identity or automatically adopts, uploads, or sends anything.
+
+`GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/pending/{key}?copy_instance=ID`
+reads the state of one local publication key under the same identity and local
+authority rules. `key` is 16 lowercase hexadecimal characters. The response
+state is `pending`, `retired`, `completed`, `absent_retired`, or `missing`.
+Pending, full retirement and completion include the immutable `revision`,
+`stage_ids`, and, when nonempty, saved `text`. A completed state includes the
+confirmed `seq` only after the retained comment is validated. If its pending
+record still exists, `pending_pinned` is true and retained file integrity is
+also checked. Otherwise removed local file bytes do not invalidate a matching
+receipt and comment. Contradictory or damaged records fail closed. The read
+does not remove a pending record or release its pins; an interrupted completion
+still needs explicit local cleanup. Missing or typed absent retirement has no
+revision or sequence. The response does not include the raw publication body,
+file bytes, or configuration identifiers.
+
+### Retire an absent People publication
+
+`POST /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/pending/{key}/retire-absent?copy_instance=ID` has no body. It durably retires a file-publication key only when there is no local pending record or completion receipt. It requires the current persisted copy and installation identities, but no current relay membership or native owner. The operation contacts neither a relay nor an agent. Success returns `{"state":"locally_discarded"}`; repeating the same durable retirement returns the same result. An existing pending, completed, or previously retired publication requires exact review and returns `409 review_required`. Existing revision-checked discard remains separate.
+
+A new retirement record consumes the ordinary local storage budget, including the atomic-write peak; a full budget can return `507 storage_full`. Terminal retirement records remain until the local copy is removed. On any refusal or uncertain response, retain the browser recovery state and retry explicitly. Retirement prevents later local admission of the key; a comment already dispatched remotely may still appear. It does not retract a remote comment or remove staged file bytes.
+
 ### People files
 
 When the local version 1 capability and the relay's `supported` state are
@@ -1751,14 +1797,23 @@ The multipart body contains one `files` part, and the query includes the
 current `copy_instance` and optionally a 16-character lowercase hexadecimal
 `stage_id` for an exact retry. Owners also supply their native `chat_instance`
 query precondition. A successful response includes an attachment descriptor:
-`id`, `sha256`, `size`, `name`, and advisory `mime`. Files must contain at
+`id`, `sha256`, `size`, `name`, advisory `mime`, and the immutable stage
+`revision` used for local removal. Files must contain at
 least one byte and be at most 4 MiB; a message can contain at most 16 files
 and 16 MiB total. Names are bounded, sanitized UTF-8 leaf names. These limits
 do not alter ordinary Agent uploads.
 
-Stage metadata and removal use GET and DELETE on
-`.../attachments/stage/{id}` with the same copy precondition and, for an
-owner, native precondition. File-bearing comment POSTs include an ordered
+Stage metadata uses GET on `.../attachments/stage/{id}` with the current
+copy precondition and, for an owner, native precondition; it also returns the
+stage revision. Local removal uses
+DELETE on that path with `copy_instance` and the exact `revision` returned by
+the original upload or an explicitly reviewed local inventory entry. It requires the current local installation and copy identity,
+but not current relay configuration, membership, write access or native owner.
+A pinned, changed or damaged stage is refused with `409`. Success is `204`;
+a retry also returns `204` when the stage is already absent after repairing its
+directory barrier. A replacement with the same ID is preserved if its revision
+differs. Removal does not retract an upload or delete independent retained files.
+File-bearing comment POSTs include an ordered
 `attachments` array of staged IDs and the current `copy_instance` query;
 the text may be empty when files are present. The publication body and key
 are frozen for retry. An uncertain outcome must be reviewed and retried with

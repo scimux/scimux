@@ -616,8 +616,11 @@ body.cards-open #msgs { overflow: hidden; }
 #attmenu button:hover { background: var(--code-bg); }
 #attmenu svg { flex: none; opacity: .75; }
 
-#attstage { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+#attstage { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;
+  max-height: 35dvh; overflow: auto; overscroll-behavior: contain; padding: 8px; }
 #attstage[hidden] { display: none; }
+#attstage .btn-tinted { min-height: 44px; }
+#attstage details { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .stagechip {
   position: relative; display: inline-flex; align-items: center; gap: 8px;
   max-width: 210px; padding: 6px 10px 6px 6px;

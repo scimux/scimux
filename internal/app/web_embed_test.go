@@ -46,6 +46,7 @@ var productionJSModules = []string{
 	"web/js/people-local-review.js",
 	"web/js/people-preparation.js",
 	"web/js/people-retention.js",
+	"web/js/people-stage-removal.js",
 	"web/js/polling.js",
 	"web/js/qr.js",
 	"web/js/qrcodegen.js",

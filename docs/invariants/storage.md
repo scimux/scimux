@@ -115,6 +115,19 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   belong to no node.
   They are never sent anywhere or logged; with the team gate off they are
   neither read nor written.
+- **Local People inventory is read-only.** Inventory checks the exact persisted
+  copy identity under copy and serialized budget locks, plus the current local
+  installation for pending authors. It does not establish a missing identity,
+  consult current relay authority, or expose stored file bytes. Bounded cursor
+  pages report damaged records as unavailable and never treat completed or
+  retired publications as active. A cursor is not a stable snapshot; clients
+  restart enumeration to see earlier concurrent additions.
+  Exact-key review distinguishes pending, full retirement, typed absent
+  retirement, completion and absence. Completion exposes its sequence only
+  after validation against the retained comment; if the pending record still
+  pins stages, retained bytes must also validate. Review never removes that
+  pending record or releases its pins. Removed bytes remain compatible with a
+  validated unpinned receipt, while corrupt retained records fail closed.
 - **People files remain bound to their copy and message.** Managed file stages,
   pending publications, receipts and retained bytes belong under the associated
   `team-copies/` identity and count toward the global budget. A local copy
@@ -134,6 +147,18 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   sync without replacing the record. Under the copy lock and then the
   global budget lock, recovery removes recognized abandoned temporary files
   before reserving space; a failed admission leaves existing records intact.
+  Explicit local stage removal checks the current copy identity and exact stage
+  revision under the copy and serialized budget locks. It refuses pinned or
+  changed stages, and repairs the stage directory barrier before acknowledging
+  an already absent stage on retry. No current relay or native-owner authority
+  is needed for this local maintenance.
+  An absent file-publication key can be retired under the same copy and budget
+  locks using a durable marker bound to the current copy and installation.
+  Admission refuses a retired key. Existing pending or completed values require
+  exact review, and a failed or uncertain marker write preserves recovery. The
+  marker and its atomic-write peak count against the normal storage limits;
+  terminal markers remain until copy removal. Retirement does not remove
+  staged bytes or retract a dispatched comment.
   A pending publication pins its stages until an exact retained comment and
   associated bytes are confirmed and a completion receipt is durable. The
   per-copy limit includes encoded stages, pending records, receipts and retained
@@ -145,7 +170,11 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   global limit. Text and pending identifiers are stored separately. Removing
   a local chat copy removes its server-managed data; older browser drafts are
   offered for explicit review when available and are not automatically adopted
-  by the replacement. Browser data removal and individual draft cleanup are
+  by the replacement. Each newly staged file retains its original server stage
+  revision and a browser file identity within its copy and binding scope.
+  Cleanup uses that revision and refuses to remove a replacement browser file.
+  Older rows without a revision remain saved until their local stage can be
+  explicitly reviewed. Browser data removal and individual draft cleanup are
   separate from copy removal and independent reference-media captures.
 - **Budgets refuse writes; they never rewrite retention.** Managed growth
   (`nodes.jsonl`, session logs, attachments, and asset blobs) is guarded by a

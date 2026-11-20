@@ -333,26 +333,33 @@ func (h *teamHandler) readPeopleStage(w http.ResponseWriter, r *http.Request, id
 }
 
 func (h *teamHandler) removePeopleStage(w http.ResponseWriter, r *http.Request, id team.CopyID, stageID string) {
-	stage, sub, server, ok := h.authorizedPeopleStage(w, r, id, stageID)
-	if !ok {
+	if !h.peopleFilesEnabled() {
+		writeTeamError(w, http.StatusConflict, "not_active")
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || len(query["revision"]) != 1 || !subHex(query.Get("revision"), 64) {
+		writeTeamError(w, http.StatusConflict, "revision_required")
+		return
+	}
+	if !h.requirePeopleCopy(w, r) {
+		return
+	}
+	if _, err := identity.LoadInstallation(h.dataDir); err != nil {
+		writeTeamError(w, http.StatusConflict, "identity_unavailable")
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !peopleCopyCurrentLocked(r) || !h.peopleWriteCurrentLocked(id, sub, server, stage.OwnerInstance) {
+	if !h.peopleFilesEnabled() || !peopleCopyCurrentLocked(r) {
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
-	current, err := h.readStage(id, stageID)
-	if err != nil || current.ID != stage.ID || current.Hash != stage.Hash || current.Name != stage.Name || current.MIME != stage.MIME || current.ConfigHash != stage.ConfigHash || current.OwnerInstance != stage.OwnerInstance || !bytes.Equal(current.Data, stage.Data) {
+	op := r.Context().Value(peopleCopyOperationKey{}).(*peopleCopyOperation)
+	if err := team.DeletePeopleStageExact(h.dataDir, id, stageID, op.instance, query.Get("revision")); err != nil {
 		writeTeamError(w, http.StatusConflict, "stage_conflict")
 		return
 	}
-	if err := team.DeletePeopleStage(h.dataDir, id, stageID); err != nil {
-		writeTeamError(w, http.StatusConflict, "stage_pinned")
-		return
-	}
-	op := r.Context().Value(peopleCopyOperationKey{}).(*peopleCopyOperation)
 	if op.state.stages == nil {
 		op.state.stages = make(map[string]uint64)
 	}

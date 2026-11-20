@@ -108,6 +108,8 @@
 import { esc as escDefault } from "./format.js";
 import { focusAtEnd } from "./caret.js";
 import { peopleFileFailureText } from "./people-preparation.js";
+import { removePeopleStage } from "./people-stage-removal.js";
+import { loadPeopleLocalInventory, discardPeopleLocalPending, readPeopleLocalPublication, retireAbsentPeopleLocalPublication, parsePeoplePendingSnapshot } from "./people-local-review.js";
 import {
   readPendingForwards,
   clearPendingForwards,
@@ -402,11 +404,16 @@ export function createComposerFeature(deps){
   let contextDraftBinding = "";
   let ownerChoice = false;
   const peopleRevisions = new Map();
+  const peopleDraftStates = new Map();
+  const capturedDraftFlights = new Set();
+  const lastPeopleDraftScopes = new Map();
+  let unavailablePeopleDraft = null;
   const agentRevisions = new Map();
-  const peopleSending = new Set();
+  const peopleSending = new Map();
+  let peopleLifetime = 0;
   const sendingDestinations = new Set();
   const recoveredPeopleFiles = new Set();
-  const recoveringPeopleFiles = new Set();
+  const recoveringPeopleFiles = new Map();
   let legacyPeopleReview = {identity:"", files:[], drafts:[], unavailable:false};
   const clearedSourceText = new Map();
   const damagedSourceMetadata = new Set();
@@ -415,6 +422,381 @@ export function createComposerFeature(deps){
   const cleanups = [];
   /* dynamic remove buttons rebound on each renderStage */
   let stageRemoveCleanups = [];
+  let localReview = null;
+  let localReviewControllers = [];
+  let localReviewAlive = true;
+  const localDiscardFlights = new Set();
+  const localStageFlights = new Set();
+
+  let textReview = null;
+  const textRetirementFlights = new Set();
+
+  function textReviewSnapshot(){
+    const id = selId(), context = peopleContext();
+    if (!id || (isPeople() && context?.key && (id.startsWith("team/") ? id !== "team/" + context.key : !context.owner))) return null;
+    const contexts = isPeople() ? (context?.key ? [context] : []) : (typeof d.localReviewContexts === "function" ? d.localReviewContexts() : []);
+    const copies = contexts.map(copy => ({key:copy.key, copyInstance:copy.copyInstance || "", binding:copy.binding || "", owner:!!copy.owner}));
+    return {copies, address:JSON.stringify([id, destinationVisit, stageIdentity(id), copies])};
+  }
+  function collectTextReviews(pending){
+    const view = textReviewSnapshot();
+    if (!view) { textReview = null; return []; }
+    if (textReview?.address !== view.address) textReview = {address:view.address, items:new Map(), notice:""};
+    const results = [], seen = new Set();
+    function add(record, copy){
+      if (!record?.request || typeof record.request.text !== "string" || typeof record.request.key !== "string") return;
+      if (!record.publication) { if (record === pending) results.push({snapshot:record}); return; }
+      if (!/^[0-9a-f]{32}:[1-9][0-9]*$/.test(record.publication) || typeof record.scope !== "string" || typeof record.head !== "string" || typeof record.version !== "string" || typeof record.binding !== "string" || typeof record.native !== "string" || record.peopleKey !== copy.key || record.copyInstance !== copy.copyInstance || record.native !== (copy.owner ? (nodeById(selId())?.instance_id || "") : "") || record.scope !== peopleStageIdentity(selId(), {...copy, binding:record.binding}) || !/^[0-9a-f]{16}$/.test(record.request.key) || !Number.isSafeInteger(record.request.anchor)) return;
+      const key = JSON.stringify([record.scope, record.publication]);
+      if (seen.has(key)) return;
+      seen.add(key);
+      const saved = JSON.stringify(record), prior = textReview.items.get(key);
+      const item = prior && prior.saved === saved ? prior : {key, saved, snapshot:JSON.parse(saved), open:false, error:false};
+      textReview.items.set(key, item); results.push(item);
+    }
+    if (pending && view.copies[0]) add(pending, view.copies[0]);
+    for (const copy of view.copies) {
+      try {
+        const retained = d.readRetainedPeopleTextPending?.(copy);
+        if (Array.isArray(retained?.entries)) for (const record of retained.entries) add(record, copy);
+      } catch { /* keep other reviews available */ }
+    }
+    return results;
+  }
+  async function retireTextReview(view, item){
+    const current = () => localReviewAlive && peopleLifetime === view.lifetime && textReview === view.review && textReviewSnapshot()?.address === view.address;
+    if (!current() || textRetirementFlights.has(item.key)) return;
+    textRetirementFlights.add(item.key); item.error = false; renderStage();
+    try {
+      if (typeof d.retirePeopleText !== "function") throw new Error("People text recovery is unavailable.");
+      const result = await d.retirePeopleText(item.snapshot, {current});
+      if (!current()) return;
+      if (result?.state === "retired") view.review.notice = "Local text retry retired; this does not retract a remote comment.";
+      else if (result?.state === "completed" && Number.isSafeInteger(result.seq) && result.seq > 0) view.review.notice = "Already completed at sequence " + result.seq + ".";
+      else throw new Error("People text recovery is unconfirmed.");
+    } catch {
+      if (current()) item.error = true;
+    } finally {
+      textRetirementFlights.delete(item.key);
+      if (current()) renderStage();
+    }
+  }
+
+  function localDiscardKey(copy, id){ return JSON.stringify([copy.key, copy.copyInstance, id]); }
+  function localDiscardHTML(row, index, entry){
+    const state = row.discards.get(entry.id);
+    if (state?.state === "locally_discarded") return '<p role="status">Locally discarded. A remote comment may still appear.</p>';
+    if (state?.state === "already_completed") return `<p role="status">Already completed at sequence ${state.seq}.</p>`;
+    const notice = state === "error" ? '<p role="status">Local discard unavailable. If the saved record changed, reopen review before trying again.</p>' : "";
+    const progress = localDiscardFlights.has(localDiscardKey(row.copy, entry.id)) ? '<p role="status">Discarding locally or the result is unavailable in this view.</p>' : "";
+    return `${notice}${progress}<p>Reviewed local revision: ${escFn(entry.revision)}</p><p>A remote comment may still appear. Discard retires local retry; it does not retract a remote comment. Saved files remain.</p><button type="button" class="people-local-discard btn-tinted" data-row="${index}" data-id="${entry.id}">Discard local pending message</button>`;
+  }
+  async function discardLocalReview(visit, row, entry){
+    const current = () => localReviewAlive && localReview === visit && localReviewAddress() === visit.address && row.entries.includes(entry);
+    if (!current()) return;
+    const item = row.browserState;
+    const captured = item?.state === "ready" && item.result.state === "pending" && item.snapshot.publicationKey === entry.id && browserSnapshotCurrent(visit, row, item, true) ? item.snapshot : null;
+    const copy = {...row.copy}, record = {kind:entry.kind, id:entry.id, revision:entry.revision};
+    const flight = localDiscardKey(copy, record.id), lifetime = peopleLifetime, originalID = selId();
+    if (localDiscardFlights.has(flight)) return;
+    localDiscardFlights.add(flight);
+    row.discards.delete(record.id);
+    renderStage();
+    const owned = () => localReviewAlive && peopleLifetime === lifetime;
+    try {
+      if (!current()) return;
+      const saved = captured ? await fencePeopleFinalization(captured, row, originalID) : null;
+      if (!current()) return;
+      const result = await discardPeopleLocalPending({api:d.localReviewApi, key:copy.key, copyInstance:copy.copyInstance, record, current:owned});
+      if (!owned()) return;
+      let cleared = true;
+      if (captured && result.state === "already_completed") item.result = {...item.result, state:"completed", seq:result.seq};
+      if (captured && result.state === "locally_discarded") {
+        item.retired = true; item.cleanupError = true;
+        cleared = await clearRetiredBrowserSnapshot(captured, saved.identity, {state:"locally_discarded"}, owned);
+        if (cleared) {
+          item.cleanupError = false;
+          if (captured.format === "transactional") row.browserState = null;
+          else item.legacyRecorded = true;
+        }
+      }
+      if (!current()) return;
+      await Promise.resolve();
+      if (!current()) return;
+      row.discards.set(record.id, cleared ? result : "error");
+    } catch {
+      if (!current()) return;
+      row.discards.set(record.id, "error");
+    } finally {
+      localDiscardFlights.delete(flight);
+    }
+    if (current()) renderStage();
+  }
+
+  async function removeLocalStage(visit, row, entry){
+    const current = () => localReviewAlive && localReview === visit && localReviewAddress() === visit.address && row.entries.includes(entry);
+    if (!current()) return;
+    const copy = {...row.copy}, flight = localDiscardKey(copy, entry.id);
+    if (localStageFlights.has(flight)) return;
+    localStageFlights.add(flight); row.stageErrors.delete(entry.id); renderStage();
+    try {
+      if (!current()) return;
+      await removePeopleStage(d.localReviewApi, {peopleKey:copy.key, copyInstance:copy.copyInstance, ref:{id:entry.id}, stageRevision:entry.revision});
+      if (!current()) return;
+      row.entries = row.entries.filter(item => item !== entry);
+    } catch {
+      if (current()) row.stageErrors.add(entry.id);
+    } finally { localStageFlights.delete(flight); }
+    if (current() || (localReview === visit && localReviewAddress() === visit.address)) renderStage();
+  }
+  function localStageHTML(row, index, entry){
+    const flight = localDiscardKey(row.copy, entry.id);
+    const error = row.stageErrors.has(entry.id) ? '<p role="status">Saved file removal is unavailable. Review the file and try again.</p>' : "";
+    const progress = localStageFlights.has(flight) ? '<p role="status">Removing saved file…</p>' : "";
+    return `<p>${escFn(entry.name || "File metadata unavailable")} — ${escFn(entry.mime || "Unknown type")} — ${escFn(entry.size ?? "Unknown size")} bytes — ${escFn(entry.hash || "Hash unavailable")}</p><p>Reviewed local revision: ${escFn(entry.revision)}</p><p>The browser draft file is kept.</p>${error}${progress}<button type="button" class="people-local-stage-remove btn-tinted" data-row="${index}" data-id="${entry.id}">Remove local upload</button>`;
+  }
+
+  function localReviewSnapshot(){
+    const id = selId();
+    if (typeof d.localReviewApi !== "function" || !id) return null;
+    const context = peopleContext();
+    if (isPeople() && context?.key && (id.startsWith("team/") ? id !== "team/" + context.key : !context.owner)) return null;
+    const contexts = isPeople() ? (context?.key ? [context] : []) : (typeof d.localReviewContexts === "function" ? d.localReviewContexts() : []);
+    if (!contexts.length) return null;
+    const copies = contexts.map(item => ({key:item.key, copyInstance:item.copyInstance || "", binding:item.binding || "", owner:!!item.owner}));
+    const incarnation = stageIdentity(id);
+    return {copies, incarnation, address:JSON.stringify([id, destinationVisit, incarnation, copies])};
+  }
+  function localReviewAddress(){ return localReviewSnapshot()?.address || ""; }
+  function stopLocalReview(){
+    for (const controller of localReviewControllers) controller.abort();
+    localReviewControllers = [];
+    localReview = null;
+  }
+  function reviewedBrowserSnapshot(record, copy, instance) {
+    let snapshot = parsePeoplePendingSnapshot(record.value, {key:copy.key, copyInstance:copy.copyInstance, binding:record.binding ?? copy.binding, instance});
+    if (record.format === "transactional") {
+      if (record.scope !== peopleStageIdentity(selId(), {...copy, binding:record.binding}) || typeof record.publication !== "string" || !/^[0-9a-f]{32}:[1-9][0-9]*$/.test(record.publication) || record.storageKey !== "idb:" + record.publication || typeof record.head !== "string" || typeof record.version !== "string") throw new Error("People recovery is unavailable.");
+      snapshot = {...snapshot, format:"transactional", scope:record.scope, publication:record.publication, head:record.head, version:record.version, storageKey:record.storageKey};
+    }
+    if (record.storageKey !== snapshot.storageKey || record.key !== snapshot.key || record.instance !== instance || (record.publicationKey !== undefined && record.publicationKey !== snapshot.publicationKey) || record.text !== snapshot.text || JSON.stringify(record.attachments) !== JSON.stringify(snapshot.attachments)) throw new Error("People recovery is unavailable.");
+    return snapshot;
+  }
+  function readBrowserPending(row, current){
+    if (!isPeople() || typeof d.pendingPeople !== "function") return;
+    let pending, snapshot;
+    const copy = row.copy;
+    const instance = copy.owner ? nodeById(selId())?.instance_id : "";
+    try {
+      pending = d.pendingPeople();
+      if (!pending) return;
+      snapshot = reviewedBrowserSnapshot(pending, copy, instance);
+    } catch { return; }
+    const value = pending.value, storageKey = pending.storageKey;
+    if (row.browserState?.value !== value) row.activeOpen = false;
+    const attempt = {value, snapshot, state:"loading"};
+    const stillCurrent = () => {
+      if (!localReviewAlive || !current() || !isPeople() || row.browserState !== attempt) return false;
+      try { const latest = d.pendingPeople(); return latest?.value === value && latest.storageKey === storageKey; }
+      catch { return false; }
+    };
+    const controller = new AbortController();
+    localReviewControllers.push(controller);
+    row.browserState = attempt;
+    readPeopleLocalPublication({api:d.localReviewApi, key:copy.key, copyInstance:copy.copyInstance, publicationKey:snapshot.publicationKey, signal:controller.signal, current:stillCurrent}).then(result => {
+      if (!stillCurrent()) return;
+      row.browserState = {value, snapshot, state:"ready", result};
+      renderStage();
+    }).catch(() => {
+      if (!stillCurrent()) return;
+      row.browserState = {value, snapshot, state:"error"};
+      renderStage();
+    });
+  }
+  function loadRetainedPending(row){
+    if (typeof d.readRetainedPeoplePending !== "function") return;
+    try {
+      const result = d.readRetainedPeoplePending(row.copy);
+      row.retainedUnavailable = result?.unavailable !== false || !Array.isArray(result.entries);
+      if (!Array.isArray(result?.entries)) return;
+      const instance = row.copy.owner ? nodeById(selId())?.instance_id : "";
+      const previous = row.retained, retained = [];
+      for (const record of result.entries) {
+        try {
+          const snapshot = reviewedBrowserSnapshot(record, row.copy, instance);
+          retained.push(previous.find(item => item.snapshot.storageKey === snapshot.storageKey && item.snapshot.value === snapshot.value) || {snapshot, open:false, state:"unread"});
+        } catch { row.retainedUnavailable = true; }
+      }
+      row.retained = retained;
+    } catch { row.retainedUnavailable = true; }
+  }
+  function readRetainedPending(visit, row, item){
+    const snapshot = item.snapshot;
+    const current = () => {
+      if (!localReviewAlive || localReview !== visit || localReviewAddress() !== visit.address || !row.retained.includes(item)) return false;
+      try {
+        const result = d.readRetainedPeoplePending(row.copy);
+        return Array.isArray(result?.entries) && result.entries.some(value => value.storageKey === snapshot.storageKey && value.value === snapshot.value);
+      } catch { return false; }
+    };
+    if (!current()) return;
+    item.state = "loading";
+    const controller = new AbortController(); localReviewControllers.push(controller);
+    readPeopleLocalPublication({api:d.localReviewApi, key:row.copy.key, copyInstance:row.copy.copyInstance, publicationKey:snapshot.publicationKey, signal:controller.signal, current}).then(result => {
+      if (!current()) return;
+      item.state = "ready"; item.result = result; renderStage();
+    }).catch(() => {
+      if (!current()) return;
+      item.state = "error"; renderStage();
+    });
+  }
+  function completedSnapshotMatches(item){
+    return item?.state === "ready" && item.result.state === "completed" &&
+      item.result.text === item.snapshot.text && JSON.stringify(item.result.stage_ids) === JSON.stringify(item.snapshot.attachments);
+  }
+  function browserRetireHTML(row, index, item, marker){
+    if (item?.state !== "ready" || (!item.retired && !completedSnapshotMatches(item) && !["missing", "absent_retired", "retired"].includes(item.result.state))) return "";
+    if (item.legacyRecorded) return '<p role="status">The legacy retry is preserved for review; its local decision is recorded.</p>';
+    const flight = localDiscardKey(row.copy, item.snapshot.publicationKey);
+    const status = item.cleanupError ? '<p role="status">Local retry cleanup is unconfirmed. Review and try again.</p>' : "";
+    if (localDiscardFlights.has(flight)) return status + '<p role="status">Retiring local retry…</p>';
+    const label = completedSnapshotMatches(item) ? "Finish local recovery" : "Clear local retry";
+    return status + `<p>A remote comment may still appear. Saved files remain.</p><button type="button" class="people-browser-retire btn-tinted" data-row="${index}" data-snapshot="${marker}">${label}</button>`;
+  }
+  function browserSnapshotCurrent(visit, row, item, active){
+    if (!localReviewAlive || localReview !== visit || localReviewAddress() !== visit.address || item.state !== "ready") return false;
+    const snapshot = item.snapshot;
+    try {
+      if (active) {
+        const pending = d.pendingPeople();
+        return row.browserState === item && pending?.storageKey === snapshot.storageKey && pending.value === snapshot.value;
+      }
+      const records = d.readRetainedPeoplePending(row.copy);
+      return row.retained.includes(item) && Array.isArray(records?.entries) && records.entries.some(value => value.storageKey === snapshot.storageKey && value.value === snapshot.value);
+    } catch { return false; }
+  }
+  async function fencePeopleFinalization(snapshot, row, id) {
+    for (const token of peopleSending.values()) {
+      if (token.pending?.storageKey === snapshot.storageKey && token.pending.value === snapshot.value) {
+        token.retiring = true;
+        releasePeopleFlight(token);
+      }
+    }
+    const identity = peopleStageIdentity(id, {key:snapshot.key, copyInstance:snapshot.copyInstance, binding:snapshot.binding, owner:row.copy.owner});
+    if (!identity || typeof d.peopleFileStore?.list !== "function") throw new Error("Saved file review is unavailable.");
+    const rows = await d.peopleFileStore.list(identity);
+    return {identity, rows};
+  }
+  async function clearRetiredBrowserSnapshot(snapshot, scope, proof, current){
+    const fenced = d.fencePeoplePending(snapshot);
+    if (fenced?.state !== "locally_retired") return false;
+    return await d.clearPeoplePending(snapshot, {scope, proof, current});
+  }
+  function isLocalReviewRequired(error){
+    if (error?.status !== 409) return false;
+    try { return JSON.parse(error.message)?.error === "review_required"; } catch { return false; }
+  }
+  async function retireBrowserSnapshot(visit, row, item, active){
+    const snapshot = item.snapshot, result = item.result;
+    const current = () => browserSnapshotCurrent(visit, row, item, active);
+    if (!current() || (!item.retired && !completedSnapshotMatches(item) && !["missing", "absent_retired", "retired"].includes(result.state))) return;
+    const flight = localDiscardKey(row.copy, snapshot.publicationKey), lifetime = peopleLifetime, originalID = selId(), originalRevision = peopleRevisions.get(selId()) || 0;
+    if (localDiscardFlights.has(flight)) return;
+    localDiscardFlights.add(flight); item.cleanupError = false; renderStage();
+    const owned = () => localReviewAlive && peopleLifetime === lifetime;
+    try {
+      if (!current()) return;
+      const saved = await fencePeopleFinalization(snapshot, row, originalID);
+      if (!current()) return;
+      const completed = completedSnapshotMatches(item);
+      if (completed && result.pending_pinned && !item.completionReleased) {
+        const released = await discardPeopleLocalPending({api:d.localReviewApi, key:snapshot.key, copyInstance:snapshot.copyInstance, record:{kind:"pending", id:snapshot.publicationKey, revision:result.revision}, current:owned});
+        if (released.state !== "already_completed" || released.seq !== result.seq) throw new Error("Completed publication changed; review it again.");
+        item.completionReleased = true;
+      } else if (!completed && !item.retired && result.state !== "retired") await retireAbsentPeopleLocalPublication({api:d.localReviewApi, key:snapshot.key, copyInstance:snapshot.copyInstance, publicationKey:snapshot.publicationKey, current:owned});
+      if (!owned()) return;
+      if (!completed) item.retired = true;
+      item.cleanupError = true;
+      const proof = completed ? {state:"completed", seq:result.seq, text:result.text, stage_ids:result.stage_ids} : {state:"locally_discarded"};
+      const cleared = await clearRetiredBrowserSnapshot(snapshot, saved.identity, proof, owned);
+      if (!owned()) return;
+      if (cleared) {
+        item.cleanupError = false;
+        if (snapshot.format === "transactional") {
+          if (cleared.draftCleared) {
+            const draft = peopleDraftStates.get(saved.identity);
+            if (draft?.head === snapshot.head && draft.version === snapshot.version && (peopleRevisions.get(originalID) || 0) === originalRevision) {
+              draft.head = undefined; draft.version = undefined; draft.text = "";
+              if (localReview === visit && localReviewAddress() === visit.address && selId() === originalID && isPeople() && peopleStageIdentity(originalID) === saved.identity && promptText() === snapshot.text) clearPrompt();
+            }
+          }
+          if (cleared.filesConfirmed) for (const file of saved.rows) {
+            const staged = (stage[saved.identity] || []).find(value => value.localID === file.id && value.fileToken === file.fileToken && value.stageRevision === file.stageRevision);
+            if (staged && snapshot.attachments.includes(file.id)) { staged.sent = true; staged.status = "err"; staged.error = "Sent; remove this saved file to finish cleanup."; }
+          }
+          if (localReview === visit && localReviewAddress() === visit.address) {
+            if (active && row.browserState === item) row.browserState = null;
+            else if (!active && row.retained.includes(item)) row.retained.splice(row.retained.indexOf(item), 1);
+          }
+        } else item.legacyRecorded = true;
+      }
+      else if (current()) item.cleanupError = true;
+    } catch (error) {
+      if (current()) {
+        if (!item.retired && !item.completionReleased && isLocalReviewRequired(error)) {
+          if (active) readBrowserPending(row, () => localReview === visit && localReviewAddress() === visit.address);
+          else readRetainedPending(visit, row, item);
+        } else item.cleanupError = true;
+      }
+    } finally { localDiscardFlights.delete(flight); }
+    if (localReview === visit && localReviewAddress() === visit.address && owned()) renderStage();
+  }
+  function browserPendingStateHTML(browserState){
+    if (browserState?.state === "loading") return '<p role="status">Checking local publication state…</p>';
+    if (browserState?.state === "error") return '<p role="status">Local publication state is unavailable.</p>';
+    if (browserState?.state !== "ready") return "";
+    const result = browserState.result;
+    if (browserState.retired) return '<p role="status">The local publication was retired.</p>';
+    if (result.state === "missing") return '<p role="status">No local publication record was found.</p>';
+    if (result.state === "absent_retired") return '<p role="status">The absent local publication key was retired.</p>';
+    const status = result.state === "completed" ? `Completed at sequence ${result.seq}${result.pending_pinned && !browserState.completionReleased ? "; local pending record remains pinned" : ""}.` : `Local publication ${result.state}.`;
+    return `<p role="status">${status}</p><label>Actual local text<textarea readonly>${escFn(result.text || "File-only message")}</textarea></label><p>Actual local stage IDs: ${result.stage_ids.map(escFn).join(", ")}</p><p>Actual local revision: ${escFn(result.revision)}</p>`;
+  }
+  function browserPendingReviewHTML(pending, names, stateHTML, action, attributes = "", retry = ""){
+    return `<details${attributes}><summary>Review unconfirmed People message</summary><label>Saved text<textarea readonly>${escFn(pending.text || "File-only message")}</textarea></label><p>${names}</p>${stateHTML}${retry}${action}</details>`;
+  }
+  function refreshLocalReview(){
+    if (!localReviewAlive) return;
+    const snapshot = localReviewSnapshot();
+    if (localReview?.address === snapshot?.address) return;
+    stopLocalReview();
+    if (!snapshot) return;
+    const {address, copies, incarnation} = snapshot;
+    const rows = copies.map(copy => ({copy, state:copy.owner && !incarnation ? "error" : "loading", entries:[], discards:new Map(), stageErrors:new Set(), retained:[], retainedUnavailable:false, activeOpen:false}));
+    const visit = {address, rows};
+    localReview = visit;
+    const current = () => localReview === visit && localReviewAddress() === address;
+    for (const row of rows) {
+      if (row.state === "error") continue;
+      loadRetainedPending(row);
+      if (typeof d.refreshRetainedPeopleRecovery === "function") Promise.resolve().then(() => d.refreshRetainedPeopleRecovery(row.copy)).then(() => {
+        if (!current()) return;
+        loadRetainedPending(row); renderStage();
+      }).catch(() => { if (current()) { row.retainedUnavailable = true; renderStage(); } });
+      const controller = new AbortController();
+      localReviewControllers.push(controller);
+      loadPeopleLocalInventory({api:d.localReviewApi, key:row.copy.key, copyInstance:row.copy.copyInstance, signal:controller.signal, current}).then(entries => {
+        if (!current()) return;
+        row.state = "ready"; row.entries = entries;
+        renderStage();
+      }).catch(() => {
+        if (!current()) return;
+        row.state = "error";
+        renderStage();
+      });
+      readBrowserPending(row, current);
+    }
+  }
 
   function selId(){ return g("sel", "") || ""; }
   function nodeById(id){
@@ -438,6 +820,7 @@ export function createComposerFeature(deps){
   }
   function peopleStageIdentity(id, context = peopleContext()){
     if (!id || !context?.key) return "";
+    if (id.startsWith("team/") && id !== "team/" + context.key) return "";
     const ownerIdentity = context.owner ? stageIdentity(id) : "";
     if (context.owner && !ownerIdentity) return "";
     return "people\0" + context.key + (context.binding ? "\0binding:" + context.binding : "") + (context.copyInstance ? "\0copy:" + context.copyInstance : "") + "\0" + ownerIdentity;
@@ -509,30 +892,38 @@ export function createComposerFeature(deps){
       .finally(() => { recoveringSourceFiles.delete(identity); if (stale && selId() === id && stageIdentity(id) === identity) restoreSourceFiles(); });
   }
   function restorePeopleFiles(){
-    const id = selId(), context = peopleContext(), identity = peopleStageIdentity(id, context), visit = destinationVisit;
+    const id = selId(), context = peopleContext(), identity = peopleStageIdentity(id, context), visit = destinationVisit, lifetime = peopleLifetime;
     if (!isPeople() || !peopleCanAttach(context) || !identity || !d.peopleFileStore || recoveredPeopleFiles.has(identity) || recoveringPeopleFiles.has(identity)) return;
-    recoveringPeopleFiles.add(identity);
     let stale = false;
-    Promise.resolve().then(() => d.peopleFileStore.list(identity)).then(rows => {
-      if (selId() !== id || destinationVisit !== visit || !isPeople() || peopleStageIdentity(id) !== identity) { stale = true; return; }
+    const recovery = Promise.resolve().then(() => d.peopleFileStore.list(identity)).then(rows => {
+      if (peopleLifetime !== lifetime || selId() !== id || destinationVisit !== visit || !isPeople() || peopleStageIdentity(id) !== identity) { stale = true; return; }
       const arr = staged(identity);
       for (const row of rows) {
-        if (arr.some(item => item.localID === row.id)) continue;
+        const existing = arr.find(item => item.localID === row.id);
+        if (existing) {
+          if (Number.isSafeInteger(row.published) && row.published > 0 && existing.fileToken && existing.fileToken === row.fileToken && existing.stageRevision && existing.stageRevision === row.stageRevision) {
+            existing.sent = true; existing.needsUpload = false; existing.status = "err"; existing.error = "Sent; remove this saved file to finish cleanup.";
+          }
+          continue;
+        }
         const file = row.file, isImage = isImageFileType(file.type);
         arr.push({key:++stageKey, file, size:file.size, name:stagedFileName(file, isImage), isImage,
           preview:isImage ? URLImpl.createObjectURL(file) : "", ref:{id:row.id}, localID:row.id, localSaved:true,
           peopleKey:context.key, copyInstance:context.copyInstance || "", instance:context.owner ? (nodeById(id)?.instance_id || "") : "",
-          status:"err", error:row.published ? "Sent; remove this saved file to finish cleanup." : "Review and send to retry this file.",
+          stageRevision:row.stageRevision, fileToken:row.fileToken,
+          status:"err", error:row.published ? (row.stageRevision ? "Sent; remove this saved file to finish cleanup." : "Sent; review the current local file before removing this saved file.") : "Review and send to retry this file.",
           sent:!!row.published, needsUpload:!row.published});
       }
       recoveredPeopleFiles.add(identity);
       renderStage();
     }).catch(() => {
-      if (selId() === id && destinationVisit === visit && isPeople() && peopleStageIdentity(id) === identity) alertFn("Saved People files could not be recovered.");
+      if (peopleLifetime !== lifetime || selId() !== id || destinationVisit !== visit || !isPeople() || peopleStageIdentity(id) !== identity) stale = true;
+      else alertFn("Saved People files could not be recovered.");
     }).finally(() => {
-      recoveringPeopleFiles.delete(identity);
-      if (stale && selId() === id && isPeople() && peopleStageIdentity(id) === identity) restorePeopleFiles();
+      if (recoveringPeopleFiles.get(identity) === recovery) recoveringPeopleFiles.delete(identity);
+      if (stale && bound && selId() === id && isPeople() && peopleStageIdentity(id) === identity) restorePeopleFiles();
     });
+    recoveringPeopleFiles.set(identity, recovery);
   }
   function clearLegacyPeopleReview(){
     for (const item of legacyPeopleReview.files) URLImpl.revokeObjectURL(item.url);
@@ -632,7 +1023,6 @@ export function createComposerFeature(deps){
     const binding = context?.attachments && context.binding ? peopleDraftBinding(id, context) : "";
     return "scimux-people-draft:" + id + (binding ? ":scope:" + encodeURIComponent(binding) : "");
   }
-  function peoplePendingDraftKey(identity){ return "scimux-people-pending-draft:" + identity; }
   function peopleDraftBinding(id, context){
     if (!context?.key) return "";
     const native = context.owner ? stageIdentity(id) : id;
@@ -747,14 +1137,39 @@ export function createComposerFeature(deps){
     }
   }
 
+  async function discardCapturedDraft(id, state, item){
+    const scope = peopleStageIdentity(id), visit = destinationVisit, lifetime = peopleLifetime;
+    const current = () => localReviewAlive && peopleLifetime === lifetime && destinationVisit === visit && selId() === id && isPeople() && peopleStageIdentity(id) === scope && peopleDraftStates.get(scope) === state && state.review?.includes(item);
+    if (!scope || !current()) return;
+    const flight = JSON.stringify([scope, item.head, item.version]);
+    if (capturedDraftFlights.has(flight)) return;
+    capturedDraftFlights.add(flight);
+    try {
+      if (typeof d.peopleFileStore?.discardPeopleCapture !== "function") throw new Error("People recovery is unavailable.");
+      const discarded = await d.peopleFileStore.discardPeopleCapture({scope, head:item.head, version:item.version, text:item.text, current});
+      if (!current()) return;
+      if (discarded) state.review = state.review.filter(row => row !== item);
+      state.captureNotice = discarded ? "discarded" : "error";
+      renderStage();
+    } catch {
+      if (current()) { state.captureNotice = "error"; renderStage(); }
+    } finally { capturedDraftFlights.delete(flight); }
+  }
+
   function renderStage(){
     if (!attstage) return;
     const id = selId();
+    const draftState = isPeople() ? peopleDraftStates.get(peopleStageIdentity(id)) : null;
+    const draftError = draftState?.error || (unavailablePeopleDraft?.id === id && unavailablePeopleDraft.visit === destinationVisit), savedDrafts = draftState?.review || [], completedDrafts = draftState?.completed || [];
     const items = id ? (stage[currentStageIdentity(id)] || []) : [];
     let pending = null;
     try { if (isPeople() && typeof d.pendingPeople === "function") pending = d.pendingPeople(); } catch { /* recovery remains unavailable */ }
+    let textPending = null;
+    try { if (isPeople() && typeof d.pendingPeopleText === "function") textPending = d.pendingPeopleText(); } catch { /* recovery remains unavailable */ }
     clearStageRemoveListeners();
-    if (!items.length && !pending){
+    const textItems = collectTextReviews(textPending);
+    const review = localReview?.address === localReviewAddress() ? localReview : null;
+    if (!items.length && !pending && !textItems.length && !textReview?.notice && !draftError && !savedDrafts.length && !completedDrafts.length && !draftState?.captureNotice && !review?.rows.some(row => row.state !== "ready" || row.entries.length || row.retained.length || row.retainedUnavailable)){
       attstage.hidden = true;
       attstage.innerHTML = "";
       return;
@@ -764,12 +1179,160 @@ export function createComposerFeature(deps){
       esc: escFn,
       iconFile: icons.ICON_FILE || "",
     });
+    if (draftError) attstage.innerHTML += '<p role="status">This People draft could not be saved. Keep this view open and review storage availability.</p>';
+    if (savedDrafts.length) attstage.innerHTML += `<details><summary>Review saved People drafts</summary>${savedDrafts.map(item => `<label>${item.sealed ? "Captured submission" : "Saved draft"}<textarea readonly>${escFn(item.text)}</textarea></label>${item.sealed ? `<button type="button" class="people-captured-discard btn-tinted" data-head="${escFn(item.head)}" data-version="${escFn(item.version)}">Discard captured submission</button>` : ""}`).join("")}</details>`;
+    if (draftState?.captureNotice) attstage.innerHTML += `<p role="status">${draftState.captureNotice === "discarded" ? "Captured submission discarded locally; this does not retract a remote comment." : "Captured submission could not be discarded. Review it again."}</p>`;
+    if (completedDrafts.length) attstage.innerHTML += `<details><summary>Review completed People messages</summary>${completedDrafts.map(item => `<p>Completed at sequence ${escFn(item.seq)}; the saved file identity could not be confirmed.</p><label>Saved text<textarea readonly>${escFn(item.request.text)}</textarea></label>`).join("")}</details>`;
+    for (const [index, item] of textItems.entries()) {
+      const snapshot = item.snapshot, progress = item.key && textRetirementFlights.has(item.key);
+      const status = progress ? '<p role="status">Retiring local text retry…</p>' : item.error ? '<p role="status">Local text retirement is unavailable. Review and try again.</p>' : "";
+      const action = item.key ? `<button type="button" class="people-text-retire btn-tinted" data-row="${index}" data-publication="${escFn(snapshot.publication)}">Discard local text retry</button>` : "";
+      attstage.innerHTML += `<details class="people-text-review" data-row="${index}"${item.open ? " open" : ""}><summary>Review unconfirmed People text</summary><label>Saved text<textarea readonly>${escFn(snapshot.request.text)}</textarea></label><p>A remote comment may still appear; this does not retract it.</p><p>Publication key: ${escFn(snapshot.request.key)}</p>${status}${action}</details>`;
+    }
+    if (textReview?.notice) attstage.innerHTML += `<p role="status">${escFn(textReview.notice)}</p>`;
+    let pendingID = "";
+    try { pendingID = JSON.parse(pending?.value || "null")?.request?.key || ""; } catch { /* retain both reviews */ }
+    let pendingRow = null;
     if (pending) {
       const names = pending.attachments.map(fileID => items.find(item => item.localID === fileID)?.name || "Saved file unavailable");
-      attstage.innerHTML += `<details><summary>Review unconfirmed People message</summary><p>${escFn(pending.text || "File-only message")}</p><p>${names.map(escFn).join(", ")}</p><button type="button" class="people-retry">Retry this message</button></details>`;
-      const buttons = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-retry") : [];
-      for (const b of buttons) {
+      const context = peopleContext();
+      const index = review ? review.rows.findIndex(row => row.copy.key === pending.key && row.copy.copyInstance === context?.copyInstance && row.copy.binding === (context?.binding || "")) : -1;
+      const row = index < 0 ? null : review.rows[index];
+      pendingRow = row;
+      if (row && row.state !== "error" && row.browserState?.value !== pending.value) {
+        row.activeOpen = false;
+        readBrowserPending(row, () => localReview === review && localReviewAddress() === review.address);
+      }
+      const entry = row?.entries.find(item => item.kind === "pending" && item.id === pendingID);
+      let action = entry ? localDiscardHTML(row, index, entry) : "";
+      const actualText = entry && (entry.text || "") !== (pending.text || "") ? `<label>Actual local pending text<textarea readonly>${escFn(entry.text || "File-only message")}</textarea></label>` : "";
+      const actualNames = entry ? (Array.isArray(entry.stage_ids) && entry.stage_ids.length ? entry.stage_ids.map(id => row.entries.find(item => item.kind === "stage" && item.id === id)?.name || "Saved file metadata unavailable") : ["Saved file metadata unavailable"]) : [];
+      const actualFiles = entry ? `<p>Actual local files: ${actualNames.map(escFn).join(", ")} (current stage inventory snapshot; IDs may be reused)</p>` : "";
+      const browserState = row?.browserState && row.browserState.value === pending.value ? row.browserState : null;
+      const stateHTML = pending.locallyRetired ? '<p role="status">The legacy retry is preserved for review; its local decision is recorded.</p>' : browserPendingStateHTML(browserState);
+      const retirement = row && !pending.locallyRetired ? browserRetireHTML(row, index, browserState, "current") : "";
+      if (retirement) action = retirement;
+      const terminal = pending.locallyRetired || (browserState?.state === "ready" && (browserState.legacyRecorded || browserState.retired || ["retired", "absent_retired"].includes(browserState.result.state)));
+      const attributes = row ? ` class="people-current-snapshot" data-row="${index}"${row.activeOpen ? " open" : ""}` : "";
+      const retiring = row && localDiscardFlights.has(localDiscardKey(row.copy, pendingID));
+      attstage.innerHTML += browserPendingReviewHTML(pending, names.map(escFn).join(", "), actualText + actualFiles + stateHTML, action, attributes, context?.writable === true && !terminal && !retiring ? '<button type="button" class="people-retry btn-tinted">Retry this message</button>' : "");
+    }
+    if (review) for (const [index, row] of review.rows.entries()) {
+      if (row.retainedUnavailable) attstage.innerHTML += '<p role="status">Some saved People review records are unavailable.</p>';
+      for (const [snapshotIndex, item] of row.retained.entries()) {
+        const snapshot = item.snapshot;
+        if (pending && snapshot.storageKey === pending.storageKey && snapshot.value === pending.value) continue;
+        const origin = `<p>Original binding: ${escFn(snapshot.binding || "No saved binding")}</p>`;
+        const attributes = ` class="people-local-snapshot" data-row="${index}" data-snapshot="${snapshotIndex}"${item.open ? " open" : ""}`;
+        attstage.innerHTML += browserPendingReviewHTML(snapshot, snapshot.attachments.map(escFn).join(", "), origin + browserPendingStateHTML(item), browserRetireHTML(row, index, item, snapshotIndex), attributes);
+      }
+      if (row.state === "ready" && !row.entries.length) continue;
+      if (review.rows.length > 1) attstage.innerHTML += `<p>Local copy ${escFn(row.copy.key)}</p>`;
+      if (row.state === "loading") attstage.innerHTML += '<p role="status">Loading saved local People review…</p>';
+      else if (row.state === "error") attstage.innerHTML += '<p role="status">Saved local People review is unavailable.</p>';
+      else {
+        const stages = row.entries.filter(entry => entry.kind === "stage");
+        const publications = row.entries.filter(entry => entry.kind === "pending" && (row !== pendingRow || entry.id !== pendingID));
+        for (const entry of publications) {
+          const names = Array.isArray(entry.stage_ids) && entry.stage_ids.length ? entry.stage_ids.map(id => stages.find(stage => stage.id === id)?.name || "Saved file metadata unavailable") : ["Saved file metadata unavailable"];
+          const state = row.discards.get(entry.id);
+          const content = state?.state === "locally_discarded" || state?.state === "already_completed" ? "" : `<label>Saved text<textarea readonly>${escFn(entry.text || "File-only message")}</textarea></label><p>Current stage inventory snapshot (IDs may be reused): ${names.map(escFn).join(", ")}</p>`;
+          attstage.innerHTML += `<details><summary>Review unconfirmed local People message</summary>${content}${localDiscardHTML(row, index, entry)}</details>`;
+        }
+        if (stages.length) attstage.innerHTML += `<details><summary>Review current staged files (inventory snapshot)</summary>${stages.map(stage => localStageHTML(row, index, stage)).join("")}</details>`;
+      }
+    }
+    const textView = {review:textReview, address:textReview?.address, lifetime:peopleLifetime};
+    for (const detail of (typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-text-review") : [])) {
+      const item = textItems[Number(detail.dataset?.row)];
+      if (!item) continue;
+      const onToggle = () => { if (textReview === textView.review && textReviewSnapshot()?.address === textView.address) item.open = !!detail.open; };
+      detail.addEventListener("toggle", onToggle);
+      stageRemoveCleanups.push(() => detail.removeEventListener("toggle", onToggle));
+    }
+    for (const button of (typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-text-retire") : [])) {
+      const item = textItems[Number(button.dataset?.row)];
+      if (!item || item.snapshot.publication !== button.dataset?.publication) continue;
+      let active = true;
+      const onClick = () => { if (active) retireTextReview(textView, item); };
+      button.addEventListener("click", onClick);
+      stageRemoveCleanups.push(() => { active = false; button.removeEventListener("click", onClick); });
+    }
+    if (review) {
+      const details = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-local-snapshot") : [];
+      for (const detail of details) {
+        const row = review.rows[Number(detail.dataset?.row)], item = row?.retained[Number(detail.dataset?.snapshot)];
+        if (!item) continue;
+        const onToggle = () => {
+          if (!localReviewAlive || localReview !== review || localReviewAddress() !== review.address || !row.retained.includes(item)) return;
+          item.open = !!detail.open;
+          if (item.open && item.state === "unread") { readRetainedPending(review, row, item); renderStage(); }
+        };
+        detail.addEventListener("toggle", onToggle);
+        stageRemoveCleanups.push(() => detail.removeEventListener("toggle", onToggle));
+      }
+    }
+    if (review && pending) {
+      const details = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-current-snapshot") : [];
+      for (const detail of details) {
+        const row = review.rows[Number(detail.dataset?.row)];
+        if (!row) continue;
+        const onToggle = () => {
+          if (!localReviewAlive || localReview !== review || localReviewAddress() !== review.address) return;
+          try {
+            const latest = d.pendingPeople();
+            if (latest?.storageKey === pending.storageKey && latest.value === pending.value) row.activeOpen = !!detail.open;
+          } catch { /* keep the last reviewed disclosure state */ }
+        };
+        detail.addEventListener("toggle", onToggle);
+        stageRemoveCleanups.push(() => detail.removeEventListener("toggle", onToggle));
+      }
+    }
+    if (draftState) for (const button of (typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-captured-discard") : [])) {
+      const item = savedDrafts.find(row => row.sealed && row.head === button.dataset?.head && row.version === button.dataset?.version);
+      if (!item) continue;
+      const onClick = () => discardCapturedDraft(id, draftState, item);
+      button.addEventListener("click", onClick);
+      stageRemoveCleanups.push(() => button.removeEventListener("click", onClick));
+    }
+    if (pending) {
+      const retryButtons = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-retry") : [];
+      for (const b of retryButtons) {
         const onClick = () => retryPeopleDraft(pending);
+        b.addEventListener("click", onClick);
+        stageRemoveCleanups.push(() => b.removeEventListener("click", onClick));
+      }
+    }
+    if (review) {
+      const retireButtons = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-browser-retire") : [];
+      for (const button of retireButtons) {
+        const row = review.rows[Number(button.dataset?.row)];
+        const active = button.dataset?.snapshot === "current";
+        const item = active ? row?.browserState : row?.retained[Number(button.dataset?.snapshot)];
+        if (!item) continue;
+        const onClick = () => retireBrowserSnapshot(review, row, item, active);
+        button.addEventListener("click", onClick);
+        stageRemoveCleanups.push(() => button.removeEventListener("click", onClick));
+      }
+    }
+    if (review) {
+      const stageButtons = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-local-stage-remove") : [];
+      for (const button of stageButtons) {
+        const row = review.rows[Number(button.dataset?.row)];
+        const entry = row?.entries.find(item => item.kind === "stage" && item.id === button.dataset?.id);
+        if (!entry) continue;
+        const onClick = () => removeLocalStage(review, row, entry);
+        button.addEventListener("click", onClick);
+        stageRemoveCleanups.push(() => button.removeEventListener("click", onClick));
+      }
+    }
+    if (review) {
+      const discardButtons = typeof attstage.querySelectorAll === "function" ? attstage.querySelectorAll(".people-local-discard") : [];
+      for (const b of discardButtons) {
+        const row = review.rows[Number(b.dataset?.row)];
+        const entry = row?.entries.find(item => item.kind === "pending" && item.id === b.dataset?.id);
+        if (!entry) continue;
+        const onClick = () => discardLocalReview(review, row, entry);
         b.addEventListener("click", onClick);
         stageRemoveCleanups.push(() => b.removeEventListener("click", onClick));
       }
@@ -807,11 +1370,9 @@ export function createComposerFeature(deps){
       try {
         if (item.uploadPromise) await item.uploadPromise;
         if (item.ref?.id) {
-          if (typeof d.api !== "function") throw new Error("Stage removal is unavailable");
-          const path = `/api/team/subscriptions/${item.peopleKey.split("/").map(encodeURIComponent).join("/")}/attachments/stage/${encodeURIComponent(item.ref.id)}?copy_instance=${encodeURIComponent(item.copyInstance || "")}${item.instance ? `&chat_instance=${encodeURIComponent(item.instance)}` : ""}`;
-          await d.api(path, {method:"DELETE"});
+          await removePeopleStage(d.api, item);
         }
-        if (item.localSaved) await d.peopleFileStore.remove(identity, item.localID);
+        if (item.localSaved) await d.peopleFileStore.removeStageFile(identity, item.localID, item.fileToken);
       } catch (err) {
         item.removing = false;
         if (selId() === id && currentStageIdentity(id) === identity) { alertFn(err?.message || "Stage removal failed"); renderStage(); }
@@ -863,6 +1424,15 @@ export function createComposerFeature(deps){
       const body = await r.json();
       it.ref = body.attachments[0];
       if (peopleKey && it.ref?.id !== it.localID) { it.ref = null; throw new Error("People file identity did not match."); }
+      if (peopleKey && it.newPeopleStage) {
+        if (it.stageRevision && it.ref.revision !== it.stageRevision) throw new Error("Saved file changed; review it before removal.");
+        if (!/^[0-9a-f]{64}$/.test(it.ref.revision || "")) throw new Error("Review the current local file before removing this saved file.");
+        it.stageRevision = it.ref.revision;
+        await d.peopleFileStore.setStageRevision(identity, it.localID, it.stageRevision, it.fileToken);
+        it.newPeopleStage = false;
+      } else if (peopleKey && it.stageRevision && it.ref.revision !== it.stageRevision) {
+        throw new Error("Saved file changed; review it before removal.");
+      }
       it.status = "done";
       if (peopleKey || it.sourceKey) it.needsUpload = false;
     } catch (e) {
@@ -910,6 +1480,7 @@ export function createComposerFeature(deps){
         copyInstance: people ? context.copyInstance || "" : "",
         instance: people ? instance : "",
         localID,
+        newPeopleStage:people,
         sourceKey: people ? "" : sourceKey,
         ...(sourceRecords[index] || {}),
       };
@@ -918,7 +1489,7 @@ export function createComposerFeature(deps){
         it.uploadPromise = (async () => {
           try {
             if (!d.peopleFileStore) throw new Error("People file storage is unavailable.");
-            await d.peopleFileStore.save(identity, localID, f);
+            it.fileToken = await d.peopleFileStore.save(identity, localID, f);
             it.localSaved = true;
             await uploadOne(it, dest, identity, instance, it.peopleKey);
           } catch (err) {
@@ -948,11 +1519,23 @@ export function createComposerFeature(deps){
   function renderRecovery(id){
     if (!roots.recovery) return;
     const entries = id ? [...readRetiredDrafts(storage, id), ...(retiredMemory.get(id) || []), ...legacyPeopleReview.drafts] : [];
+    if (id && peopleContext()) {
+      const currentLegacy = storage.getItem(peopleDraftKey(id));
+      if (currentLegacy) entries.push({owner:"unknown", values:{"scimux-people-draft:":currentLegacy}});
+    }
     if (id && peopleDraftKey(id) !== "scimux-people-draft:" + id) {
       const legacy = storage.getItem("scimux-people-draft:" + id);
       if (legacy) entries.push({owner:"unknown", values:{"scimux-people-draft:":legacy}});
     }
     const context = peopleContext();
+    if (id && context?.key) {
+      const legacyTextRetry = storage.getItem("scimux-comment-retry:" + context.key);
+      if (legacyTextRetry) {
+        let text = "Saved People retry is unavailable.";
+        try { const parsed = JSON.parse(legacyTextRetry); if (typeof parsed?.text === "string") text = parsed.text || "Empty People message"; } catch { /* preserve damaged legacy content for review */ }
+        entries.push({owner:"unknown", values:{"scimux-people-draft:":text, "scimux-delivery-status:":"unconfirmed"}});
+      }
+    }
     if (id && context?.copyInstance) {
       const priorKey = peopleDraftKey(id, {...context, copyInstance:""});
       if (priorKey !== "scimux-people-draft:" + id) {
@@ -976,7 +1559,49 @@ export function createComposerFeature(deps){
       (legacyPeopleReview.unavailable ? '<p role="status">Saved People files could not be reviewed.</p>' : "");
   }
 
+  function retireChangedPeopleFlights(id, context){
+    for (const token of peopleSending.values()) {
+      if (token.id === id && ((token.native && stageIdentity(id) !== token.native) ||
+          (token.fileIdentity && peopleStageIdentity(id, context) !== token.fileIdentity))) releasePeopleFlight(token);
+    }
+  }
+
+  function restorePeopleDraft(id, context){
+    const remembered = lastPeopleDraftScopes.get(id), native = stageIdentity(id);
+    const scope = context ? peopleStageIdentity(id, context) : (remembered && remembered.native === native ? remembered.scope : ""), visit = destinationVisit, lifetime = peopleLifetime, revision = peopleRevisions.get(id) || 0;
+    if (context && scope) lastPeopleDraftScopes.set(id, {scope, native});
+    const existing = peopleDraftStates.get(scope);
+    setPromptText(existing?.text || "");
+    const load = typeof d.refreshPeopleRecovery === "function" ? d.refreshPeopleRecovery : d.peopleFileStore?.listPeopleRecovery?.bind(d.peopleFileStore);
+    if (!scope || !load) return;
+    Promise.resolve().then(() => load(scope)).then(result => {
+      if (peopleLifetime !== lifetime || destinationVisit !== visit || selId() !== id || !isPeople() || peopleStageIdentity(id) !== scope) return;
+      if (localReview?.address === localReviewAddress()) for (const row of localReview.rows) if (peopleStageIdentity(id, row.copy) === scope) loadRetainedPending(row);
+      const canRestore = !peopleDraftStates.has(scope) && (peopleRevisions.get(id) || 0) === revision && !promptText();
+      const editable = result.heads.filter(head => !head.sealed);
+      if (canRestore && editable.length === 1) {
+        const head = editable[0];
+        peopleDraftStates.set(scope, {head:head.head, version:head.version, tail:Promise.resolve(), text:head.text, error:false, ...(result.heads.length > 1 ? {review:result.heads} : {})});
+        setPromptText(head.text);
+      } else if (canRestore && result.heads.length) {
+        peopleDraftStates.set(scope, {head:undefined, version:undefined, tail:Promise.resolve(), text:"", error:false, review:result.heads});
+      }
+      if (result.completed?.length) {
+        let state = peopleDraftStates.get(scope);
+        if (!state) { state = {head:undefined, version:undefined, tail:Promise.resolve(), text:"", error:false}; peopleDraftStates.set(scope, state); }
+        state.completed = result.completed;
+      }
+      renderStage();
+    }).catch(() => {
+      if (peopleLifetime === lifetime && destinationVisit === visit && selId() === id && isPeople() && peopleStageIdentity(id) === scope && !peopleDraftStates.has(scope)) {
+        peopleDraftStates.set(scope, {head:undefined, version:undefined, tail:Promise.resolve(), text:"", error:true});
+        renderStage();
+      }
+    });
+  }
+
   function onSelect({preferAgent = false} = {}){
+    stopLocalReview();
     clearLegacyPeopleReview();
     for (const controller of preparationControllers) controller.abort();
     destinationVisit++;
@@ -990,12 +1615,14 @@ export function createComposerFeature(deps){
     identityReady = bindDraftIdentity(storage, id, nodeById(id)?.instance_id || "");
     renderRecovery(id);
     const context = peopleContext();
+    retireChangedPeopleFlights(id, context);
     contextKey = context?.key || "";
     contextDraftBinding = peopleDraftBinding(id, context);
     ownerChoice = !!context?.owner && !id.startsWith("team/");
     explicitAgent = !!preferAgent && !id.startsWith("team/");
     destination = !explicitAgent && (id.startsWith("team/") || contextKey) ? "people" : "agent";
-    setPromptText(identityReady ? (isPeople() ? (storage.getItem(peopleDraftKey(id)) || "") : savedDraft(id)) : "");
+    if (identityReady && isPeople()) restorePeopleDraft(id, context);
+    else setPromptText(identityReady ? savedDraft(id) : "");
     if (!identityReady) alertFn("Draft storage is unavailable. Reconnect before using this chat's composer.");
     refreshDestination();
     setAttachAvail(false);
@@ -1003,6 +1630,7 @@ export function createComposerFeature(deps){
   }
 
   function refreshDestination(){
+    refreshLocalReview();
     if (roots.destination) roots.destination.hidden = !ownerChoice;
     if (roots.destinationPeople) roots.destinationPeople.setAttribute("aria-pressed", String(isPeople()));
     if (roots.destinationAgent) roots.destinationAgent.setAttribute("aria-pressed", String(!isPeople()));
@@ -1019,11 +1647,12 @@ export function createComposerFeature(deps){
 
   function contextChanged(){
     const context = peopleContext();
+    retireChangedPeopleFlights(selId(), context);
     const key = context?.key || "";
     const nextBinding = peopleDraftBinding(selId(), context);
     if (isPeople() && key === contextKey && nextBinding !== contextDraftBinding && (context?.binding || contextDraftBinding.includes("\0binding:"))) {
       destinationVisit++;
-      setPromptText(storage.getItem(peopleDraftKey(selId(), context)) || "");
+      restorePeopleDraft(selId(), context);
     }
     contextDraftBinding = nextBinding;
     if (context?.owner && !selId().startsWith("team/")) ownerChoice = true;
@@ -1048,7 +1677,8 @@ export function createComposerFeature(deps){
     destinationVisit++;
     destination = next;
     explicitAgent = next === "agent";
-    setPromptText(isPeople() ? (storage.getItem(peopleDraftKey(selId())) || "") : savedDraft(selId()));
+    if (isPeople()) restorePeopleDraft(selId(), context);
+    else setPromptText(savedDraft(selId()));
     refreshDestination();
   }
 
@@ -1129,73 +1759,162 @@ export function createComposerFeature(deps){
     if (selId() === id && !isPeople()) { setPromptText(merged); renderStage(); }
   }
 
-  async function finishPeopleFiles(fileIdentity, files, receipt) {
-    await d.peopleFileStore.markPublishedBatch(fileIdentity, files.map(item => item.localID), receipt?.seq);
-    if (typeof d.finishPeople !== "function" || !d.finishPeople(receipt)) throw new Error("The sent message could not be recorded locally. Review and retry it.");
+  function beginPeopleFlight(identity, id, context, files) {
+    const token = {identity, id, native:context.owner ? stageIdentity(id) : "", fileIdentity:files.length ? peopleStageIdentity(id, context) : "", reviewAddress:localReview?.address, lifetime:peopleLifetime, files, barrier:null};
+    peopleSending.set(identity, token);
+    for (const item of files) item.pending = true;
+    return token;
+  }
+  function ownsPeopleFlight(token) {
+    return !token.retiring && token.lifetime === peopleLifetime && peopleSending.get(token.identity) === token &&
+      (!token.native || stageIdentity(token.id) === token.native) &&
+      (!token.fileIdentity || selId() !== token.id || !isPeople() || peopleStageIdentity(token.id) === token.fileIdentity);
+  }
+  function releasePeopleFlight(token) {
+    if (peopleSending.get(token.identity) !== token) return;
+    peopleSending.delete(token.identity);
+    for (const item of token.files) item.pending = false;
+  }
+  async function peopleFileOperation(token, operation) {
+    const barrier = Promise.resolve().then(() => ownsPeopleFlight(token) ? operation() : undefined);
+    token.barrier = barrier;
+    try { await barrier; } finally { if (token.barrier === barrier) token.barrier = null; }
+    return ownsPeopleFlight(token);
+  }
+  function prunePeopleStageInventory(token, item) {
+    const review = localReview;
+    if (!localReviewAlive || !review || !token.reviewAddress || review.address !== token.reviewAddress || localReviewAddress() !== review.address || selId() !== token.id) return;
+    for (const row of review.rows) {
+      row.entries = row.entries.filter(entry => entry.kind !== "stage" || entry.id !== item.ref?.id || entry.revision !== item.stageRevision);
+    }
+  }
+  async function finishPeopleFiles(token, fileIdentity, files, receipt) {
+    if (receipt?.peoplePending?.format !== "transactional" || typeof d.finishPeople !== "function") throw new Error("The sent message could not be recorded locally. Review the saved files.");
+    let decision;
+    if (!await peopleFileOperation(token, async () => { decision = await d.finishPeople(receipt, {current:() => ownsPeopleFlight(token)}); })) return false;
+    if (!decision || decision.state !== "completed" || decision.seq !== receipt.seq) throw new Error("The sent message could not be recorded locally. Review and retry it.");
+    if (!decision.filesConfirmed) {
+      for (const item of files) { item.status = "err"; item.error = `Sent at sequence ${receipt.seq}; review whether this saved file belongs to the confirmed message.`; }
+      return false;
+    }
     const arr = stage[fileIdentity];
     for (const item of files) {
+      if (!ownsPeopleFlight(token)) return false;
       item.sent = true;
       try {
-        const path = `/api/team/subscriptions/${item.peopleKey.split("/").map(encodeURIComponent).join("/")}/attachments/stage/${encodeURIComponent(item.ref.id)}?copy_instance=${encodeURIComponent(item.copyInstance || "")}${item.instance ? `&chat_instance=${encodeURIComponent(item.instance)}` : ""}`;
-        await d.api(path, {method:"DELETE"});
-        await d.peopleFileStore.remove(fileIdentity, item.localID);
+        if (!await peopleFileOperation(token, () => removePeopleStage(d.api, item))) return false;
+        prunePeopleStageInventory(token, item);
+        if (!await peopleFileOperation(token, () => d.peopleFileStore.removeStageFile(fileIdentity, item.localID, item.fileToken, () => ownsPeopleFlight(token), receipt.peoplePending.publication))) return false;
       } catch {
+        if (!ownsPeopleFlight(token)) return false;
         item.status = "err";
-        item.error = "Sent; remove this saved file to finish cleanup.";
+        item.error = item.stageRevision ? "Sent; remove this saved file to finish cleanup." : "Sent; review the current local file before removing this saved file.";
         continue;
       }
+      if (!ownsPeopleFlight(token)) return false;
       const index = arr.indexOf(item);
       if (item.preview) URLImpl.revokeObjectURL(item.preview);
       arr.splice(index, 1);
     }
+    return decision;
+  }
+  function quietPeopleError(err) {
+    return err?.code === "PEOPLE_LOCAL_RETIRED" || err?.code === "PEOPLE_FEATURE_CLOSED";
   }
 
   async function retryPeopleDraft(pending) {
     const id = selId(), context = peopleContext(), identity = peopleStageIdentity(id, context), visit = destinationVisit;
-    const draftKey = peopleDraftKey(id, context);
-    if (!isPeople() || !identity || context?.key !== pending.key || peopleSending.has(identity) || typeof d.retryPeople !== "function") return;
+    const review = localReview?.address === localReviewAddress() ? localReview : null;
+    const row = review?.rows.find(item => item.copy.key === context?.key && item.copy.copyInstance === context?.copyInstance && item.copy.binding === (context?.binding || ""));
+    const observed = row?.browserState;
+    try { const latest = d.pendingPeople?.(); if (!latest || latest.storageKey !== pending.storageKey || latest.value !== pending.value || latest.locallyRetired) return; } catch { return; }
+    if (observed?.state === "ready" && observed.value === pending.value && (observed.retired || ["retired", "absent_retired"].includes(observed.result.state))) return;
+    if (!isPeople() || !identity || context?.writable !== true || context.key !== pending.key || peopleSending.has(identity) || typeof d.retryPeople !== "function") return;
+    let publicationKey;
+    try { publicationKey = JSON.parse(pending.value)?.request?.key; } catch { /* pending validation remains with the existing retry path */ }
+    if (localDiscardFlights.has(localDiscardKey({key:pending.key, copyInstance:context.copyInstance}, publicationKey))) return;
     const arr = stage[identity] || [];
     const files = pending.attachments.map(fileID => arr.find(item => item.localID === fileID));
-    if (files.some(item => !item || !item.localSaved)) { alertFn("Saved files for this message are unavailable."); return; }
-    peopleSending.add(identity);
-    for (const item of files) item.pending = true;
+    if (files.some(item => !item || !item.localSaved || item.removing)) { alertFn("Saved files for this message are unavailable."); return; }
+    const token = beginPeopleFlight(identity, id, context, files);
+    token.pending = {storageKey:pending.storageKey, value:pending.value};
+    const inView = () => selId() === id && destinationVisit === visit && isPeople() && peopleStageIdentity(id) === identity;
+    const draftState = peopleDraftStates.get(identity), revision = peopleRevisions.get(id) || 0;
     try {
       const receipt = await d.retryPeople();
-      await finishPeopleFiles(identity, files, receipt);
-      let frozen = null;
-      try { frozen = JSON.parse(storage.getItem(peoplePendingDraftKey(identity)) || "null"); } catch { /* keep draft */ }
-      const binding = peopleDraftBinding(id, context);
-      if (frozen?.binding === binding && frozen.text === pending.text && frozen.version === storage.getItem(draftKey + ":version") && storage.getItem(draftKey + ":binding") === binding && storage.getItem(draftKey) === pending.text && (!context.owner || binding.endsWith("\0" + stageIdentity(id)))) {
-        storage.removeItem(draftKey);
-        if (selId() === id && destinationVisit === visit && isPeople() && promptText() === pending.text) clearPrompt();
+      if (!ownsPeopleFlight(token)) return;
+      if (pending.format !== "transactional") {
+        let decision;
+        if (!await peopleFileOperation(token, async () => { decision = await d.finishPeople(receipt, {scope:identity, current:() => ownsPeopleFlight(token)}); })) return;
+        if (!decision || decision.state !== "completed" || decision.seq !== receipt.seq) throw new Error("The sent message could not be recorded locally. Review the saved files.");
+        for (const item of files) { item.status = "err"; item.error = `Sent at sequence ${receipt.seq}; review whether this saved file belongs to the confirmed message.`; }
+        if (inView()) renderStage();
+        return;
       }
-      storage.removeItem(peoplePendingDraftKey(identity));
-      if (selId() === id && destinationVisit === visit && isPeople() && peopleStageIdentity(id) === identity) renderStage();
-    } catch (err) { if (selId() === id && destinationVisit === visit && isPeople()) alertFn(err?.status ? peopleFileFailureText(err.message) : (err?.message || "Message delivery is unconfirmed.")); }
+      const decision = await finishPeopleFiles(token, identity, files, receipt);
+      if (!decision) return;
+      if (decision.draftCleared && draftState?.head === pending.head && draftState.version === pending.version && (peopleRevisions.get(id) || 0) === revision) {
+        draftState.head = undefined; draftState.version = undefined; draftState.text = "";
+        if (inView() && promptText() === pending.text) clearPrompt();
+      }
+      if (inView()) renderStage();
+    } catch (err) { if (ownsPeopleFlight(token) && inView() && !quietPeopleError(err)) alertFn(err?.status ? peopleFileFailureText(err.message) : (err?.message || "Message delivery is unconfirmed.")); }
     finally {
-      for (const item of files) item.pending = false;
-      peopleSending.delete(identity);
-      if (selId() === id && destinationVisit === visit && isPeople() && peopleStageIdentity(id) === identity) renderStage();
+      const owned = ownsPeopleFlight(token);
+      releasePeopleFlight(token);
+      if (owned && inView()) renderStage();
     }
   }
 
   async function sendPeople(){
     const context = peopleContext(); const id = selId(); const text = promptText();
-    const draftKey = peopleDraftKey(id, context);
     const withFiles = peopleCanAttach(context);
     const fileIdentity = withFiles ? peopleStageIdentity(id, context) : "";
     const identity = withFiles ? fileIdentity : (id.startsWith("team/") ? id : (stageIdentity(id) || (context?.key ? "people/" + context.key : "")));
     const sameIdentity = () => withFiles ? (selId() === id && peopleStageIdentity(id) === identity) : (id.startsWith("team/") || (identity.startsWith("people/")
       ? selId() === id && peopleContext()?.key === context.key : stageIdentity(id) === identity));
-    const files = withFiles ? (stage[fileIdentity] || []).filter(item => !item.sent) : [];
-    if (!context || !context.writable || !identity || (!text.trim() && !files.length) || new TextEncoder().encode(text).length > 16384 || peopleSending.has(identity) || typeof d.sendPeople !== "function") return;
+    let files = withFiles ? (stage[fileIdentity] || []).filter(item => !item.sent) : [];
+    if (!context || !context.writable || !identity || (id.startsWith("team/") && id !== "team/" + context.key) || (!text.trim() && !files.length) || new TextEncoder().encode(text).length > 16384 || peopleSending.has(identity) || typeof d.sendPeople !== "function") return;
     const revision = peopleRevisions.get(id) || 0;
-    const draftBinding = peopleDraftBinding(id, context);
+    const draftScope = peopleStageIdentity(id, context); let draftState = peopleDraftStates.get(draftScope), draftTail = draftState?.tail;
     const visit = destinationVisit;
-    const stillCurrent = () => selId() === id && destinationVisit === visit && isPeople() && peopleContext()?.key === context.key && (!withFiles || peopleStageIdentity(id) === fileIdentity);
-    peopleSending.add(identity);
-    for (const item of files) item.pending = true;
+    const stillCurrent = () => selId() === id && destinationVisit === visit && isPeople() && peopleContext()?.key === context.key && (!draftScope || peopleStageIdentity(id) === draftScope);
+    const token = beginPeopleFlight(identity, id, context, files);
+    let originalDraft = null;
+    if (!draftTail && typeof d.peopleFileStore?.freezePeopleDraft === "function") {
+      savePeopleDraftInput(id, context, text);
+      draftState = peopleDraftStates.get(draftScope); draftTail = draftState?.tail;
+    }
+    if (draftTail && typeof d.peopleFileStore?.freezePeopleDraft === "function") {
+      const priorTail = draftTail;
+      const frozen = priorTail.then(async draft => {
+        if (!draft && !draftState.error) {
+          draft = await d.peopleFileStore.savePeopleDraft({scope:draftScope,text,current:() => ownsPeopleFlight(token) && stillCurrent()});
+          draftState.head = draft.head; draftState.version = draft.version;
+        }
+        if (!draft) throw new Error("The People draft could not be saved for recovery.");
+        originalDraft = draft;
+        return d.peopleFileStore.freezePeopleDraft({scope:draftScope, text, ...draft, current:() => ownsPeopleFlight(token) && stillCurrent()});
+      });
+      draftState.tail = frozen.then(() => priorTail, () => { draftState.forkAfterFreezeFailure = true; return priorTail; });
+      draftTail = frozen;
+    }
     try {
+      if (files.length) {
+        if (!recoveredPeopleFiles.has(fileIdentity)) restorePeopleFiles();
+        let recovery = recoveringPeopleFiles.get(fileIdentity);
+        while (recovery) {
+          await recovery;
+          if (!ownsPeopleFlight(token) || !stillCurrent()) return;
+          recovery = recoveringPeopleFiles.get(fileIdentity);
+        }
+        if (!recoveredPeopleFiles.has(fileIdentity)) return;
+        for (const item of files) if (item.sent) item.pending = false;
+        files = files.filter(item => !item.sent);
+        token.files = files;
+        token.fileIdentity = files.length ? fileIdentity : "";
+        if (!text.trim() && !files.length) return;
+      }
       if (files.length) {
         for (const item of files) {
           if (item.needsUpload && item.localSaved && item.status !== "up") {
@@ -1204,33 +1923,55 @@ export function createComposerFeature(deps){
           }
         }
         await waitForUploads(files);
-        if (!stillCurrent() || !peopleCanAttach() || anyUploading(files)) return;
+        if (!ownsPeopleFlight(token) || !stillCurrent() || !peopleCanAttach() || anyUploading(files)) return;
         if (files.some(item => item.status !== "done" || !item.ref?.id || item.removing)) { alertFn("Review failed or unfinished People files before sending."); return; }
       }
-      const instance = withFiles && context.owner ? (nodeById(id)?.instance_id || "") : "";
+      const instance = context.owner ? (nodeById(id)?.instance_id || "") : "";
+      let capturedDraft = draftTail ? await draftTail : null;
+      if (!ownsPeopleFlight(token) || !stillCurrent()) return;
+      if (capturedDraft && !originalDraft && typeof d.peopleFileStore?.beginPeopleTextPublication === "function") throw new Error("People draft recovery is unavailable.");
       let receipt;
       if (files.length) {
-        if (!d.pendingPeople?.()) storage.setItem(peoplePendingDraftKey(fileIdentity), JSON.stringify({binding:draftBinding, text, version:storage.getItem(draftKey + ":version")}));
-        receipt = await d.sendPeople(context.key, text, files.map(item => item.ref.id), instance);
+        const pending = d.pendingPeople?.();
+        if (pending && !pending.locallyRetired) { alertFn("Review the previous unconfirmed People message before sending another."); return; }
+        if (!capturedDraft) {
+          savePeopleDraftInput(id, context, text); draftState = peopleDraftStates.get(draftScope); draftTail = draftState?.tail;
+          capturedDraft = draftTail ? await draftTail : null;
+        }
+        if (!capturedDraft || (!originalDraft && typeof d.peopleFileStore?.beginPeoplePublication === "function") || !ownsPeopleFlight(token) || !stillCurrent()) throw new Error("The People draft could not be saved for recovery.");
+        receipt = await d.sendPeople(context.key, text, files.map(item => item.ref.id), instance, {scope:draftScope, head:capturedDraft.head, version:capturedDraft.version, files:files.map(item => ({id:item.localID, fileToken:item.fileToken, stageRevision:item.stageRevision})), ...(originalDraft ? {requireDurableAdmission:true} : {}), current:() => ownsPeopleFlight(token) && stillCurrent(), onPrepared:snapshot => { if (ownsPeopleFlight(token) && stillCurrent()) token.pending = {storageKey:snapshot.storageKey, value:snapshot.value}; }});
       }
-      else await d.sendPeople(context.key, text);
+      else receipt = await d.sendPeople(context.key, text, undefined, instance, capturedDraft ? {scope:draftScope, head:capturedDraft.head, version:capturedDraft.version, current:() => ownsPeopleFlight(token), preflightCurrent:stillCurrent, ...(originalDraft ? {requireDurableAdmission:true} : {})} : null);
+      if (!ownsPeopleFlight(token)) return;
       if (files.length) {
-        await finishPeopleFiles(fileIdentity, files, receipt);
-        storage.removeItem(peoplePendingDraftKey(fileIdentity));
+        const decision = await finishPeopleFiles(token, fileIdentity, files, receipt);
+        if (!decision) return;
+        const editableDraft = originalDraft || capturedDraft;
+        if (decision.draftCleared && draftState?.head === editableDraft.head && draftState.version === editableDraft.version && (peopleRevisions.get(id) || 0) === revision) {
+          draftState.head = undefined; draftState.version = undefined; draftState.text = "";
+          if (stillCurrent() && promptText() === text) clearPrompt();
+        }
         if (stillCurrent()) renderStage();
       }
-      const boundDraft = draftBinding && storage.getItem(draftKey + ":binding") === draftBinding &&
-        (!context.owner || draftBinding.endsWith("\0" + stageIdentity(id))) &&
-        (selId() !== id || peopleDraftBinding(id, peopleContext()) === draftBinding);
-      if ((withFiles ? boundDraft : sameIdentity()) && (peopleRevisions.get(id) || 0) === revision && storage.getItem(draftKey) === text) {
-        storage.removeItem(draftKey);
-        if ((withFiles ? stillCurrent() : selId() === id && isPeople()) && promptText() === text) clearPrompt();
+      if (!files.length && capturedDraft && !receipt?.peopleTextStorageUnavailable && typeof d.peopleFileStore?.clearPeopleDraft === "function") {
+        const identity = receipt?.peopleTextDecision?.identity;
+        const exactDecision = receipt?.peopleTextDecision?.state === "completed" && Number.isSafeInteger(receipt?.seq) && receipt.seq > 0 && receipt.peopleTextDecision.seq === receipt.seq && identity && identity.scope === draftScope && identity.head === capturedDraft.head && identity.version === capturedDraft.version && typeof identity.publication === "string" && /^[0-9a-f]{32}:[1-9][0-9]*$/.test(identity.publication) && typeof identity.requestKey === "string" && /^[0-9a-f]{16}$/.test(identity.requestKey);
+        const cleared = originalDraft ? !!(exactDecision && receipt?.peopleTextDecision?.draftCleared) : (receipt?.peopleTextDecision ? receipt.peopleTextDecision.draftCleared : await d.peopleFileStore.clearPeopleDraft({scope:draftScope, head:capturedDraft.head, version:capturedDraft.version, current:() => ownsPeopleFlight(token)}));
+        const editableDraft = originalDraft || capturedDraft;
+        if (cleared && ownsPeopleFlight(token) && draftState?.head === editableDraft.head && draftState.version === editableDraft.version && (peopleRevisions.get(id) || 0) === revision) {
+          draftState.head = undefined; draftState.version = undefined; draftState.text = "";
+          if (stillCurrent() && promptText() === text) clearPrompt();
+        }
       }
-    } catch (err) { if (err && selId() === id && sameIdentity()) alertFn(files.length && err.status ? peopleFileFailureText(err.message) : err.message); }
+      if (!files.length && !capturedDraft && Number.isSafeInteger(receipt?.seq) && receipt.seq > 0 && draftState && !draftState.head && peopleDraftStates.get(draftScope) === draftState && draftState.text === text && peopleRevisions.get(id) === revision) {
+        draftState.text = "";
+        if (stillCurrent() && peopleStageIdentity(id) === draftScope && promptText() === text) clearPrompt();
+      }
+    } catch (err) { if (err && ownsPeopleFlight(token) && stillCurrent() && sameIdentity() && !quietPeopleError(err)) alertFn(files.length && err.status ? peopleFileFailureText(err.message) : err.message); }
     finally {
-      for (const item of files) item.pending = false;
-      peopleSending.delete(identity);
-      if (stillCurrent()) renderStage();
+      const owned = ownsPeopleFlight(token);
+      releasePeopleFlight(token);
+      if (owned && stillCurrent()) renderStage();
     }
   }
 
@@ -1466,6 +2207,31 @@ export function createComposerFeature(deps){
 
   /* ---------- event adapters ---------- */
 
+  function savePeopleDraftInput(id, context, text){
+    const remembered = lastPeopleDraftScopes.get(id), currentNative = stageIdentity(id);
+    const scope = context ? peopleStageIdentity(id, context) : (remembered?.native === currentNative ? remembered.scope : ""), lifetime = peopleLifetime, native = context?.owner || !context ? currentNative : "";
+    if (!scope) { unavailablePeopleDraft = {id, visit:destinationVisit}; renderStage(); return; }
+    unavailablePeopleDraft = null;
+    lastPeopleDraftScopes.set(id, {scope, native:stageIdentity(id)});
+    let state = peopleDraftStates.get(scope);
+    if (!state) { state = {head:undefined, version:undefined, tail:Promise.resolve(), text:"", error:false}; peopleDraftStates.set(scope, state); }
+    state.text = text;
+    const current = () => peopleLifetime === lifetime && (!native || stageIdentity(id) === native);
+    state.tail = state.tail.then(async () => {
+      if (!current()) return;
+      try {
+        if (typeof d.peopleFileStore?.savePeopleDraft !== "function") throw new Error("People draft storage is unavailable.");
+        const result = await d.peopleFileStore.savePeopleDraft({scope, text, ...(state.head && !state.forkAfterFreezeFailure ? {head:state.head, expected:state.version} : {}), current});
+        if (!current()) return;
+        state.head = result.head; state.version = result.version; state.error = false; state.forkAfterFreezeFailure = false;
+        return result;
+      } catch {
+        if (current()) state.error = true;
+      }
+      if (current() && selId() === id && isPeople() && peopleStageIdentity(id) === scope) renderStage();
+    });
+  }
+
   function onPromptInput(){
     if (!currentComposerIdentity()) return;
     if (!identityReady) return;
@@ -1473,11 +2239,7 @@ export function createComposerFeature(deps){
     const id = selId();
     if (id && isPeople()) {
       peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1);
-      storage.setItem(peopleDraftKey(id), promptText());
-      storage.setItem(peopleDraftKey(id) + ":binding", peopleDraftBinding(id, peopleContext()));
-      const versionKey = peopleDraftKey(id) + ":version";
-      let version; try { version = BigInt(storage.getItem(versionKey) || "0") + 1n; } catch { version = 1n; }
-      storage.setItem(versionKey, String(version));
+      savePeopleDraftInput(id, peopleContext(), promptText());
       if (composerBusy) renderBusy();
     }
     else if (id) {
@@ -1630,6 +2392,7 @@ export function createComposerFeature(deps){
 
   function bind(){
     if (bound) return;
+    localReviewAlive = true;
     bound = true;
     initIcons();
     /* edge-only initial chrome */
@@ -1658,6 +2421,16 @@ export function createComposerFeature(deps){
   }
 
   function destroy(){
+    peopleLifetime++;
+    recoveredPeopleFiles.clear();
+    recoveringPeopleFiles.clear();
+    peopleDraftStates.clear();
+    lastPeopleDraftScopes.clear();
+    unavailablePeopleDraft = null;
+    for (const token of peopleSending.values()) releasePeopleFlight(token);
+    localReviewAlive = false;
+    textReview = null;
+    stopLocalReview();
     clearLegacyPeopleReview();
     for (const controller of preparationControllers) controller.abort();
     while (cleanups.length){

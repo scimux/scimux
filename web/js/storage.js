@@ -144,12 +144,13 @@ export function bindDraftIdentity(storage, nodeId, instance){
     const values = {};
     for (const prefix of prefixes) {
       const value = storage.getItem(prefix + nodeId);
+      if (prefix === "scimux-people-draft:" && value !== null && readRetiredDrafts(storage, nodeId).some(entry => typeof entry.values[prefix] === "string")) continue;
       if (value !== null) values[prefix] = value;
     }
     if (Object.keys(values).length) {
       const owner = old || "unknown";
       if (!archiveRetiredDraft(storage, nodeId, owner, values)) return false;
-      for (const prefix of prefixes) storage.removeItem(prefix + nodeId);
+      for (const prefix of prefixes) if (prefix !== "scimux-people-draft:") storage.removeItem(prefix + nodeId);
     }
     storage.setItem(ownerKey, instance);
     return true;

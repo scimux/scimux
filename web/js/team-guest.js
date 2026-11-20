@@ -2,6 +2,7 @@
 import { esc, md, stripAssetRefs, bubbleTitle, bubbleSpeaker } from "./format.js";
 import { pinnedOrder } from "./map-model.js";
 import { promptSourceKey } from "./storage.js";
+import { peoplePendingStorageKey, parsePeoplePendingSnapshot } from "./people-local-review.js";
 import { attachmentTileHTML, attachmentUnavailableHTML } from "./attachment-tile.js";
 import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
 
@@ -115,7 +116,7 @@ export function guestGroups(subs, servers, people = {}) {
   return result;
 }
 
-export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, toast, retainPeople, assetURL = path => path, people = () => ({}), localNodes = () => [], panel, bubbleController = createBubbleActionController(), storage = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove, classificationTimeoutMs = 8000 }) {
+export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, toast, retainPeople, assetURL = path => path, people = () => ({}), localNodes = () => [], panel, bubbleController = createBubbleActionController(), storage = null, peopleFileStore = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove, classificationTimeoutMs = 8000 }) {
   let off = false;
   let destroyed = false;
   let answer = { subscriptions: [], servers: [], truncated: false };
@@ -789,6 +790,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     readGeneration++;
     bound = false;
     destroyed = true;
+    for (const flight of peopleFileFlights) cancelPeopleFileFlight(flight, "PEOPLE_FEATURE_CLOSED");
     for (const cancel of classificationCancels) cancel();
     for (const cancel of retentionCancels) cancel();
     classificationProgress.clear();
@@ -987,6 +989,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function ownerSnapshot() {
     return ownerSnapshots().find(copy => owner && copy.key === owner.key) || null;
   }
+  function localReviewContexts() {
+    return ownerSnapshots().map(copy => ({key:copy.key, copyInstance:copy.view.people_copy_instance || "", binding:answer.servers.find(server => server.id === copy.view.server)?.people_file_binding || "", owner:true}));
+  }
   function peopleContext() {
     const current = open || (owner && selectedNode() === owner.share.node ? owner : null);
     if (!current) return null;
@@ -1023,7 +1028,163 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       entry._peopleRetained = state;
     }
   }
-  async function sendPeople(key, text, attachments, instance = "") {
+  const peopleFileFlights = new Set();
+  const peopleLegacyDecisions = new Map();
+  const peopleDurablePending = new Map();
+  const peopleRetainedPending = new Map();
+  const peopleTextPending = new Map();
+  const peopleDurableText = new Map();
+  const peopleRetainedText = new Map();
+  const peopleLegacyDecisionKey = snapshot => JSON.stringify([snapshot.storageKey, snapshot.value]);
+  const peopleRetainedKey = (key, copyInstance, instance) => JSON.stringify([key, copyInstance, instance]);
+  function peopleRecoveryScope(context, instance) {
+    const ownerIdentity = context.owner ? selectedNode() + "\0" + instance : "";
+    return "people\0" + context.key + (context.binding ? "\0binding:" + context.binding : "") + (context.copyInstance ? "\0copy:" + context.copyInstance : "") + "\0" + ownerIdentity;
+  }
+  function peopleTransactionalSnapshot(row, scope) {
+    if (!row || row.scope !== scope || row.kind !== "publication" || row.state !== "pending" || typeof row.publication !== "string" || !/^[0-9a-f]{32}:[1-9][0-9]*$/.test(row.publication) || typeof row.peopleKey !== "string" || typeof row.native !== "string" || typeof row.binding !== "string" || !Array.isArray(row.files)) throw new Error("People recovery is unavailable.");
+    const identity = {key:row.peopleKey, copyInstance:row.copyInstance, binding:row.binding, instance:row.native};
+    const value = JSON.stringify({instance:row.native, copyInstance:row.copyInstance, request:row.request});
+    const parsed = parsePeoplePendingSnapshot(value, identity);
+    if (row.files.length !== parsed.attachments.length || row.files.some((file, index) => file.id !== parsed.attachments[index])) throw new Error("People recovery is unavailable.");
+    return {...parsed, format:"transactional", scope, publication:row.publication, head:row.head, version:row.version, storageKey:"idb:" + row.publication};
+  }
+  function pendingSnapshotIdentity(snapshot) {
+    try {
+      if (!snapshot || typeof snapshot.storageKey !== "string" || typeof snapshot.value !== "string" ||
+          typeof snapshot.key !== "string" || !/^[^/:]+\/[^/:]+\/[^/:]+\/[^/:]+$/.test(snapshot.key) ||
+          typeof snapshot.copyInstance !== "string" || !/^[0-9a-f]{32}$/.test(snapshot.copyInstance) ||
+          typeof snapshot.instance !== "string" || snapshot.instance.includes(":") ||
+          typeof snapshot.binding !== "string" || snapshot.binding.includes(":")) return null;
+      const identity = {key:snapshot.key, copyInstance:snapshot.copyInstance, binding:snapshot.binding, instance:snapshot.instance};
+      const parsed = parsePeoplePendingSnapshot(snapshot.value, identity);
+      const storageKey = snapshot.format === "transactional" && typeof snapshot.publication === "string" && /^[0-9a-f]{32}:[1-9][0-9]*$/.test(snapshot.publication) && typeof snapshot.scope === "string" ? "idb:" + snapshot.publication : parsed.storageKey;
+      if (storageKey !== snapshot.storageKey || parsed.publicationKey !== snapshot.publicationKey ||
+          parsed.text !== snapshot.text || JSON.stringify(parsed.attachments) !== JSON.stringify(snapshot.attachments)) return null;
+      const flightIdentity = JSON.stringify([snapshot.format === "transactional" ? "transactional" : "legacy", snapshot.key, snapshot.copyInstance, snapshot.binding, snapshot.instance, storageKey, parsed.value, ...(snapshot.format === "transactional" ? [snapshot.scope, snapshot.publication, snapshot.head, snapshot.version] : [])]);
+      return {key:storageKey, value:parsed.value, flightIdentity};
+    } catch { return null; }
+  }
+  async function clearPeoplePending(snapshot, options) {
+    const pending = pendingSnapshotIdentity(snapshot);
+    if (!pending || !options || typeof options.current !== "function") return false;
+    if (snapshot.format === "transactional") {
+      if (options.scope !== snapshot.scope || typeof peopleFileStore?.decidePeoplePublication !== "function") return false;
+      const result = await peopleFileStore.decidePeoplePublication({scope:snapshot.scope, publication:snapshot.publication, expected:snapshot, proof:options.proof, current:options.current});
+      if (!options.current()) return false;
+      const entries = peopleDurablePending.get(snapshot.scope) || [];
+      peopleDurablePending.set(snapshot.scope, entries.filter(item => item.publication !== snapshot.publication || item.value !== snapshot.value));
+      const retainedKey = peopleRetainedKey(snapshot.key, snapshot.copyInstance, snapshot.instance);
+      peopleRetainedPending.set(retainedKey, (peopleRetainedPending.get(retainedKey) || []).filter(item => item.publication !== snapshot.publication || item.value !== snapshot.value));
+      return result;
+    }
+    if (typeof peopleFileStore?.recordLegacyPeopleDecision !== "function") return false;
+    const result = await peopleFileStore.recordLegacyPeopleDecision({scope:options.scope, snapshot, proof:options.proof, current:options.current});
+    if (!options.current()) return false;
+    if (result?.state !== "retired" && result?.state !== "completed") return false;
+    peopleLegacyDecisions.set(peopleLegacyDecisionKey(snapshot), {state:result.state, ...(result.state === "completed" ? {seq:options.proof.seq} : {})});
+    return true;
+  }
+  async function refreshPeopleRecovery(scope) {
+    if (typeof peopleFileStore?.listPeopleRecovery !== "function") throw new Error("People recovery is unavailable.");
+    const context = peopleContext(), instance = context?.owner ? localNodes().find(item => item.id === selectedNode())?.instance_id : "";
+    const result = await peopleFileStore.listPeopleRecovery(scope);
+    if (destroyed) return;
+    peopleDurablePending.set(scope, result.pending.map(row => peopleTransactionalSnapshot(row, scope)));
+    peopleDurableText.set(scope, result.textPending);
+    if (context && typeof context.copyInstance === "string" && /^[0-9a-f]{32}$/.test(context.copyInstance) && peopleRecoveryScope(context, instance) === scope && typeof peopleFileStore.listRetainedPeopleRecovery === "function") {
+      const retained = await peopleFileStore.listRetainedPeopleRecovery({peopleKey:context.key, copyInstance:context.copyInstance, native:instance});
+      if (destroyed) return;
+      peopleRetainedPending.set(peopleRetainedKey(context.key, context.copyInstance, instance), retained.map(row => peopleTransactionalSnapshot(row, row.scope)));
+    }
+    for (const row of result.legacy) {
+      if (pendingSnapshotIdentity(row.snapshot) && (row.state === "retired" || (row.state === "completed" && Number.isSafeInteger(row.seq) && row.seq > 0))) peopleLegacyDecisions.set(peopleLegacyDecisionKey(row.snapshot), {state:row.state, ...(row.state === "completed" ? {seq:row.seq} : {})});
+    }
+    return result;
+  }
+  function localTextIdentity(copy) {
+    if (destroyed || !copy || typeof copy.owner !== "boolean" || typeof copy.binding !== "string" ||
+        typeof copy.key !== "string" || !/^[0-9a-f]{32}\/[0-9a-f]{32}\/[0-9a-f]{16}\/[0-9a-f]{16}$/.test(copy.key) ||
+        typeof copy.copyInstance !== "string" || !/^(?:[0-9a-f]{32})?$/.test(copy.copyInstance)) return null;
+    const node = selectedNode(), active = peopleContext();
+    const allowed = copy.owner ? localReviewContexts().some(item => item.key === copy.key && item.copyInstance === copy.copyInstance && item.binding === copy.binding) :
+      node === "team/" + copy.key && active && !active.owner && active.key === copy.key && active.copyInstance === copy.copyInstance && active.binding === copy.binding;
+    if (!allowed) return null;
+    const native = copy.owner ? localNodes().find(item => item.id === node)?.instance_id : "";
+    if (copy.owner && (typeof native !== "string" || !native)) return null;
+    return {node, key:copy.key, copyInstance:copy.copyInstance, binding:copy.binding, owner:copy.owner, native};
+  }
+  function textIdentityKey(identity) {
+    return JSON.stringify([identity.node, identity.key, identity.copyInstance, identity.binding, identity.owner, identity.native]);
+  }
+  async function refreshRetainedPeopleRecovery(copy) {
+    if (typeof peopleFileStore?.listRetainedPeopleRecovery !== "function") throw new Error("People recovery is unavailable.");
+    const identity = localTextIdentity(copy);
+    if (!identity) throw new Error("People recovery is unavailable.");
+    const key = textIdentityKey(identity), current = () => { const latest = localTextIdentity(copy); return !!latest && textIdentityKey(latest) === key; };
+    if (copy.copyInstance) {
+      const retained = await peopleFileStore.listRetainedPeopleRecovery({peopleKey:copy.key, copyInstance:copy.copyInstance, native:identity.native});
+      if (!current()) return;
+      peopleRetainedPending.set(peopleRetainedKey(copy.key, copy.copyInstance, identity.native), retained.map(row => peopleTransactionalSnapshot(row, row.scope)));
+    }
+    const text = await peopleFileStore.listRetainedPeopleRecovery({peopleKey:copy.key, copyInstance:copy.copyInstance, native:identity.native, kind:"text-publication"});
+    if (!current()) return;
+    peopleRetainedText.set(key, text);
+  }
+  function readRetainedPeopleTextPending(copy) {
+    const identity = localTextIdentity(copy);
+    if (!identity) return {entries:[], unavailable:true};
+    const entries = peopleRetainedText.get(textIdentityKey(identity)) || [];
+    return {entries:JSON.parse(JSON.stringify(entries)), unavailable:false};
+  }
+  async function retirePeopleText(snapshot, options) {
+    if (!snapshot || typeof snapshot !== "object" || !options || typeof options.current !== "function" || typeof peopleFileStore?.retirePeopleTextPublication !== "function") throw new Error("People text recovery is unavailable.");
+    const active = peopleContext();
+    const copy = localReviewContexts().find(item => item.key === snapshot.peopleKey && item.copyInstance === snapshot.copyInstance) ||
+      (active && !active.owner && active.key === snapshot.peopleKey && active.copyInstance === snapshot.copyInstance ? active : null);
+    const identity = localTextIdentity(copy);
+    if (!identity || identity.native !== snapshot.native) throw new Error("People text recovery identity is unavailable.");
+    const key = textIdentityKey(identity), current = () => { const latest = localTextIdentity(copy); return options.current() === true && !!latest && textIdentityKey(latest) === key; };
+    if (!current()) throw new Error("People publication operation cancelled.");
+    const saved = JSON.parse(JSON.stringify(snapshot));
+    const result = await peopleFileStore.retirePeopleTextPublication({scope:saved.scope, publication:saved.publication, expected:saved, current});
+    if (current()) {
+      peopleRetainedText.set(key, (peopleRetainedText.get(key) || []).filter(row => row.publication !== saved.publication));
+      peopleDurableText.set(saved.scope, (peopleDurableText.get(saved.scope) || []).filter(row => row.publication !== saved.publication));
+    }
+    return result;
+  }
+  function cancelPeopleFileFlight(flight, code) {
+    if (flight.cancelled) return;
+    flight.cancelled = code;
+    flight.resolveCancel();
+    flight.controller.abort();
+  }
+  function fencePeoplePending(snapshot) {
+    const pending = pendingSnapshotIdentity(snapshot);
+    if (!pending) return {state:"unavailable", cancelled:0};
+    let cancelled = 0;
+    for (const flight of peopleFileFlights) {
+      if (flight.identity !== pending.flightIdentity || flight.cancelled) continue;
+      cancelled++; cancelPeopleFileFlight(flight, "PEOPLE_LOCAL_RETIRED");
+    }
+    return {state:"locally_retired", cancelled};
+  }
+  async function postPeopleFile(path, body, pending, onConfirmed) {
+    const flight = {identity:pendingSnapshotIdentity(pending).flightIdentity, controller:new AbortController(), cancelled:"", resolveCancel:null};
+    const cancellation = new Promise(resolve => { flight.resolveCancel = resolve; });
+    peopleFileFlights.add(flight);
+    const cancelled = () => Object.assign(new Error(flight.cancelled === "PEOPLE_LOCAL_RETIRED" ? "Local publication was retired." : "People feature was closed."), {code:flight.cancelled});
+    try {
+      let result;
+      try { result = await Promise.race([api(path, {method:"POST", body, signal:flight.controller.signal}), cancellation]); }
+      catch (err) { if (flight.cancelled) throw cancelled(); throw err; }
+      if (flight.cancelled) throw cancelled();
+      if (!Number.isSafeInteger(result?.seq) || result.seq <= 0) throw new Error("Comment delivery is unconfirmed");
+      return onConfirmed(result);
+    } finally { peopleFileFlights.delete(flight); }
+  }
+  async function sendPeople(key, text, attachments, instance = "", admission = null) {
     const context = peopleContext();
     const current = open || (context?.owner ? owner : null);
     const files = attachments !== undefined;
@@ -1034,73 +1195,167 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         const node = localNodes().find(item => item.id === selectedNode());
         if (!node || !instance || node.instance_id !== instance) throw new Error("Chat identity is unavailable");
       } else if (instance) throw new Error("Chat identity is unavailable");
-      if (!storage || storage.persistent === false) throw new Error("Pending message recovery is unavailable");
-      const storageKey = "scimux-people-file-pending:" + key + ":" + instance + (context.binding ? ":" + context.binding : "") + ":copy:" + context.copyInstance;
-      let pending;
-      try {
-        const raw = storage.getItem(storageKey);
-        if (raw) {
-          pending = JSON.parse(raw);
-          if (!pending || pending.instance !== instance || pending.copyInstance !== context.copyInstance || pending.request?.text !== text || JSON.stringify(pending.request?.attachments) !== JSON.stringify(attachments) || typeof pending.request?.key !== "string") throw new Error("Previous file message is unconfirmed. Review and retry it before sending another.");
-        } else {
-          pending = {instance, copyInstance:context.copyInstance, request:{text, anchor:current.next, key:guestHexKey(randomBytes(8)), attachments:[...attachments]}};
-          storage.setItem(storageKey, JSON.stringify(pending));
-          if (storage.persistent === false || storage.getItem(storageKey) !== JSON.stringify(pending)) throw new Error("Pending message recovery is unavailable");
-        }
-      } catch (err) {
-        throw new Error(err?.message || "Pending message recovery is unavailable");
-      }
+      const scope = peopleRecoveryScope(context, instance);
+      if (!admission || admission.scope !== scope || typeof admission.current !== "function" || typeof admission.onPrepared !== "function" || typeof peopleFileStore?.beginPeoplePublication !== "function") throw new Error("Pending message recovery is unavailable");
+      const check = () => {
+        const latest = peopleContext();
+        if (!admission.current() || !latest || !latest.writable || !latest.attachments || latest.key !== key || latest.copyInstance !== context.copyInstance || latest.binding !== context.binding || latest.owner !== context.owner || (context.owner && localNodes().find(item => item.id === selectedNode())?.instance_id !== instance)) throw Object.assign(new Error("People publication was cancelled."), {code:"PEOPLE_FEATURE_CLOSED"});
+      };
+      check();
+      const existing = await refreshPeopleRecovery(scope);
+      check();
+      const legacy = pendingPeople();
+      if (existing.pending.length || (legacy && !legacy.locallyRetired)) throw new Error("Previous file message is unconfirmed. Review and retry it before sending another.");
+      const request = {key:guestHexKey(randomBytes(8)), text, anchor:current.next, attachments:[...attachments]};
+      const admitted = await peopleFileStore.beginPeoplePublication({scope, peopleKey:key, head:admission.head, version:admission.version, copyInstance:context.copyInstance, binding:context.binding || "", native:instance, request, files:admission.files, current:() => { try { check(); return true; } catch { return false; } }});
+      const pending = {instance, copyInstance:context.copyInstance, request};
+      const pendingValue = JSON.stringify(pending), storageKey = "idb:" + admitted.publication;
+      const snapshot = {format:"transactional", scope, publication:admitted.publication, head:admission.head, version:admission.version, key, instance, copyInstance:context.copyInstance, binding:context.binding || "", storageKey, value:pendingValue, publicationKey:request.key, text, attachments:[...attachments]};
+      peopleDurablePending.set(scope, [snapshot]);
+      check(); admission.onPrepared(snapshot); check();
       const suffix = "?copy_instance=" + encodeURIComponent(context.copyInstance) + (instance ? "&chat_instance=" + encodeURIComponent(instance) : "");
-      const result = await api(LIST + "/" + key + "/comments" + suffix, {method:"POST", body:JSON.stringify(pending.request)});
-      if (!Number.isSafeInteger(result?.seq) || result.seq <= 0) throw new Error("Comment delivery is unconfirmed");
-      if (open === current) { current.lastRead = 0; startRead(); }
-      if (owner === current) { current.lastRead = 0; startOwnerRead(); }
-      return {...result, peoplePending:{key:storageKey, value:JSON.stringify(pending)}};
+      return postPeopleFile(LIST + "/" + key + "/comments" + suffix, JSON.stringify(pending.request), snapshot, result => {
+        if (open === current) { current.lastRead = 0; startRead(); }
+        if (owner === current) { current.lastRead = 0; startOwnerRead(); }
+        return {...result, peoplePending:snapshot};
+      });
     }
-    const storageKey = "scimux-comment-retry:" + key;
-    let pending = null;
-    try { pending = JSON.parse(storage?.getItem(storageKey) || "null"); } catch {}
-    if (!pending || pending.text !== text || typeof pending.key !== "string") {
+    const native = context.owner ? (localNodes().find(item => item.id === selectedNode())?.instance_id || "") : "";
+    const scope = peopleRecoveryScope(context, native);
+    let durable = null, storageUnavailable = false;
+    if (admission?.requireDurableAdmission === true && (admission.scope !== scope || typeof admission.current !== "function" || typeof peopleFileStore?.beginPeopleTextPublication !== "function" || typeof peopleFileStore?.listPeopleRecovery !== "function")) throw new Error("People text recovery is unavailable.");
+    if (admission && admission.scope === scope && typeof admission.current === "function" && typeof peopleFileStore?.beginPeopleTextPublication === "function") {
+      const check = () => {
+        const latest = peopleContext();
+        if (destroyed || !admission.current() || (admission.preflightCurrent && !admission.preflightCurrent()) || !latest || !latest.writable || latest.key !== key || latest.copyInstance !== context.copyInstance || latest.binding !== context.binding || latest.owner !== context.owner || (context.owner && localNodes().find(item => item.id === selectedNode())?.instance_id !== native)) throw Object.assign(new Error("People publication was cancelled."), {code:"PEOPLE_FEATURE_CLOSED"});
+      };
+      try {
+        check();
+        const state = await refreshPeopleRecovery(scope);
+        check();
+        durable = state.textPending[0] || null;
+        if (durable && durable.request.text !== text) throw new Error("Previous People message is unconfirmed. Review it before sending another.");
+        if (!durable) {
+          const request = {text, anchor:current.next, key:guestHexKey(randomBytes(8))};
+          const identity = {scope, peopleKey:key, copyInstance:context.copyInstance || "", binding:context.binding || "", native, head:admission.head, version:admission.version, request};
+          const created = await peopleFileStore.beginPeopleTextPublication({...identity, current:() => { try { check(); return true; } catch { return false; } }});
+          durable = {...identity, publication:created.publication};
+          peopleDurableText.set(scope, [durable]);
+        }
+      } catch (error) {
+        if (admission.requireDurableAdmission === true || error?.code !== "PEOPLE_STORAGE_UNAVAILABLE") throw error;
+        storageUnavailable = true;
+      }
+      check();
+    }
+    let pending = durable?.request || peopleTextPending.get(scope);
+    if (pending && pending.text !== text) throw new Error("Previous People message is unconfirmed. Review it before sending another.");
+    if (!pending) {
       pending = { text, anchor: current.next, key: guestHexKey(randomBytes(8)) };
-      storage?.setItem(storageKey, JSON.stringify(pending));
+      peopleTextPending.set(scope, pending);
     }
+    if (!durable && typeof toast === "function") toast("People message retry is available only while this page remains open." + (storageUnavailable ? " Previous saved retries could not be checked." : ""));
     const result = await api(LIST + "/" + key + "/comments", { method: "POST", body: JSON.stringify(pending) });
     if (!Number.isSafeInteger(result?.seq) || result.seq <= 0) throw new Error("Comment delivery is unconfirmed");
-    if (storage?.getItem(storageKey) === JSON.stringify(pending)) storage.removeItem(storageKey);
+    if (storageUnavailable) result.peopleTextStorageUnavailable = true;
+    if (peopleTextPending.get(scope) === pending) peopleTextPending.delete(scope);
+    if (durable) {
+      result.peopleTextDecision = await peopleFileStore.finishPeopleTextPublication({scope, publication:durable.publication, expected:durable, seq:result.seq, current:admission.current});
+      peopleDurableText.set(scope, (peopleDurableText.get(scope) || []).filter(item => item.publication !== durable.publication));
+    }
     if (open === current) { current.lastRead = 0; startRead(); }
     if (owner === current) { current.lastRead = 0; startOwnerRead(); }
     return result;
   }
   function pendingPeople() {
     const context = peopleContext();
-    if (!context?.key || !storage || storage.persistent === false) return null;
+    if (!context?.key) return null;
     const node = context.owner ? localNodes().find(item => item.id === selectedNode()) : null;
     const instance = context.owner ? node?.instance_id : "";
     if (context.owner && !instance) return null;
-    const storageKey = "scimux-people-file-pending:" + context.key + ":" + instance + (context.binding ? ":" + context.binding : "") + ":copy:" + context.copyInstance;
+    const durable = peopleDurablePending.get(peopleRecoveryScope(context, instance));
+    if (durable?.length) return durable[0];
+    if (!storage || storage.persistent === false) return null;
+    const identity = {key:context.key, instance, binding:context.binding, copyInstance:context.copyInstance};
+    const storageKey = peoplePendingStorageKey(identity);
     const raw = storage.getItem(storageKey);
     if (!raw) return null;
-    let saved;
-    try { saved = JSON.parse(raw); } catch { throw new Error("Pending message recovery is unavailable."); }
-    const request = saved?.request;
-    if (saved?.instance !== instance || saved.copyInstance !== context.copyInstance || !request || typeof request.text !== "string" || new TextEncoder().encode(request.text).length > 16384 || !Number.isSafeInteger(request.anchor) || request.anchor < 0 || typeof request.key !== "string" || !/^[0-9a-f]{16}$/.test(request.key) || !Array.isArray(request.attachments) || request.attachments.length < 1 || request.attachments.length > 16 || request.attachments.some(id => typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) || new Set(request.attachments).size !== request.attachments.length) throw new Error("Pending message recovery is unavailable.");
-    return {text:request.text, attachments:[...request.attachments], instance, key:context.key, storageKey, value:raw};
+    const snapshot = parsePeoplePendingSnapshot(raw, identity);
+    const decision = peopleLegacyDecisions.get(peopleLegacyDecisionKey(snapshot));
+    return {...snapshot, format:"legacy", ...(decision ? {locallyRetired:true, decision} : {})};
+  }
+  function pendingPeopleText() {
+    const context = peopleContext();
+    if (!context?.key) return null;
+    const native = context.owner ? (localNodes().find(item => item.id === selectedNode())?.instance_id || "") : "";
+    const scope = peopleRecoveryScope(context, native);
+    const durable = peopleDurableText.get(scope);
+    return durable?.[0] || (peopleTextPending.has(scope) ? {request:peopleTextPending.get(scope)} : null);
+  }
+  function readRetainedPeoplePending(copy) {
+    const unavailable = () => ({entries:[], unavailable:true});
+    if (destroyed || !copy || typeof copy.owner !== "boolean" || typeof copy.binding !== "string" ||
+        typeof copy.key !== "string" || !/^[0-9a-f]{32}\/[0-9a-f]{32}\/[0-9a-f]{16}\/[0-9a-f]{16}$/.test(copy.key) ||
+        typeof copy.copyInstance !== "string" || !/^[0-9a-f]{32}$/.test(copy.copyInstance)) return unavailable();
+    const active = peopleContext();
+    const allowed = copy.owner ? localReviewContexts().some(item => item.key === copy.key && item.copyInstance === copy.copyInstance && item.binding === copy.binding) :
+      selectedNode() === "team/" + copy.key && active && !active.owner && active.key === copy.key && active.copyInstance === copy.copyInstance && active.binding === copy.binding;
+    if (!allowed) return unavailable();
+    const instance = copy.owner ? localNodes().find(item => item.id === selectedNode())?.instance_id : "";
+    if (copy.owner && (typeof instance !== "string" || !instance || instance.includes(":"))) return unavailable();
+    const entries = [...(peopleRetainedPending.get(peopleRetainedKey(copy.key, copy.copyInstance, instance)) || [])];
+    if (!storage || storage.persistent === false || typeof storage.keys !== "function") return {entries, unavailable:true};
+    let keys;
+    try { keys = storage.keys(); } catch { return {entries, unavailable:true}; }
+    if (storage.persistent === false || !Array.isArray(keys) || keys.length > 4096) return {entries, unavailable:true};
+    const prefix = 'scimux-people-file-pending:' + copy.key + ':' + instance;
+    const suffix = ':copy:' + copy.copyInstance;
+    let failed = false;
+    for (const storageKey of keys) {
+      if (typeof storageKey !== 'string' || !storageKey.startsWith(prefix + ':') || !storageKey.endsWith(suffix)) continue;
+      const middle = storageKey.slice(prefix.length, -suffix.length);
+      if (middle && (!middle.startsWith(':') || middle.length === 1 || middle.slice(1).includes(':'))) continue;
+      const binding = middle ? middle.slice(1) : '';
+      try {
+        const value = storage.getItem(storageKey);
+        if (storage.persistent === false || typeof value !== 'string') { failed = true; continue; }
+        entries.push(parsePeoplePendingSnapshot(value, {key:copy.key, copyInstance:copy.copyInstance, binding, instance}));
+      } catch { failed = true; }
+    }
+    return {entries, unavailable:failed};
   }
   async function retryPeople() {
     const context = peopleContext();
-    const pending = pendingPeople();
-    if (!context || !pending || (context.writable && !context.attachments)) throw new Error("Pending message recovery is unavailable.");
+    let pending = pendingPeople();
+    if (pending?.locallyRetired) throw Object.assign(new Error("This local publication was retired."), {code:"PEOPLE_LOCAL_RETIRED"});
+    if (!context || !context.writable || !pending || !context.attachments) throw new Error("Pending message recovery is unavailable.");
+    const original = pending, scope = pending.scope || peopleRecoveryScope(context, pending.instance);
+    await refreshPeopleRecovery(scope);
+    const latest = peopleContext();
+    if (!latest || !latest.writable || !latest.attachments || latest.key !== context.key || latest.copyInstance !== context.copyInstance || latest.binding !== context.binding || latest.owner !== context.owner) throw new Error("Pending message recovery is unavailable.");
+    pending = pendingPeople();
+    if (!pending || pending.locallyRetired || pending.format !== original.format || pending.storageKey !== original.storageKey || pending.value !== original.value) throw Object.assign(new Error("This local publication is unavailable or retired."), {code:"PEOPLE_LOCAL_RETIRED"});
     const request = JSON.parse(pending.value).request;
     const suffix = "?copy_instance=" + encodeURIComponent(context.copyInstance) + (pending.instance ? "&chat_instance=" + encodeURIComponent(pending.instance) : "");
-    const result = await api(LIST + "/" + pending.key + "/comments" + suffix, {method:"POST", body:JSON.stringify(request)});
-    if (!Number.isSafeInteger(result?.seq) || result.seq <= 0) throw new Error("Comment delivery is unconfirmed");
-    return {...result, peoplePending:{key:pending.storageKey, value:pending.value}};
+    return postPeopleFile(LIST + "/" + pending.key + "/comments" + suffix, JSON.stringify(request), pending, result => ({...result, peoplePending:pending}));
   }
-  function finishPeople(receipt) {
+  async function finishPeople(receipt, options = {}) {
     const pending = receipt?.peoplePending;
-    if (!storage || typeof pending?.key !== "string" || !pending.key.startsWith("scimux-people-file-pending:") || typeof pending.value !== "string" || storage.getItem(pending.key) !== pending.value) return false;
-    storage.removeItem(pending.key);
-    return storage.persistent !== false && storage.getItem(pending.key) === null;
+    if (!pending || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) return false;
+    if (options.current !== undefined && typeof options.current !== "function") return false;
+    const current = () => !destroyed && (options.current === undefined || options.current() === true);
+    if (pending.format === "legacy") {
+      const cleared = await clearPeoplePending(pending, {scope:options.scope, proof:{state:"completed", seq:receipt.seq, text:pending.text, stage_ids:pending.attachments}, current});
+      return cleared && current() ? {state:"completed", seq:receipt.seq, filesConfirmed:false, draftCleared:false} : false;
+    }
+    if (pending.format !== "transactional" || typeof peopleFileStore?.decidePeoplePublication !== "function") return false;
+    const result = await peopleFileStore.decidePeoplePublication({scope:pending.scope, publication:pending.publication, expected:pending, proof:{state:"completed", seq:receipt.seq, text:pending.text, stage_ids:pending.attachments}, current});
+    if (!current()) return false;
+    const entries = peopleDurablePending.get(pending.scope) || [];
+    peopleDurablePending.set(pending.scope, entries.filter(item => item.publication !== pending.publication || item.value !== pending.value));
+    const retainedKey = peopleRetainedKey(pending.key, pending.copyInstance, pending.instance);
+    peopleRetainedPending.set(retainedKey, (peopleRetainedPending.get(retainedKey) || []).filter(item => item.publication !== pending.publication || item.value !== pending.value));
+    return result;
   }
   function selectedActivity() { return open ? "team/" + open.key : ""; }
   function sharedPreview(anchor) {
@@ -1115,7 +1370,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!resolved || anchor.getAttribute?.('href') !== resolved) return null;
     return {url:anchor.href || resolved, name:file.name};
   }
-  return { tick, refresh, refreshMarkers, bind, destroy, settled, selectActivity, setOwnerShare, localIdentityChanged, ownerSnapshot, ownerSnapshots, canPreparePrompt, capturePromptAuthority, sharedPreview, peopleContext, sendPeople, pendingPeople, retryPeople, finishPeople, jumpToSource, loaded: () => hasAnswer, hasActivity: id => activities().some(view => "team/" + guestKey(view) === id), tab: { tabHTML, activities, groups, mineUnread, mineUnknown, ownerUnread, ownerUnreadStatus, open: openActivity, selected: selectedActivity } };
+  return { tick, refresh, refreshMarkers, bind, destroy, settled, selectActivity, setOwnerShare, localIdentityChanged, ownerSnapshot, ownerSnapshots, localReviewContexts, readRetainedPeoplePending, readRetainedPeopleTextPending, retirePeopleText, canPreparePrompt, capturePromptAuthority, sharedPreview, peopleContext, sendPeople, pendingPeople, pendingPeopleText, retryPeople, finishPeople, clearPeoplePending, fencePeoplePending, refreshPeopleRecovery, refreshRetainedPeopleRecovery, jumpToSource, loaded: () => hasAnswer, hasActivity: id => activities().some(view => "team/" + guestKey(view) === id), tab: { tabHTML, activities, groups, mineUnread, mineUnknown, ownerUnread, ownerUnreadStatus, open: openActivity, selected: selectedActivity } };
 }
 
 export function guestStateText(view) {

@@ -131,7 +131,8 @@ func TestWebIndexScriptsParse(t *testing.T) {
 
 	// Offline import smoke for the support-module graph only. app.js is the
 	// browser composition root (document/localStorage/matchMedia); do not
-	// execute it under bare Node.
+	// execute it under bare Node. The shared exact inventory includes
+	// people-local-review.js and people-stage-removal.js for the copy and imports.
 	tmp := t.TempDir()
 	jsDir := filepath.Join(tmp, "js")
 	if err := os.MkdirAll(jsDir, 0o755); err != nil {
