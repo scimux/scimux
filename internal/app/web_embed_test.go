@@ -43,6 +43,7 @@ var productionJSModules = []string{
 	"web/js/pairing.js",
 	"web/js/pairing-ui.js",
 	"web/js/people-file-store.js",
+	"web/js/people-local-review.js",
 	"web/js/people-preparation.js",
 	"web/js/people-retention.js",
 	"web/js/polling.js",

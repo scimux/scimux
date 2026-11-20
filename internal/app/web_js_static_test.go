@@ -39,6 +39,7 @@ var productionJSURLs = []string{
 	"/js/pairing.js",
 	"/js/pairing-ui.js",
 	"/js/people-file-store.js",
+	"/js/people-local-review.js",
 	"/js/people-preparation.js",
 	"/js/people-retention.js",
 	"/js/polling.js",
