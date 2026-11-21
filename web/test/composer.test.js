@@ -1522,6 +1522,54 @@ test("owner Agent dispatch disarms immediately and retains failed draft", async 
   assert.equal(ctx.feature.promptText(),'people');
 });
 
+test("owner keeps Stop for the busy agent after disarming to an empty People draft", async () => {
+  const ctx = makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true})}, sendHandler:async()=>({delivery:'ok'})});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setDestination('agent');
+  ctx.feature.setPromptText('run it'); ctx.roots.prompt.firstListener('input')();
+  await ctx.feature.sendPrompt();
+  assert.equal(ctx.feature.destination(), 'people');
+  ctx.feature.setComposerBusy(true);
+  const btn = ctx.roots.sendbtn;
+  assert.equal(btn.classList.contains('stop'), true);
+  assert.equal(btn.innerHTML, 'X');
+  assert.equal(btn.getAttribute('aria-label'), 'stop agent');
+  const before = ctx.apiCalls.length;
+  await btn.firstListener('click')();
+  assert.equal(ctx.apiCalls.length, before + 1);
+  assert.match(ctx.apiCalls.at(-1).path, /\/api\/nodes\/n1\/send\/interrupt/);
+  // Typing a People message turns the control back into Send to people.
+  ctx.feature.setPromptText('hello people'); ctx.roots.prompt.firstListener('input')();
+  assert.equal(btn.classList.contains('stop'), false);
+  assert.equal(btn.innerHTML, 'S');
+  assert.equal(btn.getAttribute('aria-label'), 'Send message to people');
+  // Clearing the People draft restores Stop while the agent is still busy.
+  ctx.feature.setPromptText(''); ctx.roots.prompt.firstListener('input')();
+  assert.equal(btn.classList.contains('stop'), true);
+  ctx.feature.setComposerBusy(false);
+  assert.equal(btn.classList.contains('stop'), false);
+  assert.equal(btn.getAttribute('aria-label'), 'Send message to people');
+});
+
+test("busy chrome falls back to empty markup when icons are missing", () => {
+  const ctx = makeFeature({deps:{icons:{}}});
+  ctx.feature.bind();
+  ctx.feature.setComposerBusy(true);
+  assert.equal(ctx.roots.sendbtn.innerHTML, '');
+  assert.equal(ctx.roots.sendbtn.classList.contains('stop'), true);
+  ctx.feature.setComposerBusy(false);
+  assert.equal(ctx.roots.sendbtn.innerHTML, '');
+  assert.equal(ctx.roots.sendbtn.classList.contains('stop'), false);
+});
+
+test("recipients never get Stop for the sharer's busy agent", async () => {
+  const ctx = makeFeature({sel:"team/s/o/c/g", deps:{peopleContext:()=>({key:"s/o/c/g",writable:true})}});
+  ctx.feature.bind(); ctx.feature.onSelect(); ctx.feature.setComposerBusy(true);
+  const btn = ctx.roots.sendbtn;
+  assert.equal(btn.classList.contains('stop'), false);
+  await btn.firstListener('click')();
+  assert.equal(ctx.apiCalls.length, 0);
+});
+
 test("owner validation retains Agent arm and later success keeps newer Agent draft", async () => {
   let resolve;
   const ctx=makeFeature({deps:{peopleContext:()=>({key:'s/o/c/g',writable:true,owner:true})},sendHandler:()=>new Promise(r=>{resolve=r})});
