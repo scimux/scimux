@@ -471,20 +471,33 @@ export function createComposerFeature(deps){
 
   function clearPrompt(){ setPromptText(""); }
 
+  /* Stop targets the local agent: in Agent mode while busy, and for the
+     owner in People mode while busy as long as no People text is typed. */
+  function stopAvailable(){
+    return !!composerBusy && (!isPeople() || (ownerChoice && !promptText().trim()));
+  }
+
   function setComposerBusy(active){
     if (composerBusy === !!active) return; /* poll-safe: no DOM churn per tick */
     composerBusy = !!active;
-    const chrome = busyChrome(composerBusy && !isPeople());
+    renderBusy();
+  }
+
+  function renderBusy(){
+    const stop = stopAvailable();
+    const chrome = busyChrome(stop);
     if (promptbar && promptbar.classList)
       promptbar.classList.toggle("busy", chrome.busy);
     if (sendbtn){
       if (sendbtn.classList) sendbtn.classList.toggle("stop", chrome.stopClass);
-      sendbtn.innerHTML = composerBusy && !isPeople()
-        ? (icons.ICON_STOP || "")
-        : (icons.ICON_SEND || "");
+      sendbtn.innerHTML = stop ? (icons.ICON_STOP || "") : (icons.ICON_SEND || "");
       if (typeof sendbtn.setAttribute === "function")
         sendbtn.setAttribute("aria-label", chrome.ariaLabel);
       sendbtn.title = chrome.title;
+      if (!stop && isPeople() && ownerChoice) {
+        sendbtn.setAttribute("aria-label", "Send message to people");
+        sendbtn.title = "Send message to people";
+      }
       if (!isPeople() && ownerChoice && !composerBusy) {
         sendbtn.setAttribute("aria-label", "Send message to agent");
         sendbtn.title = "Send message to agent";
@@ -987,7 +1000,7 @@ export function createComposerFeature(deps){
     if (!identityReady) return;
     resizePrompt();
     const id = selId();
-    if (id && isPeople()) { peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1); storage.setItem(peopleDraftKey(id), promptText()); }
+    if (id && isPeople()) { peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1); storage.setItem(peopleDraftKey(id), promptText()); if (composerBusy) renderBusy(); }
     else if (id) { agentRevisions.set(id, (agentRevisions.get(id) || 0) + 1); keepDraft(id, promptText()); if (!promptText().trim()) { clearPromptSources(storage, id); if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id); } }
   }
 
@@ -1032,7 +1045,7 @@ export function createComposerFeature(deps){
   }
 
   function onSendClick(){
-    if (composerBusy && !isPeople()) interruptPrompt();
+    if (stopAvailable()) interruptPrompt();
     else sendPrompt();
   }
 
