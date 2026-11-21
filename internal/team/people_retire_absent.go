@@ -130,7 +130,7 @@ func RetireAbsentPeopleKey(dataDir string, id CopyID, instance, author, key stri
 		if !errors.Is(e, ErrPeopleStageMissing) {
 			return e
 		}
-		return recoverPeopleTemps(dataDir, id)
+		return recoverPeopleTemps(dataDir, id, peopleChargedTrees("people-stages"))
 	})
 	if errors.Is(err, already) {
 		return nil
@@ -139,7 +139,7 @@ func RetireAbsentPeopleKey(dataDir string, id CopyID, instance, author, key stri
 		return err
 	}
 	defer release()
-	return savePeopleNamedRecordLocked(dataDir, id, envelope, encoded, true, "people-pending")
+	return savePeopleNamedRecordLocked(dataDir, id, envelope, encoded, true, peopleChargedTrees("people-pending"), "people-pending")
 }
 
 // readValidRetirement checks a terminal envelope and its local binding.

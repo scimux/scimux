@@ -68,7 +68,7 @@ func TestDiscardPeoplePendingRetiresOnlyTheReviewedRecord(t *testing.T) {
 	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err == nil {
 		t.Fatal("retired retry admitted")
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("retired retry confirmed")
 	}
 	if seq, err := DiscardPeoplePending(dir, id, instance, pending); err != nil || seq != 0 {
@@ -100,7 +100,7 @@ func TestAmbiguousPendingAndRetiredCannotBeReadOrConfirmed(t *testing.T) {
 	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err == nil {
 		t.Fatal("ambiguous pending was admitted")
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("ambiguous pending was confirmed")
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
@@ -212,7 +212,7 @@ func TestCompletionReadRefusesAmbiguousRetirement(t *testing.T) {
 		}
 		return original.remove(root, name)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("cleanup fault not reached")
 	}
 	peopleRecordIO = original
@@ -248,13 +248,13 @@ func TestValidateRetainedPeoplePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	got, err := validateRetainedPeoplePublication(dir, id, pending, 1)
+	got, err := validatePeoplePublication(dir, id, pending, 1, false)
 	if err != nil || len(got) != 1 || !bytes.Equal(got[0].Data, stage.Data) {
 		t.Fatalf("retained validation: %v", err)
 	}
 	wrong := pending
 	wrong.Author = strings.Repeat("f", 32)
-	if _, err := validateRetainedPeoplePublication(dir, id, wrong, 1); err == nil {
+	if _, err := validatePeoplePublication(dir, id, wrong, 1, false); err == nil {
 		t.Fatal("foreign history accepted")
 	}
 }
@@ -275,7 +275,7 @@ func TestConfirmationRejectsDifferentRetainedFileMetadata(t *testing.T) {
 			if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 				t.Fatal(err)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("different retained metadata accepted")
 			}
 			if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
@@ -369,7 +369,7 @@ func TestConfirmationRechecksCompletionAtBudgetBoundary(t *testing.T) {
 				}
 				return info, statErr
 			}
-			err = ConfirmPeoplePending(dir, id, pending.Key, 1)
+			err = ConfirmPeoplePending(dir, id, pending.Key, 1, false)
 			peopleRecordIO = original
 			if err == nil || !started {
 				t.Fatalf("stale completion state accepted: started=%t err=%v", started, err)
@@ -830,7 +830,7 @@ func TestReadPendingRepairsVisibleRetirementBarrier(t *testing.T) {
 	if _, err := ReadPeoplePending(dir, id, pending.Key); !errors.Is(err, ErrPeopleStage) {
 		t.Fatalf("read did not repair barrier: %v", err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); !errors.Is(err, ErrPeopleStage) {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); !errors.Is(err, ErrPeopleStage) {
 		t.Fatalf("confirmation did not repair barrier: %v", err)
 	}
 	peopleRecordIO = original
@@ -854,7 +854,7 @@ func TestDiscardCompletionWinsAndCleansPending(t *testing.T) {
 		}
 		return original.remove(root, name)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("cleanup fault not reached")
 	}
 	peopleRecordIO = original
@@ -901,7 +901,7 @@ func TestDiscardRecoversLegacyCompletionWithoutFileManifest(t *testing.T) {
 		}
 		return original.remove(root, name)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("cleanup was not interrupted")
 	}
 	peopleRecordIO = original
@@ -954,7 +954,7 @@ func TestDiscardRecoversLegacyNonObjectJSON(t *testing.T) {
 				}
 				return original.remove(root, name)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("cleanup was not interrupted")
 			}
 			peopleRecordIO = original
@@ -973,7 +973,7 @@ func TestDiscardCompletedReceiptSurvivesRemovalOfRetainedBytes(t *testing.T) {
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	root, err := peopleRecordDir(dir, id, false, "people-records", "comments", "1")
@@ -1006,7 +1006,7 @@ func TestDiscardTerminalReceiptChecksHistoryAndLocalRecordDamage(t *testing.T) {
 			if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 				t.Fatal(err)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 				t.Fatal(err)
 			}
 			copyRoot := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation)
@@ -1082,7 +1082,7 @@ func TestDiscardRejectsMalformedOrUnknownPresentManifestWithoutBytes(t *testing.
 			if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 				t.Fatal(err)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 				t.Fatal(err)
 			}
 			root, err := peopleRecordDir(dir, id, false, "people-records", "comments", "1")
@@ -1123,7 +1123,7 @@ func TestDiscardRejectsUnknownManifestDescriptorFields(t *testing.T) {
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	root, err := peopleRecordDir(dir, id, false, "people-records", "comments", "1")
@@ -1172,7 +1172,7 @@ func TestDiscardRejectsOversizedManifestWithoutRetainedBytes(t *testing.T) {
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	root, err := peopleRecordDir(dir, id, false, "people-records", "comments", "1")
@@ -1208,7 +1208,7 @@ func TestDiscardRepairsInterruptedCompletionCleanup(t *testing.T) {
 				}
 				return original.remove(root, name)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("completion was not interrupted")
 			}
 			peopleRecordIO = original
@@ -1284,7 +1284,7 @@ func TestDiscardRejectsInvalidCompletionRecovery(t *testing.T) {
 				}
 				return original.remove(root, name)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("completion was not interrupted")
 			}
 			peopleRecordIO = original
@@ -1353,7 +1353,7 @@ func TestDiscardRejectsCompletionWithReplacedRetainedBytes(t *testing.T) {
 		}
 		return original.remove(root, name)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("cleanup fault not reached")
 	}
 	peopleRecordIO = original
@@ -1414,7 +1414,7 @@ func TestDiscardCompletedReceiptChecksRetainedManifestAfterStageRemoval(t *testi
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err != nil {
@@ -1493,7 +1493,7 @@ func TestDiscardRejectsEachRetainedDescriptorMismatch(t *testing.T) {
 			if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 				t.Fatal(err)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := DiscardPeoplePending(dir, id, instance, pending); err == nil {
@@ -1591,7 +1591,7 @@ func TestDiscardAtCopyByteLimitDoesNotGrow(t *testing.T) {
 			already += info.Size()
 		}
 	}
-	base := filepath.Join(copyRoot, "people-records", "comments", "1")
+	base := filepath.Join(copyRoot, "people-completed")
 	if err := os.MkdirAll(base, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -1599,7 +1599,7 @@ func TestDiscardAtCopyByteLimitDoesNotGrow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.Truncate((256 << 20) - already); err != nil {
+	if err := f.Truncate((128 << 20) - already); err != nil {
 		f.Close()
 		t.Fatal(err)
 	}
@@ -1629,11 +1629,11 @@ func TestDiscardAtCopyByteLimitDoesNotGrow(t *testing.T) {
 
 func TestDiscardRetirementStillCountsAtCopyRecordLimit(t *testing.T) {
 	dir, id, instance, stage, pending := setupDiscard(t)
-	base := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-records", "comments", "1")
+	base := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-stages")
 	if err := os.MkdirAll(base, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 4093; i++ {
+	for i := 0; i < 2045; i++ {
 		if err := os.WriteFile(filepath.Join(base, fmt.Sprintf("%016x.json", i)), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -1665,7 +1665,7 @@ func TestDiscardAndConfirmSerialize(t *testing.T) {
 		}
 		start := make(chan struct{})
 		done := make(chan error, 1)
-		go func() { <-start; done <- ConfirmPeoplePending(dir, id, pending.Key, 1) }()
+		go func() { <-start; done <- ConfirmPeoplePending(dir, id, pending.Key, 1, false) }()
 		close(start)
 		seq, err := DiscardPeoplePending(dir, id, instance, pending)
 		confirmErr := <-done

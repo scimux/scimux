@@ -1819,6 +1819,9 @@ the text may be empty when files are present. The publication body and key
 are frozen for retry. An uncertain outcome must be reviewed and retried with
 that same body and key; a conflicting existing body is not success. A
 successful retained receipt can be reconciled without another publication.
+A storage-budget refusal while saving the kept copy confirms the owner's
+already appended comment and leaves the file unkept. A different error saving
+that copy returns `507` `storage_full` and keeps the pending pin.
 
 The shared log entry remains a version-1 comment. Its ordinary `text` is the
 original text followed by a newline and `[Attachments unavailable in this
@@ -1839,7 +1842,9 @@ browser draft.
 Associated downloads use GET `.../attachments/{seq}/{id}` with the current
 copy precondition. `preview=1` requests a verified bounded PNG or JPEG preview;
 unsupported previews do not prevent an available file download. Downloads
-use an attachment disposition and `nosniff`. The full subscription identity,
+use an attachment disposition and `nosniff`. When verified bytes are served
+without a local kept copy, the response includes `X-Scimux-People-Kept: false`.
+A kept response adds no such header. The full subscription identity,
 comment sequence, and logical file ID authorize the association; a bare hash
 does not. Available verified local bytes remain readable after a share ends
 or its relay is unavailable. Missing, corrupt, unsupported, and unavailable

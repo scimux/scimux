@@ -444,13 +444,14 @@ func (h *teamHandler) readPeopleAttachment(w http.ResponseWriter, r *http.Reques
 	if !h.requirePeopleCopy(w, r) {
 		return
 	}
+	kept := true
 	stage, err := team.ReadPeoplePublished(h.dataDir, id, seq, attachmentID)
 	if errors.Is(err, team.ErrPeopleStageMissing) {
 		if !joined || sub.State != "live" || (sub.Access != "read" && sub.Access != "write" && sub.Access != "owner") {
 			writeTeamError(w, http.StatusNotFound, "attachment_unavailable")
 			return
 		}
-		stage, err = h.fetchPeopleAttachment(r, id, seq, attachmentID, server)
+		stage, kept, err = h.fetchPeopleAttachment(r, id, seq, attachmentID, server)
 		if err != nil {
 			if errors.Is(err, team.ErrPeopleBlobCorrupt) {
 				writeTeamError(w, http.StatusBadGateway, "attachment_corrupt")
@@ -458,10 +459,6 @@ func (h *teamHandler) readPeopleAttachment(w http.ResponseWriter, r *http.Reques
 			}
 			if errors.Is(err, team.ErrBlobUnsupported) {
 				writeTeamError(w, http.StatusConflict, "attachments_unsupported")
-				return
-			}
-			if errors.Is(err, storagebudget.ErrBudget) {
-				writeTeamError(w, http.StatusInsufficientStorage, "storage_full")
 				return
 			}
 			writeTeamError(w, http.StatusNotFound, "attachment_unavailable")
@@ -475,6 +472,9 @@ func (h *teamHandler) readPeopleAttachment(w http.ResponseWriter, r *http.Reques
 	if !h.peopleFilesEnabled() || !h.peopleCopyCurrent(r) {
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
+	}
+	if !kept {
+		w.Header().Set("X-Scimux-People-Kept", "false")
 	}
 	if r.URL.Query().Get("preview") == "1" {
 		media, ok := peopleRasterPreview(stage.Data)
@@ -518,18 +518,18 @@ func peopleRasterPreview(data []byte) (string, bool) {
 
 // fetchPeopleAttachment admits remote bytes only through a descriptor in the
 // retained comment. The relay call happens outside all local storage locks.
-func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq uint64, attachmentID string, server team.Entry) (team.PeopleStage, error) {
+func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq uint64, attachmentID string, server team.Entry) (team.PeopleStage, bool, error) {
 	records, _, err := team.ReadCopy(h.dataDir, id, team.CommentsLog, seq-1, 1, 4<<20)
 	if err != nil || len(records) != 1 || records[0].Seq != seq {
-		return team.PeopleStage{}, team.ErrPeopleStageMissing
+		return team.PeopleStage{}, false, team.ErrPeopleStageMissing
 	}
 	entry, _, ok := projectCommentRecord(records[0], "")
 	if !ok {
-		return team.PeopleStage{}, team.ErrPeopleStage
+		return team.PeopleStage{}, false, team.ErrPeopleStage
 	}
 	files, ok := entry["attachments"].([]map[string]any)
 	if !ok {
-		return team.PeopleStage{}, team.ErrPeopleStageMissing
+		return team.PeopleStage{}, false, team.ErrPeopleStageMissing
 	}
 	var descriptor map[string]any
 	for _, file := range files {
@@ -539,7 +539,7 @@ func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq
 		}
 	}
 	if descriptor == nil {
-		return team.PeopleStage{}, team.ErrPeopleStageMissing
+		return team.PeopleStage{}, false, team.ErrPeopleStageMissing
 	}
 	// The fresh validated projector constructs these fields from typed descriptors.
 	hash := descriptor["sha256"].(string)
@@ -548,7 +548,7 @@ func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq
 	media := descriptor["mime"].(string)
 	data, err := h.client.GetPeopleBlob(r.Context(), server.URL, server.Token, server.ID, id.Owner, id.Chat, id.Generation, hash, size)
 	if err != nil {
-		return team.PeopleStage{}, err
+		return team.PeopleStage{}, false, err
 	}
 	stage := team.PeopleStage{ID: attachmentID, Hash: hash, Name: name, MIME: media, ConfigHash: peopleServerFingerprint(server), Data: data}
 	// Serialize the final permission/configuration check with local membership
@@ -557,7 +557,7 @@ func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq
 	defer h.mu.Unlock()
 	entries, subs, err := h.loadSubState()
 	if err != nil {
-		return team.PeopleStage{}, err
+		return team.PeopleStage{}, false, err
 	}
 	allowed := false
 	for _, sub := range subs {
@@ -570,16 +570,20 @@ func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq
 		}
 	}
 	if !allowed || !h.peopleFilesEnabled() || !peopleCopyCurrentLocked(r) {
-		return team.PeopleStage{}, team.ErrPeopleStageMissing
+		return team.PeopleStage{}, false, team.ErrPeopleStageMissing
 	}
 	if err := team.SavePeoplePublished(h.dataDir, id, seq, stage); err != nil {
-		return team.PeopleStage{}, err
+		if errors.Is(err, storagebudget.ErrBudget) {
+			return stage, false, nil
+		}
+		return team.PeopleStage{}, false, err
 	}
-	return stage, nil
+	return stage, true, nil
 }
 
 // postPeopleFileComment freezes one canonical manifest before publication.
-// Confirmed bytes are retained by exact comment sequence and attachment ID.
+// A budget refusal of the kept copy still confirms when the comment log
+// matches the pending body and the staged bytes match their hash.
 // Pending recovery remains incomplete until the browser integration is wired.
 func (h *teamHandler) postPeopleFileComment(w http.ResponseWriter, r *http.Request, id team.CopyID, sub team.Subscription, server team.Entry, text string, anchor uint64, key string, stageIDs []string) {
 	instance, ok := h.peopleWriteInstance(r, sub)
@@ -696,14 +700,18 @@ func (h *teamHandler) postPeopleFileComment(w http.ResponseWriter, r *http.Reque
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
+	unkept := false
 	for _, stage := range stages {
 		if err := team.SavePeoplePublished(h.dataDir, id, seq, stage); err != nil {
-			h.mu.Unlock()
-			writeTeamError(w, http.StatusInsufficientStorage, "storage_full")
-			return
+			if !errors.Is(err, storagebudget.ErrBudget) {
+				h.mu.Unlock()
+				writeTeamError(w, http.StatusInsufficientStorage, "storage_full")
+				return
+			}
+			unkept = true
 		}
 	}
-	err = team.ConfirmPeoplePending(h.dataDir, id, key, seq)
+	err = team.ConfirmPeoplePending(h.dataDir, id, key, seq, unkept)
 	h.mu.Unlock()
 	if err != nil {
 		writeTeamError(w, http.StatusBadGateway, "publication_unconfirmed")

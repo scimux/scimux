@@ -34,7 +34,7 @@ export async function retainPeopleEntries({key, entries, copyInstance, fetchImpl
         await Promise.race([Promise.resolve(response.body?.cancel()), aborted]);
         if (controller.signal.aborted) { result.unavailable++; continue; }
         result.available++;
-        result.files[association] = true;
+        result.files[association] = response.headers?.get?.("X-Scimux-People-Kept") === "false" ? "unkept" : true;
       } catch { result.unavailable++; }
     }
   }

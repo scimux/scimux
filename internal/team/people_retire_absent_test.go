@@ -62,7 +62,7 @@ func TestAbsentRetirementTerminalAcrossLocalReaders(t *testing.T) {
 	if _, err := ReadPeopleCompletion(dir, id, pending.Key); err == nil {
 		t.Fatal("terminal completion returned")
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("terminal key confirmed")
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err != nil {
@@ -362,7 +362,7 @@ func TestAbsentRetirementGlobalBudgetAndLinkPeak(t *testing.T) {
 }
 
 func TestAbsentRetirementCopyRecordPeak(t *testing.T) {
-	for _, total := range []int{4094, 4095} {
+	for _, total := range []int{2046, 2047} {
 		t.Run(fmt.Sprint(total), func(t *testing.T) {
 			dir, id := t.TempDir(), sampleCopyID()
 			author, err := identity.LoadOrCreateInstallation(dir)
@@ -373,7 +373,7 @@ func TestAbsentRetirementCopyRecordPeak(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			root, err := peopleRecordDir(dir, id, true, "people-records")
+			root, err := peopleRecordDir(dir, id, true, "people-stages")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -385,11 +385,11 @@ func TestAbsentRetirementCopyRecordPeak(t *testing.T) {
 			}
 			root.Close()
 			err = RetireAbsentPeopleKey(dir, id, instance, string(author), "fedcba9876543210")
-			if total == 4094 && err != nil {
-				t.Fatalf("4094: %v", err)
+			if total == 2046 && err != nil {
+				t.Fatalf("2046: %v", err)
 			}
-			if total == 4095 && !errors.Is(err, storagebudget.ErrBudget) {
-				t.Fatalf("4095: %v", err)
+			if total == 2047 && !errors.Is(err, storagebudget.ErrBudget) {
+				t.Fatalf("2047: %v", err)
 			}
 		})
 	}
@@ -753,7 +753,7 @@ func TestAbsentRetirementRequiresReviewOfCompletedReceipt(t *testing.T) {
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := RetireAbsentPeopleKey(dir, id, instance, string(author), pending.Key); !errors.Is(err, ErrPeopleReviewRequired) {
@@ -881,7 +881,7 @@ func TestAbsentRetirementCopyBytePeak(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			root, err := peopleRecordDir(dir, id, true, "people-records")
+			root, err := peopleRecordDir(dir, id, true, "people-stages")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -889,7 +889,7 @@ func TestAbsentRetirementCopyBytePeak(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := f.Truncate((256 << 20) - info.Size() - int64(2*len(encoded)) + extra); err != nil {
+			if err := f.Truncate((128 << 20) - info.Size() - int64(2*len(encoded)) + extra); err != nil {
 				t.Fatal(err)
 			}
 			f.Close()
@@ -1074,7 +1074,7 @@ func TestAbsentRetirementWriterRejectsUninspectableOrNonRegularRecords(t *testin
 					})
 				}
 			} else {
-				root, err := peopleRecordDir(dir, id, true, "people-records")
+				root, err := peopleRecordDir(dir, id, true, "people-stages")
 				if err != nil {
 					t.Fatal(err)
 				}

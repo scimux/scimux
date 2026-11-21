@@ -160,9 +160,16 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   terminal markers remain until copy removal. Retirement does not remove
   staged bytes or retract a dispatched comment.
   A pending publication pins its stages until an exact retained comment and
-  associated bytes are confirmed and a completion receipt is durable. The
-  per-copy limit includes encoded stages, pending records, receipts and retained
-  records (4096 records and 256 MiB); the global storage budget also applies.
+  associated bytes are confirmed and a completion receipt is durable. Each
+  shared-chat copy has two caps. Kept conversation files under `people-records`
+  are limited to 128 MiB and 2048 files. This seat's working files under
+  `people-stages`, `people-pending`, `people-completed`, and `people-identity`
+  have the same limits, checked only against that group. Kept `people-records`
+  bytes are outside global managed usage. The minimum-free reserve still applies
+  to every write, including a kept-file write. A budget refusal for a kept copy
+  still serves the verified bytes and leaves the file unkept. The same refusal
+  confirms the owner's already appended comment and leaves that file unkept.
+  A different error saving the kept copy keeps the pending pin.
   No network I/O occurs while these locks are held.
 - **Browser drafts are separate from retained copies.** The browser's local
   file store holds raw People and prepared source files for review across

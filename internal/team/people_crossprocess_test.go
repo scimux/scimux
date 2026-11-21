@@ -183,7 +183,7 @@ func TestPeopleConfirmationAndDiscardAcrossProcesses(t *testing.T) {
 		}
 		return f, nil
 	}
-	confirmErr := ConfirmPeoplePending(dir, id, pending.Key, 1)
+	confirmErr := ConfirmPeoplePending(dir, id, pending.Key, 1, false)
 	peopleRecordIO = original
 	if !started {
 		t.Fatal("confirmation interleaving not reached")

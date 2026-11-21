@@ -202,7 +202,7 @@ func TestLocalDiscardReportsExistingCompletion(t *testing.T) {
 	if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := team.ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := team.ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(pending)

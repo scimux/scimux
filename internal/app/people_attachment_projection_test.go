@@ -218,7 +218,7 @@ func TestPeopleFetchRequiresExactPublishedAttachmentAssociation(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	get := func(seq uint64, attachment string) error {
 		t.Helper()
-		_, err := h.fetchPeopleAttachment(req, id, seq, attachment, team.Entry{})
+		_, _, err := h.fetchPeopleAttachment(req, id, seq, attachment, team.Entry{})
 		return err
 	}
 	if err := get(1, "0123456789abcdef"); err == nil {

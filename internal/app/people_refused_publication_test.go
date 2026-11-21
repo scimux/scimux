@@ -553,13 +553,12 @@ func TestPeoplePublicationKeepsPendingWhenRetainedHistoryReadFails(t *testing.T)
 	}
 }
 
+func TestPeopleNonBudgetKeptSaveReturnsStorageFullAndKeepsPin(t *testing.T) {
+	testPeoplePublicationStorageRetry(t, "people-records", http.StatusInsufficientStorage)
+}
+
 func TestPeoplePublicationRetriesAfterRetainedAttachmentStorageFailure(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		status int
-	}{{"people-records", http.StatusInsufficientStorage}, {"people-completed", http.StatusBadGateway}} {
-		t.Run(tc.name, func(t *testing.T) { testPeoplePublicationStorageRetry(t, tc.name, tc.status) })
-	}
+	testPeoplePublicationStorageRetry(t, "people-completed", http.StatusBadGateway)
 }
 
 func testPeoplePublicationStorageRetry(t *testing.T, obstacleName string, failureStatus int) {
@@ -649,7 +648,10 @@ func testPeoplePublicationStorageRetry(t *testing.T, obstacleName string, failur
 	}
 	first := send()
 	if first.Code != failureStatus || puts != 1 || posts != 1 || reads != 2 {
-		t.Fatalf("storage failure status=%d puts=%d posts=%d reads=%d", first.Code, puts, posts, reads)
+		t.Fatalf("storage failure status=%d puts=%d posts=%d reads=%d body=%s", first.Code, puts, posts, reads, first.Body.String())
+	}
+	if failureStatus == http.StatusInsufficientStorage && !strings.Contains(first.Body.String(), `"error":"storage_full"`) {
+		t.Fatalf("non-budget kept save body=%s", first.Body.String())
 	}
 	pending, err := team.ReadPeoplePending(dir, id, "fedcba9876543210")
 	if err != nil || !bytes.Equal(pending.Body, stored) {

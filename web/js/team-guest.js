@@ -1024,7 +1024,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       const files = sharedAttachmentDescriptors(entry);
       if (!files?.length) continue;
       const state = Object.create(null);
-      for (const file of files) state[file.id] = result.files[`${entry.seq}/${file.id}`] === true;
+      for (const file of files) {
+        const mark = result.files[`${entry.seq}/${file.id}`];
+        state[file.id] = mark === "unkept" ? "unkept" : mark === true;
+      }
       entry._peopleRetained = state;
     }
   }
@@ -1425,9 +1428,10 @@ function sharedAttachmentTiles(entry, key, assetURL, copyInstance) {
     const image = file.mime === "image/png" || file.mime === "image/jpeg";
     const previewURL = url + (copyInstance ? "&preview=1" : "?preview=1");
     const download = assetURL(url), preview = image ? assetURL(previewURL) : "";
+    const unkept = entry._peopleRetained?.[file.id] === "unkept";
     if (entry._peopleRetained?.[file.id] === false) return attachmentUnavailableHTML({name:file.name, download, retryPath:download ? "" : url, escape:esc});
     if (!download && !preview) return attachmentUnavailableHTML({name:file.name, download, retryPath:url, status:"unavailable", escape:esc});
-    return attachmentTileHTML({name:file.name, url, previewURL, image:image && !!preview, key:file.id, escape:esc, assetURL, fallbackURL:download, note:image && !preview ? "preview unavailable" : ""});
+    return attachmentTileHTML({name:file.name, url, previewURL, image:unkept ? false : image && !!preview, key:file.id, escape:esc, assetURL, fallbackURL:download, note:unkept ? "Not kept locally" : image && !preview ? "preview unavailable" : ""});
   }).join("");
   return `<div class="attrow">${tiles}</div>`;
 }

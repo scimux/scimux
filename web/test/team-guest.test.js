@@ -2585,6 +2585,29 @@ test("a missing local copy identity never creates an unbound file link", () => {
  assert.match(html,/unavailable/i);assert.doesNotMatch(html,/href="\/api\/team\/subscriptions/);assert.doesNotMatch(html,/data-attachment-retry=/);
 });
 
+test("a stale unkept mark without a download URL stays unavailable", () => {
+ const file = {id: "0123456789abcdef", sha256: "a".repeat(64), name: "synthetic.txt", mime: "text/plain", size: 12};
+ const entry = {seq: 7, anchor: 0, author: "a", text: "", _peopleRetained: {[file.id]: "unkept"}, attachments: [file]};
+ const html = guestModule.guestMessageHTML(entry, {}, "s", {}, "", "", "s/o/c/g", () => "");
+ assert.match(html, /data-attachment-retry="\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef"/);
+ assert.match(html, /unavailable/i);
+ assert.doesNotMatch(html, /Not kept locally/);
+ assert.doesNotMatch(html, /href=""/);
+});
+
+test("a served file that was not kept locally says so on its tile", () => {
+ const file = {id: "0123456789abcdef", sha256: "a".repeat(64), name: "synthetic.txt", mime: "text/plain", size: 12};
+ const entry = {seq: 7, anchor: 0, author: "a", text: "", _peopleRetained: {[file.id]: "unkept"}, attachments: [file]};
+ const html = guestModule.guestMessageHTML(entry, {}, "s", {}, "", "", "s/o/c/g");
+ assert.match(html, /Not kept locally/);
+ assert.match(html, /href="\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef"/);
+ assert.doesNotMatch(html, /not retained/i);
+ const kept = {...entry, _peopleRetained: {[file.id]: true}};
+ const keptHTML = guestModule.guestMessageHTML(kept, {}, "s", {}, "", "", "s/o/c/g");
+ assert.doesNotMatch(keptHTML, /Not kept locally/);
+ assert.doesNotMatch(keptHTML, /not retained/i);
+});
+
 test("a People file that could not be retained is labelled truthfully", () => {
  const entry={seq:7,anchor:0,author:"a",text:"",_peopleRetained:{"0123456789abcdef":false},attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:12}]};
  const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g");
@@ -2644,6 +2667,21 @@ test("retention results stay scoped to each comment and show missing bytes", asy
  assert.equal(first._peopleRetained[file.id],true);assert.equal(second._peopleRetained[file.id],false);
  assert.doesNotMatch(guestModule.guestMessageHTML(first,{},"s",{},"","","s/o/c/g"),/not retained/i);
  assert.match(guestModule.guestMessageHTML(second,{},"s",{},"","","s/o/c/g"),/not retained/i);
+ f.feature.destroy();
+});
+
+test("retention marks a served unkept file on its own tile", async () => {
+ const view = {...base, access: "write", people_copy_instance: "1".repeat(32)};
+ const file = {id: "0123456789abcdef", sha256: "a".repeat(64), name: "synthetic.txt", mime: "text/plain", size: 1};
+ const message = {seq: 1, anchor: 0, author: "a", text: "", attachments: [file]};
+ const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? {...list([view], [{id: "s", delivery: "ok", people_files: "supported"}]), people_attachments: {version: 1, max_file_bytes: 4194304, max_files: 16, max_total_bytes: 16777216}} : readAnswer([], 0, false, view), async () => commentsAnswer([message], 1, false), undefined, {retainPeople: async () => ({files: {"1/0123456789abcdef": "unkept"}})});
+ f.feature.tick();
+ await f.feature.settled();
+ f.open();
+ await f.feature.settled();
+ assert.equal(message._peopleRetained[file.id], "unkept");
+ assert.match(f.get("msgs").innerHTML, /Not kept locally/);
+ assert.doesNotMatch(f.get("msgs").innerHTML, /not retained/i);
  f.feature.destroy();
 });
 

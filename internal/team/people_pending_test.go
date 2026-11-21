@@ -65,9 +65,9 @@ func TestPeoplePublicationRecordsRequireDirectoryDurability(t *testing.T) {
 				_, read = ReadPeoplePublished(dir, id, 1, stage.ID)
 				retry = SavePeoplePublished(dir, id, 1, stage)
 			case "people-completed":
-				first = ConfirmPeoplePending(dir, id, pending.Key, 1)
+				first = ConfirmPeoplePending(dir, id, pending.Key, 1, false)
 				_, read = ReadPeopleCompletion(dir, id, pending.Key)
-				retry = ConfirmPeoplePending(dir, id, pending.Key, 1)
+				retry = ConfirmPeoplePending(dir, id, pending.Key, 1, false)
 			}
 			if faults == 0 {
 				t.Fatal("directory sync fault was not injected")
@@ -97,7 +97,7 @@ func TestPeoplePublicationRecordsRequireDirectoryDurability(t *testing.T) {
 					t.Fatalf("retained recovery: %v", err)
 				}
 			case "people-completed":
-				if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+				if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 					t.Fatal(err)
 				}
 				got, err := ReadPeopleCompletion(dir, id, pending.Key)
@@ -138,7 +138,7 @@ func TestPeopleConfirmationKeepsPinWhenRetainedDirectoryCannotSync(t *testing.T)
 		}
 		return original.sync(f)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil || faults == 0 {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil || faults == 0 {
 		t.Fatalf("confirmation accepted without durable retained bytes: %v, faults=%d", err, faults)
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
@@ -148,7 +148,7 @@ func TestPeopleConfirmationKeepsPinWhenRetainedDirectoryCannotSync(t *testing.T)
 		t.Fatal("failed confirmation wrote a completion")
 	}
 	peopleRecordIO = original
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ReadPeopleCompletion(dir, id, pending.Key)
@@ -193,10 +193,10 @@ func TestPeopleCompletionParentSyncPrecedesPendingRemoval(t *testing.T) {
 		}
 		return original.sync(f)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil || faults == 0 {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil || faults == 0 {
 		t.Fatalf("undurable completion accepted: %v faults=%d", err, faults)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("retry released pending before repair")
 	}
 	peopleRecordIO = original
@@ -206,7 +206,7 @@ func TestPeopleCompletionParentSyncPrecedesPendingRemoval(t *testing.T) {
 	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
 		t.Fatal("pin released")
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
 	completion, err := ReadPeopleCompletion(dir, id, pending.Key)
@@ -298,7 +298,7 @@ func TestPeoplePendingValidatedEncodingAndCompletionRoundTrip(t *testing.T) {
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	completed, err := ReadPeopleCompletion(dir, id, pending.Key)
@@ -418,7 +418,7 @@ func TestPeopleConfirmationCleanupFailuresPreserveReceiptAndBytes(t *testing.T) 
 					return original.sync(f)
 				}
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("cleanup failure reported success")
 			}
 			if (fault == "pending directory open" || fault == "pending directory sync") && (!removed || !injected) {
@@ -430,7 +430,7 @@ func TestPeopleConfirmationCleanupFailuresPreserveReceiptAndBytes(t *testing.T) 
 				t.Fatalf("retained bytes lost: %v", err)
 			}
 			if _, err := ReadPeoplePending(dir, id, pending.Key); err == nil {
-				if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+				if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 					t.Fatalf("same-key retry: %v", err)
 				}
 			}
@@ -726,7 +726,7 @@ func TestPeopleStageRemovalFailsClosedForAbsentCopyOrUnsafePendingRoot(t *testin
 func TestPeopleConfirmationRejectsInvalidCopyBeforeFilesystemAccess(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
 	id.Generation = "invalid"
-	if err := ConfirmPeoplePending(dir, id, "0123456789abcdef", 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, "0123456789abcdef", 1, false); err == nil {
 		t.Fatal("invalid copy was confirmed")
 	}
 	entries, err := os.ReadDir(dir)
@@ -976,7 +976,7 @@ func TestPeopleConfirmationRejectsDamagedPendingAndReceipt(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("damaged or unavailable publication was confirmed")
 			}
 			if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
@@ -1022,7 +1022,7 @@ func TestPeopleConfirmationFailureKeepsPendingForExplicitRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("confirmation ignored failed storage boundary")
 			}
 			if got, err := ReadPeoplePending(dir, id, pending.Key); err != nil || !bytes.Equal(got.Body, pending.Body) {
@@ -1042,7 +1042,7 @@ func TestPeopleConfirmationFailureKeepsPendingForExplicitRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 				t.Fatalf("explicit retry after repair failed: %v", err)
 			}
 			if _, err := ReadPeopleCompletion(dir, id, pending.Key); err != nil {
@@ -1077,7 +1077,7 @@ func TestPeopleConfirmationAllowsOtherCompletionRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	root.Close()
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatalf("unrelated completion data blocked confirmation: %v", err)
 	}
 	if got, err := ReadPeopleCompletion(dir, id, pending.Key); err != nil || got.Seq != 1 {
@@ -1096,7 +1096,7 @@ func TestPeoplePendingCannotUnpinBeforeRetainedAssociation(t *testing.T) {
 	if err := SavePeoplePending(dir, id, pending, []PeopleStage{stage}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("unconfirmed bytes unpinned")
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
@@ -1108,7 +1108,7 @@ func TestPeoplePendingCannotUnpinBeforeRetainedAssociation(t *testing.T) {
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err != nil {
@@ -1146,7 +1146,7 @@ func TestPeoplePendingNeedsExactRetainedCommentBeforeUnpin(t *testing.T) {
 	if err := SavePeoplePublished(dir, id, 1, stage); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("missing durable comment unpinned the publication")
 	}
 	if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
@@ -1156,7 +1156,7 @@ func TestPeoplePendingNeedsExactRetainedCommentBeforeUnpin(t *testing.T) {
 	if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{wrong}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("different retained body unpinned the publication")
 	}
 }
@@ -1192,7 +1192,7 @@ func TestPeopleConfirmationRejectsForeignHistoryAndDifferentRetainedBytes(t *tes
 			if err := AppendCopy(dir, id, CommentsLog, []MirrorRecord{entry}); err != nil {
 				t.Fatal(err)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("mismatched publication confirmed")
 			}
 			if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
@@ -1236,7 +1236,7 @@ func TestPeopleConfirmationKeepsPendingWhenStoredFileIsDamaged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+			if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 				t.Fatal("damaged file allowed confirmation")
 			}
 			if _, err := ReadPeoplePending(dir, id, pending.Key); err != nil {
@@ -1294,7 +1294,7 @@ func TestPeoplePendingRejectsInvalidOrUnboundFrozenManifests(t *testing.T) {
 		key string
 		seq uint64
 	}{{"bad", 1}, {valid.Key, 0}, {valid.Key, 1}} {
-		if err := ConfirmPeoplePending(dir, id, tc.key, tc.seq); err == nil {
+		if err := ConfirmPeoplePending(dir, id, tc.key, tc.seq, false); err == nil {
 			t.Fatal("unrecorded pending confirmed")
 		}
 	}
@@ -1502,7 +1502,7 @@ func TestPeopleConfirmationRecoversAfterCompletionWrittenBeforeUnpin(t *testing.
 			if err := savePeopleRecord(dir, id, record, "people-completed"); err != nil {
 				t.Fatal(err)
 			}
-			err = ConfirmPeoplePending(dir, id, pending.Key, 1)
+			err = ConfirmPeoplePending(dir, id, pending.Key, 1, false)
 			if conflict {
 				if err == nil {
 					t.Fatal("conflicting receipt accepted")
@@ -1535,7 +1535,7 @@ func TestPeopleCompletionRestartBeforePendingRemoval(t *testing.T) {
 		if err := DeletePeopleStage(dir, id, stage.ID); err == nil {
 			t.Fatal("premature unpin")
 		}
-		if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err != nil {
+		if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := DeletePeopleStage(dir, id, stage.ID); err != nil {
@@ -1565,7 +1565,7 @@ func TestPeopleCompletionRestartBeforePendingRemoval(t *testing.T) {
 		}
 		return original.remove(root, name)
 	}
-	if err := ConfirmPeoplePending(dir, id, pending.Key, 1); err == nil {
+	if err := ConfirmPeoplePending(dir, id, pending.Key, 1, false); err == nil {
 		t.Fatal("interruption accepted")
 	}
 	peopleRecordIO = original

@@ -222,7 +222,7 @@ func TestPeopleAttachmentStageUsesGuardedRelay(t *testing.T) {
 	if err := team.AppendCopy(dir, copyID, team.CommentsLog, []team.MirrorRecord{{Seq: 1, Key: "c/" + pending.Key, Author: pending.Author, At: "2026-01-01T00:00:00.000Z", Body: pending.Body}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := team.ConfirmPeoplePending(dir, copyID, pending.Key, 1); err != nil {
+	if err := team.ConfirmPeoplePending(dir, copyID, pending.Key, 1, false); err != nil {
 		t.Fatal(err)
 	}
 	remove := doTeam(h, http.MethodDelete, peopleTestURL(t, dir, path+"/stage/"+result.Attachments[0].ID)+"&revision="+localStageRevision(stage), "")
@@ -1725,15 +1725,22 @@ func TestPeopleFetchReportsMissingCorruptAndUnsupportedBeforeRetaining(t *testin
 				}
 			}
 			first := doTeam(h, http.MethodGet, bound, "")
+			if mode == "local budget" {
+				if first.Code != http.StatusOK || !bytes.Equal(first.Body.Bytes(), payload) || first.Header().Get("X-Scimux-People-Kept") != "" {
+					t.Fatalf("global limit blocked a kept copy: status=%d header=%q body=%s", first.Code, first.Header().Get("X-Scimux-People-Kept"), first.Body.String())
+				}
+				stored, err := team.ReadPeoplePublished(dir, id, 1, fileID)
+				if err != nil || !bytes.Equal(stored.Data, payload) {
+					t.Fatalf("global limit prevented the kept copy: %v", err)
+				}
+				return
+			}
 			want := http.StatusNotFound
 			if mode == "corrupt" {
 				want = http.StatusBadGateway
 			}
 			if mode == "unsupported" {
 				want = http.StatusConflict
-			}
-			if mode == "local budget" {
-				want = http.StatusInsufficientStorage
 			}
 			if first.Code != want {
 				t.Fatalf("%s status=%d body=%s", mode, first.Code, first.Body.String())
@@ -1743,11 +1750,6 @@ func TestPeopleFetchReportsMissingCorruptAndUnsupportedBeforeRetaining(t *testin
 			}
 			if _, err := team.ReadPeoplePublished(dir, id, 1, fileID); err == nil {
 				t.Fatal("unverified bytes were retained")
-			}
-			if mode == "local budget" {
-				if err := os.Remove(filepath.Join(dir, "settings.json")); err != nil {
-					t.Fatal(err)
-				}
 			}
 			healthy = true
 			retry := doTeam(h, http.MethodGet, peopleTestURL(t, dir, path), "")

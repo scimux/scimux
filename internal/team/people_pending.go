@@ -181,7 +181,7 @@ func SavePeoplePending(dataDir string, id CopyID, pending PeoplePending, reviewe
 		} else if !errors.Is(pendingErr, ErrPeopleStageMissing) {
 			return pendingErr
 		}
-		return recoverPeopleTemps(dataDir, id)
+		return recoverPeopleTemps(dataDir, id, peopleChargedTrees("people-stages"))
 	})
 	if errors.Is(err, already) {
 		return nil
@@ -338,8 +338,9 @@ func pendingReferencesLocked(dataDir string, id CopyID, stageID string) (bool, e
 	return false, nil
 }
 
-// ConfirmPeoplePending releases a pin only after all retained records exist.
-func ConfirmPeoplePending(dataDir string, id CopyID, key string, seq uint64) error {
+// ConfirmPeoplePending releases a pin after the comment log matches the pending body.
+// allowUnkept permits a missing kept file when every staged file matches its hash.
+func ConfirmPeoplePending(dataDir string, id CopyID, key string, seq uint64, allowUnkept bool) error {
 	if !validHex(key, 16) || seq == 0 {
 		return ErrPeopleStage
 	}
@@ -411,13 +412,13 @@ func ConfirmPeoplePending(dataDir string, id CopyID, key string, seq uint64) err
 		if exists != currentExists {
 			return ErrPeopleStage
 		}
-		return recoverPeopleTemps(dataDir, id)
+		return recoverPeopleTemps(dataDir, id, peopleChargedTrees("people-stages"))
 	})
 	if err != nil {
 		return err
 	}
 	defer release()
-	if _, err := validateRetainedPeoplePublication(dataDir, id, pending, seq); err != nil {
+	if _, err := validatePeoplePublication(dataDir, id, pending, seq, allowUnkept); err != nil {
 		return err
 	}
 	if !exists {
@@ -440,8 +441,9 @@ func ConfirmPeoplePending(dataDir string, id CopyID, key string, seq uint64) err
 	return nil
 }
 
-// validateRetainedPeoplePublication requires the copy lock and budget lock.
-func validateRetainedPeoplePublication(dataDir string, id CopyID, pending PeoplePending, seq uint64) ([]PeopleStage, error) {
+// validatePeoplePublication requires the copy lock and budget lock.
+// allowUnkept permits a missing kept file after the staged bytes match their hash.
+func validatePeoplePublication(dataDir string, id CopyID, pending PeoplePending, seq uint64, allowUnkept bool) ([]PeopleStage, error) {
 	if err := validateRetainedPeopleComment(dataDir, id, pending, seq); err != nil {
 		return nil, err
 	}
@@ -451,20 +453,30 @@ func validateRetainedPeoplePublication(dataDir string, id CopyID, pending People
 	}
 	defer stages.Close()
 	retained, err := peopleRecordDir(dataDir, id, false, "people-records", "comments", strconv.FormatUint(seq, 10))
-	if err != nil {
+	if err != nil && !(allowUnkept && errors.Is(err, ErrPeopleStageMissing)) {
 		return nil, err
 	}
-	defer retained.Close()
+	if retained != nil {
+		defer retained.Close()
+	}
 	result := make([]PeopleStage, 0, len(pending.StageIDs))
 	for _, stageID := range pending.StageIDs {
-		copy, copyErr := readDurablePeopleRecordFile(retained, stageID)
-		if copyErr != nil {
+		stage, stageErr := readDurablePeopleRecordFile(stages, stageID)
+		if stageErr != nil {
 			return nil, ErrPeopleStage
 		}
-		stage, stageErr := readDurablePeopleRecordFile(stages, stageID)
+		if retained == nil {
+			result = append(result, stage)
+			continue
+		}
+		copy, copyErr := readDurablePeopleRecordFile(retained, stageID)
+		if allowUnkept && errors.Is(copyErr, ErrPeopleStageMissing) {
+			result = append(result, stage)
+			continue
+		}
 		// Both records were hash-verified on read, so equal bytes also imply
 		// equal hashes. Compare bytes directly to preserve the exact snapshot.
-		if stageErr != nil || !bytes.Equal(stage.Data, copy.Data) || stage.Name != copy.Name || stage.MIME != copy.MIME {
+		if copyErr != nil || !bytes.Equal(stage.Data, copy.Data) || stage.Name != copy.Name || stage.MIME != copy.MIME {
 			return nil, ErrPeopleStage
 		}
 		result = append(result, copy)

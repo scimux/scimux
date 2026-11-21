@@ -35,6 +35,24 @@ type PeopleStage struct {
 var ErrPeopleStage = errors.New("team: invalid or unavailable attachment stage")
 var ErrPeopleStageMissing = errors.New("team: attachment record unavailable")
 
+const (
+	peopleGroupMaxBytes int64 = 128 << 20
+	peopleGroupMaxFiles       = 2048
+)
+
+func peopleChargedTrees(part string) []string {
+	if part == "people-records" {
+		return []string{part}
+	}
+	work := []string{"people-stages", "people-pending", "people-completed", "people-identity"}
+	for _, name := range work {
+		if name == part {
+			return work
+		}
+	}
+	return nil
+}
+
 // ValidPeopleOwnerInstance accepts the native server's opaque instance label.
 // Its authority comes from the app's exact current-node check, not its shape.
 func ValidPeopleOwnerInstance(value string) bool {
@@ -250,7 +268,7 @@ func EnsurePeopleCopyInstance(dataDir string, id CopyID) (string, error) {
 		if err := rejectProtectedPeopleRecords(dataDir, id); err != nil {
 			return err
 		}
-		return recoverPeopleTemps(dataDir, id)
+		return recoverPeopleTemps(dataDir, id, peopleChargedTrees("people-stages"))
 	})
 	if errors.Is(err, fs.ErrExist) {
 		return readPeopleCopyInstanceLocked(dataDir, id)
@@ -278,19 +296,34 @@ func savePeopleRecord(dataDir string, id CopyID, stage PeopleStage, parts ...str
 	}
 	// PeopleStage has only strings and a byte slice, which always encode.
 	encoded, _ := json.Marshal(stage)
+	part := ""
+	if len(parts) > 0 {
+		part = parts[0]
+	}
+	trees := peopleChargedTrees(part)
+	if trees == nil {
+		return ErrPeopleStage
+	}
 	unlock := lockCopy(filepath.Dir(path))
 	defer unlock()
-	release, err := storagebudget.ReserveSerializedAfter(dataDir, "", int64(len(encoded)), func() error { return recoverPeopleTemps(dataDir, id) })
+	recover := func() error { return recoverPeopleTemps(dataDir, id, trees) }
+	var release func()
+	if part == "people-records" {
+		release, err = storagebudget.ReserveFreeSerializedAfter(dataDir, int64(len(encoded)), recover)
+	} else {
+		release, err = storagebudget.ReserveSerializedAfter(dataDir, "", int64(len(encoded)), recover)
+	}
 	if err != nil {
 		return err
 	}
 	defer release()
-	return savePeopleRecordLocked(dataDir, id, stage, encoded, parts...)
+	return savePeopleNamedRecordLocked(dataDir, id, stage, encoded, false, trees, parts...)
 }
 
 // recoverPeopleTemps runs only while both the copy and global storage locks
 // are held, so no active writer can own a matching temporary in this copy.
-func recoverPeopleTemps(dataDir string, id CopyID) error {
+// trees is only that write's group, so an unreadable kept tree does not fail a working write.
+func recoverPeopleTemps(dataDir string, id CopyID, trees []string) error {
 	root, err := peopleRecordDir(dataDir, id, false)
 	if errors.Is(err, ErrPeopleStageMissing) {
 		return nil
@@ -299,7 +332,7 @@ func recoverPeopleTemps(dataDir string, id CopyID) error {
 		return err
 	}
 	defer root.Close()
-	for _, tree := range []string{"people-stages", "people-records", "people-pending", "people-completed", "people-identity"} {
+	for _, tree := range trees {
 		err = fs.WalkDir(root.FS(), tree, func(name string, entry fs.DirEntry, walkErr error) error {
 			if errors.Is(walkErr, fs.ErrNotExist) {
 				return nil
@@ -323,10 +356,17 @@ func recoverPeopleTemps(dataDir string, id CopyID) error {
 
 // savePeopleRecordLocked requires the copy lock and serialized budget reserve.
 func savePeopleRecordLocked(dataDir string, id CopyID, stage PeopleStage, encoded []byte, parts ...string) error {
-	return savePeopleNamedRecordLocked(dataDir, id, stage, encoded, false, parts...)
+	part := ""
+	if len(parts) > 0 {
+		part = parts[0]
+	}
+	return savePeopleNamedRecordLocked(dataDir, id, stage, encoded, false, peopleChargedTrees(part), parts...)
 }
 
-func savePeopleNamedRecordLocked(dataDir string, id CopyID, stage PeopleStage, encoded []byte, retired bool, parts ...string) error {
+func savePeopleNamedRecordLocked(dataDir string, id CopyID, stage PeopleStage, encoded []byte, retired bool, trees []string, parts ...string) error {
+	if trees == nil {
+		return ErrPeopleStage
+	}
 	root, err := peopleRecordDir(dataDir, id, true, parts...)
 	if err != nil {
 		return err
@@ -342,7 +382,7 @@ func savePeopleNamedRecordLocked(dataDir string, id CopyID, stage PeopleStage, e
 	if retired {
 		peak *= 2
 	}
-	for _, tree := range []string{"people-stages", "people-records", "people-pending", "people-completed", "people-identity"} {
+	for _, tree := range trees {
 		err = peopleRecordIO.walk(copyRoot.FS(), tree, func(name string, entry fs.DirEntry, walkErr error) error {
 			if errors.Is(walkErr, fs.ErrNotExist) {
 				return nil
@@ -365,7 +405,7 @@ func savePeopleNamedRecordLocked(dataDir string, id CopyID, stage PeopleStage, e
 			}
 			used += info.Size()
 			count++
-			if count >= 4096 || used+peak > 256<<20 || (retired && count >= 4095) {
+			if count >= peopleGroupMaxFiles || used+peak > peopleGroupMaxBytes || (retired && count >= peopleGroupMaxFiles-1) {
 				return storagebudget.ErrBudget
 			}
 			return nil

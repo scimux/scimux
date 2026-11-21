@@ -141,7 +141,7 @@ func validateCompletionRetained(dataDir string, id CopyID, completion PeopleComp
 	var retained []PeopleStage
 	if pinned {
 		var err error
-		retained, err = validateRetainedPeoplePublication(dataDir, id, pending, seq)
+		retained, err = validatePeoplePublication(dataDir, id, pending, seq, false)
 		if err != nil {
 			return err
 		}

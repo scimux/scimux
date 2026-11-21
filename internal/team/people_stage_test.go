@@ -257,7 +257,7 @@ func TestPeopleStageCommitTreeReadFailureAllowsExactRetry(t *testing.T) {
 	original := peopleRecordIO
 	t.Cleanup(func() { peopleRecordIO = original })
 	peopleRecordIO.walk = func(fsys fs.FS, root string, visit fs.WalkDirFunc) error {
-		if root == "people-records" {
+		if root == "people-stages" {
 			return visit(root, nil, errors.New("synthetic directory read failure"))
 		}
 		return fs.WalkDir(fsys, root, visit)
@@ -1216,12 +1216,12 @@ func TestPeopleStageCommitRefusesUnremovableOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := peopleRecordDir(dir, id, true, "people-records")
+	root, err := peopleRecordDir(dir, id, true, "people-pending")
 	if err != nil {
 		t.Fatal(err)
 	}
 	root.Close()
-	records := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-records")
+	records := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-pending")
 	orphan := filepath.Join(records, "fedcba9876543210-aaaaaaaaaaaaaaaa.tmp")
 	if err := os.WriteFile(orphan, []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
@@ -1478,6 +1478,9 @@ func TestConcurrentPeoplePublishedRetriesKeepOneExactAssociation(t *testing.T) {
 func TestPeopleCopyQuotaCountsAllSequencesAndStages(t *testing.T) {
 	dir := t.TempDir()
 	id := sampleCopyID()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_min_free_bytes":0}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	base := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-records", "comments", "1")
 	if err := os.MkdirAll(base, 0700); err != nil {
 		t.Fatal(err)
@@ -1487,8 +1490,8 @@ func TestPeopleCopyQuotaCountsAllSequencesAndStages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := SavePeopleStage(dir, id, syntheticPeopleStage()); !errors.Is(err, storagebudget.ErrBudget) {
-		t.Fatalf("copy quota did not include published sequences: %v", err)
+	if err := SavePeopleStage(dir, id, syntheticPeopleStage()); err != nil {
+		t.Fatalf("kept files blocked a working stage: %v", err)
 	}
 }
 
@@ -1562,7 +1565,7 @@ func TestPeopleStageRecoveryRejectsUnreadableManagedTree(t *testing.T) {
 	if err := SavePeopleStage(dir, id, stage); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-records")
+	path := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-pending")
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}

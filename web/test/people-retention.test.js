@@ -45,6 +45,23 @@ test('retention reports cancellation and transport errors without granting avail
  const failure=await retainPeopleEntries({key,entries,fetchImpl:async()=>{throw Error('synthetic network failure')}});assert.equal(failure.unavailable,1);assert.equal(failure.files['1/0123456789abcdef'],false);
 });
 
+test("a kept-cap refusal stays available and is marked unkept", async () => {
+ const key = ["a".repeat(32), "b".repeat(32), "c".repeat(16), "d".repeat(16)].join("/");
+ const headers = value => ({get: name => String(name).toLowerCase() === "x-scimux-people-kept" ? value : null});
+ const entries = [{seq: 1, attachments: [{id: "0123456789abcdef", size: 1}, {id: "fedcba9876543210", size: 1}]}];
+ const result = await retainPeopleEntries({key, entries, fetchImpl: async path => ({ok: true, headers: headers(path.endsWith("0123456789abcdef") ? "false" : null), body: {cancel: async () => {}}})});
+ assert.equal(result.available, 2);
+ assert.equal(result.unavailable, 0);
+ assert.equal(result.files["1/0123456789abcdef"], "unkept");
+ assert.equal(result.files["1/fedcba9876543210"], true);
+ const other = await retainPeopleEntries({key, entries: [{seq: 1, attachments: [{id: "0123456789abcdef", size: 1}]}], fetchImpl: async () => ({ok: true, headers: headers("False"), body: {cancel: async () => {}}})});
+ assert.equal(other.files["1/0123456789abcdef"], true);
+ const refused = await retainPeopleEntries({key, entries: [{seq: 1, attachments: [{id: "0123456789abcdef", size: 1}]}], fetchImpl: async () => ({ok: false, headers: headers("false")})});
+ assert.equal(refused.available, 0);
+ assert.equal(refused.unavailable, 1);
+ assert.equal(refused.files["1/0123456789abcdef"], false);
+});
+
 test('retention skips empty pages and handles abort while finishing a response',async()=>{
  const key=['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/');let requests=0;
  const empty=await retainPeopleEntries({key,entries:[],fetchImpl:async()=>{requests++}});assert.equal(empty.available,0);assert.equal(requests,0);
