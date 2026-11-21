@@ -47,10 +47,31 @@ type teamHandler struct {
 	// word for one server in this process. It is not stored in the state file.
 	subAsks     map[string]subAsk
 	removedSubs map[team.CopyID]time.Time
+	// copyRemovalEpoch tracks only copies with in-flight attachment operations.
+	copyRemovalEpoch map[team.CopyID]*peopleCopyRemovalEpoch
+	// ownerInstance checks the current native node through the owning app.
+	ownerInstance func(nodeID, instance string) bool
+	// peopleEnabled checks the live feature gate for in-flight file work.
+	peopleEnabled func() bool
+	// Stage storage defaults to the managed team store; tests may inject failures.
+	stageRead func(string, team.CopyID, string) (team.PeopleStage, error)
+	stageSave func(string, team.CopyID, team.PeopleStage) error
+	// localDiscardBeforeDecision allows tests to interpose a copy replacement.
+	localDiscardBeforeDecision func()
+	// peopleCapabilitiesReady controls the advertised attachment capability.
+	peopleCapabilitiesReady bool
+	peopleProbeSerial       uint64
+}
+
+type peopleCopyRemovalEpoch struct {
+	epoch      uint64
+	active     int
+	stages     map[string]uint64
+	operations map[*peopleCopyOperation]struct{}
 }
 
 func newTeamHandler(dataDir string, now func() time.Time, client *team.Client) http.Handler {
-	return &teamHandler{dataDir: dataDir, now: now, client: client, statusBound: 8 * time.Second}
+	return &teamHandler{dataDir: dataDir, now: now, client: client, statusBound: 8 * time.Second, peopleCapabilitiesReady: true}
 }
 
 // newTeamClient builds the client Run installs. Tests replace it.

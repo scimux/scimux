@@ -94,6 +94,9 @@ import { createCardsFeature } from "./cards.js";
 import { createMapFeature, escapeDockStep } from "./map.js";
 import { createChatFeature, assetBubbleBodyHTML, bubbleActionsHTML, sharedBubbleMarkersHTML } from "./chat.js";
 import { createComposerFeature } from "./composer.js";
+import { createBrowserPeopleFileStore } from "./people-file-store.js";
+import { retainPeopleEntries } from "./people-retention.js";
+import { preparePeopleFiles, sha256Hex } from "./people-preparation.js";
 import {
   createBookmarksFeature,
   discloseQuoted,
@@ -144,7 +147,7 @@ export function mountHarnessRows(host, html, inspectRow) {
    required suppliers. No module-global default — a missing supplier throws,
    so a future caller cannot silently acquire the global. On the computer origin
    the browser entry below injects identity assetURL and the platform fetch. */
-export async function createApp({ fetchImpl, assetURL, document, window } = {}) {
+export async function createApp({ fetchImpl, assetURL, retryAsset, document, window } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new Error("createApp: fetchImpl is required");
   }
@@ -608,7 +611,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const isArchived = id => isArchivedMod(id, getUI().archived);
 
   const bubbleController = createBubbleActionController();
-  const guestFeature = own(createGuestFeature({ bubbleController, api, toast, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)), uiMutate: op => uiMutate(op), bookmarks: () => getUI().bookmarks, openSendTo: opts => bookmarksFeature.openSendTo(opts), people: () => getUI().people, localNodes: () => orderedNodes(), storage: store, selectedNode: () => sel, selectedUID: () => localLogIdentity.node === sel ? localLogIdentity.uid : "", localAgentAvailable: () => { const node = nodeById(sel); return !!node && !node.ended_at; }, confirmRemove: confirm, panel: { sharedMarkers: source => sharedBubbleMarkersHTML(source, {bookmarks:getUI().bookmarks, links:getUI().forward_links, iconBookmark:ICON_BUBBLE_BOOKMARK, iconInto:ICON_INTO}), openMarker: (source, kind) => chatFeature.openSharedMarker(source, kind), ownerUnavailable: source => { if (pendingJump?.team === source) { pendingJump = null; toast("This shared message is unavailable — the saved bookmark remains."); } }, ownerJump: (node, source) => { pendingJump = {node, team:source, visit:selGen, ts:Date.now()}; chatFeature.invalidate(); refreshChat(); return true; }, bubbleActions: bubbleActionsHTML, branchIcon: ICON_BRANCH, copyIcon: ICON_COPY, moreIcon: ICON_MENU_DOTS, promptIcon: ICON_INTO, choosePersonAction: opts => bookmarksFeature.openChoiceList(opts), fork: capture => sheetsFeature.openNewActivity({prompt:discloseQuoted(capture.text, capture), focusTitle:true, forwardSources:[capture.team], explicitSend:true}), copy: text => copyText(text), chooseDescription: opts => bookmarksFeature.openChoiceList(opts), editDescription: (id, capture) => { select(id); chatFeature.useTurnAsDescription(discloseQuoted(capture.text, capture)); }, preparePrompt: (capture, source) => composerFeature.preparePrompt(discloseQuoted(capture.text, capture), {...source, role:capture.role, who:capture.who, prov:capture.prov}), select: (id, how) => { select(id, how); if (!isDesktop()) setLevel(1); }, loaded: () => { if (sel.startsWith("team/") && guestFeature.hasActivity(sel) && guestFeature.tab.selected() !== sel) select(sel); }, changed: () => { if (composerFeature) composerFeature.refreshDestination(); }, ownerChanged: () => { ownerPending = ownerExpected && !guestFeature.peopleContext()?.owner; if (composerFeature) composerFeature.contextChanged(); if (chatFeature) { chatFeature.invalidate(); refreshChat(); } }, removed: () => { const first = orderedNodes()[0]; if (first) { select(first.id); $("#chattitle").focus(); } else { select(""); setLevel(2); $("#plusbtn").focus(); } } } }));
+  const peopleFileStore = own(createBrowserPeopleFileStore(globalThis.indexedDB));
+  const guestFeature = own(createGuestFeature({ bubbleController, peopleFileStore, api, assetURL, retainPeople: (key, entries, signal, copyInstance) => retainPeopleEntries({key, entries, copyInstance, fetchImpl, signal}), toast, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)), uiMutate: op => uiMutate(op), bookmarks: () => getUI().bookmarks, openSendTo: opts => bookmarksFeature.openSendTo(opts), people: () => getUI().people, localNodes: () => orderedNodes(), storage: store, selectedNode: () => sel, selectedUID: () => localLogIdentity.node === sel ? localLogIdentity.uid : "", localAgentAvailable: () => { const node = nodeById(sel); return !!node && !node.ended_at; }, confirmRemove: confirm, panel: { captureBookmark: bookmarkCapture.capture, sharedMarkers: source => sharedBubbleMarkersHTML(source, {bookmarks:getUI().bookmarks, links:getUI().forward_links, iconBookmark:ICON_BUBBLE_BOOKMARK, iconInto:ICON_INTO}), openMarker: (source, kind) => chatFeature.openSharedMarker(source, kind), ownerUnavailable: source => { if (pendingJump?.team === source) { pendingJump = null; toast("This shared message is unavailable — the saved bookmark remains."); } }, ownerJump: (node, source) => { pendingJump = {node, team:source, visit:selGen, ts:Date.now()}; chatFeature.invalidate(); refreshChat(); return true; }, bubbleActions: bubbleActionsHTML, branchIcon: ICON_BRANCH, copyIcon: ICON_COPY, moreIcon: ICON_MENU_DOTS, promptIcon: ICON_INTO, choosePersonAction: opts => bookmarksFeature.openChoiceList(opts), fork: capture => sheetsFeature.openNewActivity({prompt:discloseQuoted(capture.text, capture), focusTitle:true, forwardSources:[capture.team], explicitSend:true}), copy: text => copyText(text), chooseDescription: opts => bookmarksFeature.openChoiceList(opts), editDescription: (id, capture) => { select(id); chatFeature.useTurnAsDescription(discloseQuoted(capture.text, capture)); }, preparePrompt: (capture, source, actionCurrent) => { const preparedSource = {...source, role:capture.role, who:capture.who, prov:capture.prov}; const text = discloseQuoted(capture.text, capture); return composerFeature.prepareCapturePrompt(text, preparedSource, capture.attachments, actionCurrent); }, select: (id, how) => { select(id, how); if (!isDesktop()) setLevel(1); }, loaded: () => { if (sel.startsWith("team/") && guestFeature.hasActivity(sel) && guestFeature.tab.selected() !== sel) select(sel); }, changed: () => { if (composerFeature) composerFeature.refreshDestination(); }, ownerChanged: () => { ownerPending = ownerExpected && !guestFeature.peopleContext()?.owner; if (composerFeature) composerFeature.contextChanged(); if (chatFeature) { chatFeature.invalidate(); refreshChat(); } }, removed: () => { const first = orderedNodes()[0]; if (first) { select(first.id); $("#chattitle").focus(); } else { select(""); setLevel(2); $("#plusbtn").focus(); } } } }));
   /* Activities card feature factory — owns #cardtabs/#cardlist only. */
   const cardsFeature = own(createCardsFeature({
     requireChatIdentity: true,
@@ -872,13 +876,15 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     api,
     apiConditionalGet,
     assetURL,
-    captureBookmark: (bookmark, turn) => bookmarkCapture.capture(bookmark, turn),
+    retryAsset,
+    captureBookmark: bookmarkCapture.capture,
     openAssetPreview: assetPreview.open,
+    sharedPreview: guestFeature.sharedPreview,
     openAttachmentSettings: openAttachmentSettings.bind(null, $("#burger"), $("#m_attachment_settings")),
     nodes: () => nodes,
     sel: () => sel,
-    ownerDiscussion: () => guestFeature.ownerSnapshots(),
-    canPreparePrompt: source => guestFeature.canPreparePrompt(source),
+    ownerDiscussion: guestFeature.ownerSnapshots,
+    canPreparePrompt: guestFeature.canPreparePrompt,
     preparePrompt: (capture, source) => composerFeature.preparePrompt(discloseQuoted(capture.text, capture), {...source, role:capture.role, prov:capture.prov}),
     onLogIdentity: (id, uid) => { if (sel !== id || (localLogIdentity.node === id && localLogIdentity.uid === uid)) return; localLogIdentity = {node:id,uid}; if (ownerShareUID && uid && ownerShareUID !== uid) { ownerExpected = false; ownerPending = false; } guestFeature.localIdentityChanged(); composerFeature.contextChanged(); },
     selGen: () => selGen,
@@ -962,11 +968,28 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     storage: store,
     sel: () => sel,
     nodeById: id => nodeById(id),
-    peopleContext: () => guestFeature.peopleContext(),
-    canPreparePrompt: source => guestFeature.canPreparePrompt(source),
+    peopleContext: guestFeature.peopleContext,
+    localReviewApi: api,
+    localReviewContexts: guestFeature.localReviewContexts,
+    readRetainedPeoplePending: guestFeature.readRetainedPeoplePending,
+    readRetainedPeopleTextPending: guestFeature.readRetainedPeopleTextPending,
+    retirePeopleText: guestFeature.retirePeopleText,
+    peopleFileStore,
+    randomBytes: size => crypto.getRandomValues(new Uint8Array(size)),
+    finishPeople: guestFeature.finishPeople,
+    clearPeoplePending: guestFeature.clearPeoplePending,
+    fencePeoplePending: guestFeature.fencePeoplePending,
+    refreshPeopleRecovery: guestFeature.refreshPeopleRecovery,
+    refreshRetainedPeopleRecovery: guestFeature.refreshRetainedPeopleRecovery,
+    pendingPeople: guestFeature.pendingPeople,
+    pendingPeopleText: guestFeature.pendingPeopleText,
+    retryPeople: guestFeature.retryPeople,
+    preparePeopleFiles: opts => preparePeopleFiles({...opts, fetchImpl, digest: bytes => sha256Hex(bytes, crypto.subtle), makeFile: (bytes, name, options) => new File([bytes], name, options)}),
+    canPreparePrompt: guestFeature.canPreparePrompt,
+    capturePromptAuthority: guestFeature.capturePromptAuthority,
     promptSourcesChanged: id => { if (id !== sel) return; chatFeature.refreshPromptMarkers(id); chatFeature.invalidate(); refreshChat(); },
     agentAllowed: () => !ownerPending,
-    sendPeople: (key, text) => guestFeature.sendPeople(key, text),
+    sendPeople: guestFeature.sendPeople,
     isPhoneTouch,
     esc,
     icons: { ICON_PLUS, ICON_IMAGE, ICON_FILE, ICON_SEND, ICON_STOP },

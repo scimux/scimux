@@ -21,6 +21,7 @@ import (
 	"github.com/scimux/scimux/internal/backend"
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/sessionworker"
+	"github.com/scimux/scimux/internal/testowned/workerfixture"
 )
 
 func syntheticWorkerManager(t *testing.T, data string) *workerManager {
@@ -882,9 +883,11 @@ func TestWorkerManagerReapsOnlyProvablyStaleLocator(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := syntheticWorkerManager(t, data)
+	fixture := prepareForcedWorker(t, m)
 	if _, err := m.Launch("stale", "pi", data, "", ""); err != nil {
 		t.Fatal(err)
 	}
+	fixture.register(t, m, "stale")
 	entry := m.entry("stale")
 	realClient := entry.client
 	t.Cleanup(func() { _ = realClient.Close() })
@@ -921,8 +924,26 @@ func TestWorkerManagerReapsOnlyProvablyStaleLocator(t *testing.T) {
 	m.Detach()
 }
 
-func startUnwaitedSyntheticWorker(t *testing.T, nodeID string) (string, int, *sessionworker.Client) {
+type reattachedFixture struct {
+	parent        *workerfixture.Parent
+	pid           int
+	status        syscall.WaitStatus
+	reaped        bool
+	expectRefusal error
+	cleanupErr    error
+}
+
+func (f *reattachedFixture) observe(pid int, status syscall.WaitStatus) {
+	f.pid, f.status, f.reaped = pid, status, true
+}
+
+func startUnwaitedSyntheticWorker(t *testing.T, nodeID string) (string, int, *sessionworker.Client, *reattachedFixture) {
 	t.Helper()
+	parent, tmp, err := workerfixture.New(filepath.Clean(os.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &reattachedFixture{parent: parent}
 	data := t.TempDir()
 	if err := os.Chmod(data, 0o700); err != nil {
 		t.Fatal(err)
@@ -941,29 +962,39 @@ func startUnwaitedSyntheticWorker(t *testing.T, nodeID string) (string, int, *se
 		t.Fatal(err)
 	}
 	defer readyR.Close()
-	cmd := exec.Command(exe, "-test.run=^TestSessionWorkerHelperProcess$")
-	cmd.ExtraFiles = []*os.File{configR, readyW}
-	cmd.Env = append(os.Environ(), "SCIMUX_SESSION_WORKER_TEST_HELPER=1", workerConfigFDEnv+"=3", workerReadyFDEnv+"=4")
-	if err := cmd.Start(); err != nil {
+	environment := exec.Command(exe)
+	environment.Env = append(os.Environ(), "SCIMUX_SESSION_WORKER_TEST_HELPER=1", workerConfigFDEnv+"=3", workerReadyFDEnv+"=4", "TMPDIR="+tmp)
+	env := environment.Environ()
+	process, err := os.StartProcess(exe, []string{exe, "-test.run=^TestSessionWorkerHelperProcess$"}, &os.ProcAttr{Env: env, Files: []*os.File{nil, nil, nil, configR, readyW}})
+	if err != nil {
 		t.Fatal(err)
 	}
 	var client *sessionworker.Client
-	workerSocketDir := ""
 	t.Cleanup(func() {
-		if client != nil {
-			_ = client.Close()
+		if !fixture.reaped {
+			if err := workerfixture.StopUnproved(process); err != nil {
+				fixture.cleanupErr = err
+			} else {
+				fixture.cleanupErr = errors.New("reattached worker wait unavailable; child stopped and parent retained")
+			}
+		} else if client == nil {
+			fixture.cleanupErr = errors.New("reattached worker wait unavailable")
+		} else if err := process.Release(); err != nil {
+			fixture.cleanupErr = fmt.Errorf("reattached command release: %v", err)
+		} else {
+			fixture.cleanupErr = fixture.parent.CleanupReaped(fixture.pid, fixture.status, client.Close())
 		}
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		if workerSocketDir != "" {
-			if err := os.RemoveAll(workerSocketDir); err != nil {
-				t.Errorf("remove crashed worker socket directory %s: %v", workerSocketDir, err)
+		if fixture.expectRefusal != nil {
+			if !errors.Is(fixture.cleanupErr, fixture.expectRefusal) {
+				t.Errorf("fixture cleanup refusal: %v", fixture.cleanupErr)
 			}
-			if _, err := os.Stat(workerSocketDir); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("crashed worker socket directory remains: %s: %v", workerSocketDir, err)
-			}
+		} else if fixture.cleanupErr != nil {
+			t.Error(fixture.cleanupErr)
 		}
 	})
+	if err := parent.BindStarted(process.Pid); err != nil {
+		t.Fatal(err)
+	}
 	_ = configR.Close()
 	_ = readyW.Close()
 	config := sessionWorkerConfig{
@@ -981,9 +1012,17 @@ func startUnwaitedSyntheticWorker(t *testing.T, nodeID string) (string, int, *se
 	if err := json.NewDecoder(readyR).Decode(&locator); err != nil {
 		t.Fatal(err)
 	}
-	workerSocketDir = filepath.Dir(locator.Link.Socket)
 	client, err = sessionworker.NewClient(locator.Link)
 	if err != nil {
+		t.Fatal(err)
+	}
+	helloCtx, cancelHello := context.WithTimeout(context.Background(), 3*time.Second)
+	hello, err := client.Hello(helloCtx)
+	cancelHello()
+	if err != nil || hello.Identity != config.Identity || locator.PID != process.Pid || locator.Identity != config.Identity {
+		t.Fatal("reattached worker identity mismatch")
+	}
+	if err := parent.Register(locator.Link.Socket, process.Pid); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.Launch(context.Background(), sessionworker.LaunchRequest{
@@ -991,7 +1030,7 @@ func startUnwaitedSyntheticWorker(t *testing.T, nodeID string) (string, int, *se
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return data, cmd.Process.Pid, client
+	return data, process.Pid, client, fixture
 }
 
 func TestWorkerManagerReapsDeadReattachedWorker(t *testing.T) {
@@ -1012,9 +1051,10 @@ func TestWorkerManagerReapsDeadReattachedWorker(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			id := strings.ReplaceAll(tc.name, " ", "-")
-			data, pid, client := startUnwaitedSyntheticWorker(t, id)
+			data, pid, client, fixture := startUnwaitedSyntheticWorker(t, id)
 			killUnwaitedWorkerAndAwaitZombie(t, pid)
 			m := newWorkerManager("", data, "new")
+			m.reapObserver = fixture.observe
 			m.entries[id] = &workerEntry{client: client, pid: pid}
 			if err := tc.act(m, id); err != nil {
 				t.Fatal(err)
@@ -1038,22 +1078,50 @@ func TestWorkerManagerRetriesReapAfterProvenDeadTimeout(t *testing.T) {
 	if err := os.Chmod(data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("cat")
-	stdin, err := cmd.StdinPipe()
+	reader, stdin, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Start(); err != nil {
+	defer stdin.Close()
+	path, err := exec.LookPath("cat")
+	if err != nil {
+		_ = reader.Close()
 		t.Fatal(err)
 	}
-	pid := cmd.Process.Pid
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	output, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		_ = reader.Close()
+		t.Fatal(err)
+	}
+	process, err := os.StartProcess(path, []string{path}, &os.ProcAttr{Files: []*os.File{reader, output, output}})
+	_ = reader.Close()
+	_ = output.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := process.Pid
+	reaped, released := false, false
+	t.Cleanup(func() {
+		if released {
+			return
+		}
+		if reaped {
+			if err := process.Release(); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		if err := workerfixture.StopUnproved(process); err != nil {
+			t.Error(err)
+		}
+	})
 	client, err := sessionworker.NewClient(sessionworker.Link{Socket: filepath.Join(data, "missing.sock"), Token: "missing"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
 	m := newWorkerManager("", data, "new")
+	m.reapObserver = func(int, syscall.WaitStatus) { reaped = true }
 	owned := &workerEntry{process: &sessionWorkerProcess{wait: make(chan struct{})}}
 	if err := m.reapWorkerEntry("owned-timeout", owned, time.Now()); err == nil {
 		t.Fatal("owned worker reap hid a missing exit notification")
@@ -1088,6 +1156,13 @@ func TestWorkerManagerRetriesReapAfterProvenDeadTimeout(t *testing.T) {
 	if waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil); !errors.Is(err, syscall.ECHILD) {
 		t.Fatalf("retry did not reap child: pid=%d err=%v", waited, err)
 	}
+	if !reaped {
+		t.Fatal("retry reap receipt missing")
+	}
+	if err := process.Release(); err != nil {
+		t.Fatal(err)
+	}
+	released = true
 }
 
 func TestDeletePreservesUnreachableOwnedWorker(t *testing.T) {
@@ -1195,9 +1270,11 @@ func TestWorkerManagerReconcileReapsDeadLocator(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := syntheticWorkerManager(t, data)
+	firstFixture := prepareForcedWorker(t, first)
 	if _, err := first.Launch("dead-at-restart", "opencode", data, "", ""); err != nil {
 		t.Fatal(err)
 	}
+	firstFixture.register(t, first, "dead-at-restart")
 	entry := first.entry("dead-at-restart")
 	first.Detach()
 	process, err := os.FindProcess(entry.process.pid)
@@ -1221,9 +1298,11 @@ func TestWorkerManagerReconcileReapsDeadLocator(t *testing.T) {
 	// The same cleanup applies when the only durable record is a delete and
 	// startup therefore encounters the locator through RecoverUnknown.
 	second := syntheticWorkerManager(t, data)
+	secondFixture := prepareForcedWorker(t, second)
 	if _, err := second.Launch("dead-after-delete", "pi", data, "", ""); err != nil {
 		t.Fatal(err)
 	}
+	secondFixture.register(t, second, "dead-after-delete")
 	deletedEntry := second.entry("dead-after-delete")
 	second.Detach()
 	process, err = os.FindProcess(deletedEntry.process.pid)

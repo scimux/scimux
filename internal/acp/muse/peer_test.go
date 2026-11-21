@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -1700,6 +1701,69 @@ func TestCallOrderedApplyWaitAppliedSeesClose(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ordered call stuck")
 	}
+}
+
+// Hold the dispatcher's completion of a claimed response independently of its
+// application so an ordered caller must wait for the completed sequence.
+func TestOrderedClaimedResponseWaitsForDispatchAfterClose(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := newScriptedPeer(t)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		t.Cleanup(func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		})
+		type outcome struct {
+			result json.RawMessage
+			err    error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			result, err := s.peer.call(context.Background(), "session/start", nil, true, func(result json.RawMessage) error {
+				close(entered)
+				<-release
+				return nil
+			})
+			done <- outcome{result, err}
+		}()
+		req := s.readJSON(t)
+		id := rawID(t, req)
+		s.peer.mu.Lock()
+		s.peer.pend[canonID(json.RawMessage(id))].seq = 1
+		s.peer.mu.Unlock()
+		resolved := make(chan struct{})
+		go func() {
+			s.peer.resolve(inbound{ID: json.RawMessage(id), Result: json.RawMessage(`{"ok":true}`)})
+			close(resolved)
+		}()
+		<-entered
+		if err := s.peer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case got := <-done:
+			t.Fatalf("call returned before apply completed: %+v", got)
+		default:
+		}
+		close(release)
+		<-resolved
+		synctest.Wait()
+		select {
+		case got := <-done:
+			t.Fatalf("call returned before dispatch completed: %+v", got)
+		default:
+		}
+		s.peer.advanceApplied(1)
+		got := <-done
+		if got.err != nil || string(got.result) != `{"ok":true}` {
+			t.Fatalf("claimed response after Close: result=%s err=%v", got.result, got.err)
+		}
+	})
 }
 
 func TestCallApplyPanicWinsOverCloseOnceClaimed(t *testing.T) {

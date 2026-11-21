@@ -667,6 +667,11 @@ func codexConfiguredModel() string {
 	if err != nil {
 		return ""
 	}
+	return codexConfiguredModelIn(home)
+}
+
+// codexConfiguredModelIn reads configuration from the supplied home directory.
+func codexConfiguredModelIn(home string) string {
 	b, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
 	if err != nil {
 		return ""

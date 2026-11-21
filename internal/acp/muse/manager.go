@@ -179,9 +179,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	if err := m.publish(nodeID, s); err != nil {
 		return fail(err)
 	}
-	if s.client.Live() != nil {
-		s.markExited()
-	}
+	s.reconcileDead()
 	return sid, nil
 }
 

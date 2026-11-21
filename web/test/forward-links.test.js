@@ -117,7 +117,7 @@ test('an incomplete shared source cannot replace a pending durable source', () =
 test('draft identity retains retired and unattributed data without merging it into a new chat', () => {
  const storage=memory({'scimux-draft-owner:n1':'old','scimux-draft:n1':'old text','scimux-people-draft:n1':'old discussion','scimux-prompt-sources:n1':'[{"uid":"old"}]'});
  assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);
- assert.equal(storage.getItem('scimux-draft:n1'),null);assert.equal(storage.getItem('scimux-people-draft:n1'),null);
+ assert.equal(storage.getItem('scimux-draft:n1'),null);assert.equal(storage.getItem('scimux-people-draft:n1'),'old discussion');
  const archived=JSON.parse(storage.getItem('scimux-retired-drafts:n1:old'));assert.equal(archived[0]['scimux-draft:'],'old text');assert.equal(archived[0]['scimux-people-draft:'],'old discussion');
  storage.setItem('scimux-draft:n1','new text');assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);assert.equal(storage.getItem('scimux-draft:n1'),'new text');
  const legacy=memory({'scimux-draft:n1':'unattributed'});assert.equal(links.bindDraftIdentity(legacy,'n1','fresh'),true);assert.equal(JSON.parse(legacy.getItem('scimux-retired-drafts:n1:unknown'))[0]['scimux-draft:'],'unattributed');
@@ -219,4 +219,17 @@ test('prompt preview is bounded and optional for older links', () => {
  const source={uid:'u',record:1},address={uid:'u',record:2};
  assert.equal(links.makePromptLink(source,'n',address).preview,undefined);
  assert.equal(Array.from(links.makePromptLink(source,'n',address,'🙂'.repeat(110)).preview).length,100);
+});
+
+test('rebound draft identity preserves the legacy People slot for explicit review',()=>{
+ const storage=memory({'scimux-draft-owner:n1':'old','scimux-draft:n1':'old agent','scimux-people-draft:n1':'old people'});
+ assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);
+ assert.equal(storage.getItem('scimux-people-draft:n1'),'old people');assert.equal(storage.getItem('scimux-draft:n1'),null);
+ const archived=JSON.parse(storage.getItem('scimux-retired-drafts:n1:old'))[0];assert.equal(archived['scimux-draft:'],'old agent');assert.equal(archived['scimux-people-draft:'],'old people');
+});
+
+test('repeated rebinds do not attribute a preserved legacy People draft to a later owner',()=>{
+ const storage=memory({'scimux-draft-owner:n1':'old','scimux-people-draft:n1':'old people'});
+ assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);assert.equal(links.bindDraftIdentity(storage,'n1','later'),true);assert.equal(storage.getItem('scimux-people-draft:n1'),'old people');
+ const newOwner=links.readRetiredDrafts(storage,'n1').filter(entry=>entry.owner==='new');assert.equal(newOwner.some(entry=>entry.values['scimux-people-draft:']==='old people'),false);
 });

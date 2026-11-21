@@ -10,7 +10,9 @@ For application changes, read the relevant subsystem rules as well.
 env GOTOOLCHAIN=auto CGO_ENABLED=0 go build -o scimux ./cmd/scimux # static; web is embedded
 env GOTOOLCHAIN=auto go test ./...        # unit + integration (integration needs tmux)
 env GOTOOLCHAIN=auto go test -short ./... # unit only; CI also runs the full suite
-node --test web/test/*.test.js  # browser unit suite; no browser needed
+node --test web/test/*.test.js web/test/testdata/team-e2e/unit/*.test.js  # browser unit suite; no browser needed
+go test -cover ./internal/testowned/testdata/supervisor # non-shipped supervisor command entry
+go test -cover -tags testowned_unsupported ./internal/testowned # unsupported-platform refusal
 gofmt -w $(find . -name '*.go' -type f) && go vet ./...
 go test -run TestCrossBuildTargets ./internal/app  # cross-builds every target CI ships
 go test ./internal/transcript -run=XXX -fuzz=FuzzParseLine       -fuzztime=30s
@@ -18,6 +20,29 @@ go test ./internal/app        -run=XXX -fuzz=FuzzClaudeHookStdin -fuzztime=30s
 go test ./internal/backend    -run=XXX -fuzz=FuzzProtocolHeaders -fuzztime=30s
 go test ./internal/app        -run=XXX -fuzz=FuzzWebChildConfiguration -fuzztime=30s
 ```
+
+The combined Node command runs both browser unit tests and the test-infrastructure
+unit lane. The latter tests the runner tools in `web/test/testdata/team-e2e` and
+does not require a browser or add a shipped dependency. Both lanes are required.
+
+The non-shipped Linux supervisor command reports cleanup status separately from
+`runner_exit`. `status clean` and command exit 0 mean the supervisor proved its
+owned children were reaped; the runner may still have exited nonzero or by a
+signal. A caller must check both results before accepting a run. Invalid command
+arguments and unavailable supervisor prerequisites exit 2; cleanup failures
+exit 1. After the first interrupt, ordinary runners receive one forwarded signal,
+then a kill at 20 nominal 100 ms ticks and a timeout at 40 ticks. The browser
+runner uses 6000 and 6300 ticks instead. Repeated signals do not reset the
+deadline. These are nominal ticks, not wall-clock guarantees. Descendant
+cleanup separately uses 20 and 400 ticks with 10 ms pauses; the owned-removal
+child has a separate 210-second bound.
+The optional explicit-handle adapter is only for a fresh, dedicated test
+supervisor process. On Linux amd64 and arm64 it requires `close_range` with
+`CLOSE_RANGE_CLOEXEC`; other architectures or an unavailable syscall fail
+before launching the runner. This is not a production prerequisite. The
+adapter takes ownership of the handles and closes them after the launch
+attempt, including a failed prerequisite or launch. Its runner streams are
+separate from the supervisor's cleanup proof.
 
 Keep `TMPDIR` short (prefer `/tmp`) when running the suite. Integration tests
 create Unix-domain sockets below temporary directories, and long sandbox paths
@@ -219,22 +244,95 @@ Playwright is test-only and is not a shipped dependency. Install it outside
 this repository, for example with `npm install --prefix /some/test-tools
 playwright` followed by `/some/test-tools/node_modules/.bin/playwright install
 chromium`; install the browser's system libraries as needed. Build scimux and
-an independent relay, then supply absolute paths:
+an independent relay. The complete suite also needs an unreleased
+pre-attachment compatibility client, its matching source tree, and a
+pre-attachment compatibility relay. These run as isolated synthetic seats to
+verify mixed-version behavior. Build each fixture from an immutable revision
+and retain the revisions and build hashes with the private test evidence; the
+client source must match its binary. The relay capability advertised by the
+`Scimux-Blob-Generation` header is unpublished. A relay with this support
+must ship before the attachment-capable client, following separate approval.
+Supply absolute paths:
 
 ```sh
 CGO_ENABLED=0 go build -o /some/output/scimux ./cmd/scimux
 (cd /some/scimux-team && CGO_ENABLED=0 go build -o /some/output/scimux-team ./cmd/scimux-team)
+CGO_ENABLED=0 go build -o /some/output/scimux-test-supervisor ./internal/testowned/testdata/supervisor
+mkdir -m 700 /some/private-runtime /some/private-evidence
+SCIMUX_E2E_SUPERVISOR=/some/output/scimux-test-supervisor \
+SCIMUX_E2E_RUNTIME_PARENT=/some/private-runtime \
+SCIMUX_E2E_EVIDENCE_PARENT=/some/private-evidence \
 SCIMUX_E2E_BINARY=/some/output/scimux \
 SCIMUX_TEAM_E2E_BINARY=/some/output/scimux-team \
+SCIMUX_E2E_LEGACY_BINARY=/some/output/scimux-compatibility \
+SCIMUX_E2E_LEGACY_SOURCE=/some/compatibility-client-source \
+SCIMUX_TEAM_LEGACY_E2E_BINARY=/some/output/scimux-team-legacy \
 SCIMUX_E2E_PLAYWRIGHT=/some/test-tools/node_modules/playwright \
+SCIMUX_E2E_GO=/absolute/path/to/go \
 node web/test/team-e2e.cjs
 ```
 
+The two parents must be distinct, owner-only mode-0700 directories. The
+test-only supervisor needs Linux on amd64 or arm64 with its documented
+descriptor-isolation and child-ownership prerequisites; an unsupported system
+fails before launch. The runner owns a registered runtime beneath the runtime
+parent and removes that exact runtime only after direct supervisor wait and
+clean child proof. Missing proof, changed identity, unknown contents, or cleanup
+failure preserves the affected data and reports failure; no prefix sweep is
+used. A launch that never starts is handled separately from a started runner.
+
+The evidence parent maintains a 7-day retention policy for eligible completed
+bundles, a 2 GiB aggregate limit, and a 1 GiB reservation per run. Source,
+staging, metadata, and diagnostics count toward admission and peak limits;
+diagnostics have a separate 1 MiB cap. Quota or validation failures refuse
+publication rather than discarding required evidence. Keep protected acceptance
+bundles separately from the expiry-managed parent until their review. Focused,
+failed, and interrupted evidence is diagnostic and does not establish full
+acceptance. The command exits 0 only for a successful run with proven removal;
+prerequisite failures exit 2 and unproven cleanup or evidence failure exits 1.
+Catchable interruption reports its signal exit when cleanup is proved.
+
+The codec over net.Pipe and HTTP bridge fixture requires Go 1.26 or newer. The
+bridge exercises the codec and HTTP boundary; it does not exercise WebRTC or
+the rendezvous service.
+`SCIMUX_E2E_GO` selects an absolute executable; if omitted, the runner resolves `go` from its incoming
+preflight PATH. It verifies the selected version with local toolchain
+selection, then invokes that exact executable with an offline module setting
+and the restricted fake-agent PATH. Set `GOCACHE` and `GOMODCACHE` or `GOPATH`
+to populated test caches for offline use. The manifest records its version and
+executable digest; it does not record the path.
+
 Set `PLAYWRIGHT_BROWSERS_PATH` for a custom browser location. The runner fails
 on missing prerequisites. Its default executes all implemented scenarios and
-records only assertions that passed. The printed private artifact directory
-contains a manifest, screenshots, logs, and raw browser JavaScript coverage
-with matching sources. It can contain synthetic credentials: keep it private.
+records only assertions that passed. Retained bundles contain projected
+manifests, screenshots, and browser JavaScript coverage, with each page checked
+against its matching current or compatibility client source. Runtime diagnostics
+and intermediate data can contain synthetic credentials and remain private.
+To check the retained manifest and its declared screenshot files, select the
+source-defined profile independently of the evidence:
+
+```sh
+node web/test/testdata/team-e2e/audit-evidence.cjs --profile people-attachments /path/to/private/run
+```
+
+Use `owner-agent-attachments` for the pre-attachment scenario source and
+`people-attachments` for the People attachment scenario source. The `corrective`
+profile additionally requires the stage competition journey. The auditor
+checks assertion results, scoped counter changes and the PNG signature and
+minimum header structure; it does not decode images. It emits counts and
+PASS or FAIL without evidence content. Its structural checks do not attest
+that mutable evidence is authentic or that recorded events occurred.
+The focused common file-chip contrast check also takes the source tree and a
+private artifact directory: `node web/test/testdata/team-e2e/file-contrast.cjs
+/absolute/scimux/source /absolute/private/artifacts` with
+`SCIMUX_E2E_PLAYWRIGHT` set. On Linux, run the opt-in real-browser tunnel
+interruption and timeout checks with `SCIMUX_REMOTE_CLEANUP_REAL=1 node --test
+web/test/testdata/team-e2e/test-remote-real-cleanup.mjs`; they inspect owned
+processes via `ps` and `/proc` and require the same Playwright environment.
+The standalone synthetic attachment checks `missing-file-retry.cjs`,
+`invalid-preview.cjs` and `remote-attachment-retry.cjs` accept the same source
+and private artifact directory arguments. The complete suite additionally
+tests retry and download against isolated application seats and the real relay.
 Each run owns its temporary homes, relay, fake PATH, workers and private tmux
 sockets. Teardown deletes its fixture nodes and stops owned processes on
 success, failure and catchable signals; it retains an owned socket and fails
@@ -251,22 +349,22 @@ checks both SIGINT and SIGTERM, the final manifest, coverage and private cleanup
 The same test also holds an in-flight page coverage capture across each signal
 and verifies that its scripts are collected exactly once.
 
-Use `SCIMUX_E2E_SCENARIO` for a bounded run. The available selections are
+Use `SCIMUX_E2E_SCENARIO` for a bounded run. Set it to `people-stage-competition` for the focused competing publication and stage replacement journey. The available selections are
 `ui-join`, `stale-membership`, `stale-removed-membership`, `early-native`,
 `conversation-core`, `conversation-native`, `conversation-refusal`,
 `conversation-trace`, `native-start-failure`, `recipient-boundary`,
 `received-offline`, `permission-lifecycle`, `recipient-leave`, `leave-stale`,
 `leave-empty`, `held-evidence`, `dropped-send`, `reshare-stale`, `ai-source`,
 `viewport-keyboard`, `media-contrast`, `unshared`, and `held-chat-loading`.
-Stage 1 also provides `stage1-scanner`, `stage1-unread`, and
-`stage1-owner-files`: these exercise active and stale chat selection, unread
+The selections `stage1-scanner`, `stage1-unread`, and
+`stage1-owner-files` exercise active and stale chat selection, unread
 authorship and per-card indicators, and the owner's attachment composer.
 They use the same fake agent transports, private seats, and real relay as the
 default run. `stage2-shared-actions` checks shared bubble actions, exact
 bookmark jumps with duplicate text, local annotations and destinations, and
 an explicitly sent owner prompt. `stage2-bookmark-pages` checks an exact jump
-across the shared comment page boundary with duplicate text. These Stage 1 and
-Stage 2 scenarios also run as part of the complete default suite. The bounded
+across the shared comment page boundary with duplicate text. These scenarios
+also run as part of the complete default suite. The bounded
 `recreated-chat-isolation`, `bubble-selection`, and `draft-recovery` scenarios
 exercise reused local identities, pointer selection, and explicit review of
 older saved drafts on desktop and phone. `header-focus` checks Mine and sharer
@@ -290,6 +388,12 @@ accepted from confirmed. It explicitly releases the synthetic agent; delaying
 the fake turn alone does not hold the browser's POST acknowledgement.
 `browser-lifecycle` verifies that completed desktop and phone contexts retain
 their captured coverage through retirement, including a synthetic failure.
+The bounded `people-midbody-permission` and `people-local-budget` selections
+exercise the body-read and managed-budget cases described below. Both run in
+the no-selector default suite. The manifest checks can also be run on a saved
+private artifact with `node web/test/testdata/team-e2e/verify-midbody-witness.cjs
+<artifact>/manifest.json` and `node web/test/testdata/team-e2e/verify-local-budget.cjs
+<artifact>/manifest.json` respectively.
 The default run retires completed cases after their screenshots and coverage
 are saved, while keeping each active case's actor contexts together.
 The test-only native fixture uses a marker in its private synthetic HOME to
@@ -309,6 +413,23 @@ The manifest's assertion IDs map the principal requirements to real journeys:
 | Rendering and native recovery | `media-contrast`: `media-caption-contrast`; `viewport-keyboard`: `viewport-control-target`; `held-chat-loading`: `held-chat-loading-reduced-motion`; `native-start-failure`: `native-start-failure-restores-draft` |
 | Selection and owner discussion | `stage1-scanner`: `stage1-stale-active-response-isolated`, `stage1-shared-owner-active`; `stage1-unread`: `stage1-incoming-before-own-stays-unread`, `stage1-own-comment-no-unread` |
 | Owner files and one-send arm | `stage1-owner-files`: `stage1-owner-file-delivered`, `stage1-people-file-feedback`; `conversation-core`: `stage1-owner-send-disarms` |
+| People files and copy replacement | `people-files`: its file, preview and explicit-owner-send assertions; `people-copy-replacement`: its distinct identity, stale-upload, recovery and actionable-control assertions |
+| People file recovery and unread | `people-attachment-recovery`: its retry and download assertions; `people-retired-drafts` and `people-file-unread`: their saved-draft and unread assertions |
+| Uncertain People publication | `people-uncertain-retry`: its accepted-server, identical retry, newer-draft and no-agent-dispatch assertions |
+| Competing People publication and stage replacement | `people-stage-competition`: competing production requests, exactly one relay append, explicit retry, recreated stage, matching retained manifest and bytes, surviving draft and no agent dispatch on desktop and Chromium phone emulation |
+| People upload permission change | `people-upload-permission`: its empty-file feedback, held-before-admission upload denial, partial draft retention and no-agent-dispatch assertions |
+| People upload permission change during body | `people-midbody-permission`: the test-owned forwarder uses the isolated seat's private muxer socket and waits for its direct HTTP 100 Continue, which the muxer's Go server emits on the attachment handler's first body read after admission. It sends only part of the multipart body before changing access. A read-only direct request is refused without muxer Continue; a separate frontend request demonstrates that frontend Continue and partial bytes do not establish muxer admission. The test checks the same live copy, `409 not_active`, preserved draft and earlier stage, no publication, and explicit recovery. The private socket capability is never recorded in artifacts |
+| Local managed storage budget | `people-local-budget`: an exclusive sparse synthetic file in the isolated seat's managed assets and a temporary server-owned global limit produce an actual local `507 storage_full`, with no corresponding relay blob. The test removes only that filler, retries the same stage ID explicitly, verifies exact retained bytes and one comment, and restores the settings; screenshots, source/draft isolation and zero agent counters are checked in both viewports |
+| Relay file integrity | `people-relay-blob-recovery`: a fresh synthetic relay channel has its actual stored blob removed or replaced with same-length bytes of a different SHA-256 before the reader opens it; the reader reports unavailable, then explicitly retries and verifies restored and subsequently retained bytes without agent dispatch |
+| File association isolation | `people-cross-channel-forgery`: a reader verifies two published attachments and attempts to use one channel's stage, manifest and published attachment address in the other, while both synthetic owners' Autoapproval leases remain armed and agent counters remain unchanged |
+| People image bookmarks | `people-image-bookmark`: its exact source jump, local annotation and independent capture after copy removal and reload |
+| People source lifetime | `people-source-cancel`: removal of source-derived text and file, same-bytes unrelated file, explicit send and absence of a false source link |
+
+To exercise the held-multipart forwarder's cleanup paths, run the selected
+`people-midbody-permission` scenario with `SCIMUX_E2E_MIDBODY_PROBE` set to
+`failure`, `forward-error`, or `signal`. The first two runs intentionally
+fail; the signal run reports interruption. Check the resulting manifest and
+owned process and socket cleanup. Leave this probe unset for the default run.
 
 The mapping identifies exercised behavior, not every combination of transport,
 error and lifecycle state. Tests never substitute callback invocation for a

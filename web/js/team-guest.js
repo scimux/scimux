@@ -2,6 +2,8 @@
 import { esc, md, stripAssetRefs, bubbleTitle, bubbleSpeaker } from "./format.js";
 import { pinnedOrder } from "./map-model.js";
 import { promptSourceKey } from "./storage.js";
+import { peoplePendingStorageKey, parsePeoplePendingSnapshot } from "./people-local-review.js";
+import { attachmentTileHTML, attachmentUnavailableHTML } from "./attachment-tile.js";
 import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
 
 const LIST = "/api/team/subscriptions";
@@ -9,6 +11,13 @@ const LIST = "/api/team/subscriptions";
 export function guestKey(view) {
   return [view.server, view.owner, view.chat, view.generation].join("/");
 }
+
+function copyQuery(view) {
+  return /^[0-9a-f]{32}$/.test(view?.people_copy_instance || "") ? "&copy_instance=" + view.people_copy_instance : "";
+}
+
+function copyIdentity(view) { return view?.people_copy_instance || ""; }
+function classificationKey(view) { return guestKey(view) + "\0" + copyIdentity(view); }
 
 export function guestName(server, seat, serverName, people = {}) {
   const local = people?.[server + "/" + seat];
@@ -18,8 +27,9 @@ export function guestName(server, seat, serverName, people = {}) {
 
 export function guestCapture(entry, view, names, people = {}) {
   if (entry.omitted !== undefined) return null;
-  if (!entry.text) return null;
   const comment = entry.t === undefined;
+  const files = comment ? sharedAttachmentDescriptors(entry) : [];
+  if (!entry.text && !files?.length) return null;
   if (!comment) {
     if (entry.t !== "user" && entry.t !== "assistant") return null;
   }
@@ -28,7 +38,8 @@ export function guestCapture(entry, view, names, people = {}) {
   else if (comment) {
     if (!entry.mine) role = "person";
   } else if (view.access !== "owner") role = "person";
-  const capture = { text: stripAssetRefs(entry.text), role };
+  const capture = { text: stripAssetRefs(entry.text || ""), role };
+  if (files?.length) capture.attachments = files;
   if (role === "assistant") {
     if (entry.agent) capture.agent = entry.agent;
   }
@@ -105,7 +116,7 @@ export function guestGroups(subs, servers, people = {}) {
   return result;
 }
 
-export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, toast, people = () => ({}), localNodes = () => [], panel, bubbleController = createBubbleActionController(), storage = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove, classificationTimeoutMs = 8000 }) {
+export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, toast, retainPeople, assetURL = path => path, people = () => ({}), localNodes = () => [], panel, bubbleController = createBubbleActionController(), storage = null, peopleFileStore = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove, classificationTimeoutMs = 8000 }) {
   let off = false;
   let destroyed = false;
   let answer = { subscriptions: [], servers: [], truncated: false };
@@ -129,6 +140,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   const classificationProgress = new Map();
   const classificationResults = new Map();
   const classificationCancels = new Set();
+  const retentionCancels = new Set();
   let classificationActive = 0;
 
   // This is presentation evidence, not a read position. The durable comments
@@ -159,14 +171,14 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     finally { clearTimeout(timer); classificationCancels.delete(cancel); }
   }
   async function classifyComments(view) {
-    const key = guestKey(view);
+    const key = classificationKey(view);
     const saved = classificationProgress.get(key);
     let cursor = saved && saved.seen === view.seen_comments && saved.next <= view.comments_last ? saved.next : view.seen_comments;
     if (cursor === view.seen_comments) classificationProgress.delete(key);
     let gap = false;
     try {
       for (let pageNo = 0; pageNo < 40 && cursor < view.comments_last; pageNo++) {
-        const page = await readClassificationPage(LIST + "/" + guestKey(view) + "/comments?after=" + cursor);
+        const page = await readClassificationPage(LIST + "/" + guestKey(view) + "/comments?after=" + cursor + copyQuery(view));
         if (!page || !Array.isArray(page.entries) || !Number.isSafeInteger(page.next) || page.next <= cursor) return "unknown";
         let expected = cursor + 1;
         for (const entry of page.entries) {
@@ -192,7 +204,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       classifyComments(view).then(state => {
         classificationActive--;
         classificationJobs.delete(job.key);
-        const current = answer.subscriptions.find(item => guestKey(item) === job.key);
+        const current = answer.subscriptions.find(item => classificationKey(item) === job.key);
         if (!destroyed && current && current.seen_comments === seen && current.comments_last === last) {
           const known = classificationResults.get(job.key);
           if (known && known.state === "unread" && known.seen === seen && known.last < last) state = "unread";
@@ -208,7 +220,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function classifyList(views) {
     for (const view of views) {
       if (view.state !== "live" || !view.unread || view.comments_last <= view.seen_comments || (view.access !== "owner" && view.mirror_last > view.seen_mirror)) continue;
-      const key = guestKey(view);
+      const key = classificationKey(view);
       const result = classificationResults.get(key);
       if (result && result.seen === view.seen_comments) {
         if (result.last === view.comments_last) { setCommentUnread(view, result.state); continue; }
@@ -254,13 +266,20 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       hasAnswer = true;
       answer = next;
-      const present = new Set(next.subscriptions.map(guestKey));
+      const present = new Set(next.subscriptions.map(classificationKey));
       for (const key of classificationProgress.keys()) if (!present.has(key)) classificationProgress.delete(key);
       for (const key of classificationResults.keys()) if (!present.has(key)) classificationResults.delete(key);
       classifyList(next.subscriptions);
       if (open && !next.subscriptions.some(view => guestKey(view) === open.key)) {
         readGeneration++;
         open.busy = false;
+      }
+      if (open) {
+        const current = next.subscriptions.find(view => guestKey(view) === open.key);
+        if (current && copyIdentity(current) !== copyIdentity(open.view)) {
+          close();
+          openView(current);
+        }
       }
       panel.changed();
       panel.loaded();
@@ -348,6 +367,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     startRead();
   }
   function close() {
+    for (const cancel of retentionCancels) cancel();
     if (bubbleController.current()?.kind === "shared") bubbleController.clear();
     open = null;
     readGeneration++;
@@ -450,7 +470,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     try {
       for (let n = 0; n < 40; n++) {
         const previous = current.next;
-        const result = await api(LIST + "/" + current.key + "?after=" + current.next);
+        const result = await api(LIST + "/" + current.key + "?after=" + current.next + copyQuery(current.view));
         if (!currentRead(current, gen)) return;
         current.view = result.view;
         panel.changed();
@@ -479,8 +499,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       for (let n = 0; n < 40; n++) {
         const previous = current.cnext;
-        const result = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext);
+        const result = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext + copyQuery(current.view));
         if (!currentRead(current, gen)) return;
+        const retained = await retainComments(current, result.entries);
+        if (!currentRead(current, gen)) return;
+        applyRetention(result.entries, retained);
         Object.assign(current.names, result.names);
         if (refreshPeople()) invalidateCards();
         for (const message of result.entries) {
@@ -488,7 +511,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
           const capture = guestCapture(message, current.view, current.names, knownPeople);
           const markers = capture ? panel.sharedMarkers?.(capture.team) || "" : "";
           if (capture) current.markerHTML.set("comments/" + message.seq, markers);
-          insertUpdate(guestMessageHTML(message, current.names, current.view.server, knownPeople, "", markers), [message.anchor, 1, message.seq]);
+          insertUpdate(guestMessageHTML(message, current.names, current.view.server, knownPeople, "", markers, current.key, assetURL, current.view.people_copy_instance || ""), [message.anchor, 1, message.seq]);
           current.entries.set("comments/" + message.seq, message);
           hasEntries = true;
         }
@@ -537,7 +560,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   async function markSeen(current, gen, marks) {
     try {
-      await api(LIST + "/" + current.key + "/seen", { method: "PUT", body: JSON.stringify(marks) });
+      const copy = copyQuery(current.view);
+      await api(LIST + "/" + current.key + "/seen" + (copy ? "?" + copy.slice(1) : ""), { method: "PUT", body: JSON.stringify(marks) });
       if (!currentRead(current, gen)) return;
       if (marks.mirror !== undefined) current.seen = marks.mirror;
       if (marks.comments !== undefined) current.commentsSeen = marks.comments;
@@ -666,9 +690,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!current.row) return;
     bubbleController.cancelAction();
     const capture = current.row.capture;
-    if (action === "fork") { dispatchBubbleAction("fork", capture, {fork:panel.fork ? text => panel.fork({...capture,text}) : null}); return; }
+    const attachmentFeedback = {attachmentNotice:() => toast?.("This action uses the text; attached files are not included."), unsupported:() => toast?.("This action does not support files without text.")};
+    if (action === "fork") { dispatchBubbleAction("fork", capture, {...attachmentFeedback, fork:panel.fork ? text => panel.fork({...capture,text}) : null}); return; }
     if (action === "desc") {
-      dispatchBubbleAction("desc",capture,{controller:bubbleController,choose:panel.chooseDescription,nodes:localNodes,
+      dispatchBubbleAction("desc",capture,{...attachmentFeedback,controller:bubbleController,choose:panel.chooseDescription,nodes:localNodes,
         isCurrent:() => actionView() === current && current.row?.capture === capture,
         verify:panel.chooseDescription ? async (id,instance) => {
           const state = await api("/api/state");
@@ -678,7 +703,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         describe:panel.chooseDescription ? (id,value) => panel.editDescription?.(id,value) : (_id,value) => panel.describe?.(value)});
       return;
     }
-    if (action === "copy") { dispatchBubbleAction("copy", capture, {copy:panel.copy}); return; }
+    if (action === "copy") { dispatchBubbleAction("copy", capture, {...attachmentFeedback,copy:panel.copy}); return; }
     if (action === "more" && capture.role === "person") {
       panel.choosePersonAction?.({title:"More actions", choices:[{id:"rename",label:"Rename person"}], onChoose:choice => {
         if (choice?.id === "rename" && actionView() === current && current.row?.capture === capture) editPerson();
@@ -687,9 +712,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     }
     if (action === "prompt") {
       dispatchBubbleAction("prompt", {...capture,source:capture.team}, {
+        controller:bubbleController,
         canPrepare:() => !open && ownerCurrent(current) && canPreparePrompt(capture.team),
-        prepare:panel.preparePrompt ? (text,source) => { const entry = current.row.entry;
-          panel.preparePrompt({...capture,text,...(capture.role === "person" ? {who:guestName(current.view.server,entry.author,current.names[entry.author],knownPeople)} : {})},source); } : null,
+        prepare:panel.preparePrompt ? (text,source,actionCurrent) => { const entry = current.row.entry;
+          panel.preparePrompt({...capture,text,...(capture.role === "person" ? {who:guestName(current.view.server,entry.author,current.names[entry.author],knownPeople)} : {})},source,() => actionCurrent() && actionView() === current && current.row?.capture === capture); } : null,
       });
       return;
     }
@@ -702,17 +728,23 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         exists:value => bookmarks().some(item => item.team && keys.every(key => item.team[key] === value.team[key])),
         isCurrent:() => actionView() === current && current.row?.capture === capture,
         duplicate:() => { $("guestnote").textContent = "Already bookmarked."; },
-        capture:value => ({t:new Date(now()).toISOString(),...value}),
+        capture:value => {
+          const bookmark = {t:new Date(now()).toISOString(),...value};
+          if (value.attachments?.length && typeof panel.captureBookmark !== "function") throw new Error("Attachment capture unavailable");
+          return value.attachments?.length ? panel.captureBookmark(bookmark, value) : bookmark;
+        },
+        error:() => { $("guestnote").textContent = "Bookmark capture failed — try again."; },
         commit:value => { uiMutate({k:"bookmark-add",bookmark:value}); refreshMarkers(); $("guestnote").textContent = "Bookmarked."; },
       });
     }
     if (action === "sendto") {
-      dispatchBubbleAction("sendto", {...capture, source:capture.team, shared:true}, {sendTo:openSendTo});
+      dispatchBubbleAction("sendto", {...capture, source:capture.team, shared:true}, {...attachmentFeedback,sendTo:openSendTo});
     }
   }
   async function remove(current) {
     try {
-      await api(LIST + "/" + current.key, { method: "DELETE" });
+      const instance = current.view?.people_copy_instance || "";
+      await api(LIST + "/" + current.key + (instance ? "?copy_instance=" + encodeURIComponent(instance) : ""), { method: "DELETE" });
     } catch (error) {
       if (error.status !== 404) {
         if (open !== current) return;
@@ -758,7 +790,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     readGeneration++;
     bound = false;
     destroyed = true;
+    for (const flight of peopleFileFlights) cancelPeopleFileFlight(flight, "PEOPLE_FEATURE_CLOSED");
     for (const cancel of classificationCancels) cancel();
+    for (const cancel of retentionCancels) cancel();
     classificationProgress.clear();
     classificationResults.clear();
     while (classificationQueue.length) {
@@ -813,9 +847,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     return true;
   }
   function selectActivity(id) {
-    if (open && "team/" + open.key === id) return;
-    if (open) close();
     const view = activities().find(item => "team/" + guestKey(item) === id);
+    if (open && "team/" + open.key === id && view && copyIdentity(open.view) === copyIdentity(view)) return;
+    if (open) close();
     if (view) openView(view);
   }
   function localIdentityChanged() { reconcileOwner(); }
@@ -836,6 +870,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     for (const view of relevant) {
       const key = guestKey(view);
       let current = ownerCopies.get(key);
+      if (current && copyIdentity(current.view) !== copyIdentity(view)) {
+        ownerCopies.delete(key);
+        current = null;
+        changed = true;
+      }
       if (!current) {
         current = {key, node, view, order: view.local_order, share: null, next:0, cnext:0, mirrors:[], comments:[], entries:new Map(), row:null, names:{}, busy:false, lastRead:0};
         ownerCopies.set(key,current); changed = true;
@@ -864,7 +903,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     try {
       for (let n = 0; n < 40; n++) {
         const previous = current.next;
-        const page = await api(LIST + "/" + current.key + "?after=" + current.next);
+        const page = await api(LIST + "/" + current.key + "?after=" + current.next + copyQuery(current.view));
         if (!ownerCurrent(current)) return;
         current.view = page.view; current.mirrors.push(...page.entries); current.next = page.next;
         moreMirror = page.more;
@@ -873,8 +912,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       for (let n = 0; n < 40; n++) {
         const previous = current.cnext;
-        const page = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext);
+        const page = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext + copyQuery(current.view));
         if (!ownerCurrent(current)) return;
+        const retained = await retainComments(current, page.entries);
+        if (!ownerCurrent(current)) return;
+        applyRetention(page.entries, retained);
         Object.assign(current.names, page.names); current.comments.push(...page.entries);
         for (const entry of page.entries) current.entries.set("comments/" + entry.seq, entry);
         current.cnext = page.next;
@@ -892,7 +934,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       if (before !== ownerRenderSignature(current)) { panel.ownerChanged(); painted = true; }
       if (current.cnext > current.view.seen_comments) {
-        await api(LIST + "/" + current.key + "/seen", {method:"PUT",body:JSON.stringify({comments:current.cnext})});
+        const copy = copyQuery(current.view);
+        await api(LIST + "/" + current.key + "/seen" + (copy ? "?" + copy.slice(1) : ""), {method:"PUT",body:JSON.stringify({comments:current.cnext})});
         if (ownerCurrent(current)) {
           current.view.seen_comments = current.cnext; current.view.unread = false;
           const listed = answer.subscriptions.find(view => guestKey(view) === current.key);
@@ -931,8 +974,23 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       copy.view.chat === source.chat && copy.view.generation === source.generation &&
       source.log === "comments" && copy.entries.has("comments/" + source.seq));
   }
+  function capturePromptAuthority(source, attachments) {
+    if (off || !canPreparePrompt(source) || source?.log !== "comments" || !Array.isArray(attachments) || !attachments.length) return null;
+    const node = selectedNode(), uid = selectedUID(), key = [source.server,source.owner,source.chat,source.generation].join("/");
+    const instance = localNodes().find(item => item.id === node)?.instance_id;
+    const copy = ownerCopies.get(key), entry = copy?.entries.get("comments/" + source.seq);
+    const files = entry && sharedAttachmentDescriptors(entry);
+    const fields = ["id", "sha256", "size", "name", "mime"];
+    if (!instance || !copy || !/^[0-9a-f]{32}$/.test(copy.view.people_copy_instance || "") || !files || files.length !== attachments.length || !files.every((file, index) => fields.every(field => file[field] === attachments[index]?.[field]))) return null;
+    const captured = {...source}, binding = answer.servers.find(item => item.id === source.server)?.people_file_binding || "";
+    const copyInstance = copy.view.people_copy_instance;
+    return {copyInstance, current:() => !off && selectedNode() === node && selectedUID() === uid && localNodes().find(item => item.id === node)?.instance_id === instance && ownerCopies.get(key) === copy && copy.view.people_copy_instance === copyInstance && copy.entries.get("comments/" + captured.seq) === entry && (answer.servers.find(item => item.id === captured.server)?.people_file_binding || "") === binding && canPreparePrompt(captured)};
+  }
   function ownerSnapshot() {
     return ownerSnapshots().find(copy => owner && copy.key === owner.key) || null;
+  }
+  function localReviewContexts() {
+    return ownerSnapshots().map(copy => ({key:copy.key, copyInstance:copy.view.people_copy_instance || "", binding:answer.servers.find(server => server.id === copy.view.server)?.people_file_binding || "", owner:true}));
   }
   function peopleContext() {
     const current = open || (owner && selectedNode() === owner.share.node ? owner : null);
@@ -940,28 +998,382 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const view = current.view;
     const listed = answer.subscriptions.find(item => guestKey(item) === current.key);
     const writable = item => item && item.state === "live" && (item.access === "write" || item.access === "owner");
-    return { key: current.key, owner: current === owner, writable: !off && !current.failed && !!writable(view) && !!writable(listed) && (!current.share || current.share.state === "active") };
+    const attachments = fileCapability(view);
+    const binding = answer.servers.find(item => item.id === view.server)?.people_file_binding || "";
+    return { key: current.key, binding, copyInstance:listed?.people_copy_instance || "", copyIdentityMissing:relayFileCapability(view) && !attachments, owner: current === owner, writable: !off && !current.failed && !!writable(view) && !!writable(listed) && (!current.share || current.share.state === "active"), attachments };
   }
-  async function sendPeople(key, text) {
+  function relayFileCapability(view) {
+    const limits = answer.people_attachments;
+    const relay = answer.servers.find(item => item.id === view.server);
+    return limits?.version === 1 && limits.max_file_bytes === 4194304 && limits.max_files === 16 && limits.max_total_bytes === 16777216 && relay?.people_files === "supported";
+  }
+  function fileCapability(view) {
+    const listed = answer.subscriptions.find(item => guestKey(item) === guestKey(view));
+    return relayFileCapability(view) && /^[0-9a-f]{32}$/.test(listed?.people_copy_instance || "") && view.people_copy_instance === listed.people_copy_instance;
+  }
+  async function retainComments(current, entries) {
+    if (destroyed || current.view.state !== "live" || !fileCapability(current.view) || typeof retainPeople !== "function" || !Array.isArray(entries) || !entries.some(entry => sharedAttachmentDescriptors(entry)?.length)) return;
+    const controller = new AbortController(); const cancel = () => controller.abort();
+    retentionCancels.add(cancel);
+    try { return await retainPeople(current.key, entries, controller.signal, current.view.people_copy_instance); } catch { return null; }
+    finally { retentionCancels.delete(cancel); }
+  }
+  function applyRetention(entries, result) {
+    if (!result?.files) return;
+    for (const entry of entries) {
+      const files = sharedAttachmentDescriptors(entry);
+      if (!files?.length) continue;
+      const state = Object.create(null);
+      for (const file of files) {
+        const mark = result.files[`${entry.seq}/${file.id}`];
+        state[file.id] = mark === "unkept" ? "unkept" : mark === true;
+      }
+      entry._peopleRetained = state;
+    }
+  }
+  const peopleFileFlights = new Set();
+  const peopleLegacyDecisions = new Map();
+  const peopleDurablePending = new Map();
+  const peopleRetainedPending = new Map();
+  const peopleTextPending = new Map();
+  const peopleDurableText = new Map();
+  const peopleRetainedText = new Map();
+  const peopleLegacyDecisionKey = snapshot => JSON.stringify([snapshot.storageKey, snapshot.value]);
+  const peopleRetainedKey = (key, copyInstance, instance) => JSON.stringify([key, copyInstance, instance]);
+  function peopleRecoveryScope(context, instance) {
+    const ownerIdentity = context.owner ? selectedNode() + "\0" + instance : "";
+    return "people\0" + context.key + (context.binding ? "\0binding:" + context.binding : "") + (context.copyInstance ? "\0copy:" + context.copyInstance : "") + "\0" + ownerIdentity;
+  }
+  function peopleTransactionalSnapshot(row, scope) {
+    if (!row || row.scope !== scope || row.kind !== "publication" || row.state !== "pending" || typeof row.publication !== "string" || !/^[0-9a-f]{32}:[1-9][0-9]*$/.test(row.publication) || typeof row.peopleKey !== "string" || typeof row.native !== "string" || typeof row.binding !== "string" || !Array.isArray(row.files)) throw new Error("People recovery is unavailable.");
+    const identity = {key:row.peopleKey, copyInstance:row.copyInstance, binding:row.binding, instance:row.native};
+    const value = JSON.stringify({instance:row.native, copyInstance:row.copyInstance, request:row.request});
+    const parsed = parsePeoplePendingSnapshot(value, identity);
+    if (row.files.length !== parsed.attachments.length || row.files.some((file, index) => file.id !== parsed.attachments[index])) throw new Error("People recovery is unavailable.");
+    return {...parsed, format:"transactional", scope, publication:row.publication, head:row.head, version:row.version, storageKey:"idb:" + row.publication};
+  }
+  function pendingSnapshotIdentity(snapshot) {
+    try {
+      if (!snapshot || typeof snapshot.storageKey !== "string" || typeof snapshot.value !== "string" ||
+          typeof snapshot.key !== "string" || !/^[^/:]+\/[^/:]+\/[^/:]+\/[^/:]+$/.test(snapshot.key) ||
+          typeof snapshot.copyInstance !== "string" || !/^[0-9a-f]{32}$/.test(snapshot.copyInstance) ||
+          typeof snapshot.instance !== "string" || snapshot.instance.includes(":") ||
+          typeof snapshot.binding !== "string" || snapshot.binding.includes(":")) return null;
+      const identity = {key:snapshot.key, copyInstance:snapshot.copyInstance, binding:snapshot.binding, instance:snapshot.instance};
+      const parsed = parsePeoplePendingSnapshot(snapshot.value, identity);
+      const storageKey = snapshot.format === "transactional" && typeof snapshot.publication === "string" && /^[0-9a-f]{32}:[1-9][0-9]*$/.test(snapshot.publication) && typeof snapshot.scope === "string" ? "idb:" + snapshot.publication : parsed.storageKey;
+      if (storageKey !== snapshot.storageKey || parsed.publicationKey !== snapshot.publicationKey ||
+          parsed.text !== snapshot.text || JSON.stringify(parsed.attachments) !== JSON.stringify(snapshot.attachments)) return null;
+      const flightIdentity = JSON.stringify([snapshot.format === "transactional" ? "transactional" : "legacy", snapshot.key, snapshot.copyInstance, snapshot.binding, snapshot.instance, storageKey, parsed.value, ...(snapshot.format === "transactional" ? [snapshot.scope, snapshot.publication, snapshot.head, snapshot.version] : [])]);
+      return {key:storageKey, value:parsed.value, flightIdentity};
+    } catch { return null; }
+  }
+  async function clearPeoplePending(snapshot, options) {
+    const pending = pendingSnapshotIdentity(snapshot);
+    if (!pending || !options || typeof options.current !== "function") return false;
+    if (snapshot.format === "transactional") {
+      if (options.scope !== snapshot.scope || typeof peopleFileStore?.decidePeoplePublication !== "function") return false;
+      const result = await peopleFileStore.decidePeoplePublication({scope:snapshot.scope, publication:snapshot.publication, expected:snapshot, proof:options.proof, current:options.current});
+      if (!options.current()) return false;
+      const entries = peopleDurablePending.get(snapshot.scope) || [];
+      peopleDurablePending.set(snapshot.scope, entries.filter(item => item.publication !== snapshot.publication || item.value !== snapshot.value));
+      const retainedKey = peopleRetainedKey(snapshot.key, snapshot.copyInstance, snapshot.instance);
+      peopleRetainedPending.set(retainedKey, (peopleRetainedPending.get(retainedKey) || []).filter(item => item.publication !== snapshot.publication || item.value !== snapshot.value));
+      return result;
+    }
+    if (typeof peopleFileStore?.recordLegacyPeopleDecision !== "function") return false;
+    const result = await peopleFileStore.recordLegacyPeopleDecision({scope:options.scope, snapshot, proof:options.proof, current:options.current});
+    if (!options.current()) return false;
+    if (result?.state !== "retired" && result?.state !== "completed") return false;
+    peopleLegacyDecisions.set(peopleLegacyDecisionKey(snapshot), {state:result.state, ...(result.state === "completed" ? {seq:options.proof.seq} : {})});
+    return true;
+  }
+  async function refreshPeopleRecovery(scope) {
+    if (typeof peopleFileStore?.listPeopleRecovery !== "function") throw new Error("People recovery is unavailable.");
+    const context = peopleContext(), instance = context?.owner ? localNodes().find(item => item.id === selectedNode())?.instance_id : "";
+    const result = await peopleFileStore.listPeopleRecovery(scope);
+    if (destroyed) return;
+    peopleDurablePending.set(scope, result.pending.map(row => peopleTransactionalSnapshot(row, scope)));
+    peopleDurableText.set(scope, result.textPending);
+    if (context && typeof context.copyInstance === "string" && /^[0-9a-f]{32}$/.test(context.copyInstance) && peopleRecoveryScope(context, instance) === scope && typeof peopleFileStore.listRetainedPeopleRecovery === "function") {
+      const retained = await peopleFileStore.listRetainedPeopleRecovery({peopleKey:context.key, copyInstance:context.copyInstance, native:instance});
+      if (destroyed) return;
+      peopleRetainedPending.set(peopleRetainedKey(context.key, context.copyInstance, instance), retained.map(row => peopleTransactionalSnapshot(row, row.scope)));
+    }
+    for (const row of result.legacy) {
+      if (pendingSnapshotIdentity(row.snapshot) && (row.state === "retired" || (row.state === "completed" && Number.isSafeInteger(row.seq) && row.seq > 0))) peopleLegacyDecisions.set(peopleLegacyDecisionKey(row.snapshot), {state:row.state, ...(row.state === "completed" ? {seq:row.seq} : {})});
+    }
+    return result;
+  }
+  function localTextIdentity(copy) {
+    if (destroyed || !copy || typeof copy.owner !== "boolean" || typeof copy.binding !== "string" ||
+        typeof copy.key !== "string" || !/^[0-9a-f]{32}\/[0-9a-f]{32}\/[0-9a-f]{16}\/[0-9a-f]{16}$/.test(copy.key) ||
+        typeof copy.copyInstance !== "string" || !/^(?:[0-9a-f]{32})?$/.test(copy.copyInstance)) return null;
+    const node = selectedNode(), active = peopleContext();
+    const allowed = copy.owner ? localReviewContexts().some(item => item.key === copy.key && item.copyInstance === copy.copyInstance && item.binding === copy.binding) :
+      node === "team/" + copy.key && active && !active.owner && active.key === copy.key && active.copyInstance === copy.copyInstance && active.binding === copy.binding;
+    if (!allowed) return null;
+    const native = copy.owner ? localNodes().find(item => item.id === node)?.instance_id : "";
+    if (copy.owner && (typeof native !== "string" || !native)) return null;
+    return {node, key:copy.key, copyInstance:copy.copyInstance, binding:copy.binding, owner:copy.owner, native};
+  }
+  function textIdentityKey(identity) {
+    return JSON.stringify([identity.node, identity.key, identity.copyInstance, identity.binding, identity.owner, identity.native]);
+  }
+  async function refreshRetainedPeopleRecovery(copy) {
+    if (typeof peopleFileStore?.listRetainedPeopleRecovery !== "function") throw new Error("People recovery is unavailable.");
+    const identity = localTextIdentity(copy);
+    if (!identity) throw new Error("People recovery is unavailable.");
+    const key = textIdentityKey(identity), current = () => { const latest = localTextIdentity(copy); return !!latest && textIdentityKey(latest) === key; };
+    if (copy.copyInstance) {
+      const retained = await peopleFileStore.listRetainedPeopleRecovery({peopleKey:copy.key, copyInstance:copy.copyInstance, native:identity.native});
+      if (!current()) return;
+      peopleRetainedPending.set(peopleRetainedKey(copy.key, copy.copyInstance, identity.native), retained.map(row => peopleTransactionalSnapshot(row, row.scope)));
+    }
+    const text = await peopleFileStore.listRetainedPeopleRecovery({peopleKey:copy.key, copyInstance:copy.copyInstance, native:identity.native, kind:"text-publication"});
+    if (!current()) return;
+    peopleRetainedText.set(key, text);
+  }
+  function readRetainedPeopleTextPending(copy) {
+    const identity = localTextIdentity(copy);
+    if (!identity) return {entries:[], unavailable:true};
+    const entries = peopleRetainedText.get(textIdentityKey(identity)) || [];
+    return {entries:JSON.parse(JSON.stringify(entries)), unavailable:false};
+  }
+  async function retirePeopleText(snapshot, options) {
+    if (!snapshot || typeof snapshot !== "object" || !options || typeof options.current !== "function" || typeof peopleFileStore?.retirePeopleTextPublication !== "function") throw new Error("People text recovery is unavailable.");
+    const active = peopleContext();
+    const copy = localReviewContexts().find(item => item.key === snapshot.peopleKey && item.copyInstance === snapshot.copyInstance) ||
+      (active && !active.owner && active.key === snapshot.peopleKey && active.copyInstance === snapshot.copyInstance ? active : null);
+    const identity = localTextIdentity(copy);
+    if (!identity || identity.native !== snapshot.native) throw new Error("People text recovery identity is unavailable.");
+    const key = textIdentityKey(identity), current = () => { const latest = localTextIdentity(copy); return options.current() === true && !!latest && textIdentityKey(latest) === key; };
+    if (!current()) throw new Error("People publication operation cancelled.");
+    const saved = JSON.parse(JSON.stringify(snapshot));
+    const result = await peopleFileStore.retirePeopleTextPublication({scope:saved.scope, publication:saved.publication, expected:saved, current});
+    if (current()) {
+      peopleRetainedText.set(key, (peopleRetainedText.get(key) || []).filter(row => row.publication !== saved.publication));
+      peopleDurableText.set(saved.scope, (peopleDurableText.get(saved.scope) || []).filter(row => row.publication !== saved.publication));
+    }
+    return result;
+  }
+  function cancelPeopleFileFlight(flight, code) {
+    if (flight.cancelled) return;
+    flight.cancelled = code;
+    flight.resolveCancel();
+    flight.controller.abort();
+  }
+  function fencePeoplePending(snapshot) {
+    const pending = pendingSnapshotIdentity(snapshot);
+    if (!pending) return {state:"unavailable", cancelled:0};
+    let cancelled = 0;
+    for (const flight of peopleFileFlights) {
+      if (flight.identity !== pending.flightIdentity || flight.cancelled) continue;
+      cancelled++; cancelPeopleFileFlight(flight, "PEOPLE_LOCAL_RETIRED");
+    }
+    return {state:"locally_retired", cancelled};
+  }
+  async function postPeopleFile(path, body, pending, onConfirmed) {
+    const flight = {identity:pendingSnapshotIdentity(pending).flightIdentity, controller:new AbortController(), cancelled:"", resolveCancel:null};
+    const cancellation = new Promise(resolve => { flight.resolveCancel = resolve; });
+    peopleFileFlights.add(flight);
+    const cancelled = () => Object.assign(new Error(flight.cancelled === "PEOPLE_LOCAL_RETIRED" ? "Local publication was retired." : "People feature was closed."), {code:flight.cancelled});
+    try {
+      let result;
+      try { result = await Promise.race([api(path, {method:"POST", body, signal:flight.controller.signal}), cancellation]); }
+      catch (err) { if (flight.cancelled) throw cancelled(); throw err; }
+      if (flight.cancelled) throw cancelled();
+      if (!Number.isSafeInteger(result?.seq) || result.seq <= 0) throw new Error("Comment delivery is unconfirmed");
+      return onConfirmed(result);
+    } finally { peopleFileFlights.delete(flight); }
+  }
+  async function sendPeople(key, text, attachments, instance = "", admission = null) {
     const context = peopleContext();
     const current = open || (context?.owner ? owner : null);
-    if (!current || !context || context.key !== key || !context.writable || !text.trim() || new TextEncoder().encode(text).length > 16384) throw new Error("Comments are unavailable");
-    const storageKey = "scimux-comment-retry:" + key;
-    let pending = null;
-    try { pending = JSON.parse(storage?.getItem(storageKey) || "null"); } catch {}
-    if (!pending || pending.text !== text || typeof pending.key !== "string") {
-      pending = { text, anchor: current.next, key: guestHexKey(randomBytes(8)) };
-      storage?.setItem(storageKey, JSON.stringify(pending));
+    const files = attachments !== undefined;
+    if (!current || !context || context.key !== key || !context.writable || typeof text !== "string" || (!text.trim() && !files) || new TextEncoder().encode(text).length > 16384) throw new Error("Comments are unavailable");
+    if (files) {
+      if (!context.attachments || !Array.isArray(attachments) || attachments.length < 1 || attachments.length > 16 || attachments.some(id => typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) || new Set(attachments).size !== attachments.length) throw new Error("People files are unavailable");
+      if (context.owner) {
+        const node = localNodes().find(item => item.id === selectedNode());
+        if (!node || !instance || node.instance_id !== instance) throw new Error("Chat identity is unavailable");
+      } else if (instance) throw new Error("Chat identity is unavailable");
+      const scope = peopleRecoveryScope(context, instance);
+      if (!admission || admission.scope !== scope || typeof admission.current !== "function" || typeof admission.onPrepared !== "function" || typeof peopleFileStore?.beginPeoplePublication !== "function") throw new Error("Pending message recovery is unavailable");
+      const check = () => {
+        const latest = peopleContext();
+        if (!admission.current() || !latest || !latest.writable || !latest.attachments || latest.key !== key || latest.copyInstance !== context.copyInstance || latest.binding !== context.binding || latest.owner !== context.owner || (context.owner && localNodes().find(item => item.id === selectedNode())?.instance_id !== instance)) throw Object.assign(new Error("People publication was cancelled."), {code:"PEOPLE_FEATURE_CLOSED"});
+      };
+      check();
+      const existing = await refreshPeopleRecovery(scope);
+      check();
+      const legacy = pendingPeople();
+      if (existing.pending.length || (legacy && !legacy.locallyRetired)) throw new Error("Previous file message is unconfirmed. Review and retry it before sending another.");
+      const request = {key:guestHexKey(randomBytes(8)), text, anchor:current.next, attachments:[...attachments]};
+      const admitted = await peopleFileStore.beginPeoplePublication({scope, peopleKey:key, head:admission.head, version:admission.version, copyInstance:context.copyInstance, binding:context.binding || "", native:instance, request, files:admission.files, current:() => { try { check(); return true; } catch { return false; } }});
+      const pending = {instance, copyInstance:context.copyInstance, request};
+      const pendingValue = JSON.stringify(pending), storageKey = "idb:" + admitted.publication;
+      const snapshot = {format:"transactional", scope, publication:admitted.publication, head:admission.head, version:admission.version, key, instance, copyInstance:context.copyInstance, binding:context.binding || "", storageKey, value:pendingValue, publicationKey:request.key, text, attachments:[...attachments]};
+      peopleDurablePending.set(scope, [snapshot]);
+      check(); admission.onPrepared(snapshot); check();
+      const suffix = "?copy_instance=" + encodeURIComponent(context.copyInstance) + (instance ? "&chat_instance=" + encodeURIComponent(instance) : "");
+      return postPeopleFile(LIST + "/" + key + "/comments" + suffix, JSON.stringify(pending.request), snapshot, result => {
+        if (open === current) { current.lastRead = 0; startRead(); }
+        if (owner === current) { current.lastRead = 0; startOwnerRead(); }
+        return {...result, peoplePending:snapshot};
+      });
     }
+    const native = context.owner ? (localNodes().find(item => item.id === selectedNode())?.instance_id || "") : "";
+    const scope = peopleRecoveryScope(context, native);
+    let durable = null, storageUnavailable = false;
+    if (admission?.requireDurableAdmission === true && (admission.scope !== scope || typeof admission.current !== "function" || typeof peopleFileStore?.beginPeopleTextPublication !== "function" || typeof peopleFileStore?.listPeopleRecovery !== "function")) throw new Error("People text recovery is unavailable.");
+    if (admission && admission.scope === scope && typeof admission.current === "function" && typeof peopleFileStore?.beginPeopleTextPublication === "function") {
+      const check = () => {
+        const latest = peopleContext();
+        if (destroyed || !admission.current() || (admission.preflightCurrent && !admission.preflightCurrent()) || !latest || !latest.writable || latest.key !== key || latest.copyInstance !== context.copyInstance || latest.binding !== context.binding || latest.owner !== context.owner || (context.owner && localNodes().find(item => item.id === selectedNode())?.instance_id !== native)) throw Object.assign(new Error("People publication was cancelled."), {code:"PEOPLE_FEATURE_CLOSED"});
+      };
+      try {
+        check();
+        const state = await refreshPeopleRecovery(scope);
+        check();
+        durable = state.textPending[0] || null;
+        if (durable && durable.request.text !== text) throw new Error("Previous People message is unconfirmed. Review it before sending another.");
+        if (!durable) {
+          const request = {text, anchor:current.next, key:guestHexKey(randomBytes(8))};
+          const identity = {scope, peopleKey:key, copyInstance:context.copyInstance || "", binding:context.binding || "", native, head:admission.head, version:admission.version, request};
+          const created = await peopleFileStore.beginPeopleTextPublication({...identity, current:() => { try { check(); return true; } catch { return false; } }});
+          durable = {...identity, publication:created.publication};
+          peopleDurableText.set(scope, [durable]);
+        }
+      } catch (error) {
+        if (admission.requireDurableAdmission === true || error?.code !== "PEOPLE_STORAGE_UNAVAILABLE") throw error;
+        storageUnavailable = true;
+      }
+      check();
+    }
+    let pending = durable?.request || peopleTextPending.get(scope);
+    if (pending && pending.text !== text) throw new Error("Previous People message is unconfirmed. Review it before sending another.");
+    if (!pending) {
+      pending = { text, anchor: current.next, key: guestHexKey(randomBytes(8)) };
+      peopleTextPending.set(scope, pending);
+    }
+    if (!durable && typeof toast === "function") toast("People message retry is available only while this page remains open." + (storageUnavailable ? " Previous saved retries could not be checked." : ""));
     const result = await api(LIST + "/" + key + "/comments", { method: "POST", body: JSON.stringify(pending) });
     if (!Number.isSafeInteger(result?.seq) || result.seq <= 0) throw new Error("Comment delivery is unconfirmed");
-    if (storage?.getItem(storageKey) === JSON.stringify(pending)) storage.removeItem(storageKey);
+    if (storageUnavailable) result.peopleTextStorageUnavailable = true;
+    if (peopleTextPending.get(scope) === pending) peopleTextPending.delete(scope);
+    if (durable) {
+      result.peopleTextDecision = await peopleFileStore.finishPeopleTextPublication({scope, publication:durable.publication, expected:durable, seq:result.seq, current:admission.current});
+      peopleDurableText.set(scope, (peopleDurableText.get(scope) || []).filter(item => item.publication !== durable.publication));
+    }
     if (open === current) { current.lastRead = 0; startRead(); }
     if (owner === current) { current.lastRead = 0; startOwnerRead(); }
     return result;
   }
+  function pendingPeople() {
+    const context = peopleContext();
+    if (!context?.key) return null;
+    const node = context.owner ? localNodes().find(item => item.id === selectedNode()) : null;
+    const instance = context.owner ? node?.instance_id : "";
+    if (context.owner && !instance) return null;
+    const durable = peopleDurablePending.get(peopleRecoveryScope(context, instance));
+    if (durable?.length) return durable[0];
+    if (!storage || storage.persistent === false) return null;
+    const identity = {key:context.key, instance, binding:context.binding, copyInstance:context.copyInstance};
+    const storageKey = peoplePendingStorageKey(identity);
+    const raw = storage.getItem(storageKey);
+    if (!raw) return null;
+    const snapshot = parsePeoplePendingSnapshot(raw, identity);
+    const decision = peopleLegacyDecisions.get(peopleLegacyDecisionKey(snapshot));
+    return {...snapshot, format:"legacy", ...(decision ? {locallyRetired:true, decision} : {})};
+  }
+  function pendingPeopleText() {
+    const context = peopleContext();
+    if (!context?.key) return null;
+    const native = context.owner ? (localNodes().find(item => item.id === selectedNode())?.instance_id || "") : "";
+    const scope = peopleRecoveryScope(context, native);
+    const durable = peopleDurableText.get(scope);
+    return durable?.[0] || (peopleTextPending.has(scope) ? {request:peopleTextPending.get(scope)} : null);
+  }
+  function readRetainedPeoplePending(copy) {
+    const unavailable = () => ({entries:[], unavailable:true});
+    if (destroyed || !copy || typeof copy.owner !== "boolean" || typeof copy.binding !== "string" ||
+        typeof copy.key !== "string" || !/^[0-9a-f]{32}\/[0-9a-f]{32}\/[0-9a-f]{16}\/[0-9a-f]{16}$/.test(copy.key) ||
+        typeof copy.copyInstance !== "string" || !/^[0-9a-f]{32}$/.test(copy.copyInstance)) return unavailable();
+    const active = peopleContext();
+    const allowed = copy.owner ? localReviewContexts().some(item => item.key === copy.key && item.copyInstance === copy.copyInstance && item.binding === copy.binding) :
+      selectedNode() === "team/" + copy.key && active && !active.owner && active.key === copy.key && active.copyInstance === copy.copyInstance && active.binding === copy.binding;
+    if (!allowed) return unavailable();
+    const instance = copy.owner ? localNodes().find(item => item.id === selectedNode())?.instance_id : "";
+    if (copy.owner && (typeof instance !== "string" || !instance || instance.includes(":"))) return unavailable();
+    const entries = [...(peopleRetainedPending.get(peopleRetainedKey(copy.key, copy.copyInstance, instance)) || [])];
+    if (!storage || storage.persistent === false || typeof storage.keys !== "function") return {entries, unavailable:true};
+    let keys;
+    try { keys = storage.keys(); } catch { return {entries, unavailable:true}; }
+    if (storage.persistent === false || !Array.isArray(keys) || keys.length > 4096) return {entries, unavailable:true};
+    const prefix = 'scimux-people-file-pending:' + copy.key + ':' + instance;
+    const suffix = ':copy:' + copy.copyInstance;
+    let failed = false;
+    for (const storageKey of keys) {
+      if (typeof storageKey !== 'string' || !storageKey.startsWith(prefix + ':') || !storageKey.endsWith(suffix)) continue;
+      const middle = storageKey.slice(prefix.length, -suffix.length);
+      if (middle && (!middle.startsWith(':') || middle.length === 1 || middle.slice(1).includes(':'))) continue;
+      const binding = middle ? middle.slice(1) : '';
+      try {
+        const value = storage.getItem(storageKey);
+        if (storage.persistent === false || typeof value !== 'string') { failed = true; continue; }
+        entries.push(parsePeoplePendingSnapshot(value, {key:copy.key, copyInstance:copy.copyInstance, binding, instance}));
+      } catch { failed = true; }
+    }
+    return {entries, unavailable:failed};
+  }
+  async function retryPeople() {
+    const context = peopleContext();
+    let pending = pendingPeople();
+    if (pending?.locallyRetired) throw Object.assign(new Error("This local publication was retired."), {code:"PEOPLE_LOCAL_RETIRED"});
+    if (!context || !context.writable || !pending || !context.attachments) throw new Error("Pending message recovery is unavailable.");
+    const original = pending, scope = pending.scope || peopleRecoveryScope(context, pending.instance);
+    await refreshPeopleRecovery(scope);
+    const latest = peopleContext();
+    if (!latest || !latest.writable || !latest.attachments || latest.key !== context.key || latest.copyInstance !== context.copyInstance || latest.binding !== context.binding || latest.owner !== context.owner) throw new Error("Pending message recovery is unavailable.");
+    pending = pendingPeople();
+    if (!pending || pending.locallyRetired || pending.format !== original.format || pending.storageKey !== original.storageKey || pending.value !== original.value) throw Object.assign(new Error("This local publication is unavailable or retired."), {code:"PEOPLE_LOCAL_RETIRED"});
+    const request = JSON.parse(pending.value).request;
+    const suffix = "?copy_instance=" + encodeURIComponent(context.copyInstance) + (pending.instance ? "&chat_instance=" + encodeURIComponent(pending.instance) : "");
+    return postPeopleFile(LIST + "/" + pending.key + "/comments" + suffix, JSON.stringify(request), pending, result => ({...result, peoplePending:pending}));
+  }
+  async function finishPeople(receipt, options = {}) {
+    const pending = receipt?.peoplePending;
+    if (!pending || !Number.isSafeInteger(receipt.seq) || receipt.seq < 1) return false;
+    if (options.current !== undefined && typeof options.current !== "function") return false;
+    const current = () => !destroyed && (options.current === undefined || options.current() === true);
+    if (pending.format === "legacy") {
+      const cleared = await clearPeoplePending(pending, {scope:options.scope, proof:{state:"completed", seq:receipt.seq, text:pending.text, stage_ids:pending.attachments}, current});
+      return cleared && current() ? {state:"completed", seq:receipt.seq, filesConfirmed:false, draftCleared:false} : false;
+    }
+    if (pending.format !== "transactional" || typeof peopleFileStore?.decidePeoplePublication !== "function") return false;
+    const result = await peopleFileStore.decidePeoplePublication({scope:pending.scope, publication:pending.publication, expected:pending, proof:{state:"completed", seq:receipt.seq, text:pending.text, stage_ids:pending.attachments}, current});
+    if (!current()) return false;
+    const entries = peopleDurablePending.get(pending.scope) || [];
+    peopleDurablePending.set(pending.scope, entries.filter(item => item.publication !== pending.publication || item.value !== pending.value));
+    const retainedKey = peopleRetainedKey(pending.key, pending.copyInstance, pending.instance);
+    peopleRetainedPending.set(retainedKey, (peopleRetainedPending.get(retainedKey) || []).filter(item => item.publication !== pending.publication || item.value !== pending.value));
+    return result;
+  }
   function selectedActivity() { return open ? "team/" + open.key : ""; }
-  return { tick, refresh, refreshMarkers, bind, destroy, settled, selectActivity, setOwnerShare, localIdentityChanged, ownerSnapshot, ownerSnapshots, canPreparePrompt, peopleContext, sendPeople, jumpToSource, loaded: () => hasAnswer, hasActivity: id => activities().some(view => "team/" + guestKey(view) === id), tab: { tabHTML, activities, groups, mineUnread, mineUnknown, ownerUnread, ownerUnreadStatus, open: openActivity, selected: selectedActivity } };
+  function sharedPreview(anchor) {
+    const current = open, turn = anchor?.closest?.('.turn'), rawSeq = turn?.dataset?.cseq, id = anchor?.dataset?.tkey;
+    if (off || !current || !/^[1-9][0-9]*$/.test(rawSeq || '') || !/^[0-9a-f]{16}$/.test(id || '')) return null;
+    const seq = Number(rawSeq), listed = answer.subscriptions.find(view => guestKey(view) === current.key);
+    if (!Number.isSafeInteger(seq) || !listed || !/^[0-9a-f]{32}$/.test(current.view.people_copy_instance || '') || copyIdentity(listed) !== copyIdentity(current.view)) return null;
+    const entry = current.entries.get('comments/' + seq), file = entry && sharedAttachmentDescriptors(entry)?.find(item => item.id === id);
+    if (!file || !['image/png', 'image/jpeg'].includes(file.mime) || entry._peopleRetained?.[id] === false) return null;
+    const path = '/api/team/subscriptions/' + current.key.split('/').map(encodeURIComponent).join('/') + '/attachments/' + seq + '/' + id + '?copy_instance=' + encodeURIComponent(current.view.people_copy_instance) + '&preview=1';
+    const resolved = assetURL(path);
+    if (!resolved || anchor.getAttribute?.('href') !== resolved) return null;
+    return {url:anchor.href || resolved, name:file.name};
+  }
+  return { tick, refresh, refreshMarkers, bind, destroy, settled, selectActivity, setOwnerShare, localIdentityChanged, ownerSnapshot, ownerSnapshots, localReviewContexts, readRetainedPeoplePending, readRetainedPeopleTextPending, retirePeopleText, canPreparePrompt, capturePromptAuthority, sharedPreview, peopleContext, sendPeople, pendingPeople, pendingPeopleText, retryPeople, finishPeople, clearPeoplePending, fencePeoplePending, refreshPeopleRecovery, refreshRetainedPeopleRecovery, jumpToSource, loaded: () => hasAnswer, hasActivity: id => activities().some(view => "team/" + guestKey(view) === id), tab: { tabHTML, activities, groups, mineUnread, mineUnknown, ownerUnread, ownerUnreadStatus, open: openActivity, selected: selectedActivity } };
 }
 
 export function guestStateText(view) {
@@ -980,15 +1392,48 @@ export function guestErrorText(code) {
   if (code === "storage_full") return "This computer's storage is full. Free some space to load more.";
   return "That did not work. It will be tried again.";
 }
-export function guestMessageHTML(entry, names, server = "", people = {}, ownerKey = "", markers = "") {
+export function guestMessageHTML(entry, names, server = "", people = {}, ownerKey = "", markers = "", attachmentKey = "", assetURL = path => path, copyInstance = null) {
   let cls = "turn assistant gmsg";
   let who = guestName(server, entry.author, names[entry.author], people);
   let speakerAttributes = `data-seat="${esc(entry.author)}"`;
   if (entry.mine) { cls = "turn user gmsg"; who = bubbleSpeaker({mine:true}); speakerAttributes = ""; }
   let tab = "";
-  if (entry.text) tab = ' tabindex="0"';
+  if (entry.text || entry.attachments?.length) tab = ' tabindex="0"';
+  const tiles = sharedAttachmentTiles(entry, attachmentKey || ownerKey, assetURL, copyInstance);
   return renderBubbleTurn({turnClass:cls, turnAttributes:`data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"${ownerKey ? ` data-gkey="${esc(ownerKey)}"` : ""}`,
-    bubbleAttributes:`title="${esc(entry.at)}"${tab}`, markers, speakerName:who, speakerAttributes, text:entry.text, formatText:md});
+    bubbleAttributes:`title="${esc(entry.at)}"${tab}`, markers, speakerName:who, speakerAttributes, text:entry.text || "", formatText:md, suffix:tiles});
+}
+function sharedAttachmentDescriptors(entry) {
+  if (entry.attachments === undefined) return [];
+  if (!Array.isArray(entry.attachments) || entry.attachments.length < 1 || entry.attachments.length > 16) return null;
+  const seen = new Set(); let total = 0; const files = [];
+  for (const file of entry.attachments) {
+    if (!file || typeof file.id !== "string" || !/^[0-9a-f]{16}$/.test(file.id) || seen.has(file.id) || typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256) || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > 4194304 || typeof file.name !== "string" || !file.name || new TextEncoder().encode(file.name).length > 255 || /[\\/\x00-\x1f\x7f]/.test(file.name) || file.name === "." || file.name === ".." || typeof file.mime !== "string" || !file.mime || file.mime.length > 255) return null;
+    seen.add(file.id); total += file.size;
+    if (total > 16777216) return null;
+    files.push({id:file.id, sha256:file.sha256, size:file.size, name:file.name, mime:file.mime});
+  }
+  return files;
+}
+
+function sharedAttachmentTiles(entry, key, assetURL, copyInstance) {
+  const parts = typeof key === "string" ? key.split("/") : [];
+  const files = sharedAttachmentDescriptors(entry);
+  if (files === null) return '<span role="status">Attachments unavailable.</span>';
+  if (parts.length !== 4 || !Number.isSafeInteger(entry.seq) || entry.seq < 1 || !files.length) return "";
+  const base = "/api/team/subscriptions/" + parts.map(encodeURIComponent).join("/") + "/attachments/" + entry.seq + "/";
+  const tiles = files.map(file => {
+    if (copyInstance !== null && !/^[0-9a-f]{32}$/.test(copyInstance)) return attachmentUnavailableHTML({name:file.name, download:"", status:"copy identity unavailable", escape:esc});
+    const url = base + encodeURIComponent(file.id) + (copyInstance ? "?copy_instance=" + encodeURIComponent(copyInstance) : "");
+    const image = file.mime === "image/png" || file.mime === "image/jpeg";
+    const previewURL = url + (copyInstance ? "&preview=1" : "?preview=1");
+    const download = assetURL(url), preview = image ? assetURL(previewURL) : "";
+    const unkept = entry._peopleRetained?.[file.id] === "unkept";
+    if (entry._peopleRetained?.[file.id] === false) return attachmentUnavailableHTML({name:file.name, download, retryPath:download ? "" : url, escape:esc});
+    if (!download && !preview) return attachmentUnavailableHTML({name:file.name, download, retryPath:url, status:"unavailable", escape:esc});
+    return attachmentTileHTML({name:file.name, url, previewURL, image:unkept ? false : image && !!preview, key:file.id, escape:esc, assetURL, fallbackURL:download, note:unkept ? "Not kept locally" : image && !preview ? "preview unavailable" : ""});
+  }).join("");
+  return `<div class="attrow">${tiles}</div>`;
 }
 export function guestHexKey(bytes) {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");

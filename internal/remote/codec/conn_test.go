@@ -3,6 +3,7 @@ package codec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -171,5 +172,114 @@ func TestRoundTripReturnsEarlyResponseWhileUploadIsBlocked(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestClientReadFailureFailsPendingCallsAndStream(t *testing.T) {
+	clientRead, peerWrite := io.Pipe()
+	peerRead, clientWrite := io.Pipe()
+	client := NewConn(clientRead, clientWrite, RoleInitiator)
+	ctx, cancel := context.WithCancel(context.Background())
+	peerDone := make(chan error, 1)
+	inject := make(chan struct{})
+	var release sync.Once
+	var workers sync.WaitGroup
+	readFailure := errors.New("synthetic transport read failure")
+	t.Cleanup(func() {
+		release.Do(func() { close(inject) })
+		cancel()
+		_ = client.Close()
+		_ = peerRead.Close()
+		_ = peerWrite.Close()
+		select {
+		case <-peerDone:
+		case <-time.After(2 * time.Second):
+			t.Error("synthetic peer did not stop")
+		}
+		stopped := make(chan struct{})
+		go func() { workers.Wait(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(2 * time.Second):
+			t.Error("client workers did not stop")
+		}
+	})
+	go func() {
+		peerDone <- func() error {
+			if err := peerHandshake(peerRead, peerWrite, RoleResponder); err != nil {
+				return err
+			}
+			// Read all three completed requests before opening one response stream.
+			for ends := 0; ends < 3; {
+				fr, err := decodeFrame(peerRead)
+				if err != nil {
+					return err
+				}
+				if fr.typ == typeBodyEnd {
+					ends++
+				}
+			}
+			payload, err := encodeResponsePayload("stream", 200, nil)
+			if err != nil {
+				return err
+			}
+			if err := writeRawFrame(peerWrite, typeResponse, payload); err != nil {
+				return err
+			}
+			<-inject
+			return peerWrite.CloseWithError(readFailure)
+		}()
+	}()
+	type result struct {
+		response *Response
+		err      error
+	}
+	results := make(map[string]chan result)
+	for _, id := range []string{"first", "second", "stream"} {
+		ch := make(chan result, 1)
+		results[id] = ch
+		workers.Add(1)
+		go func(id string) {
+			defer workers.Done()
+			response, err := client.RoundTrip(ctx, &Request{ID: id, Method: "GET", Path: "/api/state"})
+			ch <- result{response, err}
+		}(id)
+	}
+	var stream *Response
+	select {
+	case got := <-results["stream"]:
+		if got.err != nil || got.response == nil || got.response.Status != 200 {
+			t.Fatalf("stream response: %+v", got)
+		}
+		stream = got.response
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream response did not arrive")
+	}
+	defer stream.Body.Close()
+	streamDone := make(chan error, 1)
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		_, err := io.ReadAll(stream.Body)
+		streamDone <- err
+	}()
+	release.Do(func() { close(inject) })
+	for _, id := range []string{"first", "second"} {
+		select {
+		case got := <-results[id]:
+			if got.response != nil || !errors.Is(got.err, readFailure) {
+				t.Errorf("%s call: response=%v err=%v", id, got.response, got.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Errorf("%s call did not fail after transport read error", id)
+		}
+	}
+	select {
+	case err := <-streamDone:
+		if !errors.Is(err, readFailure) {
+			t.Errorf("stream read: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("stream did not fail after transport read error")
 	}
 }

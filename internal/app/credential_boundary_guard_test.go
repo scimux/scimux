@@ -106,7 +106,11 @@ type goLiteral struct {
 // would force those comments to talk around the thing they are about.
 func scanGoStringLiterals(t *testing.T) []goLiteral {
 	t.Helper()
-	root := repoRootFromTest(t)
+	return scanGoStringLiteralsAt(t, repoRootFromTest(t))
+}
+
+func scanGoStringLiteralsAt(t *testing.T, root string) []goLiteral {
+	t.Helper()
 	fset := token.NewFileSet()
 	var out []goLiteral
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -114,6 +118,9 @@ func scanGoStringLiterals(t *testing.T) []goLiteral {
 			return err
 		}
 		if d.IsDir() {
+			if path == filepath.Join(root, "attic") {
+				return filepath.SkipDir
+			}
 			switch d.Name() {
 			case ".git", "node_modules", "testdata":
 				return filepath.SkipDir

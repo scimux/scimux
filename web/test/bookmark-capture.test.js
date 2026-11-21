@@ -8,6 +8,24 @@ const turn = {
   text: "![chart](scimux-asset:a_1)", prov: { source: ["synthetic"] },
 };
 
+test("shared file bookmark captures the exact team source through the common store", async()=>{
+ let sent;const team={server:"a".repeat(32),owner:"b".repeat(32),chat:"c".repeat(16),generation:"d".repeat(16),log:"comments",seq:7};
+ const attachments=[{id:"0123456789abcdef",name:"synthetic.png",mime:"image/png"}];
+ const capture=createBookmarkCapture({api:async(_path,options)=>{sent=JSON.parse(options.body).source;return {text:"caption",media:{version:1,capture_id:"e".repeat(64),items:[{id:"0",key:"attachment:team:0123456789abcdef",name:"synthetic.png",state:"ready"}]}}}});
+ const result=await capture.capture({text:"caption",team},{text:"caption",team,attachments});
+ assert.deepEqual(sent,{team:{...team,attachment_ids:["0123456789abcdef"]}});assert.equal(result.media.items[0].state,"ready");
+});
+
+test("shared file bookmark rejects malformed or ambiguous source identities before capture",()=>{
+ const valid={server:'a'.repeat(32),owner:'b'.repeat(32),chat:'c'.repeat(16),generation:'d'.repeat(16),log:'comments',seq:1};
+ const capture=createBookmarkCapture({api:()=>assert.fail('invalid source must not be captured')});
+ const files=[{id:'0123456789abcdef'}];
+ for(const team of [null,{...valid,server:''},{...valid,owner:'x'},{...valid,owner:undefined},{...valid,chat:''},{...valid,generation:'x'},{...valid,generation:undefined},{...valid,log:'mirror'},{...valid,seq:0},{...valid,seq:1.5}])
+  assert.throws(()=>capture.capture({text:'synthetic'},{team,attachments:files}),/no durable source/);
+ for(const attachments of [[{}],[{id:1}],[{id:'bad'}],[...files,...files],Array.from({length:17},(_,i)=>({id:i.toString(16).padStart(16,'0')}))])
+  assert.throws(()=>capture.capture({text:'synthetic'},{team:valid,attachments}),/no durable source/);
+});
+
 test("chat wire addresses restore omitted zero ordinals for capture", async () => {
   for (const address of [{ uid:"synthetic", record:3 }, { uid:"synthetic", segment:2 }, { uid:"synthetic" }]) {
     let sent;

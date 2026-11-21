@@ -63,6 +63,7 @@ type sessionWorkerStartOptions struct {
 	stdout  io.Writer
 	stderr  io.Writer
 	timeout time.Duration
+	started func(*sessionWorkerProcess)
 }
 
 type sessionWorkerProcess struct {
@@ -72,6 +73,7 @@ type sessionWorkerProcess struct {
 	wait         chan struct{}
 	mu           sync.Mutex
 	err          error
+	state        *os.ProcessState
 }
 
 // startSessionWorker uses inherited pipes for startup configuration and the
@@ -127,9 +129,13 @@ func startSessionWorker(ctx context.Context, executable string, config sessionWo
 		err := cmd.Wait()
 		p.mu.Lock()
 		p.err = err
+		p.state = cmd.ProcessState
 		p.mu.Unlock()
 		close(p.wait)
 	}()
+	if opts.started != nil {
+		opts.started(p)
+	}
 
 	if err := json.NewEncoder(configWrite).Encode(config); err != nil {
 		_ = configWrite.Close()

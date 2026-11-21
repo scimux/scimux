@@ -44,6 +44,7 @@ type workerManager struct {
 	home         string
 	socket       string
 	startOptions sessionWorkerStartOptions
+	reapObserver func(int, syscall.WaitStatus)
 	nextID       func() string
 	// catalog reads the installed-harness catalog, which cursor launches need
 	// to turn a (model, effort) pair back into one model id. It is a field so
@@ -507,7 +508,7 @@ func (m *workerManager) reapWorkerEntry(nodeID string, entry *workerEntry, deadl
 		case <-time.After(time.Until(deadline)):
 			return errors.New("session worker: did not exit after stop")
 		}
-	} else if err := reapReattachedWorker(entry.pid, deadline); err != nil {
+	} else if err := reapReattachedWorker(entry.pid, deadline, m.reapObserver); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -524,13 +525,14 @@ func (m *workerManager) reapWorkerEntry(nodeID string, entry *workerEntry, deadl
 // Go exec.Cmd waiter vanished with the old program image. After an ordinary
 // crash/restart the worker belongs to init (or a subreaper), so ECHILD is the
 // expected no-op result.
-func reapReattachedWorker(pid int, deadline time.Time) error {
+func reapReattachedWorker(pid int, deadline time.Time, observer func(int, syscall.WaitStatus)) error {
 	if pid <= 0 {
 		return nil
 	}
 	for {
 		var status syscall.WaitStatus
 		waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
+		reportReaped(observer, pid, waited, status, err)
 		if errors.Is(err, syscall.ECHILD) || waited == pid {
 			return nil
 		}
@@ -541,6 +543,12 @@ func reapReattachedWorker(pid int, deadline time.Time) error {
 			return errors.New("session worker: did not exit after stop")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func reportReaped(observer func(int, syscall.WaitStatus), pid, waited int, status syscall.WaitStatus, err error) {
+	if observer != nil && pid > 0 && waited == pid && err == nil && (status.Exited() || status.Signaled()) {
+		observer(pid, status)
 	}
 }
 

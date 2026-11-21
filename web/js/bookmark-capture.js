@@ -18,6 +18,14 @@ function exactAddress(turn){
   return { uid: turn.uid, segment, record };
 }
 
+function exactTeamAddress(turn){
+  const team = turn?.team, files = turn?.attachments;
+  if (!team || !/^[0-9a-f]{32}$/.test(team.server || "") || !/^[0-9a-f]{32}$/.test(team.owner || "") || !/^[0-9a-f]{16}$/.test(team.chat || "") || !/^[0-9a-f]{16}$/.test(team.generation || "") || team.log !== "comments" || !Number.isSafeInteger(team.seq) || team.seq < 1 || !Array.isArray(files) || !files.length || files.length > 16) return null;
+  const ids = files.map(file => file?.id);
+  if (ids.some(id => typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) || new Set(ids).size !== ids.length) return null;
+  return {team:{server:team.server,owner:team.owner,chat:team.chat,generation:team.generation,log:team.log,seq:team.seq,attachment_ids:ids}};
+}
+
 export function createBookmarkCapture({ api }){
   if (typeof api !== "function") throw new TypeError("bookmark capture requires api");
   const pending = new Map();
@@ -26,10 +34,11 @@ export function createBookmarkCapture({ api }){
   function capture(bookmark, turn){
     const base = clone(bookmark) || {};
     if (turn && Object.prototype.hasOwnProperty.call(turn, "prov")) base.prov = clone(turn.prov);
-    if (!hasSupportedImageMarker(base.text)) return base;
-    const source = exactAddress(turn);
+    const hasTeamFiles = Array.isArray(turn?.attachments) && turn.attachments.length > 0;
+    if (!hasTeamFiles && !hasSupportedImageMarker(base.text)) return base;
+    const source = hasTeamFiles ? exactTeamAddress(turn) : exactAddress(turn);
     if (!source) throw new Error("image bookmark has no durable source address");
-    const key = `${source.uid}:${source.segment}:${source.record}`;
+    const key = hasTeamFiles ? JSON.stringify(source) : `${source.uid}:${source.segment}:${source.record}`;
     const ownGeneration = generation;
     let request = pending.get(key);
     if (!request) {

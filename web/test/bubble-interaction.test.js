@@ -1,4 +1,11 @@
 import test from 'node:test';
+test('shared file actions never silently claim attachments follow text-only operations', async()=>{
+ const {dispatchBubbleAction}=await import('../js/menu.js');const events=[];
+ const adapter={copy:text=>events.push(['copy',text]),fork:text=>events.push(['fork',text]),sendTo:value=>events.push(['sendto',value.text]),attachmentNotice:()=>events.push(['notice']),unsupported:()=>events.push(['unsupported'])};
+ const capture={text:'caption',attachments:[{id:'synthetic'}],shared:true};
+ dispatchBubbleAction('copy',capture,adapter);assert.deepEqual(events,[['notice'],['copy','caption']]);events.length=0;
+ dispatchBubbleAction('sendto',{...capture,text:''},adapter);assert.deepEqual(events,[['unsupported']]);
+});
 import assert from 'node:assert/strict';
 import { activateBubble } from '../js/menu.js';
 import * as commonBubble from '../js/menu.js';

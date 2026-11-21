@@ -25,6 +25,63 @@ func testStore(t *testing.T) *Store {
 	return New(filepath.Join(t.TempDir(), "reference-media"))
 }
 
+func TestTeamSourceCapturePreservesExactTupleAndRejectsNativeSubstitution(t *testing.T) {
+	store := New(t.TempDir())
+	source := Source{Team: &TeamSource{Server: strings.Repeat("a", 32), Owner: strings.Repeat("b", 32), Chat: strings.Repeat("c", 16), Generation: strings.Repeat("d", 16), Log: "comments", Seq: 7, AttachmentIDs: []string{"0123456789abcdef"}}}
+	media, err := store.Capture(source, "Synthetic", nil)
+	if err != nil {
+		t.Fatalf("team capture: %v", err)
+	}
+	_, _, loaded, err := store.Load(media.CaptureID)
+	if err != nil || loaded.Team == nil || loaded.Team.Seq != 7 || len(loaded.Team.AttachmentIDs) != 1 || loaded.Team.AttachmentIDs[0] != "0123456789abcdef" || loaded.UID != "" {
+		t.Fatalf("team source changed: %#v %v", loaded, err)
+	}
+	bad := source
+	bad.UID = "invented-native-uid"
+	if _, err := store.Capture(bad, "Synthetic", nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("mixed source accepted: %v", err)
+	}
+}
+
+func TestTeamSourceRejectsInvalidTupleAndDuplicateAttachments(t *testing.T) {
+	base := TeamSource{Server: strings.Repeat("a", 32), Owner: strings.Repeat("b", 32), Chat: strings.Repeat("c", 16), Generation: strings.Repeat("d", 16), Log: "comments", Seq: 7, AttachmentIDs: []string{"0123456789abcdef"}}
+	for _, mutate := range []func(*TeamSource){
+		func(s *TeamSource) { s.Server = "bad" }, func(s *TeamSource) { s.Owner = strings.Repeat("Z", 32) },
+		func(s *TeamSource) { s.Chat = "" }, func(s *TeamSource) { s.Generation = "" }, func(s *TeamSource) { s.Log = "mirror" },
+		func(s *TeamSource) { s.Seq = 0 }, func(s *TeamSource) { s.AttachmentIDs = nil },
+		func(s *TeamSource) { s.AttachmentIDs = []string{"0123456789abcdef", "0123456789abcdef"} },
+		func(s *TeamSource) { s.AttachmentIDs = []string{"../../bad"} }, func(s *TeamSource) { s.AttachmentIDs = make([]string, 17) },
+	} {
+		value := base
+		mutate(&value)
+		if _, err := New(t.TempDir()).Capture(Source{Team: &value}, "Synthetic", nil); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid team source accepted: %#v %v", value, err)
+		}
+	}
+}
+
+func TestTeamSourceCaptureRetainsAttachmentOrder(t *testing.T) {
+	store := New(t.TempDir())
+	source := Source{Team: &TeamSource{Server: strings.Repeat("a", 32), Owner: strings.Repeat("b", 32), Chat: strings.Repeat("c", 16), Generation: strings.Repeat("d", 16), Log: "comments", Seq: 7, AttachmentIDs: []string{"0123456789abcdef", "fedcba9876543210"}}}
+	first, err := store.Capture(source, "synthetic", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, loaded, err := New(store.Root).Load(first.CaptureID)
+	if err != nil || loaded.Team == nil || len(loaded.Team.AttachmentIDs) != 2 || loaded.Team.AttachmentIDs[0] != source.Team.AttachmentIDs[0] || loaded.Team.AttachmentIDs[1] != source.Team.AttachmentIDs[1] {
+		t.Fatalf("ordered source changed: %#v %v", loaded, err)
+	}
+	reversed := *source.Team
+	reversed.AttachmentIDs = []string{source.Team.AttachmentIDs[1], source.Team.AttachmentIDs[0]}
+	second, err := store.Capture(Source{Team: &reversed}, "synthetic", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.CaptureID == first.CaptureID {
+		t.Fatal("different source order shared a canonical capture identity")
+	}
+}
+
 func TestCaptureIsCanonicalDurableAndIdempotent(t *testing.T) {
 	s := testStore(t)
 	src := Source{UID: "u1", Segment: 0, Record: 0}

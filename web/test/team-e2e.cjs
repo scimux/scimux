@@ -1,10 +1,25 @@
 #!/usr/bin/env node
 // Opt-in synthetic real-browser acceptance. No test dependency ships with scimux.
 'use strict';
+const {validMidbodyProbe}=require('./testdata/team-e2e/runner-bootstrap.cjs');
+if(!validMidbodyProbe(process.env.SCIMUX_E2E_MIDBODY_PROBE,process.env.SCIMUX_E2E_SCENARIO)) {
+  console.error('midbody cleanup probe requires its selected scenario');
+  process.exitCode=2;
+  return;
+}
+if(process.env.SCIMUX_E2E_INNER!=='1') {
+  const {configureRunner,runnerExitCode,formatRunnerSummary}=require('./testdata/team-e2e/runner-bootstrap.cjs');
+  configureRunner({env:process.env,runnerPath:__filename}).then(result=>{
+    process.exitCode=runnerExitCode(result);
+    if(process.exitCode)console.error(formatRunnerSummary(result));
+  }).catch(()=>{console.error('E2E infrastructure failed');process.exitCode=1;});
+  return;
+}
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const net = require('node:net');
+const http = require('node:http');
+const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 const { spawn, execFileSync } = require('node:child_process');
 const { retire } = require('./testdata/team-e2e/tmux-cleanup.cjs');
@@ -12,41 +27,67 @@ const { selectSharedSubscription } = require('./testdata/team-e2e/share-select.c
 const { retireCompletedContexts } = require('./testdata/team-e2e/browser-lifecycle.cjs');
 const { contrastSample } = require('./testdata/team-e2e/contrast.cjs');
 const { createCleanupOnce } = require('./testdata/team-e2e/cleanup-once.cjs');
+const { installRunnerSignals,finishScenario,controlledFailureCode } = require('./testdata/team-e2e/runner-signals.cjs');
+const { summarizeNative } = require('./testdata/team-e2e/native-process-state.cjs');
 const { createPageCapture } = require('./testdata/team-e2e/capture-once.cjs');
+const { captureEvidencePage,scenarioNames } = require('./testdata/team-e2e/evidence-project.cjs');
+const { createCaptureRegistry } = require('./testdata/team-e2e/capture-identity.cjs');
+const { createDiagnosticBudget } = require('./testdata/team-e2e/diagnostic-log.cjs');
+const { verifiedCoverageEntry } = require('./testdata/team-e2e/coverage-source.cjs');
+const { verifyMidbodyWitness } = require('./testdata/team-e2e/verify-midbody-witness.cjs');
+const { verifyLocalBudget } = require('./testdata/team-e2e/verify-local-budget.cjs');
+const { prepareTunnelGo } = require('./testdata/team-e2e/tunnel-toolchain.cjs');
+const { validateInnerRuntime } = require('./testdata/team-e2e/runtime-io.cjs');
+
+const root=validateInnerRuntime(process.env);
+if(!root){console.error('E2E runtime invalid');process.exit(2);}
 
 function prerequisite(name) {
   const value = process.env[name];
   if (!value || !path.isAbsolute(value)) throw Error(`${name} must name an absolute path`);
   return fs.realpathSync(value);
 }
-let scimux, relayBin, playwright;
+let scimux, relayBin, playwright, legacyScimux, legacyRelayBin, legacySource;
 try {
   scimux = prerequisite('SCIMUX_E2E_BINARY'); relayBin = prerequisite('SCIMUX_TEAM_E2E_BINARY');
   if (scimux === relayBin) throw Error('scimux and relay must be distinct binaries');
   for (const p of [scimux, relayBin]) fs.accessSync(p, fs.constants.X_OK);
   playwright = require(prerequisite('SCIMUX_E2E_PLAYWRIGHT'));
+  if (!process.env.SCIMUX_E2E_SCENARIO || process.env.SCIMUX_E2E_SCENARIO === 'legacy-reader') {
+    legacyScimux = prerequisite('SCIMUX_E2E_LEGACY_BINARY');
+    legacySource = prerequisite('SCIMUX_E2E_LEGACY_SOURCE');
+    fs.accessSync(path.join(legacySource,'web','js','app.js'), fs.constants.R_OK);
+    fs.accessSync(legacyScimux, fs.constants.X_OK);
+    if (legacyScimux === scimux) throw Error('legacy scimux must be a distinct binary');
+  }
+  if (!process.env.SCIMUX_E2E_SCENARIO || process.env.SCIMUX_E2E_SCENARIO === 'old-relay') {
+    legacyRelayBin = prerequisite('SCIMUX_TEAM_LEGACY_E2E_BINARY');
+    fs.accessSync(legacyRelayBin, fs.constants.X_OK);
+    if (legacyRelayBin === relayBin) throw Error('legacy relay must be a distinct binary');
+  }
   if (!playwright.chromium || !playwright.devices) throw Error('Playwright Chromium is required');
   execFileSync('tmux', ['-V'], {stdio:'ignore'});
-} catch (e) { console.error('E2E prerequisite error:', e.message); process.exit(2); }
+} catch (e) { console.error('E2E prerequisite failed'); process.exit(2); }
 
 const fixtureDir = path.join(__dirname, 'testdata', 'team-e2e');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'scimux-team-e2e-'));
-fs.chmodSync(root, 0o700);
 const manifest = {version:1, scope:'implemented synthetic browser acceptance scenarios', assertions:[], artifacts:[], counters:{}, cleanup:[]};
 const seats = [], children = [], pages = [], contexts = [];
 const coverageArchive = [];
+const pageSource = new WeakMap();
 const pending = new Set();
 const heldReleases = new Set();
 let browser, relay, shutting = false, signalCode = 0;
 let cleanupProbeGate, cleanupProbeRelease;
+const controlledNativeCleanupFailure=Error('controlled native cleanup failure');
 let captureProbeGate, captureProbeRelease, captureProbeStarted=false;
 const launchBrowser=()=>playwright.chromium.launch({handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false});
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const assertID = (id, condition) => { assert.ok(condition, id); manifest.assertions.push({id, result:'pass'}); };
 const record = () => fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify(manifest, null, 2));
 const artifacts = name => path.join(root, name);
+const captureRegistry=createCaptureRegistry({write:value=>fs.promises.writeFile(path.join(root,'capture-identities.private.json'),value,{mode:0o600})});
 const jsonLines = p => fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
-const logFile = name => fs.openSync(artifacts(name + '.log'), 'a', 0o600);
+const diagnosticBudget = createDiagnosticBudget(root);
 const fixtureBin = artifacts('bin'); fs.mkdirSync(fixtureBin, {mode:0o700});
 const names = ['claude','codex','pi','pi-acp','opencode','grok','cursor-agent','dsh','muse','vibe-acp'];
 for (const name of names) {
@@ -65,9 +106,8 @@ delete baseEnv.TMUX;
 delete baseEnv.TMUX_PANE;
 function start(binary,args,env,label,stdout='ignore') {
   if(shutting)throw Error('runner shutting down');
-  const log = logFile(label);
-  const c = spawn(binary,args,{env,stdio:['ignore',stdout,log]});
-  fs.closeSync(log); children.push(c); return c;
+  const c = spawn(binary,args,{env,stdio:['ignore',stdout,'pipe']});
+  children.push(c);diagnosticBudget.attach(label,c.stderr);return c;
 }
 async function until(fn, ms, label) {
   const end = Date.now() + ms;
@@ -78,9 +118,9 @@ async function freePort() {
   const server=net.createServer(); await new Promise((resolve,reject)=>server.once('error',reject).listen(0,'127.0.0.1',resolve));
   const port=server.address().port; await new Promise(resolve=>server.close(resolve)); return port;
 }
-async function launchRelay() {
-  const dir=artifacts('relay'); fs.mkdirSync(dir,{mode:0o700});
-  const c=start(relayBin,['-state-dir',dir,'-addr','127.0.0.1:0','-name','Synthetic relay'],baseEnv,'relay','pipe');
+async function launchRelay(binary=relayBin,label='relay') {
+  const dir=artifacts(label); fs.mkdirSync(dir,{mode:0o700});
+  const c=start(binary,['-state-dir',dir,'-addr','127.0.0.1:0','-name','Synthetic relay'],baseEnv,label,'pipe');
   let out=''; c.stdout.on('data',x=>{out+=x;});
   const url=await until(()=>{if(c.exitCode!==null)throw Error('relay exited');return out.match(/scimux-team listening on (http:\/\/127\.0\.0\.1:\d+)/)?.[1];},20000,'relay startup');
   return {dir,url,child:c};
@@ -90,17 +130,18 @@ async function restartRelay() {
   let out='';c.stdout.on('data',x=>{out+=x;});relay.child=c;
   await until(()=>{if(c.exitCode!==null)throw Error('restarted relay exited');return out.includes('scimux-team listening on '+relay.url);},20000,'relay restart');
 }
-async function makeSeat(name, legacyClosed=false) {
+async function makeSeat(name, legacyClosed=false, binary=scimux) {
   const data=artifacts(name); fs.mkdirSync(data,{mode:0o700});
   if(legacyClosed)fs.writeFileSync(path.join(data,'nodes.jsonl'),JSON.stringify({type:'node',node:{id:'Synthetic-legacy-closed',title:'Synthetic legacy closed',agent:'codex',dir:data,created_at:'1999-01-01T00:00:00Z',ended_at:'2000-01-01T00:00:00Z'}})+'\n',{mode:0o600});
   const tmuxDir=path.join(data,'tmux');fs.mkdirSync(tmuxDir,{mode:0o700});
   const socket='e2e-'+name+'-'+process.pid;
   const env={...baseEnv, HOME:data, TMUX_TMPDIR:tmuxDir, SCIMUX_SYNTHETIC_COUNTER:path.join(data,'counter')};
-  const s={name,data,env,socket,socketPath:path.join(tmuxDir,'tmux-'+process.getuid(),socket), nodes:[]}; seats.push(s);
+  const s={name,data,env,binary,socket,socketPath:path.join(tmuxDir,'tmux-'+process.getuid(),socket), nodes:[]}; seats.push(s);
   const port=await freePort(); s.base='http://127.0.0.1:'+port;
-  s.child=start(scimux,['-data',data,'-addr','127.0.0.1:'+port,'-socket',socket],env,name);
+  s.child=start(binary,['-data',data,'-addr','127.0.0.1:'+port,'-socket',socket],env,name);
   const html=await until(async()=>{if(s.child.exitCode!==null)throw Error(name+' exited');try{const r=await fetch(s.base);return r.ok?await r.text():null;}catch{return null;}},20000,name+' startup');
   const match=html.match(/name="scimux-csrf" content="([^"]+)"/);assert.ok(match,'csrf meta');const token=match[1];
+  s.csrf=token;
   s.api=(route,method='GET',body,cleanupRequest=false)=>{
     if(shutting&&!cleanupRequest)return Promise.reject(Error('runner shutting down'));
     const request=(async()=>{const r=await fetch(s.base+route,{method,headers:{'Content-Type':'application/json','X-Scimux-CSRF':token,Origin:s.base},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(10000)});const text=await r.text();if(!r.ok)throw Error(`${name} ${method} ${route}: HTTP ${r.status}`);return text?JSON.parse(text):null;})();
@@ -120,10 +161,11 @@ async function pageFor(s,mode,label) {
   const width={w320:320,w390:390,w768:768}[mode];
   const context=await browser.newContext(mode==='phone'?playwright.devices['iPhone 13']:{viewport:{width:width||1280,height:900}});contexts.push(context);
   const page=await context.newPage();pages.push({page,label});
+  pageSource.set(page, s.binary === legacyScimux ? {dir:path.join(legacySource,'web','js'),version:'legacy'} : {dir:path.resolve(__dirname,'../js'),version:'current'});
   await page.coverage.startJSCoverage({resetOnNavigation:false});
   await page.goto(s.base,{waitUntil:'networkidle'});return page;
 }
-async function screenshot(p,name) { await p.screenshot({path:artifacts(name),fullPage:true});manifest.artifacts.push(name); }
+async function screenshot(p,name) { assert.ok((await captureEvidencePage({page:p,destination:artifacts(name),register:captureRegistry.register})).ok,'screenshot capture failed');manifest.artifacts.push(name); }
 async function open(p,id) {await p.locator('[data-open="'+id+'"]').click({position:{x:20,y:12}});}
 async function staleMembership(mode,a,b,r,observer) {
   const sharePath='/api/team/shares/'+b.node.id;
@@ -426,7 +468,7 @@ async function stage1Unread(mode,ownerSeat,readerSeat) {
   const watched=chats[0], writer=await pageFor(ownerSeat,mode,'stage1-unread-writer-'+mode);
   let releaseTail,tailReady,tailReleased=false;
   const tailHeld=new Promise(resolve=>releaseTail=resolve),tailRequested=new Promise(resolve=>tailReady=resolve);heldReleases.add(releaseTail);
-  await writer.route('**/api/team/subscriptions/'+watched.key+'/seen',route=>route.abort());
+  await writer.route(url=>url.pathname==='/api/team/subscriptions/'+watched.key+'/seen',route=>route.abort());
   await owner.route('**/api/team/subscriptions/'+watched.key+'/comments?after=*',async route=>{try{const response=await route.fetch();tailReady();await tailHeld;if(!owner.isClosed())await route.fulfill({response});}catch(e){if(!tailReleased&&!shutting&&!owner.isClosed())throw e;}});
   try {
     await open(writer,watched.chat.id);await writer.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
@@ -640,11 +682,22 @@ async function stage1OwnerFiles(mode,ownerSeat,readerSeat) {
   assertID('stage1-upload-error-visible-'+mode,(await rejected.locator('[role=status]').innerText()).includes('Synthetic upload limit')&&JSON.stringify(counts(ownerSeat))===JSON.stringify(beforeFailure));
   await screenshot(page,'upload-error-'+mode+'.png');await rejected.locator('.sx').click();await page.unroute(uploadPath);
   assertID('stage1-upload-error-preserves-stage-'+mode,await page.locator('#attstage .stagechip.done[title="owner-file.txt"]').count()===1);
-  await page.locator('#destinationpeople').click();let dialog=page.waitForEvent('dialog');
-  const paste=page.locator('#prompt').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people.txt',{type:'text/plain'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
-  const warning=await dialog;assertID('stage1-people-file-feedback-'+mode,/text only/i.test(warning.message()));await warning.accept();await paste;
-  dialog=page.waitForEvent('dialog');const drop=page.locator('#promptbar').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people-drop.txt',{type:'text/plain'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));});
-  const dropWarning=await dialog;assertID('stage1-people-drop-feedback-'+mode,/text only/i.test(dropWarning.message()));await dropWarning.accept();await drop;
+  await page.locator('#destinationpeople').click();
+  if(await page.locator('#attadd').isVisible()) {
+    await page.locator('#prompt').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people.txt',{type:'text/plain'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+    await page.locator('#attstage .stagechip.done[title="people.txt"]').waitFor({timeout:30000});
+    assertID('stage1-people-file-enabled-'+mode,(await page.locator('#destinationpeople').getAttribute('aria-pressed'))==='true');
+    await page.locator('#promptbar').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people-drop.txt',{type:'text/plain'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));});
+    await page.locator('#attstage .stagechip.done[title="people-drop.txt"]').waitFor({timeout:30000});
+    assertID('stage1-people-drop-enabled-'+mode,(await page.locator('#destinationpeople').getAttribute('aria-pressed'))==='true');
+    await page.locator('#attstage .stagechip[title="people.txt"] .sx').click();await page.locator('#attstage .stagechip[title="people-drop.txt"] .sx').click();
+  } else {
+    let dialog=page.waitForEvent('dialog');
+    const paste=page.locator('#prompt').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people.txt',{type:'text/plain'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+    const warning=await dialog;assertID('stage1-people-file-feedback-'+mode,/text only/i.test(warning.message()));await warning.accept();await paste;
+    dialog=page.waitForEvent('dialog');const drop=page.locator('#promptbar').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['ignore'],'people-drop.txt',{type:'text/plain'}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));});
+    const dropWarning=await dialog;assertID('stage1-people-drop-feedback-'+mode,/text only/i.test(dropWarning.message()));await dropWarning.accept();await drop;
+  }
   assertID('stage1-people-file-keeps-draft-'+mode,(await page.locator('#prompt').innerText())==='People draft '+mode);
   await page.locator('#destinationagent').click();assertID('stage1-owner-file-staged-'+mode,(await page.locator('#attstage').innerText()).includes('owner-file.txt'));
   await page.locator('#prompt').fill('Owner file prompt '+mode);
@@ -655,6 +708,1302 @@ async function stage1OwnerFiles(mode,ownerSeat,readerSeat) {
   assertID('stage1-owner-file-delivered-'+mode,body.attachments?.length===1&&sent.includes(body.attachments[0].path)&&fs.readFileSync(body.attachments[0].path,'utf8')==='synthetic delivered file'&&after.attempted===before.attempted+1&&after.controls===before.controls);
   assertID('stage1-owner-file-disarms-'+mode,(await page.locator('#destinationpeople').getAttribute('aria-pressed'))==='true'&&(await page.locator('#prompt').innerText())==='People draft '+mode);
   manifest['stage1-owner-files-'+mode]={before,after};await screenshot(page,'stage1-owner-files-'+mode+'.png');
+  // What leaves the owner's computer names the file, never the owner's local path.
+  const shared=await ownerSeat.api('/api/team/shares/'+chat.id),mirrorLog=path.join(relay.dir,'channels',ownerSeat.self,shared.uid,'mirror.jsonl');
+  const relayed=await until(()=>{try{const text=fs.readFileSync(mirrorLog,'utf8');return text.includes('Owner file prompt '+mode)?text:null;}catch{return null;}},40000,'owner file turn on relay');
+  assertID('stage1-owner-file-name-only-on-relay-'+mode,relayed.includes('[attached file: owner-file.txt]')&&!relayed.includes(ownerSeat.data)&&!relayed.includes(path.dirname(body.attachments[0].path)));
+}
+
+async function peopleCopyReplacement(mode,ownerSeat,readerSeat){
+ const chat=await node(ownerSeat,'codex','People copy replacement '+mode,'Synthetic copy replacement setup');
+ const sharePath='/api/team/shares/'+chat.id;const grant={server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]};
+ await ownerSeat.api(sharePath,'PUT',grant);const share=await ownerSeat.api(sharePath);
+ const getSub=async()=> (await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation&&x.access==='write');
+ const old=await until(getSub,40000,'original copy'),key=[old.server,old.owner,old.chat,old.generation].join('/'),base='/api/team/subscriptions/'+key;
+ assert.ok(/^[0-9a-f]{32}$/.test(old.people_copy_instance));
+ const page=await pageFor(readerSeat,mode,'people-copy-replacement-'+mode);await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+ const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};let entered,release,heldURL,first=true;
+ const reached=new Promise(r=>entered=r),hold=new Promise(r=>release=r);heldReleases.add(release);
+ await page.route('**'+base+'/attachments?*',async route=>{if(!first){await route.continue();return;}first=false;heldURL=route.request().url();entered();await hold;if(!page.isClosed())await route.continue();});
+ try{
+  await page.locator('#prompt').fill('Synthetic earlier People draft '+mode);
+  await page.locator('#attfile').setInputFiles({name:'old-copy.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic old copy bytes')});
+  await Promise.race([reached,delay(15000).then(()=>{throw Error('old upload not held')})]);
+  const stageID=new URL(heldURL).searchParams.get('stage_id');assert.equal(new URL(heldURL).searchParams.get('copy_instance'),old.people_copy_instance);
+  await readerSeat.api(base,'DELETE');await ownerSeat.api(sharePath,'PUT',grant);
+  const fresh=await until(async()=>{const sub=await getSub();return sub?.people_copy_instance&&sub.people_copy_instance!==old.people_copy_instance?sub:null;},45000,'replacement copy identity');
+  assertID('people-copy-replacement-distinct-identity-'+mode,fresh.generation===old.generation&&fresh.people_copy_instance!==old.people_copy_instance);
+  await page.waitForResponse(async response=>{if(new URL(response.url()).pathname!=='/api/team/subscriptions'||response.status()!==200)return false;try{return (await response.json()).subscriptions?.some(item=>item.chat===fresh.chat&&item.generation===fresh.generation&&item.people_copy_instance===fresh.people_copy_instance)}catch{return false}},{timeout:40000});
+  await page.locator('#draftrecovery a[download="old-copy.txt"]').waitFor({timeout:40000});
+  const reviewTarget=await page.locator('#draftrecovery a[download="old-copy.txt"]').boundingBox();
+  assertID('people-retired-download-touch-target-'+mode,reviewTarget?.height>=44);
+  if(mode==='phone'&&await page.locator('#chatback').isVisible())await page.locator('#chatback').click();
+  await page.locator('[data-open="team/'+key+'"]').waitFor({state:'visible',timeout:30000});await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  assertID('people-replacement-does-not-inherit-old-draft-'+mode,(await page.locator('#prompt').innerText())===''&&await page.locator('#attstage .stagechip[title="old-copy.txt"]').count()===0);
+  await page.locator('#prompt').fill('Synthetic replacement People draft '+mode);
+  await page.locator('#attfile').setInputFiles({name:'new-copy.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic replacement copy bytes')});await page.locator('#attstage .stagechip.done[title="new-copy.txt"]').waitFor({timeout:30000});
+  const response=page.waitForResponse(r=>r.request().method()==='POST'&&r.url()===heldURL,{timeout:30000});release();heldReleases.delete(release);
+  const stale=await response;assertID('people-old-upload-rejected-after-copy-recreation-'+mode,stale.status()===409&&(await stale.json()).error==='copy_changed');
+  const missing=await fetch(readerSeat.base+base+'/attachments/stage/'+stageID+'?copy_instance='+fresh.people_copy_instance,{headers:{Origin:readerSeat.base,'X-Scimux-CSRF':readerSeat.csrf}});
+  assertID('people-old-stage-absent-from-replacement-'+mode,missing.status===404);
+  assertID('people-new-draft-and-file-preserved-'+mode,(await page.locator('#prompt').innerText())==='Synthetic replacement People draft '+mode&&await page.locator('#attstage .stagechip[title="old-copy.txt"]').count()===0&&await page.locator('#attstage .stagechip.done[title="new-copy.txt"]').count()===1);
+  await page.locator('#prompt').click();await page.locator('#attadd').click();const picker=page.waitForEvent('filechooser');await page.locator('#attmenu [data-src=file]').click();
+  await (await picker).setFiles({name:'remove-copy.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic removable copy bytes')});
+  await page.locator('#attstage .stagechip.done[title="remove-copy.txt"]').waitFor({timeout:30000});await page.locator('#attstage .stagechip[title="remove-copy.txt"] .sx').click();
+  await page.locator('#attstage .stagechip[title="remove-copy.txt"]').waitFor({state:'detached',timeout:30000});
+  assertID('people-replacement-controls-actionable-'+mode,await page.locator('#attstage .stagechip[title="remove-copy.txt"]').count()===0&&await page.locator('#attstage .stagechip.done[title="new-copy.txt"]').count()===1);
+  await screenshot(page,'people-copy-replacement-'+mode+'.png');
+  await page.locator('#sendbtn').click();await page.locator('#msgs .gmsg').filter({hasText:'Synthetic replacement People draft '+mode}).waitFor({timeout:40000});
+  assertID('people-replacement-send-actionable-'+mode,(await page.locator('#prompt').innerText())==='');
+  assertID('people-copy-replacement-zero-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  manifest['people-copy-replacement-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+ }finally{release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
+}
+
+
+async function peopleFiles(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People files '+mode,'Synthetic People file setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const subscription=await until(async()=>{const list=await readerSeat.api('/api/team/subscriptions');return list.subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write');},40000,'People file subscription');
+  const key=[subscription.server,subscription.owner,subscription.chat,subscription.generation].join('/');
+  const owner=await pageFor(ownerSeat,mode,'people-files-owner-'+mode),reader=await pageFor(readerSeat,mode,'people-files-recipient-'+mode);
+  await open(owner,chat.id);await open(reader,'team/'+key);
+  await owner.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await reader.locator('#attadd').waitFor({state:'visible',timeout:12000});
+  await reader.locator('#attadd').click();const chooser=reader.waitForEvent('filechooser');await reader.locator('#attmenu [data-src=file]').click();
+  await (await chooser).setFiles({name:'recipient-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('recipient synthetic file')});
+  await reader.locator('#attstage .stagechip.done[title="recipient-synthetic.txt"]').waitFor({timeout:30000});
+  assertID('people-recipient-stage-'+mode,(await reader.locator('#prompt').innerText())==='');
+  await reader.locator('#sendbtn').click();
+  const incoming=owner.locator('#msgs .gmsg').filter({hasText:'recipient-synthetic.txt'}).last();await incoming.waitFor({timeout:40000});
+  const sourceSeq=Number(await incoming.getAttribute('data-cseq'));
+  assertID('people-recipient-file-only-'+mode,await incoming.locator('.attfile').count()===1);
+  const ownerCaption='Owner <synthetic> & caption '+mode,ownerName='owner-<synthetic>&.txt';
+  await owner.locator('#prompt').fill(ownerCaption);
+  await owner.locator('#attfile').setInputFiles({name:ownerName,mimeType:'text/plain',buffer:Buffer.from('owner synthetic file')});
+  await owner.locator('#attstage .stagechip.done[title="owner-<synthetic>&.txt"]').waitFor({timeout:30000});await owner.locator('#sendbtn').click();
+  const returned=reader.locator('#msgs .gmsg').filter({hasText:ownerCaption}).last();await returned.waitFor({timeout:40000});
+  assertID('people-owner-text-and-file-'+mode,await returned.getByText(ownerName,{exact:true}).count()===1);
+  const downloadPromise=reader.waitForEvent('download');await returned.getByText(ownerName,{exact:true}).click();const download=await downloadPromise;
+  assertID('people-recipient-download-'+mode,(await fs.promises.readFile(await download.path(),'utf8'))==='owner synthetic file');
+  assertID('people-files-no-implicit-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await incoming.locator('.bubble').click({position:{x:5,y:5}});await owner.locator('[data-gact=prompt]').click();
+  await owner.locator('#destinationagent[aria-pressed=true]').waitFor({timeout:30000});
+  await owner.locator('#attstage .stagechip.done[title="recipient-synthetic.txt"]').waitFor({timeout:30000});
+  await incoming.locator('[aria-label="Prepared as prompt"]').waitFor({timeout:30000});
+  assertID('people-owner-prepare-no-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner));
+  const request=owner.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/nodes/'+chat.id+'/send');
+  await owner.locator('#sendbtn').click();const sent=(await request).postDataJSON();
+  await until(()=>counts(ownerSeat).accepted===before.owner.accepted+1,30000,'explicit prepared file delivery');
+  const delivered=jsonLines(path.join(ownerSeat.data,'counter')).at(-1)?.text||'';
+  assertID('people-owner-explicit-send-'+mode,sent.attachments?.length===1&&delivered.includes(sent.attachments[0].path)&&fs.readFileSync(sent.attachments[0].path,'utf8')==='recipient synthetic file'&&counts(ownerSeat).attempted===before.owner.attempted+1&&counts(ownerSeat).controls===before.owner.controls&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  const agentFile=owner.locator('#msgs .turn.user.media .attfile').filter({hasText:'recipient-synthetic.txt'}).last();await agentFile.waitFor({timeout:40000});
+  for(const scheme of ['light','dark']) {
+    await owner.emulateMedia({colorScheme:scheme});
+    let sample,colors;try {colors=await until(async()=>{sample=await agentFile.evaluate(el=>{const style=getComputedStyle(el),box=el.getBoundingClientRect();return {connected:el.isConnected,visible:box.width>0&&box.height>0&&style.visibility==='visible',text:style.color,background:style.backgroundColor}});return contrastSample(sample)},10000,'connected file contrast');}catch(err){throw Error(`${err.message}; sample=${JSON.stringify(sample)}`)}
+    manifest['people-agent-file-contrast-'+mode+'-'+scheme]=colors;
+    assertID('people-agent-file-contrast-'+mode+'-'+scheme,colors.contrast>=4.5);
+    await screenshot(owner,'people-agent-file-contrast-'+mode+'-'+scheme+'.png');
+  }
+  await owner.emulateMedia({colorScheme:'light'});
+  const link=await until(async()=>{const ui=await ownerSeat.api('/api/ui');return (ui.forward_links||[]).find(item=>item.kind==='prompt'&&item.source?.server===subscription.server&&item.source?.owner===subscription.owner&&item.source?.chat===subscription.chat&&item.source?.generation===subscription.generation&&item.source?.log==='comments'&&item.source?.seq===sourceSeq&&item.destination?.node===chat.id);},40000,'confirmed file source link');
+  assertID('people-owner-confirmed-source-'+mode,!!link);
+  await reader.locator('#prompt').evaluate(el=>{const bytes=Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII='),c=>c.charCodeAt(0));const data=new DataTransfer();data.items.add(new File([bytes],'synthetic-screen.png',{type:'image/png'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+  await reader.locator('#attstage .stagechip.done[title="synthetic-screen.png"]').waitFor({timeout:30000});
+  await reader.locator('#sendbtn').click();
+  const imageBubble=owner.locator('#msgs .gmsg').filter({has:owner.locator('img[alt="synthetic-screen.png"]')}).last();
+  await imageBubble.waitFor({timeout:40000});
+  await until(async()=>imageBubble.locator('img').evaluate(img=>img.complete&&img.naturalWidth===2&&img.naturalHeight===2),30000,'actual received raster preview');
+  assertID('people-pasted-image-preview-'+mode,await imageBubble.locator('img').count()===1);
+  const receivedImage=reader.locator('#msgs .gmsg').filter({has:reader.locator('img[alt="synthetic-screen.png"]')}).last();await receivedImage.waitFor({timeout:40000});
+  for(const [seatPage,bubble,side] of [[reader,receivedImage,'received'],[owner,imageBubble,'owner']]) {
+    const tile=bubble.locator('[data-asset-preview]'),pagesBefore=seatPage.context().pages().length;await tile.waitFor({timeout:30000});
+    if(side==='received'&&mode==='phone'){await tile.focus();await seatPage.keyboard.press('Enter');}else await tile.click();
+    const dialog=seatPage.locator('#assetpreview');await dialog.waitFor({state:'visible',timeout:10000});
+    await until(async()=>dialog.locator('[data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2),10000,'common image preview loaded');
+    assertID('people-common-preview-no-popup-'+side+'-'+mode,seatPage.context().pages().length===pagesBefore);
+    const file=seatPage.waitForEvent('download');await dialog.locator('[data-preview-download]').click();const saved=await file;
+    assertID('people-common-preview-download-'+side+'-'+mode,(await fs.promises.readFile(await saved.path())).equals(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=','base64')));
+    await screenshot(seatPage,'people-common-preview-'+side+'-'+mode+'.png');
+    await dialog.locator('[data-preview-close]').click();await dialog.waitFor({state:'hidden',timeout:10000});
+    assertID('people-common-preview-closed-'+side+'-'+mode,await tile.evaluate(el=>document.activeElement===el));
+  }
+  await owner.locator('#attfile').setInputFiles({name:'owner-image.png',mimeType:'image/png',buffer:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=','base64')});
+  await owner.locator('#attstage .stagechip.done[title="owner-image.png"]').waitFor({timeout:30000});await owner.locator('#sendbtn').click();
+  const ownerImage=reader.locator('#msgs .gmsg').filter({has:reader.locator('img[alt="owner-image.png"]')}).last();await ownerImage.waitFor({timeout:40000});
+  await ownerImage.locator('[data-asset-preview]').click();await reader.locator('#assetpreview').waitFor({state:'visible',timeout:10000});
+  await until(async()=>reader.locator('#assetpreview [data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2),10000,'owner image received preview');
+  assertID('people-owner-image-received-preview-'+mode,await reader.locator('#assetpreview [data-preview-title]').innerText()==='owner-image.png');
+  await reader.locator('#assetpreview [data-preview-close]').click();
+  assertID('people-image-preparation-not-implicit-'+mode,counts(ownerSeat).attempted===before.owner.attempted+1&&counts(ownerSeat).accepted===before.owner.accepted+1&&counts(ownerSeat).controls===before.owner.controls);
+  await imageBubble.locator('.bubble').click({position:{x:5,y:5}});await owner.locator('[data-gact=prompt]').click();
+  await owner.locator('#destinationagent[aria-pressed=true]').waitFor({timeout:30000});await owner.locator('#attstage .stagechip.done[title="synthetic-screen.png"]').waitFor({timeout:30000});
+  assertID('people-image-prepare-no-dispatch-'+mode,counts(ownerSeat).attempted===before.owner.attempted+1);
+  const imageRequest=owner.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/nodes/'+chat.id+'/send');await owner.locator('#sendbtn').click();const imageSent=(await imageRequest).postDataJSON();
+  await until(()=>counts(ownerSeat).accepted===before.owner.accepted+2,30000,'explicit prepared image delivery');
+  const imageDelivered=jsonLines(path.join(ownerSeat.data,'counter')).at(-1)?.text||'';
+  assertID('people-image-explicit-transport-delivery-'+mode,imageSent.attachments?.length===1&&imageDelivered.includes(imageSent.attachments[0].path)&&fs.readFileSync(imageSent.attachments[0].path).equals(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=','base64'))&&counts(ownerSeat).attempted===before.owner.attempted+2);
+  const imageURL=await imageBubble.locator('img').getAttribute('src');
+  const imageSeq=Number(await imageBubble.getAttribute('data-cseq'));
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'read'}]});
+  await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='read'),30000,'People reader permission');
+  const denied=await reader.evaluate(async key=>{const token=document.querySelector('meta[name="scimux-csrf"]').content,form=new FormData();form.append('files',new File(['denied'],'denied.txt',{type:'text/plain'}));return (await fetch('/api/team/subscriptions/'+key+'/attachments',{method:'POST',headers:{'X-Scimux-CSRF':token},body:form})).status},key);
+  assertID('people-read-only-upload-denied-'+mode,denied===403);
+  await reader.locator('#gueststate').getByText(/Can view/).waitFor({timeout:30000});
+  await receivedImage.locator('[data-asset-preview]').click();await reader.locator('#assetpreview').waitFor({state:'visible',timeout:10000});
+  await until(async()=>reader.locator('#assetpreview [data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2),10000,'read-only preview loaded');
+  assertID('people-read-only-common-preview-'+mode,await reader.locator('#assetpreview [data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2));await reader.locator('#assetpreview [data-preview-close]').click();
+  const stillReadable=reader.waitForEvent('download');await returned.getByText(ownerName,{exact:true}).click();const readDownload=await stillReadable;
+  assertID('people-read-only-retained-download-'+mode,(await fs.promises.readFile(await readDownload.path(),'utf8'))==='owner synthetic file');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'DELETE');
+  await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.state==='ended'),30000,'People image share ended');
+  await reader.locator('#gueststate').getByText(/Sharing ended/).waitFor({timeout:30000});
+  await receivedImage.locator('[data-asset-preview]').click();await reader.locator('#assetpreview').waitFor({state:'visible',timeout:10000});
+  await until(async()=>reader.locator('#assetpreview [data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2),10000,'ended preview loaded');
+  assertID('people-ended-common-preview-'+mode,await reader.locator('#assetpreview [data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2));await reader.locator('#assetpreview [data-preview-close]').click();
+  const retained=await ownerSeat.api('/api/team/subscriptions/'+key+'/comments?after='+(imageSeq-1));
+  assertID('people-image-retained-after-end-'+mode,retained.entries?.some(item=>item.seq===imageSeq));
+  const savedImage=await owner.evaluate(async url=>{const response=await fetch(url);return {status:response.status,bytes:Array.from(new Uint8Array(await response.arrayBuffer()))};},imageURL);
+  assertID('people-image-bytes-retained-after-end-'+mode,savedImage.status===200&&Buffer.from(savedImage.bytes).equals(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=','base64')));
+  assertID('people-image-no-implicit-dispatch-'+mode,counts(ownerSeat).attempted===before.owner.attempted+2&&counts(ownerSeat).accepted===before.owner.accepted+2&&counts(ownerSeat).controls===before.owner.controls&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.state==='ended'),30000,'owner retained copy after share end');
+  await terminate(relay.child);assert.ok(relay.child.exitCode!==null||relay.child.signalCode!==null,'owned relay stopped');
+  try {
+  const offlineImage=await owner.evaluate(async url=>{const response=await fetch(url);return {status:response.status,bytes:Array.from(new Uint8Array(await response.arrayBuffer()))};},imageURL);
+  assertID('people-image-retained-offline-'+mode,offlineImage.status===200&&Buffer.from(offlineImage.bytes).equals(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=','base64')));
+  await receivedImage.locator('[data-asset-preview]').click();await reader.locator('#assetpreview').waitFor({state:'visible',timeout:10000});
+  await until(async()=>reader.locator('#assetpreview [data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2),10000,'offline retained preview loaded');
+  assertID('people-offline-common-preview-'+mode,await reader.locator('#assetpreview [data-preview-image]').evaluate(img=>img.complete&&img.naturalWidth===2));await reader.locator('#assetpreview [data-preview-close]').click();
+  await incoming.locator('.bubble').click({position:{x:5,y:5}});await owner.locator('[data-gact=prompt]').click();
+  await owner.locator('#attstage .stagechip.done[title="recipient-synthetic.txt"]').waitFor({timeout:30000});
+  assertID('people-retained-prepare-no-dispatch-'+mode,counts(ownerSeat).attempted===before.owner.attempted+2&&counts(ownerSeat).accepted===before.owner.accepted+2);
+  const retainedRequest=owner.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/nodes/'+chat.id+'/send');await owner.locator('#sendbtn').click();const retainedSent=(await retainedRequest).postDataJSON();
+  await until(()=>counts(ownerSeat).accepted===before.owner.accepted+3,30000,'explicit retained file delivery');
+  const retainedDelivered=jsonLines(path.join(ownerSeat.data,'counter')).at(-1)?.text||'';
+  assertID('people-retained-file-explicit-delivery-'+mode,retainedSent.attachments?.length===1&&retainedDelivered.includes(retainedSent.attachments[0].path)&&fs.readFileSync(retainedSent.attachments[0].path,'utf8')==='recipient synthetic file'&&counts(ownerSeat).attempted===before.owner.attempted+3&&counts(ownerSeat).controls===before.owner.controls&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  } finally {await restartRelay();}
+  await screenshot(reader,'people-files-recipient-'+mode+'.png');await screenshot(owner,'people-files-owner-'+mode+'.png');
+  manifest['people-files-'+mode]={key,before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+}
+
+async function peopleStalePreparation(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Stale preparation '+mode,'Synthetic stale preparation setup');const sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'stale preparation subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),owner=await pageFor(ownerSeat,mode,'stale-preparation-owner-'+mode),reader=await pageFor(readerSeat,mode,'stale-preparation-reader-'+mode);
+  await open(owner,chat.id);await open(reader,'team/'+key);await reader.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)},upload=reader.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/team/subscriptions/'+key+'/attachments');
+  await reader.locator('#attfile').setInputFiles({name:'stale-source.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic stale source')});const id=new URL((await upload).url()).searchParams.get('stage_id');
+  await reader.locator('#attstage .stagechip.done[title="stale-source.txt"]').waitFor({timeout:30000});await reader.locator('#sendbtn').click();
+  const incoming=owner.locator('#msgs .gmsg').filter({hasText:'stale-source.txt'}).last();await incoming.waitFor({timeout:40000});const seq=Number(await incoming.getAttribute('data-cseq'));
+  let release,ready,done,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve),settled=new Promise(resolve=>done=resolve);heldReleases.add(release);
+  await owner.route(url=>url.pathname==='/api/team/subscriptions/'+key+'/attachments/'+seq+'/'+id,async route=>{try{const response=await route.fetch();ready();await held;if(!owner.isClosed())await route.fulfill({response})}catch(err){if(!released&&!shutting&&!owner.isClosed())throw err}finally{done()}});
+  try {
+    await incoming.locator('.bubble').click({position:{x:5,y:5}});await owner.locator('[data-gact=prompt]').click();await Promise.race([requested,delay(30000).then(()=>{throw Error('source file preparation not held')})]);
+    await ownerSeat.api(sharePath,'DELETE');await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.chat===share.uid&&item.generation===share.generation&&item.state==='ended'),30000,'stale source ended');
+    if(mode==='phone')await owner.locator('#chatback').click();await open(owner,ownerSeat.node.id);if(mode==='phone')await owner.locator('#chatback').click();await open(owner,chat.id);
+    await owner.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});await owner.locator('#prompt').fill('Synthetic newer draft '+mode);
+    released=true;release();heldReleases.delete(release);await settled;await owner.unrouteAll({behavior:'wait'});
+    await owner.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assertID('people-stale-source-keeps-new-draft-'+mode,(await owner.locator('#prompt').innerText())==='Synthetic newer draft '+mode&&await owner.locator('#attstage .stagechip[title="stale-source.txt"]').count()===0);
+    assertID('people-stale-source-no-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    await screenshot(owner,'people-stale-preparation-'+mode+'.png');manifest['people-stale-preparation-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {released=true;release();heldReleases.delete(release);await owner.unrouteAll({behavior:'wait'});}
+}
+
+async function peopleRetainedUnavailable(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Unavailable retained '+mode,'Synthetic unavailable setup');const sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'unavailable subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),owner=await pageFor(ownerSeat,mode,'unavailable-owner-'+mode),reader=await pageFor(readerSeat,mode,'unavailable-reader-'+mode);
+  await open(owner,chat.id);await open(reader,'team/'+key);await reader.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  const request=reader.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/team/subscriptions/'+key+'/attachments');
+  await reader.locator('#attfile').setInputFiles({name:'never-retained.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic unavailable bytes')});const staged=await request,id=new URL(staged.url()).searchParams.get('stage_id');
+  await reader.locator('#attstage .stagechip.done[title="never-retained.txt"]').waitFor({timeout:30000});let blocked=0;
+  await owner.route(url=>url.pathname.startsWith('/api/team/subscriptions/'+key+'/attachments/')&&url.pathname.endsWith('/'+id),async route=>{blocked++;await route.fulfill({status:503,contentType:'application/json',body:'{"error":"synthetic_unavailable"}'})});
+  try {
+    await reader.locator('#sendbtn').click();const incoming=owner.locator('#msgs .gmsg').filter({hasText:'never-retained.txt'}).last();await incoming.getByText(/not retained/).waitFor({timeout:40000});assertID('people-unavailable-not-retained-'+mode,blocked>0);
+    await ownerSeat.api(sharePath,'DELETE');await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.chat===share.uid&&item.generation===share.generation&&item.state==='ended'),30000,'unavailable share ended');await owner.unrouteAll({behavior:'wait'});
+    await incoming.locator('.bubble').click({position:{x:5,y:5}});const warning=owner.waitForEvent('dialog'),trigger=owner.locator('[data-gact=prompt]').click();const dialog=await warning;
+    assertID('people-retained-missing-feedback-'+mode,/source file is unavailable/i.test(dialog.message()));await dialog.accept();await trigger;
+    assertID('people-retained-missing-no-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    const recipient=reader.locator('#msgs .gmsg').filter({hasText:'never-retained.txt'}).last();await recipient.locator('.bubble').click({position:{x:5,y:5}});
+    assertID('people-recipient-no-agent-action-'+mode,await reader.locator('[data-gact=prompt]').count()===0);await screenshot(owner,'people-unavailable-'+mode+'.png');
+    manifest['people-unavailable-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {await owner.unrouteAll({behavior:'wait'});}
+}
+
+async function peopleRetiredDrafts(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Retired People draft '+mode,'Synthetic retired draft setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const state=await until(async()=>{const list=await ownerSeat.api('/api/team/subscriptions'),sub=list.subscriptions.find(item=>item.chat===share.uid&&item.generation===share.generation&&item.local_node===chat.id);const server=list.servers.find(item=>item.id===ownerSeat.serverID);return sub?.people_copy_instance&&server?.people_file_binding?{sub,server}:null},40000,'retired draft copy identity');
+  const native=(await ownerSeat.api('/api/state')).nodes.find(item=>item.id===chat.id);assert.ok(native?.instance_id,'synthetic native identity');
+  const key=[state.sub.server,state.sub.owner,state.sub.chat,state.sub.generation].join('/'),scope='people\0'+key+'\0binding:'+state.server.people_file_binding+'\0'+chat.id+'\0'+native.instance_id;
+  const pendingKey='scimux-people-file-pending:'+key+':'+native.instance_id+':'+state.server.people_file_binding;
+  const page=await pageFor(ownerSeat,mode,'people-retired-draft-'+mode);await open(page,chat.id);const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await page.evaluate(async({scope,pendingKey,instance})=>{
+    const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js');const store=createBrowserPeopleFileStore(indexedDB);
+    try { await store.save(scope,'0123456789abcdef',new File(['synthetic retired bytes'],'retired-synthetic.txt',{type:'text/plain'})); } finally { store.destroy(); }
+    localStorage.setItem(pendingKey,JSON.stringify({instance,request:{text:'Synthetic unconfirmed older message',anchor:0,key:'fedcba9876543210',attachments:['0123456789abcdef']}}));
+  },{scope,pendingKey,instance:native.instance_id});
+  await page.reload({waitUntil:'networkidle'});await page.locator('#draftrecovery details summary').waitFor({timeout:40000});await page.locator('#draftrecovery details summary').click();await page.locator('#draftrecovery textarea').filter({hasText:'Synthetic unconfirmed older message'}).waitFor({timeout:40000});
+  const review=page.locator('#draftrecovery a[download="retired-synthetic.txt"]');await review.waitFor({timeout:40000});
+  assertID('people-retired-pending-review-'+mode,/unconfirmed/i.test(await page.locator('#draftrecovery').innerText()));
+  const downloadEvent=page.waitForEvent('download');await review.click();const download=await downloadEvent;
+  assertID('people-retired-file-review-'+mode,(await fs.promises.readFile(await download.path(),'utf8'))==='synthetic retired bytes');
+  assertID('people-retired-review-no-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  manifest['people-retired-draft-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(page,'people-retired-draft-'+mode+'.png');
+}
+
+async function peopleAttachmentRecovery(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People recovery '+mode,'Synthetic recovery setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'recovery subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),owner=await pageFor(ownerSeat,mode,'people-recovery-owner-'+mode),reader=await pageFor(readerSeat,mode,'people-recovery-reader-'+mode);
+  await open(owner,chat.id);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await owner.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await owner.locator('#prompt').fill('Synthetic retained retry '+mode);await owner.locator('#attfile').setInputFiles({name:'retry-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('retry synthetic bytes')});
+  await owner.locator('#attstage .stagechip.done[title="retry-synthetic.txt"]').waitFor({timeout:30000});await owner.locator('#sendbtn').click();await owner.locator('#msgs .gmsg').filter({hasText:'Synthetic retained retry '+mode}).waitFor({timeout:40000});
+  const invalid=Buffer.from('89504e470d0a1a0a','hex');await owner.locator('#attfile').setInputFiles({name:'invalid-synthetic.png',mimeType:'image/png',buffer:invalid});
+  await owner.locator('#attstage .stagechip.done[title="invalid-synthetic.png"]').waitFor({timeout:30000});await owner.locator('#sendbtn').click();
+  const comments=await until(async()=>{const list=await ownerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0');return list.entries.length>=2?list.entries:null},40000,'recovery publications');
+  const generic=comments.find(item=>item.text==='Synthetic retained retry '+mode),bad=comments.find(item=>item.attachments?.some(file=>file.name==='invalid-synthetic.png'));
+  assert.ok(generic?.attachments?.length===1&&bad?.attachments?.length===1,'synthetic associations exist');
+  const expected='/api/team/subscriptions/'+key+'/attachments/'+generic.seq+'/'+generic.attachments[0].id;let blocked=0;
+  await reader.route(url=>url.pathname===expected,async route=>{if(route.request().method()==='GET'&&blocked++===0)await route.fulfill({status:503,contentType:'application/json',body:'{"error":"synthetic_unavailable"}'});else await route.continue()});
+  try {
+    await open(reader,'team/'+key);const bubble=reader.locator('#msgs .gmsg').filter({hasText:'Synthetic retained retry '+mode}).last();
+    const retry=bubble.getByText('Retry download',{exact:true});await retry.waitFor({timeout:40000});assertID('people-missing-retry-visible-'+mode,blocked===1);
+    await reader.unrouteAll({behavior:'wait'});const downloadEvent=reader.waitForEvent('download');await retry.click();const download=await downloadEvent;
+    assertID('people-missing-retry-bytes-'+mode,(await fs.promises.readFile(await download.path(),'utf8'))==='retry synthetic bytes');
+    const badBubble=reader.locator('#msgs .gmsg').filter({hasText:'invalid-synthetic.png'}).last(),fallback=badBubble.locator('a[download]').filter({hasText:'invalid-synthetic.png'});
+    await fallback.waitFor({timeout:40000});assertID('people-preview-refused-visible-'+mode,(await fallback.innerText()).includes('preview unavailable'));
+    const badDownloadEvent=reader.waitForEvent('download');await fallback.click();const badDownload=await badDownloadEvent;
+    assertID('people-preview-refused-download-'+mode,(await fs.promises.readFile(await badDownload.path())).equals(invalid));
+    assertID('people-recovery-zero-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    await screenshot(reader,'people-recovery-'+mode+'.png');manifest['people-recovery-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {await reader.unrouteAll({behavior:'wait'});}
+}
+
+async function peopleRelayBlobRecovery(mode,kind,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People relay '+kind+' '+mode,'Synthetic relay integrity setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'relay integrity subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),owner=await pageFor(ownerSeat,mode,'relay-integrity-owner-'+kind+'-'+mode),reader=await pageFor(readerSeat,mode,'relay-integrity-reader-'+kind+'-'+mode);
+  await open(owner,chat.id);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await owner.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)},caption='Synthetic relay '+kind+' '+mode,bytes=Buffer.from('synthetic relay recovery '+kind+' '+mode);
+  await owner.locator('#prompt').fill(caption);await owner.locator('#attfile').setInputFiles({name:'relay-recovery.txt',mimeType:'text/plain',buffer:bytes});
+  await owner.locator('#attstage .stagechip.done[title="relay-recovery.txt"]').waitFor({timeout:30000});await owner.locator('#sendbtn').click();await owner.locator('#msgs .gmsg').filter({hasText:caption}).waitFor({timeout:40000});
+  const entries=await until(async()=>{const result=await ownerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0');return result.entries.find(item=>item.text===caption&&item.attachments?.length===1)},40000,'relay integrity publication');
+  const file=entries.attachments[0],digest=crypto.createHash('sha256').update(bytes).digest('hex');
+  assert.ok(/^[0-9a-f]{32}$/.test(ownerSeat.self)&&/^[0-9a-f]{16}$/.test(share.uid)&&file.sha256===digest,'synthetic relay path identity');
+  const blob=path.join(relay.dir,'channels',ownerSeat.self,share.uid,'blobs',digest);
+  assert.ok(fs.readFileSync(blob).equals(bytes),'published synthetic relay bytes');
+  if(kind==='missing')fs.unlinkSync(blob);else {const corrupted=Buffer.from(bytes);corrupted[0]^=1;assert.equal(corrupted.length,bytes.length);assert.notEqual(crypto.createHash('sha256').update(corrupted).digest('hex'),digest);fs.writeFileSync(blob,corrupted,{mode:0o600});}
+  try {
+    let failures=0;reader.on('response',response=>{const u=new URL(response.url());if(u.pathname==='/api/team/subscriptions/'+key+'/attachments/'+entries.seq+'/'+file.id&&response.status()>=400)failures++;});
+    await open(reader,'team/'+key);const bubble=reader.locator('#msgs .gmsg').filter({hasText:caption}).last(),retry=bubble.getByText('Retry download',{exact:true});
+    await retry.waitFor({timeout:40000});assertID('people-relay-'+kind+'-unavailable-'+mode,failures>0&&(await bubble.innerText()).includes('not retained'));
+    fs.writeFileSync(blob,bytes,{mode:0o600});
+    const downloadEvent=reader.waitForEvent('download');await retry.click();const download=await downloadEvent;
+    assertID('people-relay-'+kind+'-recovered-bytes-'+mode,(await fs.promises.readFile(await download.path())).equals(bytes));
+    fs.unlinkSync(blob);await reader.reload({waitUntil:'networkidle'});
+    const retained=reader.locator('#msgs .gmsg').filter({hasText:caption}).last().locator('a[download]').filter({hasText:'relay-recovery.txt'});
+    await retained.waitFor({timeout:40000});const retainedEvent=reader.waitForEvent('download');await retained.click();const retainedDownload=await retainedEvent;
+    assertID('people-relay-'+kind+'-retained-after-reload-'+mode,(await fs.promises.readFile(await retainedDownload.path())).equals(bytes));
+    assertID('people-relay-'+kind+'-zero-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    await screenshot(reader,'people-relay-'+kind+'-'+mode+'.png');manifest['people-relay-'+kind+'-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)},failures};
+  } finally {if(!fs.existsSync(blob)||!fs.readFileSync(blob).equals(bytes))fs.writeFileSync(blob,bytes,{mode:0o600});}
+}
+
+async function peopleCrossChannelForgery(mode,firstOwner,secondOwner,readerSeat) {
+  const first=await node(firstOwner,'codex','People first channel '+mode,'Synthetic first setup'),second=await node(secondOwner,'codex','People second channel '+mode,'Synthetic second setup');
+  for(const [seat,chat] of [[firstOwner,first],[secondOwner,second]])await seat.api('/api/team/shares/'+chat.id,'PUT',{server:seat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const shares=await Promise.all([[firstOwner,first],[secondOwner,second]].map(([seat,chat])=>seat.api('/api/team/shares/'+chat.id)));
+  const subs=await until(async()=>{const list=(await readerSeat.api('/api/team/subscriptions')).subscriptions;const found=shares.map((share,i)=>list.find(item=>item.owner===[firstOwner,secondOwner][i].self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'));return found.every(Boolean)?found:null},40000,'cross-channel subscriptions');
+  const keys=subs.map(sub=>[sub.server,sub.owner,sub.chat,sub.generation].join('/'));
+  const owner=await pageFor(firstOwner,mode,'cross-channel-owner-'+mode),reader=await pageFor(readerSeat,mode,'cross-channel-reader-'+mode);
+  await open(owner,first.id);await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await owner.locator('#destinationagent').click();await owner.locator('#destinationagent[aria-pressed=true]').waitFor({timeout:30000});
+  await open(reader,'team/'+keys[0]);await reader.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  for(const [seat,chat] of [[firstOwner,first],[secondOwner,second]])assert.equal((await seat.api('/api/nodes/'+chat.id+'/auto-approve','POST',{enabled:true})).enabled,true);
+  const before={first:counts(firstOwner),second:counts(secondOwner),recipient:counts(readerSeat)},path='/api/team/subscriptions/'+keys[0]+'/attachments';
+  const request=reader.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname===path);
+  await reader.locator('#attfile').setInputFiles({name:'foreign-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic foreign channel bytes')});
+  const stageID=new URL((await request).url()).searchParams.get('stage_id');await reader.locator('#attstage .stagechip.done[title="foreign-synthetic.txt"]').waitFor({timeout:30000});
+  const prior=await readerSeat.api('/api/team/subscriptions/'+keys[1]+'/comments?after=0');
+  const result=await reader.evaluate(async({key,instance,stage})=>{
+    const csrf=document.querySelector('meta[name="scimux-csrf"]').content,base='/api/team/subscriptions/'+key,query='?copy_instance='+encodeURIComponent(instance);
+    const get=await fetch(base+'/attachments/1/'+stage+query,{headers:{'X-Scimux-CSRF':csrf}});
+    const post=await fetch(base+'/comments'+query,{method:'POST',headers:{'Content-Type':'application/json','X-Scimux-CSRF':csrf},body:JSON.stringify({text:'Synthetic forged reference',anchor:0,key:'0123456789abcdef',attachments:[stage]})});
+    const manifest=await fetch(base+'/comments'+query,{method:'POST',headers:{'Content-Type':'application/json','X-Scimux-CSRF':csrf},body:JSON.stringify({text:'Synthetic forged manifest',anchor:0,key:'fedcba9876543210',people_attachments:[{id:stage,sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]})});
+    return {get:get.status,getLeaked:(await get.text()).includes('synthetic foreign channel bytes'),post:post.status,error:(await post.json()).error,manifest:manifest.status,manifestError:(await manifest.json()).error};
+  },{key:keys[1],instance:subs[1].people_copy_instance,stage:stageID});
+  const after=await readerSeat.api('/api/team/subscriptions/'+keys[1]+'/comments?after=0');
+  assertID('people-cross-channel-denied-'+mode,result.get===404&&!result.getLeaked&&result.post===409&&result.error==='stage_unavailable'&&result.manifest===400&&result.manifestError==='bad_request'&&after.entries.length===prior.entries.length);
+  assertID('people-cross-channel-zero-controls-'+mode,JSON.stringify(counts(firstOwner))===JSON.stringify(before.first)&&JSON.stringify(counts(secondOwner))===JSON.stringify(before.second)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient)&&await owner.locator('#destinationagent[aria-pressed=true]').count()===1);
+  // Independent review adds real associated A/B publications before forged durable GET.
+  await reader.locator('#sendbtn').click();
+  const publishedA=await until(async()=>{const value=await readerSeat.api('/api/team/subscriptions/'+keys[0]+'/comments?after=0');return value.entries.find(item=>item.attachments?.some(file=>file.id===stageID))},30000,'published source A');
+  if(mode==='phone')await reader.locator('#chatback').click();
+  await open(reader,'team/'+keys[1]);await reader.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  await reader.locator('#attfile').setInputFiles({name:'second-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic second channel bytes')});
+  await reader.locator('#attstage .stagechip.done[title="second-synthetic.txt"]').waitFor({timeout:30000});await reader.locator('#sendbtn').click();
+  const publishedB=await until(async()=>{const value=await readerSeat.api('/api/team/subscriptions/'+keys[1]+'/comments?after=0');return value.entries.find(item=>item.attachments?.some(file=>file.name==='second-synthetic.txt'))},30000,'published source B');
+  const associations=await reader.evaluate(async({keys,instances,a,b})=>{
+    const get=async(index,seq,id)=>{const response=await fetch('/api/team/subscriptions/'+keys[index]+'/attachments/'+seq+'/'+id+'?copy_instance='+encodeURIComponent(instances[index]));return {status:response.status,type:response.headers.get('content-type'),text:await response.text()}};
+    return {a:await get(0,a.seq,a.id),b:await get(1,b.seq,b.id),forged:await get(1,b.seq,a.id)};
+  },{keys,instances:subs.map(sub=>sub.people_copy_instance),a:{seq:publishedA.seq,id:stageID},b:{seq:publishedB.seq,id:publishedB.attachments[0].id}});
+  assertID('people-cross-channel-published-address-'+mode,associations.a.status===200&&associations.a.text==='synthetic foreign channel bytes'&&associations.b.status===200&&associations.b.text==='synthetic second channel bytes'&&associations.forged.status===404&&associations.forged.type?.startsWith('application/json')&&!associations.forged.text.includes('synthetic foreign channel bytes'));
+  const leases=await Promise.all([[firstOwner,first],[secondOwner,second]].map(([seat,chat])=>seat.api('/api/nodes/'+chat.id+'/chat')));
+  assertID('people-cross-channel-armed-owner-'+mode,leases.every(chat=>chat.auto_approve?.enabled===true)&&JSON.stringify(counts(firstOwner))===JSON.stringify(before.first)&&JSON.stringify(counts(secondOwner))===JSON.stringify(before.second)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await screenshot(reader,'people-cross-channel-'+mode+'.png');manifest['people-cross-channel-'+mode]={before,after:{first:counts(firstOwner),second:counts(secondOwner),recipient:counts(readerSeat)},result};
+}
+
+async function peopleRealTunnel(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People tunnel '+mode,'Synthetic tunnel setup');const sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'tunnel subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),page=await pageFor(readerSeat,mode,'people-real-tunnel-'+mode);await open(page,'team/'+key);
+  await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  const goEnv={...baseEnv,GOTOOLCHAIN:'local',GOPROXY:'off'};
+  const go=prepareTunnelGo({selected:process.env.SCIMUX_E2E_GO,inheritedPath:process.env.PATH,env:goEnv});
+  const goDigest=crypto.createHash('sha256').update(fs.readFileSync(go.executable)).digest('hex');
+  manifest['people-tunnel-toolchain-'+mode]={version:go.version,sha256:goDigest};
+  async function throughTunnel(readonly) {
+    const env={...goEnv,GOCACHE:process.env.GOCACHE||execFileSync(go.executable,['env','GOCACHE'],{env:goEnv,encoding:'utf8'}).trim(),GOMODCACHE:process.env.GOMODCACHE||execFileSync(go.executable,['env','GOMODCACHE'],{env:goEnv,encoding:'utf8'}).trim(),SCIMUX_TUNNEL_APP_TARGET:readerSeat.base,SCIMUX_TUNNEL_APP_KEY:key,SCIMUX_TUNNEL_APP_COPY_INSTANCE:sub.people_copy_instance,SCIMUX_TUNNEL_APP_CSRF:readerSeat.csrf,SCIMUX_TUNNEL_APP_READONLY:readonly?'1':'0'};
+    const child=start(go.executable,['test','./internal/remote','-run','^TestPeopleRealAppThroughCodecPipeHTTPBridge$','-count=1','-v'],env,'people-tunnel-'+mode+'-'+readonly,'pipe');let output='';child.stdout.on('data',chunk=>{if(output.length<65536)output+=chunk});
+    const status=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}))});
+    assert.equal(status.code,0,'real app tunnel integration failed: '+output);assert.equal(status.signal,null);
+    assert.match(output,/--- PASS: TestPeopleRealAppThroughCodecPipeHTTPBridge(?:\s|$)/,'codec pipe HTTP bridge test must run without skipping');
+    manifest['people-tunnel-child-'+mode+'-'+readonly]={test:'TestPeopleRealAppThroughCodecPipeHTTPBridge',passed:true,toolchainSha256:goDigest};
+  }
+  await throughTunnel(false);
+  const bubble=page.locator('#msgs .gmsg').filter({hasText:'synthetic-tunnel.txt'}).last();await bubble.waitFor({timeout:40000});
+  const downloadEvent=page.waitForEvent('download');await bubble.getByText('synthetic-tunnel.txt',{exact:true}).click();const download=await downloadEvent;
+  assertID('people-real-tunnel-upload-download-'+mode,(await fs.promises.readFile(await download.path(),'utf8'))==='synthetic tunnel bytes');
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'read'}]});
+  await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.chat===share.uid&&item.generation===share.generation&&item.access==='read'),30000,'tunnel read-only permission');
+  await throughTunnel(true);assertID('people-real-tunnel-read-only-'+mode,true);
+  assertID('people-real-tunnel-no-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  manifest['people-real-tunnel-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(page,'people-real-tunnel-'+mode+'.png');
+}
+
+async function peopleFileUnread(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','File unread '+mode,'Synthetic unread setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'file unread subscription');
+  await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.chat===share.uid&&item.generation===share.generation&&item.local_node===chat.id),40000,'file unread owner identity');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');
+  const owner=await pageFor(ownerSeat,mode,'people-unread-owner-'+mode),reader=await pageFor(readerSeat,mode,'people-unread-reader-'+mode);
+  await open(owner,ownerSeat.node.id);if(mode==='phone')await owner.locator('#chatback').click();
+  await open(reader,'team/'+key);await reader.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await reader.locator('#attfile').setInputFiles({name:'unread-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic unread file')});
+  await reader.locator('#attstage .stagechip.done[title="unread-synthetic.txt"]').waitFor({timeout:30000});await reader.locator('#sendbtn').click();
+  await reader.locator('#msgs .gmsg').filter({hasText:'unread-synthetic.txt'}).waitFor({timeout:40000});
+  const card=owner.locator('#card-'+chat.id);await card.locator('.activity-unread').waitFor({timeout:40000});
+  assertID('people-file-only-unread-card-'+mode,await card.locator('.activity-unread').evaluate(el=>el.nextElementSibling?.matches('button.chev')));
+  await owner.locator('[data-activity-group="mine"]').click();
+  assertID('people-file-only-unread-group-'+mode,await owner.locator('[data-activity-group="mine"] .activity-unread').count()===1);
+  await screenshot(owner,'people-file-unread-'+mode+'.png');await owner.locator('[data-activity-group="mine"]').click();
+  await card.scrollIntoViewIfNeeded();
+  if(mode==='desktop')await card.hover();else {const box=await card.boundingBox(),cdp=await owner.context().newCDPSession(owner);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:box.x+box.width-20,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x+box.width-120,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+  await owner.locator('[data-pin-action="'+chat.id+'"]').click();await owner.locator('[data-tab=pinned]').click();
+  assertID('people-file-only-unread-owner-pinned-'+mode,await owner.locator('#card-'+chat.id+' .activity-unread').count()===1);await owner.locator('[data-tab=current]').click();
+  await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.chat===share.uid&&item.generation===share.generation&&item.seen_comments>=1),40000,'recipient file read position');
+  if(mode==='phone')await reader.locator('#chatback').click();await open(reader,readerSeat.node.id);if(mode==='phone')await reader.locator('#chatback').click();
+  await open(owner,chat.id);await owner.locator('#msgs .gmsg').filter({hasText:'unread-synthetic.txt'}).waitFor({timeout:30000});
+  await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.chat===share.uid&&item.generation===share.generation&&item.seen_comments>=1),40000,'file unread read position');
+  await owner.locator('#attfile').setInputFiles({name:'own-unread-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic own file')});
+  await owner.locator('#attstage .stagechip.done[title="own-unread-synthetic.txt"]').waitFor({timeout:30000});
+  let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
+  await owner.route(url=>url.pathname==='/api/team/subscriptions/'+key+'/seen',route=>route.abort());
+  await owner.route(url=>url.pathname==='/api/team/subscriptions/'+key+'/comments',async route=>{if(route.request().method()!=='POST'){await route.continue();return}try{const response=await route.fetch();ready();await held;if(!owner.isClosed())await route.fulfill({response})}catch(err){if(!released&&!shutting&&!owner.isClosed())throw err}});
+  try {
+    await owner.locator('#sendbtn').click();await Promise.race([requested,delay(30000).then(()=>{throw Error('own file publication not held')})]);
+    if(mode==='phone')await owner.locator('#chatback').click();await open(owner,ownerSeat.node.id);if(mode==='phone')await owner.locator('#chatback').click();
+    released=true;release();heldReleases.delete(release);await owner.unrouteAll({behavior:'wait'});
+    await until(async()=>{const state=(await ownerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.chat===share.uid&&item.generation===share.generation);const comments=await ownerSeat.api('/api/team/subscriptions/'+key+'/comments?after=1');return state?.comments_last>=2&&comments.entries.some(item=>item.seq===2&&item.mine===true)},40000,'own file classification');
+    await until(async()=>await card.locator('[aria-label="Unread status unavailable"]').count()===0&&await card.locator('.activity-unread').count()===0,40000,'own file not unread');
+    assertID('people-own-file-no-unread-'+mode,true);
+  } finally {released=true;release();heldReleases.delete(release);await owner.unrouteAll({behavior:'wait'});}
+  const received='team/'+key,group='owner/'+sub.server+'/'+sub.owner;
+  await reader.locator('[data-tab=shared] [aria-label$="unread"]').waitFor({timeout:40000});await reader.locator('[data-tab=shared]').click();
+  const receivedCard=reader.locator('.card:has([data-open="'+received+'"])');await receivedCard.locator('.activity-unread').waitFor({timeout:40000});
+  assertID('people-file-unread-recipient-tab-group-card-'+mode,await reader.locator('[data-activity-group="'+group+'"] .activity-unread').count()===1);
+  await reader.locator('[data-activity-group="'+group+'"]').click();await reader.reload({waitUntil:'networkidle'});
+  if(mode==='phone'&&await reader.locator('#cards').evaluate(el=>el.getBoundingClientRect().right<=1))await reader.locator('#chatback').click();
+  await reader.locator('[data-tab=shared]').click();await reader.locator('[data-activity-group="'+group+'"] .activity-unread').waitFor({timeout:40000});
+  assertID('people-file-unread-recipient-fold-reload-'+mode,(await reader.locator('[data-activity-group="'+group+'"]').getAttribute('aria-expanded'))==='false');
+  await reader.context().setOffline(true);assertID('people-file-unread-recipient-offline-'+mode,await reader.locator('[data-activity-group="'+group+'"] .activity-unread').count()===1);
+  const reconnected=reader.waitForResponse(response=>new URL(response.url()).pathname==='/api/team/subscriptions'&&response.status()===200,{timeout:40000});await reader.context().setOffline(false);await reconnected;
+  await reader.locator('[data-activity-group="'+group+'"] .activity-unread').waitFor({timeout:40000});assertID('people-file-unread-recipient-reconnect-'+mode,true);
+  await reader.locator('[data-activity-group="'+group+'"]').click();await receivedCard.scrollIntoViewIfNeeded();
+  if(mode==='desktop')await receivedCard.hover();else {const box=await receivedCard.boundingBox(),cdp=await reader.context().newCDPSession(reader);await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:box.x+box.width-20,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:box.x+box.width-120,y:box.y+box.height/2}]});await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();}
+  await reader.locator('[data-pin-action="'+received+'"]').click();await reader.locator('[data-tab=pinned]').click();
+  assertID('people-file-unread-recipient-pinned-'+mode,await receivedCard.locator('.activity-unread').count()===1);
+  assertID('people-file-unread-no-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  manifest['people-file-unread-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+}
+
+async function peopleLocalBudget(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People local budget '+mode,'Synthetic local budget setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'local budget subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),base='/api/team/subscriptions/'+key;
+  const owner=await pageFor(ownerSeat,mode,'local-budget-owner-'+mode),reader=await pageFor(readerSeat,mode,'local-budget-reader-'+mode);
+  await open(owner,chat.id);await open(reader,'team/'+key);
+  await reader.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+  const source='Synthetic local budget source '+mode;
+  await reader.locator('#prompt').fill(source);await reader.locator('#sendbtn').click();
+  const bubble=owner.locator('#msgs .gmsg').filter({hasText:source}).last();await bubble.waitFor({timeout:40000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await bubble.locator('.bubble').click({position:{x:5,y:5}});await owner.locator('[data-gact=prompt]').click();
+  await owner.locator('#destinationagent[aria-pressed=true]').waitFor({timeout:30000});
+  await bubble.locator('[aria-label="Prepared as prompt"]').waitFor({timeout:30000});
+  const agentDraft=await owner.locator('#prompt').innerText();
+  await owner.locator('#destinationpeople').click();await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
+  const caption='Synthetic local budget draft '+mode,bytes=Buffer.from('synthetic local budget bytes '+mode);
+  await owner.locator('#prompt').fill(caption);
+  await owner.locator('#attfile').setInputFiles({name:'prior-budget.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic prior stage')});
+  await owner.locator('#attstage .stagechip.done[title="prior-budget.txt"]').waitFor({timeout:30000});
+  const settings=await ownerSeat.api('/api/settings'),used=(await ownerSeat.api('/api/state')).storage.used_bytes;
+  const assets=path.join(ownerSeat.data,'assets'),filler=path.join(assets,'synthetic-budget-'+mode+'-'+process.pid);
+  assert.equal(path.dirname(filler),assets);fs.mkdirSync(assets,{recursive:true,mode:0o700});
+  assert.ok(fs.lstatSync(assets).isDirectory()&&!fs.lstatSync(assets).isSymbolicLink()&&fs.realpathSync(assets)===path.join(fs.realpathSync(ownerSeat.data),'assets'),'filler stays in test-owned managed assets');
+  const fd=fs.openSync(filler,'wx',0o600);fs.ftruncateSync(fd,1024*1024);fs.closeSync(fd);
+  let removed=false;
+  try {
+    await ownerSeat.api('/api/settings','PUT',{storage_global_limit_bytes:used+512*1024,storage_min_free_bytes:0});
+    const state=await ownerSeat.api('/api/state');assert.ok(state.storage.used_bytes>used+512*1024&&!state.storage.writable,'synthetic managed filler reaches local budget');
+    const uploadPath='/api/team/subscriptions/'+key+'/attachments';
+    const uploads=[];owner.on('request',req=>{if(req.method()==='POST'&&new URL(req.url()).pathname===uploadPath)uploads.push(new URL(req.url()).searchParams.get('stage_id'));});
+    const requestPromise=owner.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname===uploadPath);
+    const responsePromise=owner.waitForResponse(resp=>resp.request().method()==='POST'&&new URL(resp.url()).pathname===uploadPath);
+    await owner.locator('#attfile').setInputFiles({name:'budget-retry.txt',mimeType:'text/plain',buffer:bytes});
+    const request=await requestPromise,response=await responsePromise,stageID=new URL(request.url()).searchParams.get('stage_id'),payload=await response.json();
+    const blob=path.join(relay.dir,'channels',ownerSeat.self,share.uid,'blobs',crypto.createHash('sha256').update(bytes).digest('hex'));
+    await owner.locator('#attstage .stagechip.err[title="budget-retry.txt"] .stageerror').waitFor({timeout:30000});
+    assertID('people-local-budget-refusal-'+mode,/^[0-9a-f]{16}$/.test(stageID)&&response.status()===507&&payload.error==='storage_full'&&!fs.existsSync(blob));
+    assertID('people-local-budget-preserved-'+mode,/storage is full.*free space/i.test(await owner.locator('#attstage .stagechip.err[title="budget-retry.txt"] .stageerror').innerText())&&(await owner.locator('#prompt').innerText())===caption&&await owner.locator('#attstage .stagechip.done[title="prior-budget.txt"]').count()===1&&await bubble.locator('[aria-label="Prepared as prompt"]').count()===1);
+    await screenshot(owner,'people-local-budget-refused-'+mode+'.png');
+    await owner.locator('#destinationagent').click();assert.equal(await owner.locator('#prompt').innerText(),agentDraft);await owner.locator('#destinationpeople').click();
+    fs.unlinkSync(filler);removed=true;
+    const retryRequest=owner.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname===uploadPath);
+    const retryResponse=owner.waitForResponse(resp=>resp.request().method()==='POST'&&new URL(resp.url()).pathname===uploadPath);
+    await owner.locator('#sendbtn').click();const retried=await retryRequest,recovered=await retryResponse;
+    assert.equal(new URL(retried.url()).searchParams.get('stage_id'),stageID);assert.equal(recovered.status(),200);
+    const entry=await until(async()=>{const value=await readerSeat.api(base+'/comments?after=0');return value.entries.find(item=>item.text===caption)},40000,'local budget explicit publication');
+    const comments=await readerSeat.api(base+'/comments?after=0'),matching=comments.entries.filter(item=>item.text===caption);
+    const file=entry.attachments.find(item=>item.name==='budget-retry.txt');assert.ok(file);
+    const download=await fetch(readerSeat.base+base+'/attachments/'+entry.seq+'/'+file.id+'?copy_instance='+encodeURIComponent(sub.people_copy_instance),{headers:{Origin:readerSeat.base,'X-Scimux-CSRF':readerSeat.csrf}});
+    assertID('people-local-budget-explicit-retry-'+mode,matching.length===1&&entry.attachments.length===2&&entry.attachments.some(item=>item.name==='prior-budget.txt')&&uploads.length===2&&uploads.every(id=>id===stageID)&&fs.readFileSync(blob).equals(bytes)&&download.ok&&Buffer.from(await download.arrayBuffer()).equals(bytes));
+    await owner.locator('#destinationagent').click();assert.equal(await owner.locator('#prompt').innerText(),agentDraft);assert.equal(await bubble.locator('[aria-label="Prepared as prompt"]').count(),1);await owner.locator('#destinationpeople').click();
+    assertID('people-local-budget-zero-agent-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    await reader.locator('#msgs .gmsg').filter({hasText:caption}).last().waitFor({timeout:40000});
+    await screenshot(reader,'people-local-budget-recovered-'+mode+'.png');manifest['people-local-budget-'+mode]={status:response.status(),code:payload.error,commentCount:matching.length,before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {
+    if(!removed&&fs.existsSync(filler))fs.unlinkSync(filler);
+    await ownerSeat.api('/api/settings','PUT',{storage_global_limit_bytes:settings.storage_global_limit_bytes,storage_min_free_bytes:settings.storage_min_free_bytes});
+  }
+}
+
+// Empty files fill the kept-file count while the byte budget stays open.
+function fillKeptRecords(seat, sub) {
+  const copy = path.join(seat.data, 'team-copies', sub.server, sub.owner, sub.chat, sub.generation);
+  const records = path.join(copy, 'people-records');
+  const copyStat = fs.lstatSync(copy);
+  assert.ok(copyStat.isDirectory() && !copyStat.isSymbolicLink() && (copyStat.mode & 0o777) === 0o700, 'owner copy directory');
+  let existing = false;
+  try {
+    const stat = fs.lstatSync(records);
+    assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), 'people-records directory');
+    existing = true;
+  } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  if (!existing) fs.mkdirSync(records, {mode: 0o700});
+  fs.chmodSync(records, 0o700);
+  const expected = path.join(fs.realpathSync(seat.data), 'team-copies', sub.server, sub.owner, sub.chat, sub.generation, 'people-records');
+  assert.equal(fs.realpathSync(records), expected, 'filler stays in the owner kept-file directory');
+  const files = [];
+  try {
+    for (let i = 0; i < 2048; i++) {
+      const file = path.join(records, 'synthetic-kept-' + String(i).padStart(4, '0'));
+      const fd = fs.openSync(file, 'wx', 0o600);
+      fs.closeSync(fd);
+      files.push(file);
+    }
+  } catch (err) { removeKeptFiller(files); throw err; }
+  return {records, files};
+}
+function removeKeptFiller(files) {
+  for (const file of files) { try { fs.unlinkSync(file); } catch (err) { if (err.code !== 'ENOENT') throw err; } }
+}
+function listKeptFiles(dir) {
+  const out = [];
+  const walk = current => {
+    let entries;
+    try { entries = fs.readdirSync(current, {withFileTypes: true}); } catch (err) { if (err.code === 'ENOENT') return; throw err; }
+    for (const entry of entries) {
+      const child = path.join(current, entry.name);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) walk(child);
+      else out.push(child);
+    }
+  };
+  walk(dir);
+  return out;
+}
+async function ownerCopyReady(ownerSeat, sub) {
+  const copy = path.join(ownerSeat.data, 'team-copies', sub.server, sub.owner, sub.chat, sub.generation);
+  await until(async () => {
+    await ownerSeat.api('/api/team/subscriptions');
+    try { const stat = fs.lstatSync(copy); return stat.isDirectory() && !stat.isSymbolicLink(); } catch { return false; }
+  }, 40000, 'owner copy directory');
+}
+
+async function peopleKeptFull(mode, ownerSeat, readerSeat) {
+  const chat = await node(ownerSeat, 'codex', 'People kept full ' + mode, 'Synthetic kept cap setup');
+  await ownerSeat.api('/api/team/shares/' + chat.id, 'PUT', {server: ownerSeat.serverID, scope: 'all', members: [{seat: readerSeat.self, access: 'write'}]});
+  const share = await ownerSeat.api('/api/team/shares/' + chat.id);
+  const sub = await until(async () => (await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item => item.owner === ownerSeat.self && item.chat === share.uid && item.generation === share.generation && item.access === 'write' && item.people_copy_instance), 40000, 'kept cap subscription');
+  const key = [sub.server, sub.owner, sub.chat, sub.generation].join('/'), base = '/api/team/subscriptions/' + key;
+  await ownerCopyReady(ownerSeat, sub);
+  const kept = fillKeptRecords(ownerSeat, sub);
+  const owner = await pageFor(ownerSeat, mode, 'kept-full-owner-' + mode), reader = await pageFor(readerSeat, mode, 'kept-full-reader-' + mode);
+  try {
+    await open(owner, chat.id); await open(reader, 'team/' + key);
+    await reader.locator('#prompt[contenteditable=true]').waitFor({timeout: 30000});
+    await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout: 30000});
+    const before = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    const guestName = 'guest-over-cap.txt', guestBytes = Buffer.from('synthetic guest over cap ' + mode);
+    await reader.locator('#attadd').waitFor({state: 'visible', timeout: 30000});
+    await reader.locator('#attadd').click();
+    const chooser = reader.waitForEvent('filechooser');
+    await reader.locator('#attmenu [data-src=file]').click();
+    await (await chooser).setFiles({name: guestName, mimeType: 'text/plain', buffer: guestBytes});
+    await reader.locator('#attstage .stagechip.done[title="' + guestName + '"]').waitFor({timeout: 30000});
+    await reader.locator('#sendbtn').click();
+    const incoming = owner.locator('#msgs .gmsg').filter({hasText: guestName}).last();
+    await incoming.waitFor({timeout: 40000});
+    assertID('people-kept-full-guest-posted-' + mode, await incoming.locator('.attfile').count() === 1);
+    const caption = 'Synthetic kept cap draft ' + mode, ownerName = 'owner-outgoing.txt', bytes = Buffer.from('synthetic owner outgoing ' + mode);
+    await owner.locator('#prompt').fill(caption);
+    await owner.locator('#attfile').setInputFiles({name: ownerName, mimeType: 'text/plain', buffer: bytes});
+    await owner.locator('#attstage .stagechip.done[title="' + ownerName + '"]').waitFor({timeout: 30000});
+    const published = owner.waitForResponse(resp => resp.request().method() === 'POST' && new URL(resp.url()).pathname === base + '/comments', {timeout: 40000});
+    await owner.locator('#sendbtn').click();
+    const response = await published;
+    const returned = reader.locator('#msgs .gmsg').filter({hasText: caption}).last();
+    await returned.waitFor({timeout: 40000});
+    const saved = reader.waitForEvent('download');
+    await returned.getByText(ownerName, {exact: true}).click();
+    const got = await fs.promises.readFile(await (await saved).path());
+    assertID('people-kept-full-published-' + mode, response.status() === 200 && got.equals(bytes) && await returned.getByText(ownerName, {exact: true}).count() === 1);
+    const historyBefore = await ownerSeat.api('/api/nodes/' + chat.id + '/chat');
+    const prompt = 'Synthetic kept cap agent ' + mode;
+    await owner.locator('#destinationagent').click();
+    await owner.locator('#destinationagent[aria-pressed=true]').waitFor({timeout: 30000});
+    await owner.locator('#prompt').fill(prompt);
+    const request = owner.waitForRequest(req => req.method() === 'POST' && new URL(req.url()).pathname === '/api/nodes/' + chat.id + '/send');
+    await owner.locator('#sendbtn').click();
+    const sent = await request;
+    await until(() => counts(ownerSeat).accepted === before.owner.accepted + 1, 30000, 'kept cap explicit agent send');
+    const history = await until(async () => {
+      const body = await ownerSeat.api('/api/nodes/' + chat.id + '/chat');
+      return (body.turns || []).some(turn => turn.role === 'user' && turn.text === prompt) ? body : null;
+    }, 30000, 'kept cap session history');
+    const prior = (historyBefore.turns || []).map(turn => turn.uid), now = history.turns || [];
+    const after = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    assertID('people-kept-full-history-' + mode, now.length > prior.length && now.slice(0, prior.length).every((turn, index) => turn.uid === prior[index]) && now.some(turn => turn.role === 'user' && turn.text === prompt));
+    assertID('people-kept-full-one-dispatch-' + mode, sent.postDataJSON().text === prompt && after.owner.attempted === before.owner.attempted + 1 && after.owner.accepted === before.owner.accepted + 1 && after.owner.controls === before.owner.controls && JSON.stringify(after.recipient) === JSON.stringify(before.recipient));
+    await screenshot(owner, 'people-kept-full-owner-' + mode + '.png');
+    await screenshot(reader, 'people-kept-full-reader-' + mode + '.png');
+    manifest['people-kept-full-' + mode] = {before, after};
+  } finally { removeKeptFiller(kept.files); }
+}
+
+async function peopleUnkeptOpen(mode, ownerSeat, readerSeat) {
+  const chat = await node(ownerSeat, 'codex', 'People unkept open ' + mode, 'Synthetic unkept open setup');
+  await ownerSeat.api('/api/team/shares/' + chat.id, 'PUT', {server: ownerSeat.serverID, scope: 'all', members: [{seat: readerSeat.self, access: 'write'}]});
+  const share = await ownerSeat.api('/api/team/shares/' + chat.id);
+  const sub = await until(async () => (await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item => item.owner === ownerSeat.self && item.chat === share.uid && item.generation === share.generation && item.access === 'write' && item.people_copy_instance), 40000, 'unkept open subscription');
+  await ownerCopyReady(ownerSeat, sub);
+  const kept = fillKeptRecords(ownerSeat, sub);
+  const owner = await pageFor(ownerSeat, mode, 'unkept-open-owner-' + mode), reader = await pageFor(readerSeat, mode, 'unkept-open-reader-' + mode);
+  try {
+    await open(owner, chat.id); await open(reader, 'team/' + keyOf(sub));
+    await reader.locator('#prompt[contenteditable=true]').waitFor({timeout: 30000});
+    const before = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    const name = 'unkept-open.txt', bytes = Buffer.from('synthetic unkept bytes ' + mode);
+    await reader.locator('#attadd').waitFor({state: 'visible', timeout: 30000});
+    await reader.locator('#attadd').click();
+    const chooser = reader.waitForEvent('filechooser');
+    await reader.locator('#attmenu [data-src=file]').click();
+    await (await chooser).setFiles({name, mimeType: 'text/plain', buffer: bytes});
+    await reader.locator('#attstage .stagechip.done[title="' + name + '"]').waitFor({timeout: 30000});
+    await reader.locator('#sendbtn').click();
+    const incoming = owner.locator('#msgs .gmsg').filter({hasText: name}).last();
+    const tile = incoming.locator('a.attfile', {hasText: 'Not kept locally'});
+    await tile.waitFor({timeout: 40000});
+    const saved = owner.waitForEvent('download');
+    await tile.click();
+    const got = await fs.promises.readFile(await (await saved).path());
+    const extra = listKeptFiles(kept.records).filter(file => !kept.files.includes(file));
+    const after = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    assertID('people-unkept-open-bytes-' + mode, got.equals(bytes));
+    assertID('people-unkept-open-note-' + mode, (await incoming.innerText()).includes('Not kept locally'));
+    assertID('people-unkept-open-absent-' + mode, extra.length === 0);
+    assertID('people-unkept-open-zero-agent-' + mode, JSON.stringify(after.owner) === JSON.stringify(before.owner) && JSON.stringify(after.recipient) === JSON.stringify(before.recipient));
+    await screenshot(owner, 'people-unkept-open-' + mode + '.png');
+    manifest['people-unkept-open-' + mode] = {before, after};
+  } finally { removeKeptFiller(kept.files); }
+}
+function keyOf(sub) { return [sub.server, sub.owner, sub.chat, sub.generation].join('/'); }
+
+async function peopleQuota(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People quota '+mode,'Synthetic quota setup');
+  const sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  try {
+  const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'quota subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');
+  const entry=JSON.parse(fs.readFileSync(path.join(ownerSeat.data,'team.json'),'utf8')).servers.find(item=>item.id===ownerSeat.serverID);
+  assert.ok(entry?.token,'synthetic relay authorization');
+  const bytes=Buffer.alloc(4*1024*1024);
+  for(let index=0;index<64;index++) {
+    bytes.writeUInt32BE(index,bytes.length-4);
+    const hash=crypto.createHash('sha256').update(bytes).digest('hex');
+    const response=await fetch(relay.url+'/v1/channels/'+ownerSeat.self+'/'+share.uid+'/blobs/'+hash+'?generation='+share.generation,{method:'PUT',headers:{Authorization:'Bearer '+entry.token},body:bytes,signal:AbortSignal.timeout(30000)});
+    assert.equal(response.status,201,'synthetic relay quota setup');
+  }
+  const page=await pageFor(readerSeat,mode,'people-quota-'+mode);await open(page,'team/'+key);
+  await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await page.locator('#prompt').fill('Synthetic quota draft '+mode);
+  const warning=page.waitForEvent('dialog');const oversized=page.locator('#attfile').setInputFiles({name:'too-large.txt',mimeType:'text/plain',buffer:Buffer.alloc(4*1024*1024+1)});
+  const dialog=await warning;assertID('people-oversize-feedback-'+mode,/4 MiB|4MB/i.test(dialog.message()));await dialog.accept();await oversized;
+  assertID('people-oversize-keeps-draft-'+mode,(await page.locator('#prompt').innerText())==='Synthetic quota draft '+mode);
+  const upload=page.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/team/subscriptions/'+key+'/attachments');
+  await page.locator('#attfile').setInputFiles({name:'quota-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic quota file')});
+  const request=await upload,stageID=new URL(request.url()).searchParams.get('stage_id');
+  await page.locator('#attstage .stagechip.err .stageerror').waitFor({timeout:30000});
+  assertID('people-quota-actionable-'+mode,/relay.*quota.*full/i.test(await page.locator('#attstage .stageerror').innerText()));
+  const stage=await readerSeat.api('/api/team/subscriptions/'+key+'/attachments/stage/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance));
+  assertID('people-quota-stage-retained-'+mode,stage?.id===stageID&&(await page.locator('#prompt').innerText())==='Synthetic quota draft '+mode);
+  assertID('people-quota-no-implicit-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await screenshot(page,'people-quota-'+mode+'.png');manifest['people-quota-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {
+    try { await ownerSeat.api(sharePath,'DELETE',undefined,true); }
+    catch (err) { manifest.cleanup.push({quotaShareCleanupError:String(err)});throw err; }
+  }
+}
+
+async function peopleStageCompetition(mode, ownerSeat, readerSeat) {
+  const testRelay=await launchRelay(relayBin,'competition-relay-'+mode),target=new URL(testRelay.url);let appends=0;
+  const proxy=http.createServer((req,res)=>{
+    if(req.method==='POST'&&new URL(req.url,'http://synthetic.invalid').pathname.endsWith('/comments'))appends++;
+    const upstream=http.request({hostname:target.hostname,port:target.port,path:req.url,method:req.method,headers:{...req.headers,host:target.host}},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res)});
+    upstream.on('error',()=>{if(!res.headersSent)res.writeHead(502);res.end();});req.pipe(upstream);
+  });
+  await new Promise((resolve,reject)=>proxy.once('error',reject).listen(0,'127.0.0.1',resolve));
+  const stopProxy=()=>proxy.close();heldReleases.add(stopProxy);
+  try {
+  const relayURL='http://127.0.0.1:'+proxy.address().port,identities=[];
+  for(const seat of [ownerSeat,readerSeat]) {
+    const issue=JSON.parse(execFileSync(relayBin,['-state-dir',testRelay.dir,'-url',relayURL,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
+    const joined=await seat.api('/api/team/servers','POST',{link:issue.link,name:'Synthetic competition'});
+    identities.push({server:joined.id,self:(await seat.api('/api/team/servers/'+joined.id+'/seats')).self});
+  }
+  const [ownerIdentity,readerIdentity]=identities;
+  const chat=await node(ownerSeat,'codex','Synthetic stage competition '+mode,'Synthetic setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerIdentity.server,scope:'all',members:[{seat:readerIdentity.self,access:'write'}]});
+  const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.server===ownerIdentity.server&&x.owner===ownerIdentity.self&&x.chat===share.uid&&x.generation===share.generation&&x.access==='write'),40000,'competition subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),base='/api/team/subscriptions/'+key;
+  const page=await pageFor(readerSeat,mode,'people-stage-competition-'+mode);await open(page,'team/'+key);
+  await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await page.locator('#prompt').fill('Newer synthetic draft '+mode);
+  const upload=page.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname===base+'/attachments');
+  await page.locator('#attfile').setInputFiles({name:'first.txt',mimeType:'text/plain',buffer:Buffer.from('first synthetic bytes')});
+  const stageID=new URL((await upload).url()).searchParams.get('stage_id');
+  await page.locator('#attstage .stagechip.done[title="first.txt"]').waitFor({timeout:30000});
+  assert.match(stageID,/^[0-9a-f]{16}$/);assert.match(sub.people_copy_instance,/^[0-9a-f]{32}$/);
+  const original=await readerSeat.api(base+'/attachments/stage/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance));
+  const firstBytes=Buffer.from('first synthetic bytes');
+  assert.equal(original.id,stageID);assert.equal(original.name,'first.txt');assert.equal(original.mime,'text/plain; charset=utf-8');
+  assert.equal(original.size,firstBytes.length);assert.equal(original.sha256,crypto.createHash('sha256').update(firstBytes).digest('hex'));assert.match(original.revision,/^[0-9a-f]{64}$/);
+  const originalRevision=original.revision;
+  assertID('people-stage-competition-no-empty-review-'+mode,(await page.locator('#attstage .stagechip.done[title="first.txt"]').count())===1&&(await page.locator('#prompt').innerText())==='Newer synthetic draft '+mode&&!(await page.locator('#attstage').innerText()).includes('No saved local People publications or files.'));
+  assert.equal(appends,0,'no implicit append before publication');
+  const result=await page.evaluate(async ({base,instance,stageID,originalRevision,mode})=>{
+    const token=document.querySelector('meta[name="scimux-csrf"]').content, q='?copy_instance='+encodeURIComponent(instance), removalQuery=q+'&revision='+encodeURIComponent(originalRevision), headers={'X-Scimux-CSRF':token};
+    const body={text:'Synthetic competing publication '+mode,anchor:0,key:'0123456789abcdef',attachments:[stageID]};
+    const send=()=>fetch(base+'/comments'+q,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const [publication,removal]=await Promise.all([send(),fetch(base+'/attachments/stage/'+stageID+removalQuery,{method:'DELETE',headers})]);
+    const replace=async()=>{const form=new FormData();form.append('files',new File(['replacement synthetic bytes'],'replacement.txt',{type:'text/plain'}));return (await fetch(base+'/attachments'+q+'&stage_id='+stageID,{method:'POST',headers,body:form})).status;};
+    let replacement=0;
+    if(removal.ok)replacement=await replace();
+    const retry=await send();
+    if(!removal.ok){const later=await fetch(base+'/attachments/stage/'+stageID+removalQuery,{method:'DELETE',headers});if(later.ok)replacement=await replace();}
+    const finalRetry=await send();
+    return {publication:publication.status,removal:removal.status,replacement,retry:retry.status,finalRetry:finalRetry.status};
+  },{base,instance:sub.people_copy_instance,stageID,originalRevision,mode});
+  assert.ok(result.retry===200,'explicit retry must confirm');
+  assert.ok(result.publication===200||result.publication===409,'publication race outcome');
+  assert.ok(result.removal===200||result.removal===204||result.removal===409,'removal race outcome');
+  assert.ok(result.replacement>=200&&result.replacement<300&&result.finalRetry===200,'replacement created and completion retry preserved');
+  const entries=(await readerSeat.api(base+'/comments?after=0')).entries.filter(x=>x.text==='Synthetic competing publication '+mode);
+  assert.equal(entries.length,1);const entry=entries[0],file=entry.attachments.find(x=>x.id===stageID);assert.ok(file);
+  const response=await fetch(readerSeat.base+base+'/attachments/'+entry.seq+'/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance),{headers:{Origin:readerSeat.base,'X-Scimux-CSRF':readerSeat.csrf}});
+  const bytes=Buffer.from(await response.arrayBuffer()),hash=crypto.createHash('sha256').update(bytes).digest('hex');
+  assertID('people-stage-competition-consistent-'+mode,response.ok&&file.sha256===hash&&file.size===bytes.length&&file.mime==='text/plain; charset=utf-8'&&((file.name==='first.txt'&&bytes.toString()==='first synthetic bytes')||(file.name==='replacement.txt'&&bytes.toString()==='replacement synthetic bytes')));
+  const current=await readerSeat.api(base+'/attachments/stage/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance));assert.equal(current.name,'replacement.txt');
+  assertID('people-stage-competition-one-append-'+mode,appends===1);
+  assertID('people-stage-competition-draft-'+mode,(await page.locator('#prompt').innerText())==='Newer synthetic draft '+mode);
+  assertID('people-stage-competition-zero-agent-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await page.locator('#msgs .gmsg').filter({hasText:'Synthetic competing publication '+mode}).last().waitFor({timeout:40000});
+  await screenshot(page,'people-stage-competition-'+mode+'.png');manifest['people-stage-competition-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {heldReleases.delete(stopProxy);await new Promise(resolve=>proxy.close(resolve));}
+}
+
+async function peoplePendingPhoneReachability(mode, ownerSeat, readerSeat, ending=false) {
+  const family='people-pending-layout'+(ending?'-ended':''),label=family+'-'+mode,testRelay=await launchRelay(relayBin,'pending-layout-relay-'+(ending?'ended-':'')+mode),target=new URL(testRelay.url);let releaseRelay,releaseReply,entered,replyReady,attempts=0;
+  const relayGate=new Promise(resolve=>{releaseRelay=resolve;}),relayEntered=new Promise(resolve=>{entered=resolve;}),replyGate=new Promise(resolve=>{releaseReply=resolve;}),replyFetched=new Promise(resolve=>{replyReady=resolve;});
+  const proxy=http.createServer(async(req,res)=>{
+    if(req.method==='POST'&&new URL(req.url,'http://synthetic.invalid').pathname.endsWith('/comments')){attempts++;entered();await relayGate;}
+    if(req.destroyed||res.destroyed){res.destroy();return;}
+    const upstream=http.request({hostname:target.hostname,port:target.port,path:req.url,method:req.method,headers:{...req.headers,host:target.host}},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res);});upstream.on('error',()=>{if(!res.headersSent)res.writeHead(502);res.end();});req.pipe(upstream);
+  });
+  await new Promise((resolve,reject)=>proxy.once('error',reject).listen(0,'127.0.0.1',resolve));
+  const cleanup=()=>{releaseRelay();releaseReply();proxy.closeAllConnections();proxy.close();};heldReleases.add(cleanup);
+  try {
+    const relayURL='http://127.0.0.1:'+proxy.address().port,identities=[];
+    for(const seat of [ownerSeat,readerSeat]){const issue=JSON.parse(execFileSync(relayBin,['-state-dir',testRelay.dir,'-url',relayURL,'-json','issue'],{env:baseEnv,encoding:'utf8'}));const joined=await seat.api('/api/team/servers','POST',{link:issue.link,name:'Synthetic layout relay'});identities.push({server:joined.id,self:(await seat.api('/api/team/servers/'+joined.id+'/seats')).self});}
+    const [owner,reader]=identities,chat=await node(ownerSeat,'codex','Synthetic pending layout '+mode,'Synthetic setup'),sharePath='/api/team/shares/'+chat.id,grant=access=>({server:owner.server,scope:'all',members:[{seat:reader.self,access}]});
+    await ownerSeat.api(sharePath,'PUT',grant('write'));const share=await ownerSeat.api(sharePath),sub=await until(async()=>{const data=await readerSeat.api('/api/team/subscriptions');const row=data.subscriptions.find(item=>item.server===owner.server&&item.owner===owner.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),server=data.servers.find(item=>item.id===reader.server);return row?.people_copy_instance&&server?.people_file_binding?{row,server}:null;},40000,'layout subscription');
+    const key=[sub.row.server,sub.row.owner,sub.row.chat,sub.row.generation].join('/'),base='/api/team/subscriptions/'+key,scope=`people\0${key}\0binding:${sub.server.people_file_binding}\0copy:${sub.row.people_copy_instance}\0`,first=await pageFor(readerSeat,mode,'people-pending-layout-origin-'+mode),before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+    await open(first,'team/'+key);await first.locator('#attadd').waitFor({state:'visible',timeout:30000});await first.locator('#prompt').fill('Original synthetic pending '+mode);
+    const name='long-synthetic-original-'.repeat(5)+'file.txt';await first.locator('#attfile').setInputFiles([{name,mimeType:'text/plain',buffer:Buffer.from('original one')},{name:'another-original.txt',mimeType:'text/plain',buffer:Buffer.from('original two')}]);await until(async()=>await first.locator('#attstage .stagechip.done').count()===2,30000,'two staged files');
+    let replySettled=false;const originalReply=first.waitForResponse(response=>response.request().method()==='POST'&&new URL(response.url()).pathname===base+'/comments'&&new URL(response.url()).searchParams.get('copy_instance')===sub.row.people_copy_instance,{timeout:90000}).then(response=>{replySettled=true;return response;});originalReply.catch(()=>{});
+    await first.route('**/api/team/subscriptions/**/comments?*',async route=>{const request=route.request(),url=new URL(request.url());if(request.method()!=='POST'||url.pathname!==base+'/comments'||url.searchParams.get('copy_instance')!==sub.row.people_copy_instance){await route.continue();return;}const response=await route.fetch({maxRetries:0});replyReady(response.status());await replyGate;if(!first.isClosed())await route.fulfill({response});});
+    await first.locator('#sendbtn').click();let relayTimeout;try{await Promise.race([relayEntered,new Promise((_,reject)=>{relayTimeout=setTimeout(()=>reject(Error('relay append not reached')),15000);})]);}finally{clearTimeout(relayTimeout);}
+    const state=page=>page.evaluate(async scope=>{const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js'),store=createBrowserPeopleFileStore(indexedDB);try{const recovery=await store.listPeopleRecovery(scope),files=await store.list(scope);return {recovery,files:await Promise.all(files.map(async row=>({id:row.id,token:row.fileToken,name:row.file.name,text:await row.file.text()})))};}finally{store.destroy();}},scope);
+    const initial=await until(async()=>{const value=await state(first);return value.recovery.pending.length===1?value:null;},30000,'persisted pending'),publication=initial.recovery.pending[0],query='?copy_instance='+encodeURIComponent(sub.row.people_copy_instance),serverPending=await readerSeat.api(base+'/pending/'+publication.request.key+query),stageID=publication.request.attachments[0],stage=await readerSeat.api(base+'/attachments/stage/'+stageID+query);assert.equal(serverPending.state,'pending');assert.match(serverPending.revision,/^[0-9a-f]{64}$/);assert.deepEqual(serverPending.stage_ids,publication.request.attachments);const stageRemoval=base+'/attachments/stage/'+stageID+query+'&revision='+encodeURIComponent(stage.revision),headers={Origin:readerSeat.base,'X-Scimux-CSRF':readerSeat.csrf},pinned=await fetch(readerSeat.base+stageRemoval,{method:'DELETE',headers});assert.equal(pinned.status,409);
+    const second=await first.context().newPage();pages.push({page:second,label:'people-pending-layout-review-'+mode});pageSource.set(second,{dir:path.resolve(__dirname,'../js'),version:'current'});await second.coverage.startJSCoverage({resetOnNavigation:false});await second.goto(readerSeat.base,{waitUntil:'networkidle'});await second.locator('#prompt').waitFor({state:'visible',timeout:30000});
+    await second.locator('#prompt').fill('Newer synthetic pending draft '+mode);await second.locator('#attfile').setInputFiles({name:'newer-kept.txt',mimeType:'text/plain',buffer:Buffer.from('newer exact bytes')});await second.locator('#attstage .stagechip.done[title="newer-kept.txt"]').waitFor({timeout:30000});
+    const newer=await until(async()=>{const value=await state(second);return value.files.some(row=>row.name==='newer-kept.txt')&&value.recovery.heads.some(row=>row.text==='Newer synthetic pending draft '+mode)?value:null;},30000,'newer draft and file');
+    if(ending)await ownerSeat.api(sharePath,'DELETE');else await ownerSeat.api(sharePath,'PUT',grant('read'));await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(row=>row.chat===share.uid&&row.generation===share.generation&&(ending?row.state==='ended':row.access==='read')),40000,'permission loss');
+    if(ending)await second.locator('#gueststate').getByText(/Sharing ended/).waitFor({timeout:30000});else await until(async()=>!(await second.locator('#attadd').isVisible()),30000,'read-only recipient controls');
+    const summary=second.locator('#attstage details summary').getByText('Review unconfirmed People message').first();await summary.waitFor({timeout:40000});await summary.click();const button=second.locator('#attstage .people-local-discard').first();await button.waitFor({state:'visible',timeout:30000});assert.match(await summary.locator('..').innerText(),/Local publication pending/);await button.scrollIntoViewIfNeeded();
+    const geometry=await button.evaluate(el=>{const rect=el.getBoundingClientRect(),x=rect.left+rect.width/2,y=rect.top+rect.height/2,hit=document.elementFromPoint(x,y);return {x,y,width:rect.width,height:rect.height,viewport:innerHeight,hit:hit===el||el.contains(hit)};});assert.ok(geometry.height>=44&&geometry.y>=0&&geometry.y<geometry.viewport&&geometry.hit,`discard control unreachable: ${JSON.stringify(geometry)}`);
+    const deletion=second.waitForResponse(response=>response.request().method()==='DELETE'&&new URL(response.url()).pathname===base+'/pending/'+publication.request.key);if(mode==='desktop'){await button.focus();await second.keyboard.press('Enter');}else await button.tap();const removed=await deletion,params=new URL(removed.url()).searchParams;assert.ok(removed.ok());assert.equal(params.get('copy_instance'),sub.row.people_copy_instance);assert.equal(params.get('revision'),serverPending.revision);
+    const retired=await until(async()=>{const value=await state(second);return value.recovery.pending.length===0?value:null;},30000,'durable local retirement');assert.ok(retired.files.some(row=>row.name==='newer-kept.txt'&&row.text==='newer exact bytes'));assert.ok(retired.recovery.heads.some(row=>row.text==='Newer synthetic pending draft '+mode));assert.equal(await second.locator('#prompt').innerText(),'Newer synthetic pending draft '+mode);assert.deepEqual(retired.files.find(row=>row.name==='newer-kept.txt'),newer.files.find(row=>row.name==='newer-kept.txt'));
+    const retiredBeforeUnpin=await readerSeat.api(base+'/pending/'+publication.request.key+query);assert.equal(retiredBeforeUnpin.state,'retired');const unpinned=await fetch(readerSeat.base+stageRemoval,{method:'DELETE',headers});assert.ok(unpinned.ok);assert.equal(replySettled,false,'original response must remain held through retirement');releaseRelay();let timer;const fetchedStatus=await Promise.race([replyFetched,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('original response not fetched')),15000);})]).finally(()=>clearTimeout(timer));assert.ok(fetchedStatus>=400);assert.equal(replySettled,false);releaseReply();const delivered=await originalReply;await delivered.finished();await first.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));const serverRetired=await until(async()=>{const pending=await readerSeat.api(base+'/pending/'+publication.request.key+query);return pending.state==='retired'?pending:null;},30000,'server pending retired');const final=await state(second);assert.equal(final.recovery.pending.length,0);assert.deepEqual(final.files,newer.files);assert.ok(final.files.some(row=>row.name==='newer-kept.txt'&&row.text==='newer exact bytes'));assert.deepEqual(counts(ownerSeat),before.owner);assert.deepEqual(counts(readerSeat),before.recipient);
+    assertID(family+'-reachable-'+mode,geometry.height>=44&&geometry.y>=0&&geometry.y<geometry.viewport&&geometry.hit);
+    assertID(family+'-exact-discard-'+mode,removed.ok()&&params.get('copy_instance')===sub.row.people_copy_instance&&params.get('revision')===serverPending.revision&&pinned.status===409&&retiredBeforeUnpin.state==='retired'&&unpinned.ok&&serverRetired.state==='retired'&&attempts===1);
+    assertID(family+'-retained-'+mode,final.recovery.pending.length===0&&final.recovery.heads.some(head=>head.text==='Newer synthetic pending draft '+mode)&&final.files.some(row=>row.name==='newer-kept.txt'&&row.text==='newer exact bytes'));
+    assertID(family+'-zero-agent-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    manifest[label]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(second,label+'.png');
+  } catch(error) { console.error('Synthetic pending layout setup:',error.message); throw error; }
+  finally {heldReleases.delete(cleanup);releaseRelay();releaseReply();proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve));}
+}
+
+async function peopleLocalStageReview(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Synthetic saved file review '+mode,'Synthetic setup');
+  const sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'saved file subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),base='/api/team/subscriptions/'+key,page=await pageFor(readerSeat,mode,'people-local-stage-review-'+mode);
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  await page.locator('#prompt').fill('Synthetic saved draft '+mode);
+  const upload=page.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname===base+'/attachments');
+  await page.locator('#attfile').setInputFiles({name:'review-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic review bytes')});
+  const stageID=new URL((await upload).url()).searchParams.get('stage_id');
+  await page.locator('#attstage .stagechip.done[title="review-synthetic.txt"]').waitFor({timeout:30000});
+  const stage=await readerSeat.api(base+'/attachments/stage/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance));
+  assert.match(stage.revision,/^[0-9a-f]{64}$/);
+  await page.reload({waitUntil:'networkidle'});
+  const summary=page.locator('#attstage details summary').getByText('Review current staged files (inventory snapshot)');await summary.waitFor({timeout:40000});await summary.click();
+  const button=page.locator('#attstage .people-local-stage-remove');await button.waitFor({state:'visible',timeout:30000});
+  const box=await button.boundingBox();assertID('people-local-stage-review-target-'+mode,!!box&&box.height>=44);
+  const geometry=await page.evaluate(()=>({viewport:innerWidth,body:document.body.scrollWidth,stage:document.querySelector('#attstage').scrollWidth,stageWidth:document.querySelector('#attstage').clientWidth}));
+  assertID('people-local-stage-review-body-contained-'+mode,geometry.body<=geometry.viewport);
+  assertID('people-local-stage-review-composer-contained-'+mode,geometry.stage<=geometry.stageWidth);
+  const beforeRow=await page.evaluate(async id=>{const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('scimux-people-file-drafts');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});const rows=await new Promise((resolve,reject)=>{const req=db.transaction('files').objectStore('files').getAll();req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});db.close();const row=rows.find(value=>value.id===id);return row?{fileToken:row.fileToken,size:row.file.size}:null;},stageID);
+  assert.ok(beforeRow?.fileToken,'browser file token');
+  const response=page.waitForResponse(resp=>resp.request().method()==='DELETE'&&new URL(resp.url()).pathname===base+'/attachments/stage/'+stageID);
+  if(mode==='desktop'){await button.focus();await page.keyboard.press('Enter');}else await button.click();
+  const removed=await response,params=new URL(removed.url()).searchParams;
+  assertID('people-local-stage-review-exact-'+mode,removed.ok()&&params.get('copy_instance')===sub.people_copy_instance&&params.get('revision')===stage.revision);
+  await button.waitFor({state:'detached',timeout:30000});
+  const inventory=await readerSeat.api(base+'/local?copy_instance='+encodeURIComponent(sub.people_copy_instance));
+  assertID('people-local-stage-review-server-'+mode,!inventory.entries.some(entry=>entry.kind==='stage'&&entry.id===stageID));
+  const afterRow=await page.evaluate(async id=>{const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('scimux-people-file-drafts');req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});const rows=await new Promise((resolve,reject)=>{const req=db.transaction('files').objectStore('files').getAll();req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});db.close();const row=rows.find(value=>value.id===id);return row?{fileToken:row.fileToken,size:row.file.size}:null;},stageID);
+  assertID('people-local-stage-review-preserves-'+mode,JSON.stringify(afterRow)===JSON.stringify(beforeRow)&&(await page.locator('#prompt').innerText())==='Synthetic saved draft '+mode);
+  assertID('people-local-stage-review-zero-agent-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  manifest['people-local-stage-review-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(page,'people-local-stage-review-'+mode+'.png');
+}
+
+async function peopleTransactionalRetirement(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Synthetic retry retirement '+mode,'Synthetic setup');
+  const sharePath='/api/team/shares/'+chat.id;await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api(sharePath),sub=await until(async()=>{const data=await readerSeat.api('/api/team/subscriptions');const row=data.subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),server=data.servers.find(item=>item.id===readerSeat.serverID);return row?.people_copy_instance&&server?.people_file_binding?{row,server}:null;},40000,'transactional retirement subscription');
+  const key=[sub.row.server,sub.row.owner,sub.row.chat,sub.row.generation].join('/'),base='/api/team/subscriptions/'+key,scope=`people\0${key}\0binding:${sub.server.people_file_binding}\0copy:${sub.row.people_copy_instance}\0`,page=await pageFor(readerSeat,mode,'people-transactional-retirement-'+mode),before={owner:counts(ownerSeat),recipient:counts(readerSeat)};let comments=0;
+  await page.route('**/api/team/subscriptions/**/comments?*',async route=>{const request=route.request();if(request.method()==='POST'&&new URL(request.url()).pathname===base+'/comments'){comments++;await route.abort('failed');}else await route.continue();});
+  try {
+    await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});await page.locator('#prompt').fill('Synthetic retry caption '+mode);await page.locator('#attfile').setInputFiles({name:'retire-synthetic.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic retained bytes')});await page.locator('#attstage .stagechip.done[title="retire-synthetic.txt"]').waitFor({timeout:30000});
+    const dialog=page.waitForEvent('dialog'),send=page.locator('#sendbtn').click();await (await dialog).accept();await send;
+    const state=()=>page.evaluate(async scope=>{const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js');const store=createBrowserPeopleFileStore(indexedDB);try{const recovery=await store.listPeopleRecovery(scope),files=await store.list(scope);return {recovery,files:await Promise.all(files.map(async row=>({id:row.id,fileToken:row.fileToken,size:row.file.size,text:await row.file.text()})))};}finally{store.destroy();}},scope);
+    const captured=await until(async()=>{const value=await state();return value.recovery.pending.length===1?value:null;},30000,'saved unconfirmed publication'),publication=captured.recovery.pending[0],stage=publication.request.attachments[0];
+    const missing=await readerSeat.api(base+'/pending/'+publication.request.key+'?copy_instance='+encodeURIComponent(sub.row.people_copy_instance));
+    assertID('people-transactional-retirement-missing-'+mode,missing.state==='missing'&&comments===1);
+    const summary=page.locator('#attstage details summary').getByText('Review unconfirmed People message');await summary.waitFor({timeout:30000});await summary.click();const button=page.locator('#attstage .people-browser-retire');await button.waitFor({state:'visible',timeout:30000});
+    const response=page.waitForResponse(r=>r.request().method()==='POST'&&new URL(r.url()).pathname===base+'/pending/'+publication.request.key+'/retire-absent');if(mode==='desktop'){await button.focus();await page.keyboard.press('Enter');}else await button.click();const retired=await response,body=await retired.json();
+    assertID('people-transactional-retirement-bodyless-'+mode,retired.ok()&&body.state==='locally_discarded'&&retired.request().postData()===null);
+    const after=await until(async()=>{const value=await state();return value.recovery.pending.length===0?value:null;},30000,'local retirement decision'),server=await readerSeat.api(base+'/pending/'+publication.request.key+'?copy_instance='+encodeURIComponent(sub.row.people_copy_instance));
+    assertID('people-transactional-retirement-marker-'+mode,server.state==='absent_retired'&&after.recovery.pending.length===0);
+    assertID('people-transactional-retirement-preserves-'+mode,JSON.stringify(after.files)===JSON.stringify(captured.files)&&after.files[0].id===stage&&after.files[0].text==='synthetic retained bytes'&&after.recovery.heads.some(head=>head.text==='Synthetic retry caption '+mode)&&(await page.locator('#prompt').innerText())==='Synthetic retry caption '+mode);
+    assertID('people-transactional-retirement-zero-agent-'+mode,comments===1&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    manifest['people-transactional-retirement-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(page,'people-transactional-retirement-'+mode+'.png');
+  } finally {await page.unroute('**/api/team/subscriptions/**/comments?*');}
+}
+
+async function peopleTransactionalDrafts(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Synthetic concurrent drafts '+mode,'Synthetic setup');
+  const sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api(sharePath),sub=await until(async()=>{const data=await readerSeat.api('/api/team/subscriptions');const row=data.subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write');const server=data.servers.find(item=>item.id===readerSeat.serverID);return row?.people_copy_instance&&server?.people_file_binding?{row,server}:null;},40000,'transactional draft subscription');
+  const key=[sub.row.server,sub.row.owner,sub.row.chat,sub.row.generation].join('/'),scope=`people\0${key}\0binding:${sub.server.people_file_binding}\0copy:${sub.row.people_copy_instance}\0`,first=await pageFor(readerSeat,mode,'people-transactional-drafts-'+mode),before={owner:counts(ownerSeat),recipient:counts(readerSeat)};let posts=0;
+  first.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname==='/api/team/subscriptions/'+key+'/comments')posts++;});
+  await open(first,'team/'+key);await first.locator('#prompt').waitFor({state:'visible',timeout:30000});
+  const legacyKey='scimux-people-draft:team/'+key;await first.evaluate(({legacyKey})=>localStorage.setItem(legacyKey,'synthetic preserved legacy'),{legacyKey});
+  const state=page=>page.evaluate(async scope=>{const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js');const store=createBrowserPeopleFileStore(indexedDB);try{return await store.listPeopleRecovery(scope);}finally{store.destroy();}},scope);
+  await first.locator('#prompt').fill('same synthetic text');const initial=await until(async()=>{const snapshot=await state(first);return snapshot.heads.length===1&&snapshot.heads[0].text==='same synthetic text'?snapshot:null;},30000,'first durable draft');
+  const second=await first.context().newPage();pages.push({page:second,label:'people-transactional-drafts-second-'+mode});pageSource.set(second,{dir:path.resolve(__dirname,'../js'),version:'current'});await second.coverage.startJSCoverage({resetOnNavigation:false});second.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname==='/api/team/subscriptions/'+key+'/comments')posts++;});await second.goto(readerSeat.base,{waitUntil:'networkidle'});
+  await until(async()=>await second.locator('#prompt').innerText()==='same synthetic text',40000,'restored transactional draft');
+  await second.locator('#prompt').fill('same synthetic text');const next=await until(async()=>{const snapshot=await state(second);return snapshot.heads.length===1&&snapshot.heads[0].version!==initial.heads[0].version?snapshot:null;},30000,'newer same-text draft');
+  await first.locator('#prompt').fill('same synthetic text');const fork=await until(async()=>{const snapshot=await state(first);return snapshot.heads.length===2?snapshot:null;},30000,'separate concurrent drafts');
+  assertID('people-transactional-drafts-separate-'+mode,fork.heads.every(head=>head.text==='same synthetic text')&&new Set(fork.heads.map(head=>head.version)).size===2&&fork.heads.some(head=>head.version===next.heads[0].version));
+  const stale=await first.evaluate(async({scope,head,version})=>{const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js');const store=createBrowserPeopleFileStore(indexedDB);try{return await store.clearPeopleDraft({scope,head,version});}finally{store.destroy();}},{scope,head:initial.heads[0].head,version:initial.heads[0].version});
+  const after=await state(second);assertID('people-transactional-drafts-stale-clear-'+mode,stale===false&&after.heads.length===2&&after.heads.some(head=>head.version===next.heads[0].version));
+  assertID('people-transactional-drafts-legacy-'+mode,(await first.evaluate(key=>localStorage.getItem(key),legacyKey))==='synthetic preserved legacy');
+  assertID('people-transactional-drafts-zero-agent-'+mode,posts===0&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  manifest['people-transactional-drafts-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(first,'people-transactional-drafts-'+mode+'.png');
+}
+
+async function peopleStaleRetry(mode,ownerSeat,otherOwner,readerSeat,observer) {
+  const label='people-stale-retry-'+mode,chat=await node(ownerSeat,'codex','Synthetic stale retry '+mode,'Synthetic setup'),sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api(sharePath),sub=await until(async()=>{const data=await readerSeat.api('/api/team/subscriptions'),row=data.subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),server=data.servers.find(item=>item.id===readerSeat.serverID);return row?.people_copy_instance&&server?.people_file_binding?{row,server}:null;},40000,'stale retry subscription');
+  const key=[sub.row.server,sub.row.owner,sub.row.chat,sub.row.generation].join('/'),base='/api/team/subscriptions/'+key,scope=`people\0${key}\0binding:${sub.server.people_file_binding}\0copy:${sub.row.people_copy_instance}\0`,first=await pageFor(readerSeat,mode,label+'-first');
+  const seats={'owner-a':ownerSeat,'owner-b':otherOwner,recipient:readerSeat,observer},countsAll=()=>Object.fromEntries(Object.entries(seats).map(([name,seat])=>[name,counts(seat)]));
+  const state=page=>page.evaluate(async scope=>{const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('scimux-people-file-drafts',2);req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});try{const tx=db.transaction(['files','recovery'],'readonly'),get=name=>new Promise((resolve,reject)=>{const req=tx.objectStore(name).getAll();req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});const [files,recovery]=await Promise.all([get('files'),get('recovery')]);return {recovery:recovery.filter(row=>row.scope===scope),files:await Promise.all(files.filter(row=>row.scope===scope).map(async row=>({id:row.id,fileToken:row.fileToken,stageRevision:row.stageRevision,name:row.file.name,bytes:Array.from(new Uint8Array(await row.file.arrayBuffer()))})))};}finally{db.close();}},scope);
+  let firstPosts=0,secondPosts=0,unexpected=0,unexpectedDialogs=0,release,ready,rejectReady,released=false;const gate=new Promise(resolve=>{release=resolve;}),acceptedPromise=new Promise((resolve,reject)=>{ready=resolve;rejectReady=reject;});acceptedPromise.catch(()=>{});const unblock=()=>{released=true;release();};heldReleases.add(unblock);
+  await first.evaluate(()=>{const add=EventTarget.prototype.addEventListener;window.__syntheticRetryHandlers=[];EventTarget.prototype.addEventListener=function(type,listener,options){if(type==='click'&&this instanceof HTMLElement&&this.classList.contains('people-retry')&&typeof listener==='function')window.__syntheticRetryHandlers.push({element:this,listener});return add.call(this,type,listener,options);};});
+  await first.route('**/api/team/subscriptions/**/comments**',async route=>{const request=route.request();if(request.method()==='POST'&&new URL(request.url()).pathname===base+'/comments'){firstPosts++;if(firstPosts>1)unexpected++;await route.abort('failed');}else await route.continue();});
+  let second;
+  try {
+    await open(first,'team/'+key);await first.locator('#attadd').waitFor({timeout:30000});await first.locator('#prompt').fill('Synthetic old retry '+mode);await first.locator('#attfile').setInputFiles({name:'old-kept.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic old retained bytes')});await first.locator('#attstage .stagechip.done[title="old-kept.txt"]').waitFor({timeout:30000});
+    const dialog=first.waitForEvent('dialog'),send=first.locator('#sendbtn').click();await (await dialog).accept();await send;
+    const oldState=await until(async()=>{const value=await state(first),row=value.recovery.find(r=>r.kind==='publication'&&r.state==='pending');return row?{value,row}:null;},30000,'old pending publication'),old=oldState.row;
+    await first.locator('#attstage details summary').getByText('Review unconfirmed People message').waitFor({timeout:30000});await first.locator('#attstage details summary').getByText('Review unconfirmed People message').click();await first.locator('.people-retry').waitFor({timeout:30000});
+    first.on('dialog',dialog=>{unexpectedDialogs++;dialog.dismiss().catch(()=>{});});const captured=await first.evaluate(()=>{const entry=window.__syntheticRetryHandlers.at(-1);if(!entry)return false;window.__syntheticOldRetry=entry;return true;});assert.ok(captured);const missing=await readerSeat.api(base+'/pending/'+old.request.key+'?copy_instance='+encodeURIComponent(sub.row.people_copy_instance));assertID('people-stale-retry-prepared-'+mode,firstPosts===1&&missing.state==='missing'&&old.request.attachments.length===1);
+    second=await first.context().newPage();pages.push({page:second,label:label+'-second'});pageSource.set(second,{dir:path.resolve(__dirname,'../js'),version:'current'});await second.coverage.startJSCoverage({resetOnNavigation:false});await second.goto(readerSeat.base,{waitUntil:'networkidle'});if(mode==='phone'&&await second.locator('#chatback').isVisible())await second.locator('#chatback').click();await open(second,'team/'+key);
+    const summary=second.locator('#attstage details summary').getByText('Review unconfirmed People message');await summary.waitFor({timeout:30000});await summary.click();const retire=second.locator('#attstage .people-browser-retire');await retire.waitFor({timeout:30000});const retireResponse=second.waitForResponse(r=>r.request().method()==='POST'&&new URL(r.url()).pathname===base+'/pending/'+old.request.key+'/retire-absent');await retire.click();assert.ok((await retireResponse).ok());
+    const retired=await until(async()=>{const value=await state(second),decision=value.recovery.find(r=>r.kind==='decision'&&r.publication===old.publication);return decision?.state==='retired'?{value,decision}:null;},30000,'old local decision');assert.deepEqual(retired.value.files,oldState.value.files);assertID('people-stale-retry-retired-'+mode,retired.decision.state==='retired'&&retired.value.files.some(file=>file.id===old.request.attachments[0]));
+    await second.route('**/api/team/subscriptions/**/comments**',async route=>{const request=route.request();if(request.method()!=='POST'||new URL(request.url()).pathname!==base+'/comments'){await route.continue();return;}secondPosts++;if(secondPosts>1){unexpected++;await route.abort('failed');return;}try{const response=await route.fetch({maxRetries:0}),body=await response.json();ready({status:response.status(),body,request:request.postDataJSON()});await gate;if(!second.isClosed())await route.fulfill({response});}catch(error){rejectReady(error);if(!released&&!shutting&&!second.isClosed())throw error;}});
+    await second.locator('#prompt').fill('Synthetic fresh retry '+mode);const delivered=second.waitForResponse(response=>response.request().method()==='POST'&&new URL(response.url()).pathname===base+'/comments',{timeout:90000});delivered.catch(()=>{});await second.locator('#sendbtn').click();let timer;const accepted=await Promise.race([acceptedPromise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('fresh response not fetched')),30000);})]).finally(()=>clearTimeout(timer));assert.equal(accepted.status,200);assert.notEqual(accepted.request.key,old.request.key);assert.deepEqual(accepted.request.attachments,old.request.attachments,'restored upload must retain its original stage ID');
+    const fresh=await until(async()=>{const value=await state(second),row=value.recovery.find(r=>r.kind==='publication'&&r.state==='pending'&&r.request.key===accepted.request.key);return row?{value,row}:null;},30000,'fresh pending publication');assertID('people-stale-retry-fresh-'+mode,fresh.row.publication!==old.publication&&fresh.row.request.text==='Synthetic fresh retry '+mode&&JSON.stringify(fresh.row.request.attachments)===JSON.stringify(old.request.attachments));
+    await second.locator('#prompt').fill('Synthetic newer draft '+mode);await second.locator('#attfile').setInputFiles({name:'new-kept.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic newer retained bytes')});await second.locator('#attstage .stagechip.done[title="new-kept.txt"]').waitFor({timeout:30000});
+    if(mode==='phone')await first.locator('#chatback').click();await open(first,readerSeat.node.id);if(mode==='phone')await first.locator('#chatback').click();await open(first,'team/'+key);await first.locator('#prompt').waitFor({timeout:30000});await until(async()=>{const v=await state(first);return v.recovery.some(row=>row.kind==='publication'&&row.publication===fresh.row.publication)&&v.files.some(file=>file.name==='new-kept.txt');},30000,'fresh state after navigation');await until(async()=>await first.locator('#attstage textarea').evaluateAll((nodes,text)=>nodes.some(node=>node.value===text),'Synthetic fresh retry '+mode),30000,'fresh retry cache rendered');assert.ok(await first.locator('#attstage .people-retry').count());
+    const saved=await state(first),before=countsAll(),beforeComments={attempted:unexpected,accepted:0,controls:0};await first.evaluate(async()=>{const {element,listener}=window.__syntheticOldRetry;await listener.call(element,new MouseEvent('click',{bubbles:true}));});await first.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));const after=countsAll(),afterComments={attempted:unexpected,accepted:0,controls:0},afterStale=await state(first);
+    assert.deepEqual(afterStale,saved);assert.deepEqual(after,before);assertID('people-stale-retry-stale-safe-'+mode,unexpected===0&&unexpectedDialogs===0&&JSON.stringify(afterStale)===JSON.stringify(saved));assertID('people-stale-retry-zero-agent-'+mode,JSON.stringify(before)===JSON.stringify(after));
+    release();const delivery=await delivered;await delivery.finished();const entries=await until(async()=>{const rows=(await readerSeat.api(base+'/comments?after=0')).entries.filter(row=>row.seq===accepted.body.seq);return rows.length===1?rows:null;},30000,'fresh accepted comment');assert.equal(entries[0].text,'Synthetic fresh retry '+mode);assert.equal(secondPosts,1);assert.equal(unexpected,0);const late=await state(second),newFile=saved.files.find(file=>file.name==='new-kept.txt');assert.deepEqual(late.files.find(file=>file.name==='new-kept.txt'),newFile);assert.ok(late.recovery.some(row=>row.kind==='draft'&&row.text==='Synthetic newer draft '+mode));assert.deepEqual(late.recovery.find(row=>row.kind==='decision'&&row.publication===old.publication),retired.decision);assertID('people-stale-retry-late-'+mode,entries.length===1&&secondPosts===1&&unexpected===0);
+    manifest[label]={before,after,beforeComments,afterComments};
+    await first.waitForFunction(title=>document.querySelector('#chattitle')?.textContent.trim()===title,'Synthetic stale retry '+mode,{timeout:10000});
+    if(mode==='phone'){
+      let previous=null,stable=0;
+      await until(async()=>{const sample=await first.evaluate(()=>{const chat=document.querySelector('#chat')?.getBoundingClientRect(),cards=document.querySelector('#cards')?.getBoundingClientRect();return chat&&cards?{left:chat.left,width:chat.width,viewport:innerWidth,cardsRight:cards.right}:null;});
+        if(!sample||Math.abs(sample.left)>1||Math.abs(sample.width-sample.viewport)>1||sample.cardsRight>0){previous=null;stable=0;return false;}
+        stable=previous&&Math.abs(sample.left-previous.left)<=.5&&Math.abs(sample.width-previous.width)<=.5&&Math.abs(sample.cardsRight-previous.cardsRight)<=.5?stable+1:1;previous=sample;return stable>=3;
+      },10000,'settled selected chat');
+    }
+    await screenshot(first,label+'.png');
+  } finally {unblock();heldReleases.delete(unblock);await first.unrouteAll({behavior:'wait'});if(second)await second.unrouteAll({behavior:'wait'});}
+}
+
+async function peopleCapturedDiscard(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Synthetic captured review '+mode,'Synthetic setup'),sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api(sharePath),sub=await until(async()=>{const data=await readerSeat.api('/api/team/subscriptions'),row=data.subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),server=data.servers.find(item=>item.id===readerSeat.serverID);return row?.people_copy_instance&&server?.people_file_binding?{row,server}:null;},40000,'capture review subscription');
+  const key=[sub.row.server,sub.row.owner,sub.row.chat,sub.row.generation].join('/'),scope=`people\0${key}\0binding:${sub.server.people_file_binding}\0copy:${sub.row.people_copy_instance}\0`,page=await pageFor(readerSeat,mode,'people-captured-discard-'+mode),before={owner:counts(ownerSeat),recipient:counts(readerSeat)};let comments=0;
+  page.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname==='/api/team/subscriptions/'+key+'/comments')comments++;});
+  await open(page,'team/'+key);await page.locator('#prompt').waitFor({state:'visible',timeout:30000});
+  const captured=await page.evaluate(async scope=>{const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js'),store=createBrowserPeopleFileStore(indexedDB);try{const draft=await store.savePeopleDraft({scope,text:'synthetic editable'}),capture=await store.freezePeopleDraft({scope,text:'synthetic editable',...draft});await store.save(scope,'3333333333333333',new File(['synthetic'], 'kept.txt',{type:'text/plain'}));localStorage.setItem('synthetic-capture-legacy','unchanged');return {draft,capture};}finally{store.destroy();}},scope);
+  await page.reload({waitUntil:'networkidle'});if(mode==='phone'&&await page.locator('#chatback').isVisible())await page.locator('#chatback').click();await open(page,'team/'+key);await page.locator('#prompt').waitFor({state:'visible',timeout:30000});
+  const summary=page.locator('#attstage details summary').getByText('Review saved People drafts');await summary.waitFor({state:'visible',timeout:30000});await summary.click();
+  const button=page.locator('#attstage .people-captured-discard');await button.waitFor({state:'visible',timeout:30000});
+  const style=await button.evaluate(el=>{const reference=document.createElement('button');reference.type='button';reference.className='btn-tinted';el.parentElement.appendChild(reference);try{const actual=getComputedStyle(el), expected=getComputedStyle(reference), properties=['display','alignItems','justifyContent','gap','padding','borderRadius','fontSize','backgroundColor','color'];return {height:el.getBoundingClientRect().height,actual:Object.fromEntries(properties.map(key=>[key,actual[key]])),expected:Object.fromEntries(properties.map(key=>[key,expected[key]]))};}finally{reference.remove();}});
+  assert.ok(style.height>=44, 'captured discard has a 44px target');assert.deepEqual(style.actual,style.expected,'captured discard uses the tinted button style');
+  if(mode==='desktop'){await button.focus();await page.keyboard.press('Enter');}else await button.tap();
+  const after=await until(async()=>{const value=await page.evaluate(async scope=>{const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js'),store=createBrowserPeopleFileStore(indexedDB);try{return {recovery:await store.listPeopleRecovery(scope),files:await Promise.all((await store.list(scope)).map(async row=>({name:row.file.name,text:await row.file.text()}))),legacy:localStorage.getItem('synthetic-capture-legacy')};}finally{store.destroy();}},scope);return value.recovery.heads.some(row=>row.head===captured.capture.head)?null:value;},30000,'capture cleanup state');
+  assertID('people-captured-discard-exact-'+mode,!after.recovery.heads.some(row=>row.head===captured.capture.head)&&after.recovery.heads.some(row=>row.head===captured.draft.head&&row.text==='synthetic editable'));
+  assertID('people-captured-discard-preserves-'+mode,after.files.length===1&&after.files[0].name==='kept.txt'&&after.files[0].text==='synthetic'&&after.legacy==='unchanged');
+  assertID('people-captured-discard-zero-agent-'+mode,comments===0&&JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  manifest['people-captured-discard-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(page,'people-captured-discard-'+mode+'.png');
+}
+
+async function peopleTextRetirement(mode, ownerSeat, otherOwner, readerSeat, observer, variant) {
+  const label='people-text-retirement-'+variant+'-'+mode, testRelay=await launchRelay(relayBin,'text-retirement-relay-'+variant+'-'+mode), identities=[];
+  for(const seat of [ownerSeat,readerSeat]) {
+    const issue=JSON.parse(execFileSync(relayBin,['-state-dir',testRelay.dir,'-url',testRelay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
+    const joined=await seat.api('/api/team/servers','POST',{link:issue.link,name:'Synthetic text relay'});
+    identities.push({server:joined.id,self:(await seat.api('/api/team/servers/'+joined.id+'/seats')).self});
+  }
+  const [owner,reader]=identities,chat=await node(ownerSeat,'codex','Synthetic text retirement '+variant+' '+mode,'Synthetic setup'),sharePath='/api/team/shares/'+chat.id;
+  const grant=access=>({server:owner.server,scope:'all',members:[{seat:reader.self,access}]});
+  await ownerSeat.api(sharePath,'PUT',grant('write'));const share=await ownerSeat.api(sharePath);
+  const sendingSeat=variant==='readonly'?readerSeat:ownerSeat;
+  const subscription=await until(async()=>{const data=await sendingSeat.api('/api/team/subscriptions'),row=data.subscriptions.find(item=>item.server===owner.server&&item.owner===owner.self&&item.chat===share.uid&&item.generation===share.generation&&(variant==='readonly'?item.access==='write':item.access==='owner'));return row?.people_copy_instance?row:null;},40000,'text retirement subscription');
+  const key=[subscription.server,subscription.owner,subscription.chat,subscription.generation].join('/'),base='/api/team/subscriptions/'+key,original='Synthetic explicit human text '+variant+' '+mode,newer='Synthetic newer text '+variant+' '+mode;
+  const page=await pageFor(sendingSeat,mode,label+'-origin'),seatMap={'owner-a':ownerSeat,'owner-b':otherOwner,recipient:readerSeat,observer},snapshotCounts=()=>Object.fromEntries(Object.entries(seatMap).map(([role,seat])=>[role,counts(seat)])),before=snapshotCounts();
+  let release,ready,rejectReady,released=false,postCount=0,extraPosts=0,requestBody;const gate=new Promise(resolve=>{release=resolve;}),fetched=new Promise((resolve,reject)=>{ready=resolve;rejectReady=reject;});fetched.catch(()=>{});
+  const cleanup=()=>{released=true;release();};heldReleases.add(cleanup);
+  const state=page=>page.evaluate(async()=>{const db=await new Promise((resolve,reject)=>{const request=indexedDB.open('scimux-people-file-drafts',2);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});try{const tx=db.transaction(['files','recovery'],'readonly'),read=store=>new Promise((resolve,reject)=>{const request=tx.objectStore(store).getAll();request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});const [files,recovery]=await Promise.all([read('files'),read('recovery')]);return {recovery,files:await Promise.all(files.map(async row=>({key:row.key,id:row.id,fileToken:row.fileToken,name:row.file.name,bytes:Array.from(new Uint8Array(await row.file.arrayBuffer()))}))),legacy:localStorage.getItem('synthetic-text-retirement-legacy')};}finally{db.close();}});
+  try {
+    await open(page,variant==='readonly'?'team/'+key:chat.id);if(variant!=='readonly')await page.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});
+    await page.evaluate(()=>localStorage.setItem('synthetic-text-retirement-legacy','unchanged'));
+    const responsePromise=page.waitForResponse(response=>response.request().method()==='POST'&&new URL(response.url()).pathname===base+'/comments',{timeout:90000});responsePromise.catch(()=>{});
+    await page.route('**/api/team/subscriptions/**/comments**',async route=>{const request=route.request();if(request.method()!=='POST'||new URL(request.url()).pathname!==base+'/comments'){await route.continue();return;}try{postCount++;requestBody=request.postDataJSON();const response=await route.fetch({maxRetries:0});const body=await response.json();ready({status:response.status(),body});await gate;if(!page.isClosed())await route.fulfill({response});}catch(error){rejectReady(error);if(!released&&!shutting&&!page.isClosed())throw error;}});
+    await page.locator('#prompt').fill(original);await page.locator('#sendbtn').click();let timeout;const accepted=await Promise.race([fetched,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('text response not fetched')),30000);})]).finally(()=>clearTimeout(timeout));assert.equal(accepted.status,200);assert.ok(Number.isSafeInteger(accepted.body.seq)&&accepted.body.seq>0);assert.equal(requestBody.text,original);assert.match(requestBody.key,/^[0-9a-f]{16}$/);
+    const initial=await until(async()=>{const value=await state(page),pending=value.recovery.find(row=>row.kind==='text-publication'&&row.state==='pending'&&row.request?.key===requestBody.key);return pending?{value,pending}:null;},30000,'immutable text pending');const publication=initial.pending;assert.deepEqual(publication.request,requestBody);assert.ok(publication.head&&publication.version&&publication.publication&&publication.scope);assert.equal(publication.peopleKey,key);assert.equal(publication.copyInstance,subscription.people_copy_instance);assert.equal(publication.native,variant==='readonly'?'':chat.instance_id);assert.ok(initial.value.recovery.some(row=>row.kind==='head'&&row.head===publication.head&&row.version===publication.version&&row.sealed));assert.ok(initial.value.recovery.some(row=>row.kind==='draft'&&row.version===publication.version&&row.text===original));
+    assertID('people-text-retirement-'+variant+'-prepared-'+mode,postCount===1&&accepted.status===200&&publication.request.key===requestBody.key);
+    const review=await page.context().newPage();review.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname===base+'/comments')extraPosts++;});pages.push({page:review,label:label+'-review'});pageSource.set(review,{dir:path.resolve(__dirname,'../js'),version:'current'});await review.coverage.startJSCoverage({resetOnNavigation:false});await review.goto(sendingSeat.base,{waitUntil:'networkidle'});if(mode==='phone'&&await review.locator('#chatback').isVisible())await review.locator('#chatback').click();await open(review,variant==='readonly'?'team/'+key:chat.id);
+    await review.locator('#prompt').fill(newer);await until(async()=>(await state(review)).recovery.some(row=>row.kind==='draft'&&row.text===newer),30000,'newer text saved');
+    if(await review.locator('#attadd').isVisible()) {
+      await review.locator('#attfile').setInputFiles({name:'retained.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic retained bytes')});
+      await review.locator('#attstage .stagechip.done[title="retained.txt"]').waitFor({timeout:30000});
+    } else {
+      // A local seed is only a retained-byte check; it does not prove an upload.
+      await review.evaluate(async scope=>{const {createBrowserPeopleFileStore}=await import('/js/people-file-store.js'),store=createBrowserPeopleFileStore(indexedDB);try{await store.save(scope,'3333333333333333',new File(['synthetic retained bytes'],'retained.txt',{type:'text/plain'}));}finally{store.destroy();}},publication.scope);
+    }
+    if(variant==='readonly') {await ownerSeat.api(sharePath,'PUT',grant('read'));await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(row=>row.chat===share.uid&&row.generation===share.generation&&row.access==='read'),40000,'read-only transition');await review.locator('#gueststate').getByText(/Can view/i).waitFor({timeout:30000});await review.locator('#prompt[contenteditable=false]').waitFor({state:'visible',timeout:30000});assert.equal(await review.locator('#prompt').getAttribute('contenteditable'),'false');assert.equal(await review.locator('#destinationagent').isVisible(),false);assert.equal(await review.locator('#convtools').isVisible(),false);assert.equal(await review.locator('#workpulse').evaluate(el=>el.classList.contains('on')),false);}
+    else {await review.locator('#sharestatus').waitFor({state:'visible',timeout:30000});await review.locator('#destinationagent').click();await review.locator('#destinationagent[aria-pressed=true]').waitFor({timeout:30000});await review.locator('#prompt').fill('Synthetic unsent Agent draft '+mode);await review.locator('#attadd').waitFor({state:'visible',timeout:30000});await review.locator('#attfile').setInputFiles({name:'agent-unsent.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic agent bytes')});await review.locator('#attstage .stagechip.done[title="agent-unsent.txt"]').waitFor({timeout:30000});await ownerSeat.api(sharePath,'DELETE');await until(async()=>(await ownerSeat.api('/api/team/subscriptions')).subscriptions.some(row=>row.chat===share.uid&&row.generation===share.generation&&row.state==='ended'),40000,'owner sharing ended');await until(async()=>!(await review.locator('#sharestatus').isVisible())||/sharing ended/i.test(await review.locator('#sharestatus').innerText()),30000,'ended sharing UI');const live=(await ownerSeat.api('/api/state')).nodes.find(row=>row.id===chat.id);assert.ok(live&&live.instance_id===chat.instance_id&&!live.ended_at);}
+    const saved=await state(review);assert.ok(saved.files.some(row=>row.name==='retained.txt'&&Buffer.from(row.bytes).toString()==='synthetic retained bytes'));const summary=review.locator('#attstage details').filter({has:review.locator('summary').getByText('Review unconfirmed People text')}).filter({has:review.locator('[data-publication="'+publication.publication+'"]')}).locator('summary');await summary.waitFor({state:'visible',timeout:30000});await summary.click();const details=summary.locator('..'),button=details.locator('button[data-publication="'+publication.publication+'"]');await button.waitFor({state:'visible',timeout:30000});await button.scrollIntoViewIfNeeded();const box=await button.boundingBox();assertID('people-text-retirement-'+variant+'-reachable-'+mode,!!box&&box.height>=44);if(mode==='desktop'){await button.focus();await review.keyboard.press('Enter');}else await button.tap();
+    const retired=await until(async()=>{const value=await state(review),decision=value.recovery.find(row=>row.kind==='text-decision'&&row.publication===publication.publication);return decision?.state==='retired'?{value,decision}:null;},30000,'local text decision');assert.deepEqual(retired.decision,{...publication,key:'text-decision:'+publication.publication,kind:'text-decision',state:'retired'});assert.ok(!retired.value.recovery.some(row=>row.kind==='text-publication'&&row.publication===publication.publication));assertID('people-text-retirement-'+variant+'-local-'+mode,true);assert.match(await review.locator('#attstage').innerText(),/local|retir/i);assert.match(await review.locator('#attstage').innerText(),/not retract|does not retract/i);
+    assert.deepEqual(retired.value.recovery.filter(row=>row.publication!==publication.publication),saved.recovery.filter(row=>row.publication!==publication.publication));assert.deepEqual(retired.value.files,saved.files);assert.equal(retired.value.legacy,'unchanged');assert.equal(await review.locator('#prompt').innerText(),variant==='readonly'?newer:'Synthetic unsent Agent draft '+mode);if(variant!=='readonly'){assert.match(await review.locator('#attstage').innerText(),/agent-unsent\.txt/);assert.equal(await review.locator('#destinationagent').getAttribute('aria-pressed'),'true');}assertID('people-text-retirement-'+variant+'-preserves-'+mode,true);
+    cleanup();const delivered=await responsePromise;assert.ok(delivered.ok());await delivered.finished();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));const final=await state(review);assert.deepEqual(final,retired.value);assert.equal(await review.locator('#prompt').innerText(),variant==='readonly'?newer:'Synthetic unsent Agent draft '+mode);if(variant!=='readonly'){assert.match(await review.locator('#attstage').innerText(),/agent-unsent\.txt/);assert.equal(await review.locator('#destinationagent').getAttribute('aria-pressed'),'true');}else{assert.equal(await review.locator('#convtools').isVisible(),false);assert.equal(await review.locator('#workpulse').evaluate(el=>el.classList.contains('on')),false);}
+    const entries=(await sendingSeat.api(base+'/comments?after=0')).entries.filter(row=>row.seq===accepted.body.seq);assert.equal(entries.length,1);assert.equal(entries[0].text,original);assert.equal(postCount,1);assert.equal(extraPosts,0);assertID('people-text-retirement-'+variant+'-late-'+mode,true);
+    const after=snapshotCounts();assert.deepEqual(after,before);assertID('people-text-retirement-'+variant+'-zero-agent-'+mode,true);manifest[label]={before,after};await screenshot(review,label+'.png');
+  }finally{heldReleases.delete(cleanup);cleanup();await page.unrouteAll({behavior:'wait'});}
+}
+
+async function peopleNoStorageText(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','Synthetic page-only retry '+mode,'Synthetic setup'),sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});const share=await ownerSeat.api(sharePath),sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(row=>row.owner===ownerSeat.self&&row.chat===share.uid&&row.generation===share.generation&&row.access==='write'),40000,'page-only subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),base='/api/team/subscriptions/'+key,page=await pageFor(readerSeat,mode,'people-no-storage-text-'+mode),before={owner:counts(ownerSeat),recipient:counts(readerSeat)},posts=[];
+  await page.addInitScript(()=>Object.defineProperty(globalThis,'indexedDB',{value:undefined,configurable:true}));await page.reload({waitUntil:'networkidle'});await open(page,'team/'+key);await page.locator('#prompt').waitFor({state:'visible',timeout:30000});assert.equal(await page.evaluate(()=>typeof indexedDB),'undefined');
+  page.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname===base+'/comments')posts.push(request.postDataJSON());});
+  await page.locator('#prompt').fill('Synthetic page-only message '+mode);const response=page.waitForResponse(result=>result.request().method()==='POST'&&new URL(result.url()).pathname===base+'/comments');await page.locator('#sendbtn').click();assert.ok((await response).ok());assert.match(await page.locator('#toast').innerText(),/retry is available only while this page remains open/i);await until(async()=>(await page.locator('#prompt').innerText())==='',30000,'confirmed page-only input cleared');
+  const entries=(await readerSeat.api(base+'/comments?after=0')).entries.filter(row=>row.text==='Synthetic page-only message '+mode);assert.equal(entries.length,1);assert.equal(posts.length,1);assertID('people-no-storage-text-send-'+mode,(await page.locator('#prompt').innerText())==='');
+  for(const edit of ['same','different']){
+    const original='Synthetic page-only uncertain '+edit+' '+mode,newer=edit==='same'?original:'Synthetic newer unsaved '+mode;let ready,release,first=true;const reached=new Promise(resolve=>{ready=resolve;}),gate=new Promise(resolve=>{release=resolve;});heldReleases.add(release);const start=posts.length;
+    await page.route('**/api/team/subscriptions/**/comments**',async route=>{const request=route.request();if(request.method()!=='POST'||new URL(request.url()).pathname!==base+'/comments'||!first){await route.continue();return;}first=false;const actual=await route.fetch({maxRetries:0});ready(actual.status());await gate;await route.abort('failed');});
+    try{await page.locator('#prompt').fill(original);const dialog=page.waitForEvent('dialog',{timeout:30000});dialog.catch(()=>{});await page.locator('#sendbtn').click();assert.equal(await reached,200);await page.locator('#prompt').fill(newer);release();await (await dialog).accept();assert.equal(await page.locator('#prompt').innerText(),newer);await page.locator('#prompt').fill(original);const retry=page.waitForResponse(result=>result.request().method()==='POST'&&new URL(result.url()).pathname===base+'/comments');await page.locator('#sendbtn').click();assert.ok((await retry).ok());await until(async()=>posts.length===start+2,30000,'explicit page-only retry');assert.deepEqual(posts[start+1],posts[start]);const matching=(await readerSeat.api(base+'/comments?after=0')).entries.filter(row=>row.text===original);assert.equal(matching.length,1);assertID('people-no-storage-text-uncertain-'+edit+'-'+mode,posts.length===start+2&&matching.length===1);}finally{release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
+  }
+  assert.deepEqual(counts(ownerSeat),before.owner);assert.deepEqual(counts(readerSeat),before.recipient);assertID('people-no-storage-text-zero-agent-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));manifest['people-no-storage-text-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};await screenshot(page,'people-no-storage-text-'+mode+'.png');
+}
+
+async function peopleUncertainRetry(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People uncertain '+mode,'Synthetic uncertain setup');
+  const sharePath='/api/team/shares/'+chat.id;
+  await ownerSeat.api(sharePath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'uncertain subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),path='/api/team/subscriptions/'+key+'/comments';
+  const page=await pageFor(readerSeat,mode,'people-uncertain-'+mode);await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)},bodies=[];let forwarded=0,confirmedStatus=0;
+  await page.route('**/api/team/subscriptions/**/comments?*',async route=>{
+    const req=route.request();if(req.method()!=='POST'||new URL(req.url()).pathname!==path){await route.continue();return;}
+    bodies.push(req.postDataJSON());if(forwarded++===0){const response=await route.fetch();confirmedStatus=response.status();await route.abort('failed');}else await route.continue();
+  });
+  try {
+    await page.locator('#prompt').fill('Synthetic uncertain caption '+mode);
+    await page.locator('#attfile').setInputFiles({name:'uncertain.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic uncertain bytes')});
+    await page.locator('#attstage .stagechip.done[title="uncertain.txt"]').waitFor({timeout:30000});
+    const dialog=page.waitForEvent('dialog');const send=page.locator('#sendbtn').click();await (await dialog).accept();await send;
+    await page.locator('#attstage details summary').getByText('Review unconfirmed People message').waitFor({timeout:30000});
+    assertID('people-uncertain-accepted-server-'+mode,confirmedStatus===200&&bodies.length===1);
+    await page.locator('#prompt').fill('Newer People draft '+mode);
+    await until(async()=>page.evaluate(async text=>{const db=await new Promise((resolve,reject)=>{const request=indexedDB.open('scimux-people-file-drafts',2);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});try{const rows=await new Promise((resolve,reject)=>{const request=db.transaction('recovery','readonly').objectStore('recovery').getAll();request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});return rows.some(head=>head.kind==='head'&&!head.sealed&&rows.some(row=>row.kind==='draft'&&row.version===head.version&&row.text===text));}finally{db.close();}},'Newer People draft '+mode),30000,'durable newer People draft');
+    await page.reload({waitUntil:'networkidle'});await page.locator('#attstage details summary').getByText('Review unconfirmed People message').waitFor({timeout:40000});
+    await until(async()=>(await page.locator('#prompt').innerText())==='Newer People draft '+mode,30000,'reloaded People draft');
+    assertID('people-uncertain-reload-keeps-draft-'+mode,(await page.locator('#prompt').innerText())==='Newer People draft '+mode);
+    await page.locator('#attstage details summary').getByText('Review unconfirmed People message').click();await page.locator('.people-retry').waitFor({timeout:30000});
+    await page.locator('.people-retry').click();
+    await until(()=>bodies.length===2,30000,'explicit pending retry');
+    await page.locator('.people-retry').waitFor({state:'detached',timeout:40000});
+    const bubble=page.locator('#msgs .gmsg').filter({hasText:'Synthetic uncertain caption '+mode});await bubble.first().waitFor({timeout:40000});
+    assertID('people-uncertain-exact-retry-'+mode,JSON.stringify(bodies[0])===JSON.stringify(bodies[1])&&await bubble.count()===1&&(await page.locator('#prompt').innerText())==='Newer People draft '+mode);
+    assertID('people-uncertain-no-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    await screenshot(page,'people-uncertain-retry-'+mode+'.png');manifest['people-uncertain-retry-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)},forwarded,confirmedStatus};
+  } finally {await page.unrouteAll({behavior:'wait'});}
+}
+
+async function peoplePermissionDuringUpload(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People upload permission '+mode,'Synthetic permission setup');
+  const sharePath='/api/team/shares/'+chat.id,grant=access=>({server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access}]});
+  await ownerSeat.api(sharePath,'PUT',grant('write'));const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'upload permission subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),base='/api/team/subscriptions/'+key,page=await pageFor(readerSeat,mode,'people-upload-permission-'+mode);
+  await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await page.locator('#prompt').fill('Synthetic partial upload draft '+mode);
+  await page.locator('#attfile').setInputFiles({name:'first.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic first')});
+  await page.locator('#attstage .stagechip.done[title="first.txt"]').waitFor({timeout:30000});
+  let invalidRequests=0;const countInvalid=req=>{if(req.method()==='POST'&&new URL(req.url()).pathname===base+'/attachments')invalidRequests++;};page.on('request',countInvalid);
+  const emptyDialog=page.waitForEvent('dialog');const emptyInput=page.locator('#attfile').setInputFiles({name:'empty.txt',mimeType:'text/plain',buffer:Buffer.alloc(0)});const emptyNotice=await emptyDialog;
+  assertID('people-empty-file-feedback-'+mode,/non-empty/i.test(emptyNotice.message()));await emptyNotice.accept();await emptyInput;page.off('request',countInvalid);
+  assertID('people-empty-file-keeps-draft-'+mode,invalidRequests===0&&(await page.locator('#prompt').innerText())==='Synthetic partial upload draft '+mode&&await page.locator('#attstage .stagechip.done[title="first.txt"]').count()===1);
+  let release,entered;const reached=new Promise(resolve=>{entered=resolve}),hold=new Promise(resolve=>{release=resolve});heldReleases.add(release);
+  await page.route('**'+base+'/attachments?*',async route=>{entered();await hold;if(!page.isClosed())await route.continue();});
+  try {
+    await page.locator('#attfile').setInputFiles({name:'second.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic second')});await Promise.race([reached,delay(15000).then(()=>{throw Error('second upload not held')})]);
+    await ownerSeat.api(sharePath,'PUT',grant('read'));
+    await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='read'),30000,'permission changed during upload');
+    const failed=page.waitForResponse(response=>response.request().method()==='POST'&&new URL(response.url()).pathname===base+'/attachments',{timeout:30000});release();heldReleases.delete(release);const response=await failed;
+    assertID('people-held-upload-permission-denied-'+mode,response.status()===403);
+    await page.locator('#gueststate').getByText(/Can view/).waitFor({timeout:30000});
+    assertID('people-partial-upload-keeps-draft-'+mode,(await page.locator('#prompt').innerText())==='Synthetic partial upload draft '+mode&&await page.locator('#attstage .stagechip[title="first.txt"]').count()===1);
+    assertID('people-held-upload-no-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    await screenshot(page,'people-upload-permission-'+mode+'.png');manifest['people-upload-permission-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+  } finally {release();heldReleases.delete(release);await page.unrouteAll({behavior:'wait'});}
+}
+
+async function peoplePermissionMidBody(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People midbody permission '+mode,'Synthetic permission setup');
+  const sharePath='/api/team/shares/'+chat.id,grant=access=>({server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access}]});
+  await ownerSeat.api(sharePath,'PUT',grant('write'));const share=await ownerSeat.api(sharePath);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'midbody permission subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),base='/api/team/subscriptions/'+key,page=await pageFor(readerSeat,mode,'people-midbody-permission-'+mode);
+  await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+  const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await page.locator('#prompt').fill('Synthetic midbody draft '+mode);
+  const earlierRequest=page.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname===base+'/attachments');
+  await page.locator('#attfile').setInputFiles({name:'earlier.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic earlier')});
+  const earlierID=new URL((await earlierRequest).url()).searchParams.get('stage_id');
+  await page.locator('#attstage .stagechip.done[title="earlier.txt"]').waitFor({timeout:30000});
+  let release,entered;const reached=new Promise(resolve=>{entered=resolve}),hold=new Promise(resolve=>{release=resolve});heldReleases.add(release);
+  let forwarded=0,continued=0,firstBytes=0,upstream,negativeRequest,stageID,forwardFailure,retiring=false,heldBody,heldHeaders,heldPath;
+  // This locator belongs to the isolated seat. Never record its capability.
+  const locatorPath=path.join(readerSeat.data,'muxer.json'),locatorInfo=fs.lstatSync(locatorPath);
+  assert.ok(locatorInfo.isFile()&&(locatorInfo.mode&0o077)===0,'private test-owned muxer locator');
+  const link=JSON.parse(fs.readFileSync(locatorPath,'utf8'));
+  assert.ok(path.isAbsolute(link.socket)&&typeof link.token==='string'&&link.token.length>0,'test-owned muxer capability');
+  await page.route('**'+base+'/attachments?*',async route=>{
+    try {
+    const request=route.request(),body=request.postDataBuffer(),headers=await request.allHeaders();
+    stageID=new URL(request.url()).searchParams.get('stage_id');
+    delete headers.host;delete headers['transfer-encoding'];headers['content-length']=String(body.length);headers.expect='100-continue';
+    headers['x-scimux-backend-token']=link.token;headers['x-scimux-backend-major']='1';headers['x-scimux-backend-minor']='0';
+    heldBody=body;heldHeaders=headers;heldPath=new URL(request.url()).pathname+new URL(request.url()).search;
+    await new Promise((resolve,reject)=>{
+      upstream=http.request({socketPath:link.socket,path:heldPath,method:'POST',headers},response=>{
+        const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('end',()=>{
+          route.fulfill({status:response.statusCode,headers:response.headers,body:Buffer.concat(chunks)}).then(resolve,reject);
+        });response.on('error',reject);
+      });
+      upstream.setTimeout(30000,()=>upstream.destroy(Error('midbody forward timeout')));
+      upstream.on('error',reject);upstream.on('continue',async()=>{
+        if(process.env.SCIMUX_E2E_MIDBODY_PROBE==='forward-error'){upstream.destroy(Error('synthetic forward failure'));return;}
+        continued++;const split=Math.min(1024,body.length-1);firstBytes=split;
+        upstream.write(body.subarray(0,split),async err=>{if(err){reject(err);return;}entered();await hold;if(!upstream.destroyed)upstream.end(body.subarray(split));});
+      });
+      forwarded++;upstream.flushHeaders();
+    });} catch(err) {
+      if(!retiring&&!shutting){forwardFailure=err;entered();}
+      await route.abort().catch(()=>{});
+    }
+  });
+  try {
+    await page.locator('#attfile').setInputFiles({name:'midbody.txt',mimeType:'text/plain',buffer:Buffer.alloc(128*1024,65)});
+    await Promise.race([reached,delay(15000).then(()=>{throw Error('upload body read not reached')})]);
+    if(forwardFailure)throw forwardFailure;
+    assertID('people-midbody-admitted-'+mode,forwarded===1&&continued===1&&firstBytes>0);
+    // A direct muxer 100 is emitted by Go's server on the first Body.Read;
+    // unlike frontend Continue, it follows the real attachment admission path.
+    assertID('people-midbody-muxer-body-read-'+mode,continued===1&&firstBytes>0&&firstBytes<heldBody.length);
+    if(process.env.SCIMUX_E2E_MIDBODY_PROBE==='failure')throw Error('synthetic midbody cleanup failure');
+    if(process.env.SCIMUX_E2E_MIDBODY_PROBE==='signal') {
+      process.kill(process.pid,'SIGTERM');
+      await delay(30000);
+      throw Error('midbody signal cleanup did not terminate');
+    }
+    await ownerSeat.api(sharePath,'PUT',grant('read'));
+    const downgraded=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='read'),30000,'permission changed during body');
+    assertID('people-midbody-same-live-copy-'+mode,downgraded.state==='live'&&downgraded.people_copy_instance===sub.people_copy_instance);
+    let refusedContinue=0;
+    const refusedStatus=await new Promise((resolve,reject)=>{
+      const request=http.request({socketPath:link.socket,path:heldPath,method:'POST',headers:{...heldHeaders,connection:'close'}},response=>{
+        response.resume();response.on('end',()=>resolve(response.statusCode));response.on('error',reject);
+      });
+      negativeRequest=request;
+      request.setTimeout(15000,()=>request.destroy(Error('refused admission timeout')));
+      request.on('continue',()=>{refusedContinue++;});request.on('error',reject);
+      request.flushHeaders();request.write(heldBody.subarray(0,firstBytes));
+    });
+    assertID('people-midbody-refused-before-body-'+mode,refusedStatus===403&&refusedContinue===0);
+    const frontHeaders={...heldHeaders,connection:'close'};
+    delete frontHeaders['x-scimux-backend-token'];delete frontHeaders['x-scimux-backend-major'];delete frontHeaders['x-scimux-backend-minor'];
+    let frontContinue=0,frontBytes=0;
+    const frontStatus=await new Promise((resolve,reject)=>{
+      negativeRequest=http.request(readerSeat.base+heldPath,{method:'POST',headers:frontHeaders},response=>{
+        response.resume();response.on('end',()=>resolve(response.statusCode));response.on('error',reject);
+      });
+      negativeRequest.setTimeout(15000,()=>negativeRequest.destroy(Error('frontend refused admission timeout')));
+      negativeRequest.on('continue',()=>{frontContinue++;frontBytes=firstBytes;negativeRequest.write(heldBody.subarray(0,firstBytes),err=>{if(err)reject(err);else negativeRequest.end(heldBody.subarray(firstBytes));});});
+      negativeRequest.on('error',reject);negativeRequest.flushHeaders();
+    });
+    manifest['people-midbody-negative-'+mode]={frontContinue,frontBytes,frontStatus,refusedContinue,refusedStatus};
+    assertID('people-midbody-frontend-continue-not-admission-'+mode,frontContinue===1&&frontBytes>0&&frontBytes<heldBody.length&&frontStatus===403&&refusedContinue===0);
+    const failed=page.waitForResponse(response=>response.request().method()==='POST'&&new URL(response.url()).pathname===base+'/attachments',{timeout:30000});release();heldReleases.delete(release);const response=await failed;
+    assertID('people-midbody-rejected-'+mode,response.status()===409);
+    const refusal=await response.json();assertID('people-midbody-not-active-'+mode,refusal?.error==='not_active');
+    await page.locator('#gueststate').getByText(/Can view/).waitFor({timeout:30000});
+    assertID('people-midbody-keeps-draft-'+mode,(await page.locator('#prompt').innerText())==='Synthetic midbody draft '+mode&&await page.locator('#attstage .stagechip[title="earlier.txt"]').count()===1&&await page.locator('#attstage .stagechip.done[title="midbody.txt"]').count()===0);
+    await page.unrouteAll({behavior:'wait'});
+    await ownerSeat.api(sharePath,'PUT',grant('write'));
+    await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),30000,'write access restored after midbody');
+    const missing=await fetch(readerSeat.base+base+'/attachments/stage/'+stageID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance),{headers:{Origin:readerSeat.base,'X-Scimux-CSRF':readerSeat.csrf}});
+    const earlier=await readerSeat.api(base+'/attachments/stage/'+earlierID+'?copy_instance='+encodeURIComponent(sub.people_copy_instance));
+    const comments=await readerSeat.api(base+'/comments?after=0');
+    assertID('people-midbody-no-stage-'+mode,/^[0-9a-f]{16}$/.test(stageID)&&missing.status===404&&earlier.id===earlierID);
+    assertID('people-midbody-no-publication-'+mode,comments.entries.length===0);
+    await page.locator('#attadd').waitFor({state:'visible',timeout:30000});
+    await page.locator('#attstage .stagechip[title="midbody.txt"] .sx').click();
+    await page.locator('#attfile').setInputFiles({name:'midbody.txt',mimeType:'text/plain',buffer:Buffer.alloc(128*1024,65)});
+    await page.locator('#attstage .stagechip.done[title="midbody.txt"]').waitFor({timeout:30000});
+    assertID('people-midbody-explicit-recovery-'+mode,(await page.locator('#prompt').innerText())==='Synthetic midbody draft '+mode&&await page.locator('#attstage .stagechip[title="earlier.txt"]').count()===1);
+    assertID('people-midbody-no-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+    await screenshot(page,'people-midbody-permission-'+mode+'.png');manifest['people-midbody-permission-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)},forwarded,continued,firstBytes,muxerContinue:continued,refusedContinue,refusedStatus,frontContinue,frontBytes,frontStatus,continueAloneProvesMuxerAdmission:false};
+  } finally {retiring=true;release();heldReleases.delete(release);if(upstream&&!upstream.destroyed)upstream.destroy();if(negativeRequest&&!negativeRequest.destroyed)negativeRequest.destroy();await page.unrouteAll({behavior:'wait'});}
+}
+
+async function peopleImageBookmark(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People image bookmark '+mode,'Synthetic bookmark setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'image bookmark subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),page=await pageFor(readerSeat,mode,'people-image-bookmark-'+mode),caption='Synthetic bookmarked image '+mode;
+  await open(page,'team/'+key);await page.locator('#attadd').waitFor({state:'visible',timeout:30000});const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGP4z8DwH4QZYAwAR8oH+WdZbrcAAAAASUVORK5CYII=','base64');
+  await page.locator('#prompt').fill(caption);await page.locator('#attfile').setInputFiles({name:'bookmarked.png',mimeType:'image/png',buffer:png});await page.locator('#attstage .stagechip.done[title="bookmarked.png"]').waitFor({timeout:30000});await page.locator('#sendbtn').click();
+  const bubble=page.locator('#msgs .gmsg').filter({hasText:caption}).last();await bubble.waitFor({timeout:40000});const seq=Number(await bubble.getAttribute('data-cseq'));
+  await bubble.locator('.bubble').click({position:{x:5,y:5}});await page.locator('[data-gact=bookmark]').click();
+  const saved=await until(async()=>{const ui=await readerSeat.api('/api/ui');return (ui.bookmarks||[]).find(item=>item.team?.server===sub.server&&item.team?.owner===sub.owner&&item.team?.chat===sub.chat&&item.team?.generation===sub.generation&&item.team?.log==='comments'&&item.team?.seq===seq&&item.media?.items?.length);},40000,'image bookmark capture');
+  assertID('people-image-bookmark-exact-source-'+mode,saved.media.items.some(item=>item.state==='ready'));
+  await page.locator('#bookmarksbtn').click();const bookmark=page.locator('#bookmarklist .bookmark').filter({hasText:caption}).last();await bookmark.locator('.nbubble').click();await bookmark.locator('[data-bmact=jump]').click();await page.locator('#msgs [data-cseq="'+seq+'"].jumpflash').waitFor({timeout:30000});
+  assertID('people-image-bookmark-jump-'+mode,await page.locator('#msgs [data-cseq="'+seq+'"].jumpflash').count()===1);
+  if((await page.locator('#bookmarksbtn').getAttribute('aria-label'))==='open bookmarks')await page.locator('#bookmarksbtn').click();
+  if(!await bookmark.locator('[data-bmact=comment]').isVisible())await bookmark.locator('.nbubble').click();await bookmark.locator('[data-bmact=comment]').click();await page.locator('#bookmarkprompt').fill('Synthetic local image annotation '+mode);await page.locator('#bookmarksend').click();
+  const local=await until(async()=>(await readerSeat.api('/api/ui')).bookmarks?.find(item=>item.anchor===saved.t&&item.text==='Synthetic local image annotation '+mode),30000,'image local annotation');
+  const countBefore=(await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0')).entries.length;assertID('people-image-bookmark-local-comment-'+mode,!!local&&countBefore===1);
+  await readerSeat.api('/api/team/subscriptions/'+key,'DELETE');
+  const item=saved.media.items.find(value=>value.state==='ready'),url='/api/reference-media/'+saved.media.capture_id+'/assets/'+item.id;
+  const retained=await page.evaluate(async url=>{const response=await fetch(url);return {status:response.status,bytes:Array.from(new Uint8Array(await response.arrayBuffer()))}},url);
+  assertID('people-image-bookmark-survives-copy-removal-'+mode,retained.status===200&&Buffer.from(retained.bytes).equals(png));
+  await page.reload({waitUntil:'networkidle'});if((await page.locator('#bookmarksbtn').getAttribute('aria-label'))==='open bookmarks')await page.locator('#bookmarksbtn').click();
+  const retainedBookmark=page.locator('#bookmarklist .bookmark').filter({hasText:caption}).last();await retainedBookmark.waitFor({timeout:30000});
+  await until(async()=>retainedBookmark.locator('img').first().evaluate(img=>img.complete&&img.naturalWidth===2),10000,'retained bookmark image after reload');
+  assertID('people-image-bookmark-reloads-after-copy-removal-'+mode,await retainedBookmark.locator('img').first().evaluate(img=>img.complete&&img.naturalWidth===2));
+  assertID('people-image-bookmark-no-agent-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await screenshot(page,'people-image-bookmark-'+mode+'.png');manifest['people-image-bookmark-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+}
+
+async function peopleSourceCancellation(mode,ownerSeat,readerSeat) {
+  const chat=await node(ownerSeat,'codex','People source lifetime '+mode,'Synthetic source lifetime setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write'),40000,'source lifetime subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),owner=await pageFor(ownerSeat,mode,'people-source-owner-'+mode),reader=await pageFor(readerSeat,mode,'people-source-reader-'+mode);
+  await open(owner,chat.id);await open(reader,'team/'+key);await reader.locator('#attadd').waitFor({state:'visible',timeout:30000});const before={owner:counts(ownerSeat),recipient:counts(readerSeat)};
+  await reader.locator('#prompt').fill('Synthetic source text '+mode);await reader.locator('#attfile').setInputFiles({name:'source.txt',mimeType:'text/plain',buffer:Buffer.from('identical synthetic bytes')});await reader.locator('#attstage .stagechip.done[title="source.txt"]').waitFor({timeout:30000});await reader.locator('#sendbtn').click();
+  const source=owner.locator('#msgs .gmsg').filter({hasText:'Synthetic source text '+mode}).last();await source.waitFor({timeout:40000});const seq=Number(await source.getAttribute('data-cseq'));
+  await source.locator('.bubble').click({position:{x:5,y:5}});await owner.locator('[data-gact=prompt]').click();await owner.locator('#destinationagent[aria-pressed=true]').waitFor({timeout:30000});await owner.locator('#attstage .stagechip.done[title="source.txt"]').waitFor({timeout:30000});
+  await owner.locator('#prompt').fill('');await owner.locator('#attfile').setInputFiles({name:'unrelated.txt',mimeType:'text/plain',buffer:Buffer.from('identical synthetic bytes')});await owner.locator('#attstage .stagechip.done[title="unrelated.txt"]').waitFor({timeout:30000});
+  assertID('people-source-files-never-auto-send-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await owner.locator('#attstage .stagechip[title="source.txt"] .sx').click();await owner.locator('#attstage .stagechip[title="source.txt"]').waitFor({state:'detached',timeout:30000});await owner.locator('#prompt').fill('Unrelated owner prompt '+mode);
+  assertID('people-source-cancel-clears-prepared-association-'+mode,await owner.evaluate(id=>{const raw=localStorage.getItem('scimux-prompt-sources:'+id);return !raw||JSON.parse(raw).length===0},chat.id));
+  const posted=owner.waitForRequest(req=>req.method()==='POST'&&new URL(req.url()).pathname==='/api/nodes/'+chat.id+'/send');await owner.locator('#sendbtn').click();const sent=(await posted).postDataJSON();await until(()=>counts(ownerSeat).accepted===before.owner.accepted+1,30000,'explicit unrelated owner send');
+  await owner.locator('#msgs .turn.user .bubble').filter({hasText:'Unrelated owner prompt '+mode}).first().waitFor({timeout:40000});
+  const delivered=jsonLines(path.join(ownerSeat.data,'counter')).at(-1)?.text||'';const links=(await ownerSeat.api('/api/ui')).forward_links||[];
+  assertID('people-source-cancel-keeps-unrelated-file-'+mode,sent.attachments?.length===1&&delivered.includes(sent.attachments[0].path)&&fs.readFileSync(sent.attachments[0].path,'utf8')==='identical synthetic bytes'&&counts(ownerSeat).attempted===before.owner.attempted+1&&counts(ownerSeat).controls===before.owner.controls);
+  assertID('people-source-cancel-no-false-provenance-'+mode,!links.some(item=>item.kind==='prompt'&&item.source?.server===sub.server&&item.source?.owner===sub.owner&&item.source?.chat===sub.chat&&item.source?.generation===sub.generation&&item.source?.seq===seq)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
+  await screenshot(owner,'people-source-cancel-'+mode+'.png');manifest['people-source-cancel-'+mode]={before,after:{owner:counts(ownerSeat),recipient:counts(readerSeat)}};
+}
+
+async function legacyReaderFiles(mode,ownerSeat) {
+  const legacy=await makeSeat('legacy-reader-'+mode,false,legacyScimux);legacy.node=await node(legacy,'codex','Legacy reader '+mode,'Synthetic local legacy setup');
+  await legacy.api('/api/settings','PUT',{experimental_feature_team:true});
+  const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
+  await legacy.api('/api/team/servers','POST',{link:issue.link,name:'Synthetic relay'});legacy.serverID=(await legacy.api('/api/team/servers')).servers[0].id;legacy.self=(await legacy.api('/api/team/servers/'+legacy.serverID+'/seats')).self;
+  const chat=await node(ownerSeat,'codex','Legacy reader share '+mode,'Synthetic legacy share setup');
+  await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:legacy.self,access:'write'}]});const share=await ownerSeat.api('/api/team/shares/'+chat.id);
+  const sub=await until(async()=>(await legacy.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation),40000,'legacy reader subscription');
+  const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),owner=await pageFor(ownerSeat,mode,'legacy-writer-'+mode),reader=await pageFor(legacy,mode,'legacy-reader-'+mode);
+  await open(owner,chat.id);await open(reader,'team/'+key);await owner.locator('#msgs').getByText('Synthetic response 1',{exact:true}).waitFor({timeout:30000});
+  await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout:30000});await owner.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+  const before={owner:counts(ownerSeat),legacy:counts(legacy)};
+  await owner.locator('#attadd').waitFor({state:'visible',timeout:12000});
+  for(const [caption,name] of [['Synthetic <caption> & file '+mode,'legacy-text-file.txt'],['','legacy-file-only.txt']]) {
+    if(caption)await owner.locator('#prompt').fill(caption);
+    await owner.locator('#attfile').setInputFiles({name,mimeType:'text/plain',buffer:Buffer.from('synthetic legacy file')});await owner.locator('#attstage .stagechip.done[title="'+name+'"]').waitFor({timeout:30000});
+    await owner.locator('#sendbtn').click();
+    const matching=reader.locator('#msgs .gmsg').filter({hasText:'[Attachments unavailable in this version of scimux.]'});await until(async()=>await matching.count()===(caption?1:2),40000,'legacy fallback message');
+    const bubble=matching.last();if(caption)assertID('legacy-reader-original-text-'+mode,(await bubble.innerText()).includes(caption));
+    else assertID('legacy-reader-file-only-visible-'+mode,(await bubble.innerText()).includes('[Attachments unavailable in this version of scimux.]'));
+    assertID('legacy-reader-no-false-file-'+(caption?'text-':'only-')+mode,!(await bubble.innerText()).includes(name));
+  }
+  assertID('legacy-reader-zero-implicit-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(legacy))===JSON.stringify(before.legacy));
+  await screenshot(reader,'legacy-reader-'+mode+'.png');manifest['legacy-reader-'+mode]={before,after:{owner:counts(ownerSeat),legacy:counts(legacy)}};
+}
+
+async function oldRelayFiles(mode) {
+  const old=await launchRelay(legacyRelayBin,'legacy-relay-'+mode);let blobPuts=0;
+  const target=new URL(old.url);
+  const proxy=http.createServer((req,res)=>{
+    if(req.method==='PUT' && req.url.includes('/blobs/'))blobPuts++;
+    const upstream=http.request({hostname:target.hostname,port:target.port,path:req.url,method:req.method,headers:{...req.headers,host:target.host}},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res)});
+    upstream.on('error',()=>{if(!res.headersSent)res.writeHead(502);res.end()});req.pipe(upstream);
+  });
+  await new Promise((resolve,reject)=>proxy.once('error',reject).listen(0,'127.0.0.1',resolve));
+  const stopProxy=()=>proxy.close();heldReleases.add(stopProxy);
+  try {
+    const relayURL='http://127.0.0.1:'+proxy.address().port,owner=await makeSeat('old-owner-'+mode),reader=await makeSeat('old-reader-'+mode);
+    owner.node=await node(owner,'codex','Old relay owner '+mode,'Synthetic old relay owner');reader.node=await node(reader,'codex','Old relay reader '+mode,'Synthetic old relay reader');
+    for(const seat of [owner,reader]) {
+      await seat.api('/api/settings','PUT',{experimental_feature_team:true});
+      const issue=JSON.parse(execFileSync(legacyRelayBin,['-state-dir',old.dir,'-url',relayURL,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
+      await seat.api('/api/team/servers','POST',{link:issue.link,name:'Synthetic old relay'});seat.serverID=(await seat.api('/api/team/servers')).servers[0].id;seat.self=(await seat.api('/api/team/servers/'+seat.serverID+'/seats')).self;
+    }
+    await owner.api('/api/team/shares/'+owner.node.id,'PUT',{server:owner.serverID,scope:'all',members:[{seat:reader.self,access:'write'}]});const share=await owner.api('/api/team/shares/'+owner.node.id);
+    const sub=await until(async()=>(await reader.api('/api/team/subscriptions')).subscriptions.find(item=>item.owner===owner.self&&item.chat===share.uid&&item.generation===share.generation),40000,'old relay membership');
+    const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),page=await pageFor(reader,mode,'old-relay-reader-'+mode);await open(page,'team/'+key);
+    await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});const before=counts(reader);
+    const dialog=page.waitForEvent('dialog');const pasted=page.locator('#prompt').evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['synthetic'],'unsupported.txt',{type:'text/plain'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+    const warning=await dialog;assertID('old-relay-feedback-'+mode,/text only/i.test(warning.message()));await warning.accept();await pasted;
+    const status=await page.evaluate(async key=>{const token=document.querySelector('meta[name="scimux-csrf"]').content,form=new FormData();form.append('files',new File(['synthetic'],'unsupported.txt',{type:'text/plain'}));return (await fetch('/api/team/subscriptions/'+key+'/attachments',{method:'POST',headers:{'X-Scimux-CSRF':token},body:form})).status},key);
+    assertID('old-relay-no-blob-put-'+mode,status===409&&blobPuts===0&&JSON.stringify(counts(reader))===JSON.stringify(before));
+    await screenshot(page,'old-relay-'+mode+'.png');manifest['old-relay-'+mode]={status,blobPuts,before,after:counts(reader)};
+  } finally {heldReleases.delete(stopProxy);await new Promise(resolve=>proxy.close(resolve));}
 }
 async function recreatedChatIsolation(mode,seat,readerSeat) {
  for(const pending of [false,true]) {
@@ -983,7 +2332,7 @@ async function recipientLeaveStale(mode,ownerSeat,readerSeat) {
   const share=await ownerSeat.api('/api/team/shares/'+chat.id);const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid),30000,'delayed leave subscription');
   const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');const page=await pageFor(readerSeat,mode,'delayed-leave-'+mode);await open(page,'team/'+key);
   let release,ready,released=false;const held=new Promise(resolve=>release=resolve),requested=new Promise(resolve=>ready=resolve);heldReleases.add(release);
-  await page.route('**/api/team/subscriptions/'+key,async route=>{if(route.request().method()!=='DELETE'){await route.continue();return;}try{const response=await route.fetch();ready();await held;if(!page.isClosed())await route.fulfill({response});}catch(e){if(!released&&!shutting&&!page.isClosed())throw e;}});
+  await page.route(url=>url.pathname==='/api/team/subscriptions/'+key,async route=>{if(route.request().method()!=='DELETE'){await route.continue();return;}try{const response=await route.fetch();ready();await held;if(!page.isClosed())await route.fulfill({response});}catch(e){if(!released&&!shutting&&!page.isClosed())throw e;}});
   try {
     page.once('dialog',dialog=>dialog.accept());await page.locator('#guestremove').click();await Promise.race([requested,delay(20000).then(()=>{throw Error('leave not requested');})]);
     if(mode==='phone')await page.locator('#chatback').click();await open(page,readerSeat.node.id);
@@ -1061,10 +2410,12 @@ async function recipientLeave(mode,ownerSeat,readerSeat) {
   assertID('leave-control-hit-target-'+mode,hit);
   page.once('dialog',dialog=>dialog.dismiss());await button.click();
   assertID('leave-cancel-retains-focus-'+mode,await button.evaluate(el=>document.activeElement===el)&&await page.locator('#chattitle').innerText()===chat.title);
-  await page.route('**/api/team/subscriptions/'+key,route=>route.request().method()==='DELETE'?route.abort('failed'):route.continue());
+  let failedDelete=0;
+  const deleteRoute=url=>url.pathname==='/api/team/subscriptions/'+key;
+  await page.route(deleteRoute,route=>{if(route.request().method()==='DELETE'){failedDelete++;return route.abort('failed');}return route.continue();});
   page.once('dialog',dialog=>dialog.accept());await button.click();await page.locator('#guestnote').getByText('That did not work. Try again.').waitFor({timeout:30000});
-  assertID('leave-error-retains-copy-'+mode,await button.isEnabled()&&await button.evaluate(el=>document.activeElement===el)&&(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(x=>x.chat===share.uid));
-  await page.unroute('**/api/team/subscriptions/'+key);
+  assertID('leave-error-retains-copy-'+mode,failedDelete===1&&await button.isEnabled()&&await button.evaluate(el=>document.activeElement===el)&&(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(x=>x.chat===share.uid));
+  await page.unroute(deleteRoute);
   page.once('dialog',dialog=>dialog.accept());await button.click();
   await until(async()=>!(await readerSeat.api('/api/team/subscriptions')).subscriptions.some(x=>x.chat===share.uid),30000,'left local copy');
   const localNodes=(await readerSeat.api('/api/state')).nodes;
@@ -1284,7 +2635,8 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   await screenshot(owner,'trace-owner-'+mode+'.png');await screenshot(reader,'trace-reader-'+mode+'.png');
   await owner.locator('#destinationagent').click();await owner.locator('#attfile').setInputFiles({name:'synthetic-note.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic attachment')});
   await owner.locator('#attstage .stagechip.done').waitFor({timeout:30000});await owner.locator('#destinationpeople').click();
-  assertID('trace-agent-attachment-hidden-people-'+mode,!(await owner.locator('#attstage').isVisible()));await owner.locator('#destinationagent').click();
+  await owner.locator('#attstage').waitFor({state:'hidden',timeout:30000});
+  assertID('trace-agent-attachment-hidden-people-'+mode,!(await owner.locator('#attstage').isVisible())&&!(await owner.locator('#attstage').innerText()).includes('synthetic-note.txt'));await owner.locator('#destinationagent').click();
   assertID('trace-agent-attachment-retained-toggle-'+mode,(await owner.locator('#attstage').innerText()).includes('synthetic-note.txt'));
   await owner.locator('#attstage .sx').click();
   await owner.emulateMedia({reducedMotion:'reduce'});
@@ -1377,12 +2729,11 @@ async function refusalTrace(mode,ownerSeat,readerSeat,newer) {
 }
 const capturePage=createPageCapture(async(page,label)=>{
   if(captureProbeGate){captureProbeStarted=true;await captureProbeGate;}
-  const sourceDir=path.resolve(__dirname,'../js');
+  const snapshot=pageSource.get(page);
+  assert.ok(snapshot,'browser page has a source snapshot');
   for(const entry of await page.coverage.stopJSCoverage()) {
-      const url=new URL(entry.url);if(!/^\/js\/[a-z0-9-]+\.js$/.test(url.pathname))continue;
-      const source=fs.readFileSync(path.join(sourceDir,path.basename(url.pathname)),'utf8');
-      assert.equal(entry.source,source,'browser source matches checkout: '+url.pathname);
-      coverageArchive.push({page:label,path:url.pathname,source,functions:entry.functions});
+      const verified=verifiedCoverageEntry(entry,label,snapshot.dir,snapshot.version);
+      if(verified)coverageArchive.push(verified);
   }
 });
 async function captureCoverage(selectedPages=pages) {
@@ -1418,6 +2769,8 @@ async function performCleanup() {
     }catch(e){manifest.cleanup.push({seat:s.name,deleteError:String(e)});manifest.result='fail';process.exitCode=1;}}
   }
   for(const c of children.slice().reverse()) await terminate(c);
+  const diagnostics=await diagnosticBudget.finish();
+  if(diagnostics.failed){manifest.cleanup.push({fatal:'diagnostic capture failed'});manifest.result='fail';process.exitCode=1;}
   const stopped=children.every(c=>c.exitCode!==null||c.signalCode!==null);
   manifest.cleanup.push({childrenStopped:stopped});
   if(!stopped){manifest.result='fail';process.exitCode=1;}
@@ -1438,20 +2791,23 @@ async function performCleanup() {
     if(remaining.length){manifest.result='fail';process.exitCode=1;}
     const pidsPath=path.join(s.data,'counter.native-pids');
     const pids=fs.existsSync(pidsPath)?fs.readFileSync(pidsPath,'utf8').trim().split('\n').filter(Boolean).map(Number):[];
-    const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code!=='ESRCH';}};
-    for(let i=0;i<50 && pids.some(alive);i++)await delay(100);
-    const remainingNativeHelpers=pids.filter(alive).length;
-    manifest.cleanup.push({seat:s.name,remainingNativeHelpers});
+    let native=summarizeNative(pids);
+    for(let i=0;i<50 && native.active;i++){await delay(100);native=summarizeNative(pids);}
+    const remainingNativeHelpers=native.active;
+    manifest.cleanup.push({seat:s.name,remainingNativeHelpers,remainingNativeZombies:native.zombies});
     if(remainingNativeHelpers){manifest.result='fail';process.exitCode=1;}
   }
   record();
 }
 const cleanup=createCleanupOnce(async()=>{try{await performCleanup();}catch(e){manifest.result='fail';manifest.cleanup.push({fatal:String(e)});process.exitCode=1;record();throw e;}});
-for(const [sig,code] of [['SIGINT',130],['SIGTERM',143]])process.once(sig,()=>{signalCode=code;if(manifest.result!=='fail')manifest.result='interrupted';manifest.signal=sig;const finished=cleanup();cleanupProbeRelease?.();captureProbeRelease?.();finished.then(()=>{record();process.stdout.write('Artifacts: '+root+'\n',()=>process.exit(code));}).catch(e=>{process.stderr.write(String(e)+'\n',()=>process.exit(code));});});
+// Opt-in probe only: keep the existing overlap gate blocked until the test releases it.
+const holdCleanupProbe = process.env.SCIMUX_E2E_CLEANUP_PROBE === 'overlap' && process.env.SCIMUX_E2E_HOLD_CLEANUP === '1';
+if (holdCleanupProbe) process.stdin.once('data',()=>cleanupProbeRelease?.());
+installRunnerSignals({events:process,manifest,cleanup,record,exit:code=>process.exit(code),notify:message=>{if(holdCleanupProbe&&message==='received')console.log('Cleanup signal received');},release:()=>{signalCode=manifest.signal==='SIGINT'?130:143;if(!holdCleanupProbe)cleanupProbeRelease?.();captureProbeRelease?.();}});
 
 async function run() {
  const selected=process.env.SCIMUX_E2E_SCENARIO||'default';
- if(!['default','stale-membership','stale-removed-membership','conversation-trace','conversation-native','conversation-refusal','conversation-core','early-native','native-start-failure','recipient-boundary','ai-source','ui-join','recipient-leave','permission-lifecycle','leave-empty','leave-stale','held-evidence','viewport-keyboard','dropped-send','reshare-stale','media-contrast','unshared','held-chat-loading','received-offline','stage1-scanner','stage1-unread','stage1-owner-files','stage2-shared-actions','stage2-bookmark-pages','recreated-chat-isolation','bubble-selection','draft-recovery','header-focus','description-save-isolation','description-recreated-choice','description-choice-order','no-selection','delete-recreation-isolation','legacy-closed-recreation','browser-lifecycle'].includes(selected))throw Error('unknown SCIMUX_E2E_SCENARIO');
+ if(!scenarioNames.includes(selected))throw Error('unknown SCIMUX_E2E_SCENARIO');
  if(selected!=='default')manifest.scope=selected+' scenario only';
  relay=await launchRelay();
  for(const name of ['owner-a','owner-b','recipient','observer']) await makeSeat(name);
@@ -1467,7 +2823,7 @@ async function run() {
  if(['failure','signal','overlap','capture-overlap'].includes(process.env.SCIMUX_E2E_CLEANUP_PROBE)) {
   manifest.scope='cleanup probe only';
   const native=await node(a,'claude','native cleanup probe','Synthetic native initial');
-  if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='failure')throw Error('controlled native cleanup failure');
+  if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='failure')throw controlledNativeCleanupFailure;
   if(['overlap','capture-overlap'].includes(process.env.SCIMUX_E2E_CLEANUP_PROBE)){
    browser=await launchBrowser();const page=await pageFor(a,'desktop','cleanup-overlap');await open(page,native.id);await page.locator('#msgs').getByText('Synthetic native initial',{exact:true}).waitFor({timeout:30000});
    if(process.env.SCIMUX_E2E_CLEANUP_PROBE==='overlap'){
@@ -1519,6 +2875,36 @@ async function run() {
  for(const s of selected==='default'?[r,observer]:seats){await s.api('/api/settings','PUT',{experimental_feature_team:true});const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));await s.api('/api/team/servers','POST',{link:issue.link,name:selected==='received-offline'&&s===a?'Synthetic sharer':s.name});}
  for(const s of seats){s.serverID=(await s.api('/api/team/servers')).servers[0].id;s.self=(await s.api('/api/team/servers/'+s.serverID+'/seats')).self;}
  for(const s of [a,b])await s.api('/api/team/shares/'+s.node.id,'PUT',{server:s.serverID,scope:'all',members:[{seat:r.self,access:'write'},...(s===b?[{seat:observer.self,access:'write'}]:[])]});
+ if(selected==='people-source-cancel'){for(const mode of ['desktop','phone'])await peopleSourceCancellation(mode,a,r);return;}
+ if(selected==='people-image-bookmark'){for(const mode of ['desktop','phone'])await peopleImageBookmark(mode,a,r);return;}
+ if(selected==='people-upload-permission'){for(const mode of ['desktop','phone'])await peoplePermissionDuringUpload(mode,a,r);return;}
+ if(selected==='people-midbody-permission'){for(const mode of ['desktop','phone'])await peoplePermissionMidBody(mode,a,r);return;}
+ if(selected==='people-stage-competition'){for(const mode of ['desktop','phone'])await peopleStageCompetition(mode,a,r);return;}
+ if(selected==='people-pending-layout'){for(const ending of [false,true])for(const mode of ['phone','desktop'])await peoplePendingPhoneReachability(mode,a,r,ending);return;}
+ if(selected==='people-local-stage-review'){for(const mode of ['desktop','phone'])await peopleLocalStageReview(mode,a,r);return;}
+ if(selected==='people-stale-retry'){for(const mode of ['desktop','phone'])await peopleStaleRetry(mode,a,b,r,observer);return;}
+ if(selected==='people-captured-discard'){for(const mode of ['desktop','phone'])await peopleCapturedDiscard(mode,a,r);return;}
+ if(selected==='people-text-retirement'){for(const variant of ['readonly','owner-ended-agent'])for(const mode of ['desktop','phone'])await peopleTextRetirement(mode,a,b,r,observer,variant);return;}
+ if(selected==='people-transactional-drafts'){for(const mode of ['desktop','phone'])await peopleTransactionalDrafts(mode,a,r);return;}
+ if(selected==='people-no-storage-text'){for(const mode of ['desktop','phone'])await peopleNoStorageText(mode,a,r);return;}
+ if(selected==='people-transactional-retirement'){for(const mode of ['desktop','phone'])await peopleTransactionalRetirement(mode,a,r);return;}
+ if(selected==='people-uncertain-retry'){for(const mode of ['desktop','phone'])await peopleUncertainRetry(mode,a,r);return;}
+ if(selected==='people-files'){for(const mode of ['desktop','phone'])await peopleFiles(mode,a,r);return;}
+ if(selected==='people-quota'){for(const mode of ['desktop','phone'])await peopleQuota(mode,a,r);return;}
+ if(selected==='people-local-budget'){for(const mode of ['desktop','phone'])await peopleLocalBudget(mode,a,r);return;}
+ if(selected==='people-kept-full'){for(const mode of ['desktop','phone'])await peopleKeptFull(mode,a,r);return;}
+ if(selected==='people-unkept-open'){for(const mode of ['desktop','phone'])await peopleUnkeptOpen(mode,a,r);return;}
+ if(selected==='people-file-unread'){for(const mode of ['desktop','phone'])await peopleFileUnread(mode,a,r);return;}
+ if(selected==='people-attachment-recovery'){for(const mode of ['desktop','phone'])await peopleAttachmentRecovery(mode,a,r);return;}
+ if(selected==='people-relay-blob-recovery'){for(const mode of ['desktop','phone'])for(const kind of ['missing','corrupt'])await peopleRelayBlobRecovery(mode,kind,a,r);return;}
+ if(selected==='people-cross-channel-forgery'){for(const mode of ['desktop','phone'])await peopleCrossChannelForgery(mode,a,b,r);return;}
+ if(selected==='people-retained-unavailable'){for(const mode of ['desktop','phone'])await peopleRetainedUnavailable(mode,a,r);return;}
+ if(selected==='people-retired-drafts'){for(const mode of ['desktop','phone'])await peopleRetiredDrafts(mode,a,r);return;}
+ if(selected==='people-copy-replacement'){for(const mode of ['desktop','phone'])await peopleCopyReplacement(mode,a,r);return;}
+ if(selected==='people-stale-preparation'){for(const mode of ['desktop','phone'])await peopleStalePreparation(mode,a,r);return;}
+ if(selected==='people-real-tunnel'){for(const mode of ['desktop','phone'])await peopleRealTunnel(mode,a,r);return;}
+ if(selected==='legacy-reader'){for(const mode of ['desktop','phone'])await legacyReaderFiles(mode,a);return;}
+ if(selected==='old-relay'){for(const mode of ['desktop','phone'])await oldRelayFiles(mode);return;}
  if(selected==='stage1-scanner'){for(const mode of ['desktop','phone'])await stage1Scanner(mode,a,r);return;}
  if(selected==='stage1-unread'){for(const mode of ['desktop','phone'])await stage1Unread(mode,a,r);return;}
  if(selected==='stage1-owner-files'){for(const mode of ['desktop','phone'])await stage1OwnerFiles(mode,a,r);return;}
@@ -1813,6 +3199,36 @@ async function run() {
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>receivedOfflineRetry(mode,a,r));
  for(const mode of ['desktop','phone']){await runCompletedCase(()=>stage1Scanner(mode,a,r));await runCompletedCase(()=>stage1Unread(mode,a,r));await runCompletedCase(()=>stage1OwnerFiles(mode,a,r));}
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>stage2SharedActions(mode,a,b,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleFiles(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleUncertainRetry(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleStageCompetition(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleLocalStageReview(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleTransactionalDrafts(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleCapturedDiscard(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleStaleRetry(mode,a,b,r,observer));
+ for(const variant of ['readonly','owner-ended-agent'])for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleTextRetirement(mode,a,b,r,observer,variant));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleTransactionalRetirement(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleNoStorageText(mode,a,r));
+ for(const ending of [false,true])for(const mode of ['desktop','phone'])await runCompletedCase(()=>peoplePendingPhoneReachability(mode,a,r,ending));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peoplePermissionDuringUpload(mode,a,r));
+  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peoplePermissionMidBody(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleImageBookmark(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleSourceCancellation(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleQuota(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleLocalBudget(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleKeptFull(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleUnkeptOpen(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleFileUnread(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleAttachmentRecovery(mode,a,r));
+ for(const mode of ['desktop','phone'])for(const kind of ['missing','corrupt'])await runCompletedCase(()=>peopleRelayBlobRecovery(mode,kind,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleCrossChannelForgery(mode,a,b,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleRetainedUnavailable(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleRetiredDrafts(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleCopyReplacement(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleStalePreparation(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleRealTunnel(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>legacyReaderFiles(mode,a));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>oldRelayFiles(mode));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>stage2BookmarkPages(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>recreatedChatIsolation(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>bubbleSelection(mode,a,r));
@@ -1820,8 +3236,9 @@ async function run() {
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>deleteRecreationIsolation(mode,a));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>legacyClosedRecreation(mode));
  const empty=await makeSeat('no-selection');for(const mode of ['desktop','phone'])await runCompletedCase(()=>noSelection(mode,empty));
+ verifyMidbodyWitness(manifest);verifyLocalBudget(manifest);
  manifest.counters.afterNative=Object.fromEntries(seats.map(s=>[s.name,counts(s)]));
  assertID('native-authoritative-response',true);
  if(process.env.SCIMUX_E2E_FAIL_AFTER_NATIVE==='1')throw Error('controlled failure with native node');
 }
-(async()=>{try{await run();manifest.result='pass';}catch(e){if(!signalCode)manifest.result='fail';manifest.error=String(e);console.error(e.stack||e);if(!signalCode)process.exitCode=1;for(const {page,label} of [...pages].reverse()){try{if(!page.isClosed()){const name='failure-'+label+'.png';await page.screenshot({path:artifacts(name),fullPage:true,timeout:5000});manifest.artifacts.push(name);}}catch{}}}finally{await cleanup();console.log('Artifacts: '+root);if(signalCode)process.exitCode=signalCode;}})();
+(async()=>{try{await run();finishScenario(manifest,signalCode);}catch(e){if(!signalCode)manifest.result='fail';const failureCode=controlledFailureCode(e,controlledNativeCleanupFailure);if(failureCode&&!signalCode)manifest.failureCode=failureCode;manifest.error='scenario-failure';console.error('E2E scenario failed');if(!signalCode)process.exitCode=1;for(const {page,label} of [...pages].reverse()){try{if(!page.isClosed()){const name='failure-'+label+'.png';if((await captureEvidencePage({page,destination:artifacts(name),timeout:5000,register:captureRegistry.register})).ok)manifest.artifacts.push(name);}}catch{}}}finally{await cleanup();if(signalCode)process.exitCode=signalCode;}})();

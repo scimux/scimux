@@ -6,6 +6,7 @@ import { jsonResponse } from "./s2-helpers.js";
 import { decodeResponse } from "../js/api.js";
 import { bubbleActionsHTML } from '../js/chat.js';
 import { createBubbleActionController } from '../js/menu.js';
+import { createPeopleFileStore, createIndexedDBPeopleDriver } from "../js/people-file-store.js";
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
@@ -114,7 +115,7 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
         insertAdjacentHTML(_where, html) { pieces.splice(index, 0, html); body.innerHTML = pieces.join(""); } };
     });
   } });
-  const routed = (path, opts) => path.includes("/comments?") ? commentsApi(path, opts) : api(path, opts);
+  const routed = (path, opts) => path.includes("/comments?") && opts?.method !== "POST" ? commentsApi(path, opts) : api(path, opts);
   let feature;
   const callbacks = extra.panel || {};
   const panel = { bubbleActions:bubbleActionsHTML, promptIcon:"", preparePrompt() {}, ...callbacks,
@@ -912,6 +913,32 @@ test('shared bubbles expose the ordinary action order and icons', async () => {
  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const turn=sharedActionBubble(1);f.click('msgs',turn.bubble);
  const html=turn.turn.rowHTML,actions=[...html.matchAll(/data-gact="(fork|sendto|desc|bookmark|copy)"/g)].map(m=>m[1]);
  assert.deepEqual(actions,['fork','sendto','desc','bookmark','copy']);assert.match(html,/FORK/);assert.match(html,/INTO/);assert.match(html,/COPY/);f.feature.destroy();
+});
+
+test('shared file bookmark failures do not commit a misleading bookmark',async()=>{
+ for(const mode of ['missing capture','capture error']) {
+  const entry={seq:1,anchor:0,author:'a',text:'synthetic',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1}]};
+  const mutations=[],panel=mode==='capture error'?{captureBookmark:async()=>{throw Error('synthetic capture failure')}}:{};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer(),async()=>commentsAnswer([entry],1),undefined,{panel,bookmarks:()=>[],uiMutate:change=>mutations.push(change)});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const item=sharedActionBubble(0);item.turn.dataset={cseq:'1'};f.click('msgs',item.bubble);
+  const action={dataset:{gact:'bookmark'},closest:selector=>selector==='[data-gact]'?action:null};f.click('msgs',action);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.get('guestnote').textContent,'Bookmark capture failed — try again.');assert.deepEqual(mutations,[]);f.feature.destroy();
+ }
+});
+
+test('shared file copy explains whether text can be copied',async()=>{
+ for(const text of ['', 'synthetic caption']) {
+  const entry={seq:1,anchor:0,author:'a',text,attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+  const notices=[],copied=[];
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer(),async()=>commentsAnswer([entry],1),undefined,{toast:value=>notices.push(value),panel:{copy:value=>copied.push(value)}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const item=sharedActionBubble(0);item.turn.dataset={cseq:'1'};f.click('msgs',item.bubble);
+  const action={dataset:{gact:'copy'},closest:selector=>selector==='[data-gact]'?action:null};f.click('msgs',action);
+  assert.deepEqual(copied,text?[text]:[]);
+  assert.deepEqual(notices,[text?'This action uses the text; attached files are not included.':'This action does not support files without text.']);f.feature.destroy();
+ }
 });
 
 test('shared action commands pass captured text to local capability adapters', async () => {
@@ -1758,7 +1785,7 @@ test("panel send-to keeps the received conversation selected", async () => {
 test("panel People send posts bounded text with a stable retry key and no controller dispatch", async () => {
   const calls=[]; let fail=true; const store=new Map();
   const storage={getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v),removeItem:k=>store.delete(k)};
-  const view={...base,access:"write"};
+  const view={...base,access:"write",people_copy_instance:"1".repeat(32)};
   const panel={ids:{},loaded(){},select(){},removed(){},changed(){}};
   const f=nativeViewFixture(async(path,opts)=>{
     if(path==="/api/team/subscriptions") return list([view]);
@@ -1768,6 +1795,7 @@ test("panel People send posts bounded text with a stable retry key and no contro
   f.feature.tick(); await f.feature.settled(); f.feature.selectActivity("team/s/o/c/g"); await f.feature.settled();
   assert.equal(f.feature.peopleContext().writable,true);
   await assert.rejects(f.feature.sendPeople("s/o/c/g","hello"),/offline/);
+  assert.equal(f.feature.pendingPeopleText().request.text,"hello");
   fail=false; await f.feature.sendPeople("s/o/c/g","hello");
   assert.deepEqual(calls,[{text:"hello",anchor:3,key:"0102030405060708"},{text:"hello",anchor:3,key:"0102030405060708"}]);
   await assert.rejects(f.feature.sendPeople("wrong","hello"));
@@ -1837,7 +1865,7 @@ test("People comment without a confirmed sequence remains retryable", async () =
     return readAnswer([],1,false,view);
   },undefined,()=>new Uint8Array([1,2,3,4,5,6,7,8]),{panel,storage});
   f.feature.tick(); await f.feature.settled(); f.feature.selectActivity('team/s/o/c/g'); await f.feature.settled();
-  await assert.rejects(f.feature.sendPeople('s/o/c/g','text')); confirmed=true; await f.feature.sendPeople('s/o/c/g','text');
+  await assert.rejects(f.feature.sendPeople('s/o/c/g','text')); assert.equal(f.feature.pendingPeopleText().request.text,'text');confirmed=true; await f.feature.sendPeople('s/o/c/g','text');
   assert.equal(calls.length,2); assert.deepEqual(calls[0],calls[1]); f.feature.destroy();
 });
 
@@ -1912,6 +1940,24 @@ test('late owner mirror and comment pages cannot repaint a different local chat'
  }
 });
 
+test('late owner file retention cannot apply to a different local chat', async () => {
+ const view={...base,access:'owner',local_node:'n1',people_copy_instance:'1'.repeat(32)}, pending=deferred();
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};
+ const entry={seq:1,anchor:0,text:'synthetic',author:'p',attachments:[file]};
+ let selected='n1',started=false,seen=0,renders=0;
+ const panel={ids:{},loaded(){},select(){},removed(){},ownerChanged(){renders++}};
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return {...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};
+  if(path.includes('/seen')&&opts?.method==='PUT'){seen++;return {}}
+  return readAnswer([],0,false,view);
+ },async()=>({entries:[entry],names:{p:'Person'},next:1,more:false}),undefined,{panel,selectedNode:()=>selected,selectedUID:()=>selected==='n1'?'c':'',retainPeople:async()=>{started=true;return pending.promise}});
+ f.feature.tick();for(let i=0;i<40&&!started;i++)await Promise.resolve();assert.equal(started,true);
+ selected='n2';f.feature.setOwnerShare('n2',null);const before=renders;
+ pending.resolve({files:{'1/0123456789abcdef':true}});await f.feature.settled();
+ assert.equal(renders,before);assert.deepEqual(f.feature.ownerSnapshots(),[]);assert.equal(entry._peopleRetained,undefined);assert.equal(seen,0);
+ f.feature.destroy();
+});
+
 test('owner permission loss prevents a later comment post', async () => {
  let ended=false, posts=0; const view={...base,access:'owner'}, panel={ids:{},loaded(){},select(){},removed(){},ownerChanged(){}};
  const f=nativeViewFixture(async(path,opts)=>{
@@ -1944,6 +1990,52 @@ test('panel subscription removal calls the panel callback and clears its saved s
  const f=nativeViewFixture(async(path,opts)=>path==='/api/team/subscriptions'?list([base]):opts?.method==='DELETE'?{}:readAnswer(),undefined,undefined,{panel});
  f.feature.tick(); await f.feature.settled(); f.feature.selectActivity('team/s/o/c/g'); await f.feature.settled();
  f.click('guestremove'); await f.feature.settled(); assert.deepEqual(removed,[true]); assert.equal(f.feature.tab.selected(),''); f.feature.destroy();
+});
+
+test('received preview authority accepts only the current associated raster',async()=>{
+ const view={...base,people_copy_instance:'1'.repeat(32),access:'read',state:'ended'};
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1};
+ const message={seq:1,anchor:0,author:'a',text:'',attachments:[file]};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false));
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const path='/api/team/subscriptions/s/o/c/g/attachments/1/'+file.id+'?copy_instance='+view.people_copy_instance+'&preview=1';
+ const turn={dataset:{cseq:'1'}},anchor={dataset:{tkey:file.id},closest:()=>turn,getAttribute:()=>path};
+ assert.deepEqual(f.feature.sharedPreview(anchor),{url:path,name:file.name});
+ anchor.getAttribute=()=> 'https://example.invalid/forged';assert.equal(f.feature.sharedPreview(anchor),null);
+ anchor.getAttribute=()=>path;anchor.dataset.tkey='fedcba9876543210';assert.equal(f.feature.sharedPreview(anchor),null);
+ anchor.dataset.tkey=file.id;turn.dataset.cseq='0';assert.equal(f.feature.sharedPreview(anchor),null);
+ turn.dataset.cseq='9007199254740992';assert.equal(f.feature.sharedPreview(anchor),null);turn.dataset.cseq='1';
+ message._peopleRetained={[file.id]:false};assert.equal(f.feature.sharedPreview(anchor),null);delete message._peopleRetained;
+ file.mime='text/html';assert.equal(f.feature.sharedPreview(anchor),null);file.mime='image/png';
+ delete anchor.dataset.tkey;assert.equal(f.feature.sharedPreview(anchor),null);anchor.dataset.tkey=file.id;
+ assert.equal(f.feature.sharedPreview({dataset:{tkey:file.id},closest:()=>null}),null);
+ f.navigate();assert.equal(f.feature.sharedPreview(anchor),null);f.feature.destroy();
+});
+
+test('received preview authority refuses a copy without its local identity',async()=>{
+ const view={...base,access:'read'},file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,author:'a',attachments:[file]}],1,false));
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(f.feature.sharedPreview({dataset:{tkey:file.id},closest:()=>({dataset:{cseq:'1'}})}),null);f.feature.destroy();
+});
+
+test('received preview authority rejects unavailable assets and damaged descriptors',async()=>{
+ const view={...base,people_copy_instance:'1'.repeat(32),access:'read'};let available=false;
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:1};
+ const message={seq:1,anchor:0,author:'a',text:'',attachments:[file]};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{assetURL:path=>available?path:''});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const path='/api/team/subscriptions/s/o/c/g/attachments/1/'+file.id+'?copy_instance='+view.people_copy_instance+'&preview=1';
+ const turn={dataset:{cseq:'1'}},anchor={dataset:{tkey:file.id},closest:()=>turn,getAttribute:()=>path};
+ assert.equal(f.feature.sharedPreview(anchor),null);available=true;assert.ok(f.feature.sharedPreview(anchor));
+ file.sha256='damaged';assert.equal(f.feature.sharedPreview(anchor),null);f.feature.destroy();
+});
+
+test('removing a People copy carries its captured local identity', async () => {
+ const instance='a'.repeat(32),sub={...base,people_copy_instance:instance};let removed='';
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([sub]);if(opts?.method==='DELETE'){removed=path;return {}}return readAnswer([],0,false,{people_copy_instance:instance});});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();f.click('guestremove');await f.feature.settled();
+ assert.equal(new URL(removed,'http://localhost').searchParams.get('copy_instance'),instance);f.feature.destroy();
 });
 
 test('panel selection ignores a repeated id and closes when navigating to a local chat', async () => {
@@ -2070,6 +2162,9 @@ test('owner comment prompt action prepares attributed source and recipient forge
  const action={dataset:{gact:'prompt'},closest:s=>s==='[data-gact]'?action:null}; f.click('msgs',action);
  assert.equal(prepared.length,1); assert.equal(prepared[0][0].who,'Alex'); assert.equal(prepared[0][0].prov,true);
  assert.deepEqual(prepared[0][1],{server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1});
+ assert.equal(prepared[0][2](),true);
+ const copy={dataset:{gact:'copy'},closest:s=>s==='[data-gact]'?copy:null};f.click('msgs',copy);
+ assert.equal(prepared[0][2](),false,'a later action must retire the preparation callback');
  f.feature.destroy();
  const g=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([],0),comments,undefined,{panel});
  g.feature.tick(); await g.feature.settled(); g.feature.selectActivity('team/s/o/c/g'); await g.feature.settled();
@@ -2397,4 +2492,1073 @@ test('another shared bubble action retires pending description verification', as
  const action=name=>({dataset:{gact:name},closest:s=>s==='[data-gact]'?{dataset:{gact:name}}:null});
  f.click('msgs',action('desc'));menu.onChoose(menu.choices[0]);await Promise.resolve();f.click('msgs',action('copy'));finish({nodes});await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual(selected,[]);assert.deepEqual(copies,['human']);f.feature.destroy();
+});
+
+test("People file publication keeps an uncertain manifest immutable across edits", async () => {
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='0123456789abcdef',revision='e'.repeat(64),calls=[],paths=[],values=new Map();let fail=true,rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)},driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:1});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:''}),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(path.split('?')[0].endsWith('/comments')&&opts?.method==='POST'){paths.push(path);calls.push(JSON.parse(opts.body));if(fail)throw Error('offline');return {seq:1};}return readAnswer([],3,false,view);},undefined,()=>new Uint8Array([1,2,3,4,5,6,7,8]),{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.feature.selectActivity('team/'+key);await f.feature.settled();assert.equal(f.feature.peopleContext().attachments,true);
+ const admission={scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:()=>{}};
+ await assert.rejects(f.feature.sendPeople(key,'',[id],'',admission),/offline/);await assert.rejects(f.feature.sendPeople(key,'newer text',['fedcba9876543210'],'',admission),/unconfirmed/i);assert.equal(calls.length,1);assert.equal(f.feature.pendingPeople().text,'');
+ fail=false;const receipt=await f.feature.retryPeople();assert.deepEqual(calls,[{text:'',anchor:3,key:'0102030405060708',attachments:[id]},{text:'',anchor:3,key:'0102030405060708',attachments:[id]}]);assert.equal(paths.length,2);for(const path of paths)assert.equal(new URL(path,'http://local.invalid').searchParams.get('copy_instance'),copyInstance);
+ assert.equal(recovery.find(row=>row.kind==='publication').state,'pending');const result=await f.feature.finishPeople(receipt);assert.equal(result.state,'completed');assert.equal(result.seq,1);assert.equal(recovery.find(row=>row.kind==='decision').state,'completed');assert.equal(values.size,0);assert.equal(f.feature.pendingPeople(),null);
+ }finally{f.feature.destroy();}
+});
+
+test("People file capability requires the selected local copy identity", async () => {
+ let view={...base,access:"write"};
+ const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?{...list([view],[{id:"s",delivery:"ok",people_files:"supported"}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view));
+ f.feature.tick();await f.feature.settled();f.feature.selectActivity("team/s/o/c/g");await f.feature.settled();
+ assert.equal(f.feature.peopleContext().attachments,false);
+ f.feature.destroy();
+});
+
+test("damaged People pending data never posts or deletes a retry record", async () => {
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),peopleKey=[server,owner,chat,generation].join('/'),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:'1'.repeat(32)};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const next=fn({files:[],recovery});recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver);
+ const values=new Map(),storage={persistent:true,getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+ const key='scimux-people-file-pending:'+peopleKey+'::copy:'+view.people_copy_instance;let posts=0;
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};
+  if(opts?.method==='POST'){posts++;return {seq:0}}
+  return readAnswer([],0,false,view);
+ },undefined,undefined,{storage,peopleFileStore});
+ f.feature.tick();await f.feature.settled();f.open('team/'+peopleKey);await f.feature.settled();
+ for(const raw of ['{',JSON.stringify({instance:'',copyInstance:view.people_copy_instance,request:{text:'synthetic',anchor:0,key:'0123456789abcdef',attachments:['0123456789abcdef','0123456789abcdef']}})]) {
+  values.set(key,raw);
+  assert.throws(()=>f.feature.pendingPeople(),/recovery is unavailable/i);
+  await assert.rejects(f.feature.retryPeople(),/recovery is unavailable/i);
+  assert.equal(await f.feature.finishPeople({peoplePending:{key,value:'different'}}),false);
+  assert.equal(values.get(key),raw);
+ }
+ assert.equal(posts,0);
+ const valid=JSON.stringify({instance:'',copyInstance:view.people_copy_instance,request:{text:'synthetic',anchor:0,key:'0123456789abcdef',attachments:['0123456789abcdef']}});
+ values.set(key,valid);await assert.rejects(f.feature.retryPeople(),/delivery is unconfirmed/i);
+ assert.equal(posts,1);assert.equal(values.get(key),valid);
+ assert.equal(await f.feature.finishPeople(null),false);
+ assert.equal(await f.feature.finishPeople({peoplePending:{key:'unrelated',value:valid}}),false);
+ storage.persistent=false;assert.equal(f.feature.pendingPeople(),null);
+ await assert.rejects(f.feature.retryPeople(),/recovery is unavailable/i);
+ assert.equal(values.get(key),valid);assert.equal(posts,1);f.feature.destroy();
+});
+
+test('owner People retry preserves copy, configuration and native instance binding',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),peopleKey=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',view={...base,server,owner,chat,generation,access:'owner',local_node:'n1',people_copy_instance:copyInstance};
+ const values=new Map(),storage={persistent:true,getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};let native='synthetic-instance',sent,recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const next=fn({files:[],recovery});recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver);
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){sent={path,body:JSON.parse(opts.body)};return {seq:3};}return readAnswer([],0,false,view);},undefined,undefined,{storage,peopleFileStore,selectedNode:()=> 'n1',selectedUID:()=>chat,localNodes:()=>[{id:'n1',instance_id:native}]});
+ try{f.feature.tick();await f.feature.settled();f.feature.setOwnerShare('n1',{node:'n1',uid:chat,server,generation,state:'active'});await f.feature.settled();const key=`scimux-people-file-pending:${peopleKey}:${native}:${binding}:copy:${copyInstance}`,scope=`people\0${peopleKey}\0binding:${binding}\0copy:${copyInstance}\0n1\0${native}`,request={text:'synthetic',anchor:0,key:'0123456789abcdef',attachments:['fedcba9876543210']},raw=JSON.stringify({instance:native,copyInstance,request});values.set(key,raw);
+ const receipt=await f.feature.retryPeople(),url=new URL(sent.path,'http://local.invalid');assert.equal(url.searchParams.get('copy_instance'),copyInstance);assert.equal(url.searchParams.get('chat_instance'),native);assert.deepEqual(sent.body,request);assert.ok(values.has(key));const result=await f.feature.finishPeople(receipt,{scope,current:()=>true});assert.equal(result.state,'completed');assert.equal(result.seq,3);assert.equal(values.get(key),raw);assert.equal(recovery.find(row=>row.kind==='legacy-decision').seq,3);assert.equal(f.feature.pendingPeople().locallyRetired,true);native='';assert.equal(f.feature.pendingPeople(),null);}finally{f.feature.destroy();}
+});
+
+test('owner People file publication requires the current native instance',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',native='current',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0n1\0${native}`,id='0123456789abcdef',revision='e'.repeat(64),view={...base,server,owner,chat,generation,access:'owner',local_node:'n1',people_copy_instance:copyInstance};
+ const values=new Map(),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let posts=0,rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:1});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'draft'}),admission={scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:()=>{}};
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts++;return {seq:1};}return readAnswer([],0,false,view);},undefined,undefined,{storage,peopleFileStore,selectedNode:()=> 'n1',selectedUID:()=>chat,localNodes:()=>[{id:'other',instance_id:'unrelated'},{id:'n1',instance_id:native}]});
+ try{f.feature.tick();await f.feature.settled();f.feature.setOwnerShare('n1',{node:'n1',uid:chat,server,generation,state:'active'});await f.feature.settled();await assert.rejects(f.feature.sendPeople(key,'draft',[id],'old',admission),/identity is unavailable/i);assert.equal(posts,0);assert.equal(values.size,0);const receipt=await f.feature.sendPeople(key,'draft',[id],native,admission);assert.equal(posts,1);assert.ok(receipt.peoplePending);assert.equal(receipt.peoplePending.instance,native);assert.equal(values.size,0);}finally{f.feature.destroy();}
+});
+
+test("file-only shared comment keeps its exact source and common attachment tile", () => {
+ const entry={seq:7,anchor:0,author:"a",at:"2026-01-01T00:00:00Z",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.png",mime:"image/png",size:12}]};
+ const capture=guestModule.guestCapture(entry,base,{a:"Ada"});
+ assert.ok(capture);assert.equal(capture.text,"");assert.equal(capture.team.seq,7);assert.deepEqual(capture.attachments.map(file=>file.id),["0123456789abcdef"]);
+ const html=guestMessageHTML(entry,{a:"Ada"},"s",{},"","","s/o/c/g");
+ assert.match(html,/class="attthumb"/);assert.match(html,/\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef\?preview=1/);assert.match(html,/tabindex="0"/);
+});
+
+test("shared attachment tiles use the remote asset transport for downloads and previews", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.png",mime:"image/png",size:12}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g",path=>"/remote-asset?path="+encodeURIComponent(path));
+ assert.match(html,/href="\/remote-asset\?path=/);assert.match(html,/src="\/remote-asset\?path=/);
+});
+
+test("shared attachment with unavailable remote bytes does not link to the current page", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.png",mime:"image/png",size:12}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g",()=>"");
+ assert.doesNotMatch(html,/href=""|src=""/);assert.match(html,/unavailable/i);
+});
+
+test("a missing local copy identity never creates an unbound file link", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:1}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g",path=>path,"");
+ assert.match(html,/unavailable/i);assert.doesNotMatch(html,/href="\/api\/team\/subscriptions/);assert.doesNotMatch(html,/data-attachment-retry=/);
+});
+
+test("a stale unkept mark without a download URL stays unavailable", () => {
+ const file = {id: "0123456789abcdef", sha256: "a".repeat(64), name: "synthetic.txt", mime: "text/plain", size: 12};
+ const entry = {seq: 7, anchor: 0, author: "a", text: "", _peopleRetained: {[file.id]: "unkept"}, attachments: [file]};
+ const html = guestModule.guestMessageHTML(entry, {}, "s", {}, "", "", "s/o/c/g", () => "");
+ assert.match(html, /data-attachment-retry="\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef"/);
+ assert.match(html, /unavailable/i);
+ assert.doesNotMatch(html, /Not kept locally/);
+ assert.doesNotMatch(html, /href=""/);
+});
+
+test("a served file that was not kept locally says so on its tile", () => {
+ const file = {id: "0123456789abcdef", sha256: "a".repeat(64), name: "synthetic.txt", mime: "text/plain", size: 12};
+ const entry = {seq: 7, anchor: 0, author: "a", text: "", _peopleRetained: {[file.id]: "unkept"}, attachments: [file]};
+ const html = guestModule.guestMessageHTML(entry, {}, "s", {}, "", "", "s/o/c/g");
+ assert.match(html, /Not kept locally/);
+ assert.match(html, /href="\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef"/);
+ assert.doesNotMatch(html, /not retained/i);
+ const kept = {...entry, _peopleRetained: {[file.id]: true}};
+ const keptHTML = guestModule.guestMessageHTML(kept, {}, "s", {}, "", "", "s/o/c/g");
+ assert.doesNotMatch(keptHTML, /Not kept locally/);
+ assert.doesNotMatch(keptHTML, /not retained/i);
+});
+
+test("a People file that could not be retained is labelled truthfully", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",_peopleRetained:{"0123456789abcdef":false},attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:12}]};
+ const html=guestModule.guestMessageHTML(entry,{},"s",{},"","","s/o/c/g");
+ assert.match(html,/not retained/i);assert.match(html,/retry download/i);
+});
+
+test('invalid shared attachment manifests never produce file links',()=>{
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:4194304};
+ const oversized=Array.from({length:5},(_,i)=>({...file,id:i.toString(16).padStart(16,'0')}));
+ for(const attachments of [null,[],[{...file,name:'../escape'}],[file,file],oversized]) {
+  let calls=0;const entry={seq:7,anchor:0,author:'a',text:'synthetic',attachments};
+  const html=guestModule.guestMessageHTML(entry,{},'s',{},'','','s/o/c/g',()=>{calls++;return 'blob:unexpected'});
+  assert.match(html,/Attachments unavailable/);assert.doesNotMatch(html,/blob:unexpected/);assert.equal(calls,0);
+ }
+});
+
+test('a malformed shared attachment source key cannot produce a file URL',()=>{
+ const entry={seq:7,anchor:0,author:'a',text:'synthetic',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+ let calls=0;const html=guestModule.guestMessageHTML(entry,{},'s',{},'','',{invalid:true},()=>{calls++;return 'blob:unexpected'});
+ assert.equal(calls,0);assert.doesNotMatch(html,/blob:unexpected|data-attachment-retry/);
+});
+
+test("received People files are handed to bounded retention before their page renders", async()=>{
+ const view={...base,access:"write",people_copy_instance:"1".repeat(32)};const retained=[];
+ const message={seq:1,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:1}]};
+ const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?{...list([view],[{id:"s",delivery:"ok",people_files:"supported"}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{retainPeople:async(key,entries)=>{retained.push({key,entries});}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(retained.length,1);assert.equal(retained[0].key,"s/o/c/g");assert.equal(retained[0].entries[0].attachments[0].name,"synthetic.txt");f.feature.destroy();
+});
+
+test('received retention failure preserves the discussion without inventing availability',async()=>{
+ const view={...base,access:'read',people_copy_instance:'1'.repeat(32)};
+ const message={seq:1,anchor:0,author:'a',text:'synthetic retained caption',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+ let attempts=0;const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?{...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{retainPeople:async()=>{attempts++;throw Error('synthetic retention failure')}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(attempts,1);assert.match(f.get('msgs').innerHTML,/synthetic retained caption/);assert.equal(message._peopleRetained,undefined);f.feature.destroy();
+});
+
+test('closing or destroying a received panel aborts its in-flight file retention',async()=>{
+ for(const action of ['close','destroy']) {
+  const view={...base,access:'read',people_copy_instance:'1'.repeat(32)};
+  const message={seq:1,anchor:0,author:'a',text:'synthetic stale caption',attachments:[{id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1}]};
+  let entered;const started=new Promise(resolve=>{entered=resolve});
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?{...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([message],1,false),undefined,{retainPeople:async(_key,_entries,signal)=>{entered(signal);return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(Error('synthetic abort')),{once:true}))}});
+  f.feature.tick();await f.feature.settled();f.open();const signal=await started;
+  if(action==='close')f.navigate();else f.feature.destroy();
+  assert.equal(signal.aborted,true);await f.feature.settled();assert.doesNotMatch(f.get('msgs').innerHTML,/synthetic stale caption/);
+  if(action==='close')f.feature.destroy();
+ }
+});
+
+test("retention results stay scoped to each comment and show missing bytes", async()=>{
+ const view={...base,access:"write",people_copy_instance:"1".repeat(32)},file={id:"0123456789abcdef",sha256:"a".repeat(64),name:"synthetic.txt",mime:"text/plain",size:1};
+ const first={seq:1,anchor:0,author:"a",text:"",attachments:[file]},second={seq:2,anchor:0,author:"a",text:"",attachments:[{...file,name:"second.txt"}]};
+ const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?{...list([view],[{id:"s",delivery:"ok",people_files:"supported"}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([first,second],2,false),undefined,{retainPeople:async()=>({files:{"1/0123456789abcdef":true,"2/0123456789abcdef":false}})});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(first._peopleRetained[file.id],true);assert.equal(second._peopleRetained[file.id],false);
+ assert.doesNotMatch(guestModule.guestMessageHTML(first,{},"s",{},"","","s/o/c/g"),/not retained/i);
+ assert.match(guestModule.guestMessageHTML(second,{},"s",{},"","","s/o/c/g"),/not retained/i);
+ f.feature.destroy();
+});
+
+test("retention marks a served unkept file on its own tile", async () => {
+ const view = {...base, access: "write", people_copy_instance: "1".repeat(32)};
+ const file = {id: "0123456789abcdef", sha256: "a".repeat(64), name: "synthetic.txt", mime: "text/plain", size: 1};
+ const message = {seq: 1, anchor: 0, author: "a", text: "", attachments: [file]};
+ const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? {...list([view], [{id: "s", delivery: "ok", people_files: "supported"}]), people_attachments: {version: 1, max_file_bytes: 4194304, max_files: 16, max_total_bytes: 16777216}} : readAnswer([], 0, false, view), async () => commentsAnswer([message], 1, false), undefined, {retainPeople: async () => ({files: {"1/0123456789abcdef": "unkept"}})});
+ f.feature.tick();
+ await f.feature.settled();
+ f.open();
+ await f.feature.settled();
+ assert.equal(message._peopleRetained[file.id], "unkept");
+ assert.match(f.get("msgs").innerHTML, /Not kept locally/);
+ assert.doesNotMatch(f.get("msgs").innerHTML, /not retained/i);
+ f.feature.destroy();
+});
+
+test('retention results cannot authorize a malformed neighboring comment',async()=>{
+ const view={...base,access:'write',people_copy_instance:'1'.repeat(32)},file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};
+ const valid={seq:1,anchor:0,author:'a',text:'valid',attachments:[file]},invalid={seq:2,anchor:0,author:'a',text:'invalid',attachments:[{...file,name:'../escape'}]};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?{...list([view],[{id:'s',delivery:'ok',people_files:'supported'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:readAnswer([],0,false,view),async()=>commentsAnswer([valid,invalid],2,false),undefined,{retainPeople:async()=>({files:{'1/0123456789abcdef':true,'2/0123456789abcdef':true}})});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(valid._peopleRetained[file.id],true);assert.equal(invalid._peopleRetained,undefined);
+ assert.match(guestModule.guestMessageHTML(invalid,{},'s',{},'','','s/o/c/g'),/Attachments unavailable/);f.feature.destroy();
+});
+
+test("shared attachment capture does not carry arbitrary paths or URLs", () => {
+ const entry={seq:7,anchor:0,author:"a",text:"",attachments:[{id:"0123456789abcdef",name:"synthetic.png",mime:"image/png",size:12,sha256:"a".repeat(64),path:"/synthetic/private",url:"https://example.invalid/file"}]};
+ const capture=guestModule.guestCapture(entry,base,{a:"Ada"});
+ assert.ok(capture);assert.equal("path" in capture.attachments[0],false);assert.equal("url" in capture.attachments[0],false);assert.equal(capture.attachments[0].id,"0123456789abcdef");
+});
+
+test('a verified remote download stays available when raster preview is unavailable',()=>{
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.png',mime:'image/png',size:12};
+ const entry={seq:7,anchor:0,author:'a',text:'',attachments:[file]};
+ const html=guestModule.guestMessageHTML(entry,{},'s',{},'','','s/o/c/g',path=>path.endsWith('?preview=1')?'':'blob:retained');
+ assert.match(html,/synthetic\.png/);assert.match(html,/preview unavailable/i);assert.match(html,/href="blob:retained"/);assert.match(html,/download=/);
+});
+
+test('remote unavailable association offers a scoped explicit retry control',()=>{
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};const entry={seq:7,anchor:0,author:'a',text:'',_peopleRetained:{[file.id]:false},attachments:[file]};
+ const html=guestModule.guestMessageHTML(entry,{},'s',{},'','','s/o/c/g',()=> '');
+ assert.match(html,/data-attachment-retry="\/api\/team\/subscriptions\/s\/o\/c\/g\/attachments\/7\/0123456789abcdef"/);assert.match(html,/>Retry download<\/button>/);
+});
+
+test('retained owner file authority binds exact copy, descriptor and native instance',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1',people_copy_instance:'1'.repeat(32)};const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};let subscriptions=[view],binding='one',instance='original';
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list(subscriptions,[{id:'s',people_file_binding:binding}]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[file]}],1),undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',localAgentAvailable:()=>true,localNodes:()=>[{id:'n1',instance_id:instance}]});
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const scope=f.feature.capturePromptAuthority(source,[file]);assert.ok(scope);assert.equal(scope.current(),true);
+ instance='';assert.equal(f.feature.capturePromptAuthority(source,[file]),null);assert.equal(scope.current(),false);instance='original';
+ assert.equal(f.feature.capturePromptAuthority(source,[{...file,name:'different'}]),null);assert.equal(f.feature.capturePromptAuthority({...source,generation:'other'},[file]),null);
+ instance='replacement';assert.equal(scope.current(),false);instance='original';binding='two';f.setTime(10000);f.feature.tick();await f.feature.settled();assert.equal(scope.current(),false);
+ binding='one';subscriptions=[];f.setTime(20000);f.feature.tick();await f.feature.settled();subscriptions=[view];f.setTime(30000);f.feature.tick();await f.feature.settled();assert.equal(scope.current(),false);f.feature.destroy();
+});
+
+test('owner preparation authority requires every ordered retained descriptor',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1',people_copy_instance:'1'.repeat(32)};
+ const first={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'first.txt',mime:'text/plain',size:1},second={id:'fedcba9876543210',sha256:'b'.repeat(64),name:'second.txt',mime:'text/plain',size:2};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[first,second]}],1),undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',localAgentAvailable:()=>true,localNodes:()=>[{id:'n1',instance_id:'synthetic-instance'}]});
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const valid=f.feature.capturePromptAuthority(source,[first,second]);assert.ok(valid);assert.equal(valid.current(),true);
+ for(const attempted of [null,[],[first],[second,first],[first,{...second,sha256:'c'.repeat(64)}],[first,{...second,size:1}],[first,{...second,mime:'image/png'}]]) assert.equal(f.feature.capturePromptAuthority(source,attempted),null);
+ f.feature.destroy();
+});
+
+test('owner file preparation refuses a retained copy without its local identity',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1'};
+ const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[file]}],1),undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',localAgentAvailable:()=>true,localNodes:()=>[{id:'n1',instance_id:'synthetic-instance'}]});
+ f.feature.tick();await f.feature.settled();
+ assert.equal(f.feature.capturePromptAuthority({server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1},[file]),null);
+ f.feature.destroy();
+});
+
+test('retained file authority stops on feature disable, selection or source retirement',async()=>{
+ const view={...base,access:'owner',state:'ended',local_node:'n1',people_copy_instance:'1'.repeat(32)};const file={id:'0123456789abcdef',sha256:'a'.repeat(64),name:'synthetic.txt',mime:'text/plain',size:1};let enabled=true,selected='n1',uid='c',agent=true;
+ const f=nativeViewFixture(async path=>{if(path==='/api/team/subscriptions'){if(!enabled)throw Object.assign(Error('disabled'),{status:404});return list([view])}return readAnswer([],0,false,view)},async()=>commentsAnswer([{seq:1,anchor:0,text:'retained',author:'p',attachments:[file]}],1),undefined,{selectedNode:()=>selected,selectedUID:()=>uid,localAgentAvailable:()=>agent,localNodes:()=>[{id:'n1',instance_id:'original'}]});
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};const scope=f.feature.capturePromptAuthority(source,[file]);assert.ok(scope);assert.equal(scope.current(),true);
+ selected='n2';assert.equal(scope.current(),false);selected='n1';uid='other';assert.equal(scope.current(),false);uid='c';agent=false;assert.equal(scope.current(),false);agent=true;
+ enabled=false;f.setTime(10000);f.feature.tick();await f.feature.settled();assert.equal(scope.current(),false);assert.equal(f.feature.capturePromptAuthority(source,[file]),null);f.feature.destroy();
+});
+
+test('a replacement local copy must retire the failed prior panel even under the same durable chat address', async()=>{
+ let phase=0;const original={...base,access:'write',mirror_last:0,seen_mirror:0,people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};
+ const capabilities=view=>({...list([view],[{id:base.server,people_files:'supported',people_file_binding:'stable'}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}});
+ const f=nativeViewFixture(async(path,opts)=>{
+  if(path==='/api/team/subscriptions')return capabilities(phase===2?replacement:original);
+  if(opts?.method==='PUT')return {};
+  if(phase===1)throw Object.assign(new Error('{"error":"not_found"}'),{status:404});
+  return readAnswer([],0,false,phase===2?replacement:original);
+ });
+ try{
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();assert.equal(f.feature.peopleContext().attachments,true);
+  phase=1;f.setTime(5000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.peopleContext().writable,false);
+  phase=2;f.feature.refresh();await f.feature.settled();f.open();await f.feature.settled();
+  assert.equal(f.feature.peopleContext().writable,true,'explicitly opening the listed replacement must not retain prior not-found failure');
+  assert.equal(f.feature.peopleContext().attachments,true,'replacement must use its current copy identity for attachment capability');
+  assert.equal(f.get('guestnote').textContent,'');
+ }finally{f.feature.destroy();}
+});
+
+test('owner copy replacement retires a delayed old history response',async()=>{
+ const original={...base,access:'owner',local_node:'n1',people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};
+ let view=original,release,entered;const started=new Promise(resolve=>{entered=resolve});
+ const f=nativeViewFixture(async path=>{
+  if(path==='/api/team/subscriptions')return list([view]);
+  if(path.includes('copy_instance='+original.people_copy_instance)){entered();return new Promise(resolve=>{release=()=>resolve(readAnswer([{t:'user',seq:1,text:'old retained'}],1,false,original))})}
+  return readAnswer([{t:'user',seq:1,text:'replacement retained'}],1,false,replacement);
+ },undefined,undefined,{selectedNode:()=> 'n1'});
+ try {
+  f.feature.tick();await started;view=replacement;f.feature.refresh();await new Promise(resolve=>setImmediate(resolve));
+  release();await f.feature.settled();const snapshots=f.feature.ownerSnapshots();assert.equal(snapshots.length,1);assert.equal(snapshots[0].view.people_copy_instance,replacement.people_copy_instance);
+  assert.deepEqual(snapshots[0].mirrors.map(item=>item.text),['replacement retained']);
+ } finally {if(release)release();f.feature.destroy()}
+});
+
+test('unread evidence from an earlier copy is not reused by its replacement',async()=>{
+ const original={...base,access:'write',state:'live',unread:true,comments_last:1,seen_comments:0,mirror_last:0,seen_mirror:0,people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};let view=original;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'synthetic',author:'p',mine:view===replacement}],1,false));
+ try {f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.activities()[0].unread,true);view=replacement;f.feature.refresh();await f.feature.settled();assert.equal(f.feature.tab.activities()[0].unread,false)} finally {f.feature.destroy()}
+});
+
+test('a delayed received-copy response cannot replace the current panel',async()=>{
+ const original={...base,access:'write',people_copy_instance:'a'.repeat(32)},replacement={...original,people_copy_instance:'b'.repeat(32)};let view=original,release,entered;
+ const started=new Promise(resolve=>{entered=resolve});
+ const f=nativeViewFixture(async path=>{
+  if(path==='/api/team/subscriptions')return list([view]);
+  if(path.includes('copy_instance='+original.people_copy_instance)){entered();return new Promise(resolve=>{release=()=>resolve(readAnswer([{t:'user',seq:1,text:'old response'}],1,false,original))})}
+  return readAnswer([{t:'user',seq:1,text:'replacement response'}],1,false,replacement);
+ });
+ try {f.feature.tick();await f.feature.settled();f.open();await started;view=replacement;f.feature.refresh();await new Promise(resolve=>setImmediate(resolve));release();await f.feature.settled();assert.match(f.get('msgs').innerHTML,/replacement response/);assert.doesNotMatch(f.get('msgs').innerHTML,/old response/)} finally {if(release)release();f.feature.destroy()}
+});
+
+test('refreshing and reselecting an unchanged copy preserves its panel',async()=>{
+ const view={...base,access:'write',people_copy_instance:'a'.repeat(32)};let reads=0;
+ const f=nativeViewFixture(async path=>{if(path==='/api/team/subscriptions')return list([{...view}]);reads++;return readAnswer([{t:'user',seq:1,text:'stable response'}],1,false,{...view})});
+ try {f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const before=f.get('msgs').innerHTML,count=reads;f.feature.refresh();await f.feature.settled();f.open();await f.feature.settled();assert.equal(f.get('msgs').innerHTML,before);assert.equal(reads,count)} finally {f.feature.destroy()}
+});
+
+test('read-position updates carry the selected copy identity',async()=>{
+ const view={...base,access:'write',people_copy_instance:'a'.repeat(32),seen_mirror:0,mirror_last:1};const seen=[];
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view]);if(opts?.method==='PUT'){seen.push(path);return {}}return readAnswer([{t:'user',seq:1,text:'synthetic'}],1,false,view)});
+ try {f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();assert.equal(seen.length,1);assert.equal(new URL(seen[0],'http://local.invalid').searchParams.get('copy_instance'),view.people_copy_instance)} finally {f.feature.destroy()}
+});
+
+test('inactive owner exposes exact retained copies for local review without writable authority', async () => {
+  const uid='c'.repeat(16), server='a'.repeat(32), owner='b'.repeat(32), copy='d'.repeat(32);
+  const view={...base,server,owner,chat:uid,generation:'e'.repeat(16),access:'owner',state:'ended',local_node:'n1',people_copy_instance:copy};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),undefined,undefined,{selectedNode:()=>'n1',selectedUID:()=>uid});
+  try {f.feature.tick();await f.feature.settled();assert.deepEqual(f.feature.localReviewContexts?.(),[{key:[server,owner,uid,view.generation].join('/'),copyInstance:copy,binding:'',owner:true}]);assert.equal(f.feature.peopleContext(),null);} finally {f.feature.destroy();}
+});
+
+test('owner local review identities follow the listed copy and server binding', async () => {
+  const uid='c'.repeat(16), server='a'.repeat(32), owner='b'.repeat(32), generation='e'.repeat(16);
+  let view={...base,server,owner,chat:uid,generation,access:'owner',state:'ended',local_node:'n1'};
+  let servers=[{id:'other',people_file_binding:'wrong'},{id:server,people_file_binding:'synthetic-binding'}];
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],servers):readAnswer([],0,false,view),undefined,undefined,{selectedNode:()=>'n1',selectedUID:()=>uid});
+  try {f.feature.tick();await f.feature.settled();assert.deepEqual(f.feature.localReviewContexts(),[{key:[server,owner,uid,generation].join('/'),copyInstance:'',binding:'synthetic-binding',owner:true}]);view={...view,people_copy_instance:'d'.repeat(32)};servers=[];f.setTime(10000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.localReviewContexts()[0].copyInstance,'d'.repeat(32));assert.equal(f.feature.localReviewContexts()[0].binding,'');} finally {f.feature.destroy();}
+});
+
+test('inactive owner reads a retained browser publication under its original binding', async () => {
+  const uid='c'.repeat(16),server='a'.repeat(32),owner='b'.repeat(32),copy='d'.repeat(32),native='1'.repeat(32),generation='e'.repeat(16),key=[server,owner,uid,generation].join('/');
+  const view={...base,server,owner,chat:uid,generation,access:'owner',state:'ended',local_node:'n1',people_copy_instance:copy},binding='old-binding',storageKey=`scimux-people-file-pending:${key}:${native}:${binding}:copy:${copy}`;
+  const request={text:'synthetic retained',anchor:0,key:'2'.repeat(16),attachments:['3'.repeat(16)]},value=JSON.stringify({instance:native,copyInstance:copy,request}),values=new Map([[storageKey,value]]);let writes=0;
+  const storage={persistent:true,keys:()=>[...values.keys()],getItem:k=>values.get(k)??null,setItem:()=>{writes++;},removeItem:()=>{writes++;}};
+  let reads=0;const f=nativeViewFixture(async path=>{reads++;return path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:'new-binding'}]):readAnswer([],0,false,view);},undefined,undefined,{storage,selectedNode:()=>'n1',selectedUID:()=>uid,localNodes:()=>[{id:'n1',instance_id:native}]});
+  try {f.feature.tick();await f.feature.settled();assert.equal(f.feature.peopleContext(),null);const copyContext=f.feature.localReviewContexts()[0],before=reads;assert.equal(typeof f.feature.loaded(),'boolean');const lookup=f.feature.readRetainedPeoplePending || (()=>({entries:[],unavailable:false}));const result=lookup(copyContext);
+    assert.equal(result.unavailable,false);assert.equal(result.entries.length,1);assert.deepEqual(result.entries[0],{key,copyInstance:copy,binding,instance:native,storageKey,value,publicationKey:request.key,text:request.text,attachments:request.attachments});result.entries[0].attachments.push('4'.repeat(16));assert.equal(values.get(storageKey),value);assert.equal(writes,0);assert.equal(reads,before);
+  } finally {f.feature.destroy();}
+});
+
+function retainedPendingLookupFixture() {
+  const uid='c'.repeat(16),server='a'.repeat(32),owner='b'.repeat(32),copy='d'.repeat(32),native='1'.repeat(32),generation='e'.repeat(16),key=[server,owner,uid,generation].join('/');
+  const view={...base,server,owner,chat:uid,generation,access:'owner',state:'ended',local_node:'n1',people_copy_instance:copy},values=new Map();let keysMode='ok',writes=0,selected='n1',actualNative=native;
+  const storage={persistent:true,keys:()=>{if(keysMode==='throw')throw Error('synthetic');if(keysMode==='missing')return null;if(keysMode==='many')return Array(4097).fill('other');return [...values.keys()];},getItem:k=>{if(keysMode==='readfail')throw Error('synthetic');return values.get(k)??null;},setItem:()=>{writes++;},removeItem:()=>{writes++;}};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:'new-binding'}]):readAnswer([],0,false,view),undefined,undefined,{storage,selectedNode:()=>selected,selectedUID:()=>uid,localNodes:()=>[{id:'n1',instance_id:actualNative}]});
+  const storageKey=(binding,inst=native,copyID=copy,channel=key)=>`scimux-people-file-pending:${channel}:${inst}${binding?':'+binding:''}:copy:${copyID}`;
+  const value=(inst=native,copyID=copy,request={text:'synthetic',anchor:0,key:'2'.repeat(16),attachments:['3'.repeat(16)]})=>JSON.stringify({instance:inst,copyInstance:copyID,request});
+  return {f,storage,values,storageKey,value,key,copy,native,setMode:v=>{keysMode=v;},setSelected:v=>{selected=v;},setNative:v=>{actualNative=v;},writes:()=>writes};
+}
+
+test('readonly retained lookup isolates copies, native instances and malformed slots', async () => {
+  const x=retainedPendingLookupFixture();try{x.f.feature.tick();await x.f.feature.settled();const context=x.f.feature.localReviewContexts()[0],good=x.storageKey('old');x.values.set(good,x.value());
+    for(const other of [x.storageKey('old','9'.repeat(32)),x.storageKey('old',x.native,'9'.repeat(32)),x.storageKey('old',x.native,x.copy,x.key+'x'),good+':suffix',x.storageKey('wrong:slot')])x.values.set(other,x.value());
+    const lookup=x.f.feature.readRetainedPeoplePending || (()=>({entries:[],unavailable:false}));let result=lookup(context);assert.equal(result.entries.length,1);assert.equal(result.entries[0].storageKey,good);assert.equal(result.unavailable,false);
+    const bad=x.storageKey('broken');x.values.set(bad,'{');result=lookup(context);assert.equal(result.entries.length,1);assert.equal(result.unavailable,true);assert.equal(x.values.get(bad),'{');
+    for(const copy of [{...context,key:context.key+'x'},{...context,copyInstance:'9'.repeat(32)},{...context,owner:false},null])assert.deepEqual(lookup(copy),{entries:[],unavailable:true});
+    x.setNative('9'.repeat(32));result=lookup(context);assert.equal(result.entries.length,0);assert.equal(result.unavailable,true);x.setSelected('n2');assert.deepEqual(lookup(context),{entries:[],unavailable:true});assert.equal(x.writes(),0);
+  }finally{x.f.feature.destroy();}
+});
+
+test('readonly retained lookup reports storage and enumeration failures without writes', async () => {
+  const x=retainedPendingLookupFixture();try{x.f.feature.tick();await x.f.feature.settled();const context=x.f.feature.localReviewContexts()[0];x.values.set(x.storageKey('old'),x.value());const lookup=x.f.feature.readRetainedPeoplePending || (()=>({entries:[],unavailable:false}));
+    for(const mode of ['missing','throw','many','readfail']){x.setMode(mode);assert.deepEqual(lookup(context),{entries:[],unavailable:true},mode);}x.setMode('ok');x.storage.persistent=false;assert.deepEqual(lookup(context),{entries:[],unavailable:true});assert.equal(x.writes(),0);
+  }finally{x.f.feature.destroy();}
+});
+
+test('readonly received copy lookup remains bound to the selected received identity', async () => {
+  const uid='c'.repeat(16),server='a'.repeat(32),owner='b'.repeat(32),generation='e'.repeat(16),copy='d'.repeat(32),key=[server,owner,uid,generation].join('/'),view={...base,server,owner,chat:uid,generation,access:'read',state:'ended',people_copy_instance:copy};
+  let selected='team/'+key,writes=0;const slot=`scimux-people-file-pending:${key}::prior:copy:${copy}`,value=JSON.stringify({instance:'',copyInstance:copy,request:{text:'synthetic',anchor:1,key:'2'.repeat(16),attachments:['3'.repeat(16)]}}),values=new Map([[slot,value]]);
+  const storage={persistent:true,keys:()=>[...values.keys()],getItem:k=>values.get(k)??null,setItem:()=>{writes++;},removeItem:()=>{writes++;}};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:'current'}]):readAnswer([],0,false,view),undefined,undefined,{storage,selectedNode:()=>selected});
+  try {f.feature.tick();await f.feature.settled();f.feature.selectActivity('team/'+key);await f.feature.settled();const context=f.feature.peopleContext(),result=f.feature.readRetainedPeoplePending(context);assert.equal(result.unavailable,false);assert.equal(result.entries.length,1);assert.equal(result.entries[0].binding,'prior');assert.equal(result.entries[0].value,value);selected='team/'+key+'x';assert.deepEqual(f.feature.readRetainedPeoplePending(context),{entries:[],unavailable:true});assert.equal(writes,0);} finally {f.feature.destroy();}
+});
+
+test('readonly lookup rejects ambiguous native identifiers and nonboolean owner flags', async () => {
+  const x=retainedPendingLookupFixture();try{x.f.feature.tick();await x.f.feature.settled();const context=x.f.feature.localReviewContexts()[0];x.setNative('one:binding');x.values.set(x.storageKey('', 'one:binding'),x.value('one:binding'));assert.deepEqual(x.f.feature.readRetainedPeoplePending(context),{entries:[],unavailable:true});x.setNative(x.native);assert.deepEqual(x.f.feature.readRetainedPeoplePending({...context,owner:'yes'}),{entries:[],unavailable:true});}finally{x.f.feature.destroy();}
+});
+
+test('readonly lookup handles empty bindings and vanished enumerated entries', async () => {
+  const x=retainedPendingLookupFixture();try{x.f.feature.tick();await x.f.feature.settled();const context=x.f.feature.localReviewContexts()[0],slot=x.storageKey('');x.values.set(slot,x.value());let result=x.f.feature.readRetainedPeoplePending(context);assert.equal(result.entries.length,1);assert.equal(result.entries[0].binding,'');assert.equal(result.unavailable,false);x.storage.keys=()=>[slot,x.storageKey('vanished')];result=x.f.feature.readRetainedPeoplePending(context);assert.equal(result.entries.length,1);assert.equal(result.unavailable,true);assert.equal(x.writes(),0);}finally{x.f.feature.destroy();}
+});
+
+test('current People pending lookup returns null for an empty current slot', async () => {
+  const view={...base,access:'write',people_copy_instance:'1'.repeat(32)},storage={persistent:true,getItem:()=>null,setItem(){},removeItem(){}};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),undefined,undefined,{storage});
+  try {f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();assert.equal(f.feature.pendingPeople(),null);}finally{f.feature.destroy();}
+});
+
+async function pendingFenceFixture({abortOnSignal=false}={}) {
+  const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='0123456789abcdef',revision='e'.repeat(64),posts=[],values=new Map(),waiters=[];
+  let files=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],tail=Promise.resolve(),fail=false,reads=0,random=0;
+  const writePeople=fn=>{const operation=tail.then(()=>{if(fail)throw Error('synthetic transaction failure');const next=fn({files,recovery});files=next.files;recovery=next.recovery;return next.value;});tail=operation.then(()=>{},()=>{});return operation;};
+  const driver={read:async()=>files,readWrite:fn=>writePeople(({files,recovery})=>{const next=fn(files);return {files:next.rows,recovery,value:next.value};}),writePeople},store=createPeopleFileStore(driver),token=await store.save(scope,id,{name:'synthetic.txt',type:'text/plain',size:2});await store.setStageRevision(scope,id,revision,token);const draft=await store.savePeopleDraft({scope,text:'synthetic'});
+  const storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem(){assert.fail('legacy storage must not be removed');}};
+  const view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+  const api=async(path,options)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(options?.method==='POST'&&path.split('?')[0].endsWith('/comments'))return new Promise((resolve,reject)=>{posts.push({path,options,resolve,reject});for(const waiter of waiters.splice(0))waiter();if(abortOnSignal&&options.signal)options.signal.addEventListener('abort',()=>reject(Error('aborted')),{once:true});});assert.ok(path.startsWith('/api/team/subscriptions/'),'no Agent or unrelated API calls');assert.ok(!options?.method||options.method==='GET');reads++;return readAnswer([],0,false,view);};
+  const f=nativeViewFixture(api,undefined,n=>new Uint8Array(n).fill(++random),{storage,peopleFileStore:store});
+  const waitPost=async count=>{while(posts.length<count)await new Promise(resolve=>waiters.push(resolve));};
+  const admission={scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:snapshot=>{prepared=snapshot;}};let prepared;
+  f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();
+  async function start(){const flight=f.feature.sendPeople(key,'synthetic',[id],'',admission);flight.catch(()=>{});await waitPost(posts.length+1);assert.equal(prepared.key,key);assert.equal(prepared.copyInstance,copyInstance);assert.equal(prepared.binding,binding);assert.equal(prepared.instance,'');assert.equal(posts.at(-1).path,`/api/team/subscriptions/${key}/comments?copy_instance=${copyInstance}`);assert.deepEqual(JSON.parse(posts.at(-1).options.body),JSON.parse(prepared.value).request);return {flight,snapshot:prepared};}
+  async function retry(){const original=f.feature.pendingPeople(),count=posts.length+1,flight=f.feature.retryPeople();flight.catch(()=>{});await Promise.race([waitPost(count),flight.then(()=>{throw Error('retry settled before dispatch');},error=>{throw error;})]);assert.deepEqual(JSON.parse(posts.at(-1).options.body),JSON.parse(original.value).request);assert.equal(posts.at(-1).path,`/api/team/subscriptions/${key}/comments?copy_instance=${copyInstance}`);return {flight};}
+  const state=()=>store.listPeopleRecovery(scope);
+  const clear=snapshot=>f.feature.clearPeoplePending(snapshot,{scope,proof:{state:'locally_discarded'},current:()=>true});
+  return {f,key,scope,id,revision,token,draft,store,storage,values,posts,start,retry,waitPost,state,clear,reads:()=>reads,setFailure:value=>{fail=value;},files:()=>store.list(scope),recovery:()=>recovery};
+}
+
+test('exact local pending cleanup removes only the captured value without fabricating receipt', async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),request=JSON.parse(snapshot.value).request;assert.deepEqual(request.attachments,[x.id]);assert.equal(request.text,'synthetic');assert.equal((await x.state()).pending[0].publication,snapshot.publication);assert.deepEqual(await x.clear(snapshot),{state:'retired'});assert.equal((await x.state()).pending.length,0);const decision=x.recovery().find(row=>row.kind==='decision');assert.equal(decision.state,'retired');assert.equal(decision.seq,undefined);assert.deepEqual(decision.request,request);assert.equal((await x.files())[0].fileToken,x.token);assert.equal(x.posts.length,1);x.posts[0].reject(Error('synthetic'));await assert.rejects(flight,/synthetic/);}finally{x.f.feature.destroy();}
+});
+
+test('local retirement fences held file send and retry even if transport ignores abort',async()=>{
+ for(const method of ['send','retry'])for(const outcome of ['success','error']){const x=await pendingFenceFixture();try{const initial=await x.start();let flight=initial.flight;if(method==='retry'){x.posts[0].reject(Error('synthetic offline'));await assert.rejects(flight,/offline/);({flight}=await x.retry());}const snap=initial.snapshot,post=x.posts.at(-1),before=x.reads();assert.deepEqual(x.f.feature.fencePeoplePending(snap),{state:'locally_retired',cancelled:1});assert.equal(post.options.signal.aborted,true);if(outcome==='success')post.resolve({seq:7});else post.reject(Object.assign(Error('offline'),{status:503}));await assert.rejects(flight,e=>e.code==='PEOPLE_LOCAL_RETIRED');assert.equal(x.reads(),before);assert.equal((await x.state()).pending[0].publication,snap.publication);assert.equal((await x.files())[0].fileToken,x.token);}finally{x.f.feature.destroy();}}
+});
+
+test('exact cleanup refuses malformed, replaced, vanished and storage-failure snapshots',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot:snap}=await x.start();for(const bad of [null,{}, {...snap,storageKey:'unrelated'}, {...snap,storageKey:snap.storageKey+'x'}, {...snap,value:'{'}, {...snap,publicationKey:'f'.repeat(16)}, {...snap,copyInstance:'2'.repeat(32)}, {...snap,instance:'other'}]){assert.equal(await x.clear(bad),false);assert.equal((await x.state()).pending[0].publication,snap.publication);}const altered={...snap,version:'different'};await assert.rejects(x.clear(altered),/identity/i);x.setFailure(true);await assert.rejects(x.clear(snap),/synthetic transaction failure/);x.setFailure(false);assert.equal((await x.state()).pending[0].publication,snap.publication);assert.equal((await x.files())[0].fileToken,x.token);assert.deepEqual(await x.clear(snap),{state:'retired'});await assert.rejects(x.clear(snap),/identity/i);assert.equal((await x.state()).pending.length,0);x.posts[0].reject(Error('synthetic'));await assert.rejects(flight,/synthetic/);}finally{x.f.feature.destroy();}
+});
+
+test('local retirement fences every matching flight while preserving newer pending requests',async()=>{
+ const x=await pendingFenceFixture();try{const first=await x.start(),second=await x.retry();assert.deepEqual(await x.clear(first.snapshot),{state:'retired'});const newer=await x.start();assert.notEqual(newer.snapshot.publication,first.snapshot.publication);assert.notEqual(newer.snapshot.publicationKey,first.snapshot.publicationKey);assert.deepEqual(x.f.feature.fencePeoplePending(first.snapshot),{state:'locally_retired',cancelled:2});assert.equal(x.posts[0].options.signal.aborted,true);assert.equal(x.posts[1].options.signal.aborted,true);assert.equal(x.posts[2].options.signal.aborted,false);await assert.rejects(x.clear(first.snapshot),/identity/i);assert.equal((await x.state()).pending[0].publication,newer.snapshot.publication);x.posts[0].resolve({seq:2});x.posts[1].reject(Error('synthetic'));x.posts[2].resolve({seq:3});await assert.rejects(first.flight,e=>e.code==='PEOPLE_LOCAL_RETIRED');await assert.rejects(second.flight,e=>e.code==='PEOPLE_LOCAL_RETIRED');assert.equal((await newer.flight).seq,3);assert.deepEqual(x.f.feature.fencePeoplePending(first.snapshot),{state:'locally_retired',cancelled:0});assert.equal((await x.files())[0].fileToken,x.token);}finally{x.f.feature.destroy();}
+});
+
+test('finishPeople reports storage failures and retains matching record',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start();x.posts[0].resolve({seq:2});const receipt=await flight;assert.equal(receipt.seq,2);x.setFailure(true);await assert.rejects(x.f.feature.finishPeople(receipt),/synthetic transaction failure/);x.setFailure(false);assert.equal((await x.state()).pending[0].publication,snapshot.publication);assert.equal((await x.files())[0].published,undefined);assert.deepEqual(await x.f.feature.finishPeople(receipt),{state:'completed',seq:2,filesConfirmed:true,draftCleared:true});assert.equal((await x.state()).pending.length,0);assert.equal((await x.files())[0].published,2);}finally{x.f.feature.destroy();}
+});
+
+test('exact pending helpers reject structurally ambiguous snapshot identities',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),value=JSON.stringify({request:{text:'synthetic',anchor:0,key:'2'.repeat(16),attachments:['3'.repeat(16)]}}),bad={storageKey:'scimux-people-file-pending:undefined:undefined:copy:undefined',value,publicationKey:'2'.repeat(16),text:'synthetic',attachments:['3'.repeat(16)]};x.values.set(bad.storageKey,value);assert.equal(await x.clear(bad),false);assert.deepEqual(x.f.feature.fencePeoplePending(bad),{state:'unavailable',cancelled:0});assert.equal(x.values.get(bad.storageKey),value);assert.equal((await x.state()).pending[0].publication,snapshot.publication);x.posts[0].reject(Error('synthetic'));await assert.rejects(flight,/synthetic/);}finally{x.f.feature.destroy();}
+});
+
+test('file fence leaves unrelated scope and text-only requests untouched',async()=>{
+ const x=await pendingFenceFixture();try{const {flight:file,snapshot:old}=await x.start(),text=x.f.feature.sendPeople(x.key,'human text');text.catch(()=>{});await x.waitPost(2);assert.equal(x.posts.length,2);for(const update of [{binding:'other'}, {key:['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'f'.repeat(16)].join('/')}, {copyInstance:'4'.repeat(32)}, {instance:'other'}]){const identity={...old,...update,format:'legacy'},body=JSON.parse(old.value);body.instance=identity.instance;body.copyInstance=identity.copyInstance;identity.value=JSON.stringify(body);identity.storageKey=`scimux-people-file-pending:${identity.key}:${identity.instance}${identity.binding?':'+identity.binding:''}:copy:${identity.copyInstance}`;assert.deepEqual(x.f.feature.fencePeoplePending(identity),{state:'locally_retired',cancelled:0});}assert.equal(x.posts[0].options.signal.aborted,false);assert.equal(x.posts[1].options.signal,undefined);assert.deepEqual(x.f.feature.fencePeoplePending(old),{state:'locally_retired',cancelled:1});x.posts[0].reject(Error('synthetic'));x.posts[1].resolve({seq:3});await assert.rejects(file,e=>e.code==='PEOPLE_LOCAL_RETIRED');assert.equal((await text).seq,3);assert.equal((await x.state()).pending[0].publication,old.publication);}finally{x.f.feature.destroy();}
+});
+
+test('ordinary file request success and failure release their flight and preserve errors',async()=>{
+ for(const outcome of ['success','error']){const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),error=Object.assign(Error('synthetic'),{status:409});if(outcome==='success'){x.posts[0].resolve({seq:2});const receipt=await flight;assert.equal(receipt.seq,2);assert.equal(receipt.peoplePending.publication,snapshot.publication);}else{x.posts[0].reject(error);await assert.rejects(flight,e=>e===error&&e.status===409);}assert.deepEqual(x.f.feature.fencePeoplePending(snapshot),{state:'locally_retired',cancelled:0});assert.equal(x.posts[0].options.signal.aborted,false);assert.equal((await x.state()).pending[0].publication,snapshot.publication);}finally{x.f.feature.destroy();}}
+});
+
+test('file publication abort propagates promptly and clears the flight registration',async()=>{
+ const x=await pendingFenceFixture({abortOnSignal:true});try{const {flight,snapshot}=await x.start();assert.deepEqual(x.f.feature.fencePeoplePending(snapshot),{state:'locally_retired',cancelled:1});await assert.rejects(flight,e=>e.code==='PEOPLE_LOCAL_RETIRED');assert.deepEqual(x.f.feature.fencePeoplePending(snapshot),{state:'locally_retired',cancelled:0});assert.equal((await x.state()).pending[0].publication,snapshot.publication);}finally{x.f.feature.destroy();}
+});
+
+test('retirement settles ignored-abort send and retry before transport releases',async()=>{
+ for(const mode of ['send','retry'])for(const late of ['success','error']){const x=await pendingFenceFixture();try{const initial=await x.start();let flight=initial.flight;if(mode==='retry'){x.posts[0].reject(Error('synthetic'));await assert.rejects(flight,/synthetic/);({flight}=await x.retry());}const post=x.posts.at(-1),reads=x.reads();assert.deepEqual(x.f.feature.fencePeoplePending(initial.snapshot),{state:'locally_retired',cancelled:1});assert.equal(post.options.signal.aborted,true);await assert.rejects(flight,e=>e.code==='PEOPLE_LOCAL_RETIRED');assert.deepEqual(x.f.feature.fencePeoplePending(initial.snapshot),{state:'locally_retired',cancelled:0});assert.equal((await x.state()).pending[0].publication,initial.snapshot.publication);if(late==='success')post.resolve({seq:8});else post.reject(Error('synthetic late error'));await new Promise(resolve=>setImmediate(resolve));assert.equal(x.reads(),reads);}finally{x.posts.forEach(post=>post.resolve({seq:1}));x.f.feature.destroy();}}
+});
+
+test('destroy promptly cancels owned ignored-abort file requests without retiring saved retry',async()=>{
+ for(const late of ['success','error']){const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),post=x.posts[0];x.f.feature.destroy();assert.equal(post.options.signal.aborted,true);await assert.rejects(flight,e=>e.code==='PEOPLE_FEATURE_CLOSED');assert.equal((await x.state()).pending[0].publication,snapshot.publication);assert.deepEqual(x.f.feature.fencePeoplePending(snapshot),{state:'locally_retired',cancelled:0});if(late==='success')post.resolve({seq:3});else post.reject(Error('synthetic late'));await new Promise(resolve=>setImmediate(resolve));assert.equal((await x.files())[0].published,undefined);}finally{x.posts.forEach(post=>post.resolve({seq:1}));x.f.feature.destroy();}}
+});
+
+test('retiring duplicate old flights promptly leaves a newer publication running',async()=>{
+ const x=await pendingFenceFixture();try{const first=await x.start(),second=await x.retry();assert.deepEqual(await x.clear(first.snapshot),{state:'retired'});const newer=await x.start();let outcomes=['pending','pending','pending'];const observed=[first.flight,second.flight,newer.flight].map((p,i)=>p.then(()=>{outcomes[i]='success';},e=>{outcomes[i]=e.code;}));assert.deepEqual(x.f.feature.fencePeoplePending(first.snapshot),{state:'locally_retired',cancelled:2});await Promise.all(observed.slice(0,2));assert.deepEqual(outcomes,['PEOPLE_LOCAL_RETIRED','PEOPLE_LOCAL_RETIRED','pending']);assert.equal(x.posts[2].options.signal.aborted,false);assert.deepEqual(x.f.feature.fencePeoplePending(first.snapshot),{state:'locally_retired',cancelled:0});assert.equal((await x.state()).pending[0].publication,newer.snapshot.publication);x.posts[0].resolve({seq:4});x.posts[1].reject(Error('synthetic'));x.posts[2].resolve({seq:5});await Promise.all(observed);assert.deepEqual(outcomes,['PEOPLE_LOCAL_RETIRED','PEOPLE_LOCAL_RETIRED','success']);assert.equal((await x.files())[0].fileToken,x.token);}finally{x.posts.forEach(p=>p.resolve({seq:1}));x.f.feature.destroy();}
+});
+
+test('destroy cancels a held retry while another feature instance remains independent',async()=>{
+ const x=await pendingFenceFixture(),y=await pendingFenceFixture();try{const prior=await x.start();x.posts[0].reject(Error('synthetic'));await assert.rejects(prior.flight,/synthetic/);const retry=await x.retry(),other=await y.start();x.f.feature.destroy();await assert.rejects(retry.flight,e=>e.code==='PEOPLE_FEATURE_CLOSED');assert.equal(x.posts[1].options.signal.aborted,true);assert.equal(y.posts[0].options.signal.aborted,false);assert.equal((await x.state()).pending[0].publication,prior.snapshot.publication);x.posts[1].resolve({seq:1});y.posts[0].resolve({seq:2});assert.equal((await other.flight).seq,2);assert.equal((await y.state()).pending[0].publication,other.snapshot.publication);}finally{for(const v of [x,y]){v.posts.forEach(p=>p.resolve({seq:1}));v.f.feature.destroy();}}
+});
+
+test('destroy after explicit fence retains the retirement outcome',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start();assert.deepEqual(x.f.feature.fencePeoplePending(snapshot),{state:'locally_retired',cancelled:1});x.f.feature.destroy();await assert.rejects(flight,e=>e.code==='PEOPLE_LOCAL_RETIRED');assert.equal((await x.state()).pending[0].publication,snapshot.publication);}finally{x.posts.forEach(p=>p.resolve({seq:1}));x.f.feature.destroy();}
+});
+
+test('a transport rejection already queued cannot outrun an explicit fence',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start();x.posts[0].reject(Error('synthetic'));await Promise.resolve();assert.deepEqual(x.f.feature.fencePeoplePending(snapshot),{state:'locally_retired',cancelled:1});await assert.rejects(flight,e=>e.code==='PEOPLE_LOCAL_RETIRED');assert.equal((await x.state()).pending[0].publication,snapshot.publication);}finally{x.posts.forEach(p=>p.resolve({seq:1}));x.f.feature.destroy();}
+});
+
+test('queued transport rejection and retirement preserve the actual ordering',async()=>{
+ for(let ticks=0;ticks<8;ticks++){const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),failure=Object.assign(Error('synthetic'),{status:503}),observed=flight.then(()=>null,e=>e);x.posts[0].reject(failure);for(let i=0;i<ticks;i++)await Promise.resolve();const fenced=x.f.feature.fencePeoplePending(snapshot),result=await observed;if(fenced.cancelled)assert.equal(result.code,'PEOPLE_LOCAL_RETIRED');else assert.equal(result,failure);assert.equal((await x.state()).pending[0].publication,snapshot.publication);}finally{x.posts.forEach(p=>p.resolve({seq:1}));x.f.feature.destroy();}}
+});
+
+test('an old closed flight cannot affect a new request after rebinding',async()=>{
+ const x=await pendingFenceFixture();try{const old=await x.start();x.f.feature.destroy();await assert.rejects(old.flight,e=>e.code==='PEOPLE_FEATURE_CLOSED');x.f.feature.bind();x.f.open('team/'+x.key);await x.f.feature.settled();const newer=await x.retry();assert.equal(x.posts[1].options.signal.aborted,false);x.posts[0].reject(Error('synthetic late failure'));await new Promise(resolve=>setImmediate(resolve));assert.equal(x.posts[1].options.signal.aborted,false);assert.equal((await x.state()).pending[0].publication,old.snapshot.publication);x.posts[1].resolve({seq:6});assert.equal((await newer.flight).seq,6);}finally{x.posts.forEach(p=>p.resolve({seq:1}));x.f.feature.destroy();}
+});
+
+test('retiring an old pending snapshot preserves a newer publication written concurrently',async()=>{
+  const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'synthetic',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]);let removals=0,recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],release;
+  const storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>{removals++;values.delete(k);}},driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:fn=>new Promise((resolve,reject)=>{release=()=>{try{const next=fn({files:[],recovery});recovery=next.recovery;resolve(next.value);}catch(error){reject(error);}};})},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),undefined,undefined,{storage,peopleFileStore});
+  try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const old={key,copyInstance,binding,instance:'',storageKey,value,publicationKey,text:'synthetic',attachments:[id]},next=JSON.parse(value);next.request.key='9'.repeat(16);const newer=JSON.stringify(next);const decision=f.feature.clearPeoplePending(old,{scope:'synthetic-scope',proof:{state:'locally_discarded'},current:()=>true});values.set(storageKey,newer);release();assert.equal(await decision,true);assert.equal(values.get(storageKey),newer);assert.equal(f.feature.pendingPeople().value,newer);assert.equal(f.feature.pendingPeople().publicationKey,'9'.repeat(16));assert.equal(f.feature.pendingPeople().locallyRetired,undefined);assert.equal(removals,0);assert.equal(recovery.find(row=>row.kind==='legacy-decision').snapshot.value,value);}finally{f.feature.destroy();}
+});
+
+test('explicit legacy People retirement records a durable decision without deleting its raw value',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'synthetic legacy',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const snapshot={key,copyInstance,binding,instance:'',storageKey,value,publicationKey,text:'synthetic legacy',attachments:[id]};const result=await f.feature.clearPeoplePending(snapshot,{scope:'synthetic-scope',proof:{state:'locally_discarded'},current:()=>true});assert.equal(result,true);assert.equal(values.get(storageKey),value);const saved=await peopleFileStore.listPeopleRecovery('synthetic-scope');assert.equal(saved.legacy.length,1);assert.equal(saved.legacy[0].state,'retired');assert.equal(saved.legacy[0].snapshot.value,value);assert.equal(f.feature.pendingPeople().locallyRetired,true);}finally{f.feature.destroy();}
+});
+
+test('a durably retired legacy People retry cannot be republished',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=0;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const snapshot={key,copyInstance,binding,instance:'',storageKey,value,publicationKey,text:'legacy',attachments:[id]};assert.equal(await f.feature.clearPeoplePending(snapshot,{scope:'synthetic-scope',proof:{state:'locally_discarded'},current:()=>true}),true);await assert.rejects(f.feature.retryPeople(),error=>error.code==='PEOPLE_LOCAL_RETIRED');assert.equal(posts,0);assert.equal(values.get(storageKey),value);}finally{f.feature.destroy();}
+});
+
+test('a fresh People feature restores the durable retirement of a preserved legacy retry',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),make=()=>nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore});
+ const first=make();let second;try{first.feature.tick();await first.feature.settled();first.open('team/'+key);await first.feature.settled();const snapshot={key,copyInstance,binding,instance:'',storageKey,value,publicationKey,text:'legacy',attachments:[id]};assert.equal(await first.feature.clearPeoplePending(snapshot,{scope:'synthetic-scope',proof:{state:'locally_discarded'},current:()=>true}),true);first.feature.destroy();second=make();second.feature.tick();await second.feature.settled();second.open('team/'+key);await second.feature.settled();await second.feature.refreshPeopleRecovery?.('synthetic-scope');assert.equal(second.feature.pendingPeople().locallyRetired,true);assert.equal(values.get(storageKey),value);}finally{first.feature.destroy();second?.feature.destroy();}
+});
+
+test('People file send waits for transactional publication admission before dispatch',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='e'.repeat(64),values=new Map();let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],hold=false,release,posts=0,prepared=0;
+ const storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)},driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:fn=>{const next=fn({files:rows,recovery});if(hold&&next.recovery.some(row=>row.kind==='publication'&&row.state==='pending')&&!recovery.some(row=>row.kind==='publication'&&row.state==='pending'))return new Promise(resolve=>{release=()=>{rows=next.files;recovery=next.recovery;resolve(next.value);};});rows=next.files;recovery=next.recovery;return Promise.resolve(next.value);}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:2});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'});
+ const view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},f=nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();hold=true;const flight=f.feature.sendPeople(key,'caption',[id],'',{scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:()=>{prepared++;}});await new Promise(resolve=>setImmediate(resolve));assert.equal(posts,0);assert.equal(prepared,0);assert.equal(values.size,0);assert.equal(typeof release,'function');hold=false;release();const receipt=await flight;assert.equal(receipt.seq,7);assert.equal(posts,1);assert.equal(prepared,1);assert.equal(values.size,0);assert.equal(recovery.filter(row=>row.kind==='publication'&&row.state==='pending').length,1);}finally{f.feature.destroy();}
+});
+
+test('a new People feature reloads an uncertain transactional publication without dispatch',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='e'.repeat(64),storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy slot must not be written')},removeItem(){assert.fail('legacy slot must not be removed')}};let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=0;
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:2});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'});
+ const view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts++;throw Error('synthetic offline');}return readAnswer([],0,false,view);},make=()=>nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore});
+ const first=make();let second;try{first.feature.tick();await first.feature.settled();first.open('team/'+key);await first.feature.settled();await assert.rejects(first.feature.sendPeople(key,'caption',[id],'',{scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:()=>{}}),/offline/);first.feature.destroy();second=make();second.feature.tick();await second.feature.settled();second.open('team/'+key);await second.feature.settled();await second.feature.refreshPeopleRecovery(scope);const pending=second.feature.pendingPeople();assert.ok(pending);assert.equal(pending.format,'transactional');assert.equal(pending.text,'caption');assert.deepEqual(pending.attachments,[id]);assert.equal(posts,1);}finally{first.feature.destroy();second?.feature.destroy();}
+});
+
+test('explicit transactional People retry reuses its frozen request and completes only that publication',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='e'.repeat(64),storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy deletion')}};let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=[];
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:2});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'});
+ const view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts.push(JSON.parse(opts.body));if(posts.length===1)throw Error('offline');return {seq:7};}return readAnswer([],0,false,view);},f=nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await assert.rejects(f.feature.sendPeople(key,'caption',[id],'',{scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:()=>{}}),/offline/);const pending=f.feature.pendingPeople();assert.equal(pending.format,'transactional');const receipt=await f.feature.retryPeople();assert.equal(receipt.seq,7);assert.deepEqual(posts[1],posts[0]);assert.deepEqual(await f.feature.finishPeople(receipt),{state:'completed',seq:7,filesConfirmed:true,draftCleared:true});assert.equal(recovery.find(row=>row.publication===pending.publication&&row.kind==='decision').state,'completed');assert.equal((await peopleFileStore.list(scope))[0].published,7);assert.equal(f.feature.pendingPeople(),null);assert.equal(posts.length,2);}finally{f.feature.destroy();}
+});
+
+test('a queued transactional People receipt cannot finalize after its composer flight is fenced',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='e'.repeat(64),storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy delete')}};let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],hold=false,release,current=true;
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:fn=>{const run=()=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;};return hold?new Promise((resolve,reject)=>{release=()=>{try{resolve(run());}catch(error){reject(error);}};}):Promise.resolve().then(run);}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:2});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'});
+ const view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async(path,opts)=>path==='/api/team/subscriptions'?{...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}}:opts?.method==='POST'?{seq:7}:readAnswer([],0,false,view),f=nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const receipt=await f.feature.sendPeople(key,'caption',[id],'',{scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:()=>{}});hold=true;const operation=f.feature.finishPeople(receipt,{current:()=>current}),rejected=assert.rejects(operation,/cancel/i);current=false;release();await rejected;assert.equal(recovery.find(row=>row.kind==='publication').state,'pending');assert.equal(rows[0].published,undefined);}finally{f.feature.destroy();}
+});
+
+test('explicit confirmed legacy People retry records its actual receipt without deleting legacy bytes',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=[];
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const next=fn({files:[],recovery});recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts.push(JSON.parse(opts.body));return {seq:7};}return readAnswer([],0,false,view);},f=nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const receipt=await f.feature.retryPeople();assert.equal(receipt.seq,7);assert.deepEqual(posts,[JSON.parse(value).request]);const result=await f.feature.finishPeople(receipt,{scope,current:()=>true});assert.deepEqual(result,{state:'completed',seq:7,filesConfirmed:false,draftCleared:false});assert.equal(values.get(storageKey),value);const state=await peopleFileStore.listPeopleRecovery(scope);assert.equal(state.legacy[0].state,'completed');assert.equal(state.legacy[0].seq,7);assert.equal(f.feature.pendingPeople().locallyRetired,true);assert.equal(posts.length,1);}finally{f.feature.destroy();}
+});
+
+test('transactional retirement fences an already dispatched People post without clearing newer data',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='e'.repeat(64),storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy delete')}};let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],release,snapshot,posts=0;
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),file={name:'saved.txt',type:'text/plain',size:2},token=await peopleFileStore.save(scope,id,file);await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'});
+ const view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([view],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts++;return new Promise(resolve=>{release=resolve;});}return readAnswer([],0,false,view);},f=nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore});let observed;
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const flight=f.feature.sendPeople(key,'caption',[id],'',{scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:value=>{snapshot=value;}});observed=flight.catch(error=>error);await new Promise(resolve=>setImmediate(resolve));assert.equal(posts,1);assert.equal(snapshot.format,'transactional');assert.deepEqual(f.feature.fencePeoplePending(snapshot),{state:'locally_retired',cancelled:1});const result=await f.feature.clearPeoplePending(snapshot,{scope,proof:{state:'locally_discarded'},current:()=>true});assert.equal(result.state,'retired');assert.equal(recovery.find(row=>row.kind==='decision').state,'retired');assert.equal(rows[0].file,file);release({seq:7});assert.equal((await observed).code,'PEOPLE_LOCAL_RETIRED');assert.equal(rows[0].published,undefined);}finally{if(release)release({seq:7});if(observed)await observed;f.feature.destroy();}
+});
+
+test('concurrent transactional People publications remain independently reviewable',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='e'.repeat(64),storage={persistent:true,keys:()=>[],getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy delete')}};let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:2});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'}),input={scope,peopleKey:key,head:draft.head,version:draft.version,copyInstance,binding,native:'',request:{key:'2'.repeat(16),text:'caption',anchor:0,attachments:[id]},files:[{id,fileToken:token,stageRevision:revision}]};
+ const first=await peopleFileStore.beginPeoplePublication(input),second=await peopleFileStore.beginPeoplePublication({...input,request:{...input.request,key:'4'.repeat(16)}}),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};let selected='team/'+key;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),undefined,undefined,{storage,peopleFileStore,selectedNode:()=>selected});
+ try{f.feature.tick();await f.feature.settled();f.open(selected);await f.feature.settled();await f.feature.refreshPeopleRecovery(scope);const found=f.feature.readRetainedPeoplePending({key,copyInstance,binding,owner:false});assert.equal(found.unavailable,false);assert.deepEqual(found.entries.filter(entry=>entry.format==='transactional').map(entry=>entry.publication).sort(),[first.publication,second.publication].sort());}finally{f.feature.destroy();}
+});
+
+test('People recovery keeps prior-binding transactional publications reviewable in the same copy',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),id='3'.repeat(16),revision='e'.repeat(64),storage={persistent:true,keys:()=>[],getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy delete')}};let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),publications=[];
+ for(const binding of ['old','current']){const scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,token=await peopleFileStore.save(scope,id,{name:binding+'.txt',type:'text/plain',size:2});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:binding});const result=await peopleFileStore.beginPeoplePublication({scope,peopleKey:key,head:draft.head,version:draft.version,copyInstance,binding,native:'',request:{key:(binding==='old'?'2':'4').repeat(16),text:binding,anchor:0,attachments:[id]},files:[{id,fileToken:token,stageRevision:revision}]});publications.push(result.publication);}
+ const scope=`people\0${key}\0binding:current\0copy:${copyInstance}\0`,view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:'current'}]):readAnswer([],0,false,view),undefined,undefined,{storage,peopleFileStore,selectedNode:()=> 'team/'+key});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await f.feature.refreshPeopleRecovery(scope);const result=f.feature.readRetainedPeoplePending({key,copyInstance,binding:'current',owner:false});assert.equal(result.unavailable,false);assert.deepEqual(result.entries.filter(entry=>entry.format==='transactional').map(entry=>entry.publication).sort(),publications.sort());assert.deepEqual(result.entries.filter(entry=>entry.format==='transactional').map(entry=>entry.binding).sort(),['current','old']);}finally{f.feature.destroy();}
+});
+
+test('text-only People send stays usable without replacing or deleting legacy retry storage',async()=>{
+ const view={...base,access:'write'},slot='scimux-comment-retry:s/o/c/g',legacy=JSON.stringify({text:'older synthetic',anchor:0,key:'2'.repeat(16)}),values=new Map([[slot,legacy]]),storage={persistent:true,getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};let posts=0;
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{storage,peopleFileStore:null});
+ try{f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();assert.equal((await f.feature.sendPeople('s/o/c/g','new synthetic')).seq,7);assert.equal(posts,1);assert.equal(values.get(slot),legacy);}finally{f.feature.destroy();}
+});
+
+test('text-only People retry after reload uses the same durable publication key',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy deletion')}};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=[],random=1;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},peopleFileStore=createPeopleFileStore(driver),draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'});let freezes=0;const freeze=peopleFileStore.freezePeopleDraft;peopleFileStore.freezePeopleDraft=async(...args)=>{freezes++;return freeze(...args);};const frozen=await peopleFileStore.freezePeopleDraft({scope,text:'caption',...draft}),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},api=async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts.push(JSON.parse(opts.body));if(posts.length===1)throw Error('offline');return {seq:7};}return readAnswer([],0,false,view);},make=()=>nativeViewFixture(api,undefined,n=>new Uint8Array(n).fill(random++),{storage,peopleFileStore}),admission={scope,head:frozen.head,version:frozen.version,current:()=>true,requireDurableAdmission:true};
+ const first=make();let second;try{first.feature.tick();await first.feature.settled();first.open('team/'+key);await first.feature.settled();await assert.rejects(first.feature.sendPeople(key,'caption',undefined,'',admission),/offline/);const original=recovery.find(row=>row.kind==='text-publication'),next=recovery.find(row=>row.key==='allocator').next;first.feature.destroy();second=make();second.feature.tick();await second.feature.settled();second.open('team/'+key);await second.feature.settled();const result=await second.feature.sendPeople(key,'caption',undefined,'',admission);assert.equal(result.seq,7);assert.equal(posts.length,2);assert.deepEqual(posts[1],posts[0]);assert.equal(recovery.find(row=>row.kind==='text-decision').state,'completed');assert.equal(recovery.find(row=>row.kind==='text-decision').publication,original.publication);assert.equal(recovery.find(row=>row.key==='allocator').next,next);assert.equal(freezes,1);assert.equal(result.peopleTextDecision.identity.head,frozen.head);assert.equal(result.peopleTextDecision.identity.requestKey,posts[0].key);}finally{first.feature.destroy();second?.feature.destroy();}
+});
+
+test('readonly People cannot dispatch a legacy retry even when it remains reviewable',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:'2'.repeat(16),attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=0;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const next=fn({files:[],recovery});recovery=next.recovery;return next.value;}},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'read',people_copy_instance:copyInstance},f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await assert.rejects(f.feature.retryPeople(),/unavailable/i);assert.equal(posts,0);assert.equal(values.get(storageKey),value);}finally{f.feature.destroy();}
+});
+
+test('People retry rechecks writability after asynchronous recovery loading',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:'2'.repeat(16),attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=0,hold=false,release,access='write';
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:fn=>{const run=()=>{const next=fn({files:[],recovery});recovery=next.recovery;return next.value;};return hold?new Promise((resolve,reject)=>{release=()=>{try{resolve(run());}catch(error){reject(error);}};}):Promise.resolve().then(run);}},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access,people_copy_instance:copyInstance},f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([{...view,access}],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,{...view,access});},undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();hold=true;const flight=f.feature.retryPeople(),rejected=assert.rejects(flight,/unavailable|cancel/i);await new Promise(resolve=>setImmediate(resolve));assert.equal(typeof release,'function');access='read';f.setTime(20000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.peopleContext().writable,false);hold=false;release();await rejected;assert.equal(posts,0);assert.equal(values.get(storageKey),value);}finally{if(release)release();f.feature.destroy();}
+});
+
+test('text-only People admission rechecks writability before dispatch',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy delete')}};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],hold=false,release,access='write',posts=0;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:fn=>{const run=()=>{const next=fn({files:[],recovery});recovery=next.recovery;return next.value;};return hold?new Promise((resolve,reject)=>{release=()=>{try{resolve(run());}catch(error){reject(error);}};}):Promise.resolve().then(run);}},peopleFileStore=createPeopleFileStore(driver),draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'}),view={...base,server,owner,chat,generation,access,people_copy_instance:copyInstance},f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([{...view,access}],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,{...view,access});},undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();hold=true;const flight=f.feature.sendPeople(key,'caption',undefined,'',{scope,head:draft.head,version:draft.version,current:()=>true}),rejected=assert.rejects(flight,/cancel|unavailable/i);await new Promise(resolve=>setImmediate(resolve));assert.equal(typeof release,'function');access='read';f.setTime(20000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.peopleContext().writable,false);hold=false;release();await rejected;assert.equal(posts,0);assert.equal(recovery.some(row=>row.kind==='text-publication'),false);}finally{if(release)release();f.feature.destroy();}
+});
+
+test('People file admission rechecks writability before dispatch',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='e'.repeat(64),storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy delete')}};let rows=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],hold=false,release,access='write',posts=0;
+ const driver={read:async()=>rows,readWrite:async fn=>{const next=fn(rows);rows=next.rows;return next.value;},writePeople:fn=>{const run=()=>{const next=fn({files:rows,recovery});rows=next.files;recovery=next.recovery;return next.value;};return hold?new Promise((resolve,reject)=>{release=()=>{try{resolve(run());}catch(error){reject(error);}};}):Promise.resolve().then(run);}},peopleFileStore=createPeopleFileStore(driver),token=await peopleFileStore.save(scope,id,{name:'saved.txt',type:'text/plain',size:1});await peopleFileStore.setStageRevision(scope,id,revision,token);const draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'}),view={...base,server,owner,chat,generation,access,people_copy_instance:copyInstance},f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return {...list([{...view,access}],[{id:server,delivery:'ok',people_files:'supported',people_file_binding:binding}]),people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216}};if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,{...view,access});},undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();hold=true;const flight=f.feature.sendPeople(key,'caption',[id],'',{scope,head:draft.head,version:draft.version,files:[{id,fileToken:token,stageRevision:revision}],current:()=>true,onPrepared:()=>{}}),rejected=assert.rejects(flight,/cancel|unavailable/i);await new Promise(resolve=>setImmediate(resolve));assert.equal(typeof release,'function');access='read';f.setTime(20000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.peopleContext().writable,false);hold=false;release();await rejected;assert.equal(posts,0);assert.equal(recovery.some(row=>row.kind==='publication'),false);}finally{if(release)release();f.feature.destroy();}
+});
+
+test('a legacy decision finishing after its captured lifetime cannot update the new view cache',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,values=new Map([[storageKey,value]]),storage={persistent:true,getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],release,current=true;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:fn=>{const next=fn({files:[],recovery});recovery=next.recovery;return new Promise(resolve=>{release=()=>resolve(next.value);});}},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),undefined,undefined,{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const snapshot={key,copyInstance,binding,instance:'',storageKey,value,publicationKey,text:'legacy',attachments:[id]},operation=f.feature.clearPeoplePending(snapshot,{scope:'scope',proof:{state:'locally_discarded'},current:()=>current});assert.ok(recovery.some(row=>row.kind==='legacy-decision'));current=false;release();assert.equal(await operation,false);assert.equal(f.feature.pendingPeople().locallyRetired,undefined);assert.equal(values.get(storageKey),value);}finally{f.feature.destroy();}
+});
+
+test('an uncertain in-memory text publication is isolated from a new People copy',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/');let copy='1'.repeat(32),posts=[],random=1;
+ const view=()=>({...base,server,owner,chat,generation,access:'write',people_copy_instance:copy}),f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view()],[{id:server,people_file_binding:'binding'}]);if(opts?.method==='POST'){posts.push(JSON.parse(opts.body));if(posts.length===1)throw Error('offline');return {seq:7};}return readAnswer([],0,false,view());},undefined,n=>new Uint8Array(n).fill(random++),{peopleFileStore:null});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await assert.rejects(f.feature.sendPeople(key,'old text'),/offline/);copy='2'.repeat(32);f.setTime(100000);f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();assert.equal(f.feature.pendingPeopleText(),null);assert.equal((await f.feature.sendPeople(key,'new text')).seq,7);assert.equal(posts.length,2);assert.equal(posts[1].text,'new text');assert.notEqual(posts[1].key,posts[0].key);}finally{f.feature.destroy();}
+});
+
+test('text-only People remains usable with honest feedback when transactional storage is unavailable',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`;let posts=0,feedback=[];
+ const driver=createIndexedDBPeopleDriver({open(){throw Error('synthetic denied storage');}}),peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{peopleFileStore,toast:message=>feedback.push(message)});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const result=await f.feature.sendPeople(key,'synthetic',undefined,'',{scope,head:'head',version:'version',current:()=>true});assert.equal(result.seq,7);assert.equal(posts,1);assert.ok(feedback.some(message=>/only while this page remains open/i.test(message)));}finally{f.feature.destroy();}
+});
+
+test('corrupt People recovery identity refuses text publication instead of masking the failure',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`;let posts=0,feedback=[];
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>fn({files:[],recovery:[]}).value},peopleFileStore=createPeopleFileStore(driver),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance},f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{peopleFileStore,toast:message=>feedback.push(message)});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await assert.rejects(f.feature.sendPeople(key,'synthetic',undefined,'',{scope,head:'head',version:'version',current:()=>true}),/identity is unavailable/i);assert.equal(posts,0);assert.deepEqual(feedback,[]);}finally{f.feature.destroy();}
+});
+
+test('People file publication without captured transaction admission refuses dispatch',async()=>{
+ const x=await pendingFenceFixture();try{await assert.rejects(x.f.feature.sendPeople(x.key,'synthetic',[x.id]),/recovery is unavailable/i);assert.equal(x.posts.length,0);assert.equal((await x.state()).pending.length,0);assert.equal((await x.files())[0].fileToken,x.token);}finally{x.f.feature.destroy();}
+});
+
+// Each claimed identity retains the transactional representation of the held send.
+// A fence must compare the captured tuple, not just its IDB key and request bytes.
+for (const [part, change] of [
+  ['binding', s => ({...s,binding:'other',scope:s.scope.replace('binding:binding','binding:other')})],
+  ...['server','owner','chat','generation'].map((name,index)=>[name,s=>{const parts=s.key.split('/');parts[index]=(index<2?'e'.repeat(32):'e'.repeat(16));const key=parts.join('/');return {...s,key,scope:s.scope.replace(s.key,key)};}]),
+  ['scope', s => ({...s,scope:s.scope+'other'})],
+  ['native', s => {const instance='2'.repeat(32),body=JSON.parse(s.value);body.instance=instance;return {...s,instance,value:JSON.stringify(body),scope:s.scope+'native:'+instance};}],
+  ['copy', s => {const copyInstance='2'.repeat(32),body=JSON.parse(s.value);body.copyInstance=copyInstance;return {...s,copyInstance,value:JSON.stringify(body),scope:s.scope.replace(s.copyInstance,copyInstance)};}],
+  ['publication', s => {const publication='f'.repeat(32)+':7';return {...s,publication,storageKey:'idb:'+publication};}],
+  ['head', s => ({...s,head:'f'.repeat(32)+':8'})],
+  ['version', s => ({...s,version:'f'.repeat(32)+':9'})],
+]) {
+  test(`transactional People fence leaves a changed claimed ${part} flight untouched`,async()=>{
+    const x=await pendingFenceFixture();let flight;
+    try {
+      const sent=await x.start();flight=sent.flight;const claimed=change(sent.snapshot),result=x.f.feature.fencePeoplePending(claimed),aborted=x.posts[0].options.signal.aborted;
+      const saved=await x.state(),files=await x.files();
+      assert.equal(claimed.format,'transactional');
+      assert.deepEqual({cancelled:result.cancelled,aborted,pending:saved.pending.map(row=>row.publication),token:files[0].fileToken,revision:files[0].stageRevision,published:files[0].published},
+        {cancelled:0,aborted:false,pending:[sent.snapshot.publication],token:x.token,revision:x.revision,published:undefined},`changed ${part} must preserve the captured flight and stored data`);
+      x.posts[0].resolve({seq:11});assert.equal((await flight).seq,11);
+    } finally {x.posts.forEach(post=>post.resolve({seq:11}));x.f.feature.destroy();if(flight)await flight.catch(()=>{});}
+  });
+}
+
+test('exact transactional fence cancels matching send and retry while another feature and text flight survive',async()=>{
+  const x=await pendingFenceFixture(),y=await pendingFenceFixture();let text;
+  try {
+    await y.store.savePeopleDraft({scope:'separate synthetic scope',text:'another draft'});
+    const first=await x.start(),retry=await x.retry(),other=await y.start();
+    assert.notEqual(other.snapshot.publication,first.snapshot.publication);
+    text=x.f.feature.sendPeople(x.key,'separate synthetic text');text.catch(()=>{});await x.waitPost(3);
+    const result=x.f.feature.fencePeoplePending(first.snapshot);
+    assert.equal(result.cancelled,2);assert.equal(x.posts[0].options.signal.aborted,true);assert.equal(x.posts[1].options.signal.aborted,true);
+    assert.equal(x.posts[2].options.signal,undefined);assert.equal(y.posts[0].options.signal.aborted,false);
+    await assert.rejects(first.flight,error=>error.code==='PEOPLE_LOCAL_RETIRED');await assert.rejects(retry.flight,error=>error.code==='PEOPLE_LOCAL_RETIRED');
+    assert.equal((await x.state()).pending[0].publication,first.snapshot.publication);assert.equal((await y.state()).pending[0].publication,other.snapshot.publication);
+    assert.equal((await x.files())[0].fileToken,x.token);assert.equal((await y.files())[0].fileToken,y.token);
+    x.posts[0].resolve({seq:12});x.posts[1].reject(Error('late synthetic failure'));x.posts[2].resolve({seq:13});y.posts[0].resolve({seq:14});
+    assert.equal((await text).seq,13);assert.equal((await other.flight).seq,14);
+    assert.equal((await x.files())[0].published,undefined);assert.equal((await y.files())[0].published,undefined);
+  } finally {for(const z of [x,y]){z.posts.forEach(post=>post.resolve({seq:1}));z.f.feature.destroy();}if(text)await text.catch(()=>{});}
+});
+
+test('legacy People retry fence matches the captured raw publication without requiring a format label',async()=>{
+ const x=await pendingFenceFixture(),copyInstance='1'.repeat(32),storageKey=`scimux-people-file-pending:${x.key}::binding:copy:${copyInstance}`,value=JSON.stringify({instance:'',copyInstance,request:{key:'2'.repeat(16),text:'legacy synthetic',anchor:0,attachments:[x.id]}});let flight;
+ try{x.values.set(storageKey,value);const snapshot=x.f.feature.pendingPeople();assert.equal(snapshot.format,'legacy');assert.equal(snapshot.value,value);({flight}=await x.retry());const {format,...unlabelled}=snapshot;assert.equal(format,'legacy');assert.deepEqual(x.f.feature.fencePeoplePending(unlabelled),{state:'locally_retired',cancelled:1});assert.equal(x.posts[0].options.signal.aborted,true);await assert.rejects(flight,error=>error.code==='PEOPLE_LOCAL_RETIRED');x.posts[0].resolve({seq:8});assert.equal(x.values.get(storageKey),value);assert.equal((await x.files())[0].fileToken,x.token);assert.equal((await x.files())[0].published,undefined);}finally{x.posts.forEach(post=>post.resolve({seq:1}));x.f.feature.destroy();if(flight)await flight.catch(()=>{});}
+});
+
+test('a frozen People text submission is not dispatched when durable admission becomes unavailable',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy deletion')}};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=0,unavailable=false;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{if(unavailable)throw Object.assign(Error('synthetic storage unavailable'),{code:'PEOPLE_STORAGE_UNAVAILABLE'});const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},peopleFileStore=createPeopleFileStore(driver),draft=await peopleFileStore.savePeopleDraft({scope,text:'caption'}),frozen=await peopleFileStore.freezePeopleDraft({scope,text:'caption',...draft}),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,n=>new Uint8Array(n).fill(1),{storage,peopleFileStore});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();assert.ok(recovery.some(row=>row.kind==='draft'&&row.version===frozen.version&&row.text==='caption'));assert.ok(recovery.some(row=>row.kind==='draft'&&row.version===draft.version&&row.text==='caption'));unavailable=true;let error;try{await f.feature.sendPeople(key,'caption',undefined,'',{scope,...frozen,current:()=>true,requireDurableAdmission:true});}catch(err){error=err;}assert.equal(posts,0,'unavailable durable admission must prevent dispatch');assert.match(error?.message||'',/unavailable/i);}finally{f.feature.destroy();}
+});
+
+test('unreadable durable People admission preserves the old request for explicit retry',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],files=[],unavailable=false,posts=[];
+ const driver={read:async()=>files,readWrite:async fn=>{const result=fn(files);files=result.rows;return result.value;},writePeople:async fn=>{if(unavailable)throw Object.assign(Error('storage unavailable'),{code:'PEOPLE_STORAGE_UNAVAILABLE'});const result=fn({files,recovery});files=result.files;recovery=result.recovery;return result.value;}},store=createPeopleFileStore(driver),draft=await store.savePeopleDraft({scope,text:'older request'}),frozen=await store.freezePeopleDraft({scope,text:'older request',...draft}),request={key:'4'.repeat(16),text:'older request',anchor:0},identity={scope,peopleKey:key,copyInstance,binding,native:'',...frozen,request},saved=await store.beginPeopleTextPublication(identity);await store.save(scope,'0123456789abcdef',{name:'kept.txt',type:'text/plain',size:3});const before=JSON.stringify({recovery,files}),storage={persistent:true,getItem:()=>null,setItem(){assert.fail('legacy write')},removeItem(){assert.fail('legacy deletion')}};
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts.push(JSON.parse(opts.body));return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{storage,peopleFileStore:store});
+ try{unavailable=true;f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const admission={scope,...frozen,current:()=>true,requireDurableAdmission:true};await assert.rejects(f.feature.sendPeople(key,'older request',undefined,'',admission),/unavailable/i);assert.equal(posts.length,0);assert.equal(JSON.stringify({recovery,files}),before);unavailable=false;const receipt=await f.feature.sendPeople(key,'older request',undefined,'',admission);assert.equal(receipt.seq,7);assert.deepEqual(posts,[request]);assert.equal(receipt.peopleTextDecision.identity.publication,saved.publication);assert.equal(receipt.peopleTextDecision.identity.requestKey,request.key);assert.equal(files[0].file.name,'kept.txt');}finally{f.feature.destroy();}
+});
+
+test('required People text admission rejects missing capability, scope and cancellation before dispatch',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+ for(const mode of ['no-store','no-begin','wrong-scope','cancelled','preflight']){
+  let posts=0,reads=0;const store=mode==='no-store'?null:{listPeopleRecovery:async()=>{reads++;return {textPending:[],pending:[]};},...(mode==='no-begin'?{}:{beginPeopleTextPublication:async()=>{throw Error('unexpected admission');}})};
+  const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{peopleFileStore:store});
+  try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const prior=reads,admission={scope:mode==='wrong-scope'?'wrong':scope,head:'head',version:'version',requireDurableAdmission:true,current:()=>mode!=='cancelled',preflightCurrent:()=>mode!=='preflight'};await assert.rejects(f.feature.sendPeople(key,'caption',undefined,'',admission),/unavailable|cancel/i);assert.equal(posts,0,mode);assert.equal(reads,prior,mode);}finally{f.feature.destroy();}
+ }
+});
+
+test('required owner People text admission refuses a changed native instance before POST',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0n1\0current`,view={...base,server,owner,chat,generation,access:'owner',local_node:'n1',people_copy_instance:copyInstance};let native='current',posts=0,recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],hold=false,release,entered;const ready=new Promise(resolve=>{entered=resolve;});
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const next=fn({files:[],recovery});recovery=next.recovery;return next.value;}},actual=createPeopleFileStore(driver),draft=await actual.savePeopleDraft({scope,text:'caption'}),frozen=await actual.freezePeopleDraft({scope,text:'caption',...draft}),store={...actual,listPeopleRecovery:async s=>{const state=await actual.listPeopleRecovery(s);if(hold){entered();await new Promise(resolve=>{release=resolve;});}return state;}};
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:binding}]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{peopleFileStore:store,selectedNode:()=> 'n1',selectedUID:()=>chat,localNodes:()=>[{id:'other',instance_id:'unrelated'},{id:'n1',instance_id:native}]});
+ try{f.feature.tick();await f.feature.settled();f.feature.setOwnerShare('n1',{node:'n1',uid:chat,server,generation,state:'active'});await f.feature.settled();hold=true;const flight=f.feature.sendPeople(key,'caption',undefined,'',{scope,...frozen,current:()=>true,requireDurableAdmission:true}),rejected=assert.rejects(flight,/cancel/i);await ready;native='replacement';hold=false;release();await rejected;assert.equal(posts,0);assert.ok(recovery.some(row=>row.key==='head:'+frozen.head));}finally{if(release)release();f.feature.destroy();}
+});
+
+test('People recovery rejects invalid transactional records without exposing them as pending',async()=>{
+ const scope='synthetic-scope',key=['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),copyInstance='1'.repeat(32),request={key:'2'.repeat(16),text:'caption',anchor:0,attachments:['3'.repeat(16)]},row={scope,kind:'publication',state:'pending',publication:'a'.repeat(32)+':1',peopleKey:key,copyInstance,binding:'binding',native:'',request,files:[{id:'3'.repeat(16)}]};
+ for(const invalid of [{...row,scope:'other'},{...row,files:[{id:'4'.repeat(16)}]}]){
+  const store={listPeopleRecovery:async()=>({pending:[invalid],textPending:[],legacy:[]})},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:store});try{await assert.rejects(f.feature.refreshPeopleRecovery(scope),/unavailable/i);assert.equal(f.feature.pendingPeople(),null);}finally{f.feature.destroy();}
+ }
+});
+
+test('People transactional completion validates scope and retirement without changing saved files',async()=>{
+ const key=['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),revision='a'.repeat(64),dbRows=[],driverState=[{key:'allocator',epoch:'a'.repeat(32),next:1}];let files=dbRows,recovery=driverState;
+ const driver={read:async()=>files,readWrite:async fn=>{const next=fn(files);files=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files,recovery});files=next.files;recovery=next.recovery;return next.value;}},store=createPeopleFileStore(driver),token=await store.save(scope,id,{name:'saved.txt',type:'text/plain',size:1});await store.setStageRevision(scope,id,revision,token);const draft=await store.savePeopleDraft({scope,text:'caption'}),request={key:'2'.repeat(16),text:'caption',anchor:0,attachments:[id]},created=await store.beginPeoplePublication({scope,peopleKey:key,copyInstance,binding,native:'',...draft,request,files:[{id,fileToken:token,stageRevision:revision}]}),snapshot={format:'transactional',scope,publication:created.publication,head:draft.head,version:draft.version,key,instance:'',copyInstance,binding,storageKey:'idb:'+created.publication,value:JSON.stringify({instance:'',copyInstance,request}),publicationKey:request.key,text:request.text,attachments:request.attachments},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:store});
+ try{assert.equal(await f.feature.clearPeoplePending(snapshot,{scope:'other',proof:{state:'locally_discarded'},current:()=>true}),false);assert.equal(recovery.find(row=>row.publication===created.publication).state,'pending');const result=await f.feature.clearPeoplePending(snapshot,{scope,proof:{state:'locally_discarded'},current:()=>true});assert.equal(result.state,'retired');assert.equal(recovery.find(row=>row.publication===created.publication).state,'retired');assert.equal((await store.list(scope))[0].fileToken,token);}finally{f.feature.destroy();}
+});
+
+test('People recovery refuses unavailable and unauthorized retained refresh',async()=>{
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:null});try{await assert.rejects(f.feature.refreshPeopleRecovery('scope'),/unavailable/i);await assert.rejects(f.feature.refreshRetainedPeopleRecovery(null),/unavailable/i);assert.equal(f.feature.pendingPeople(),null);assert.equal(f.feature.pendingPeopleText(),null);}finally{f.feature.destroy();}
+});
+
+test('People retained recovery requires the exact selected copy and reads its actual store',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};let selected='team/'+key,recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},store=createPeopleFileStore(driver),f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),undefined,undefined,{peopleFileStore:store,selectedNode:()=>selected});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const copy=f.feature.peopleContext();assert.equal(copy.owner,false);await f.feature.refreshRetainedPeopleRecovery(copy);selected='team/other';await assert.rejects(f.feature.refreshRetainedPeopleRecovery(copy),/unavailable/i);selected='team/'+key;await assert.rejects(f.feature.refreshRetainedPeopleRecovery({...copy,copyInstance:'2'.repeat(32)}),/unavailable/i);assert.equal(recovery.length,1);}finally{f.feature.destroy();}
+});
+
+test('owner retained People recovery validates native identity and destruction during its read',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',view={...base,server,owner,chat,generation,access:'owner',local_node:'n1',people_copy_instance:copyInstance};let native='current',recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],hold=false,release,entered;const ready=new Promise(resolve=>{entered=resolve;});
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},actual=createPeopleFileStore(driver),store={...actual,listRetainedPeopleRecovery:async input=>{const result=await actual.listRetainedPeopleRecovery(input);if(hold){entered();await new Promise(resolve=>{release=resolve;});}return result;}},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),undefined,undefined,{peopleFileStore:store,selectedNode:()=> 'n1',selectedUID:()=>chat,localNodes:()=>[{id:'other',instance_id:'unrelated'},{id:'n1',instance_id:native}]});
+ try{f.feature.tick();await f.feature.settled();f.feature.setOwnerShare('n1',{node:'n1',uid:chat,server,generation,state:'active'});await f.feature.settled();const copy=f.feature.peopleContext();assert.equal(copy.owner,true);await f.feature.refreshRetainedPeopleRecovery(copy);await assert.rejects(f.feature.refreshRetainedPeopleRecovery({...copy,copyInstance:'2'.repeat(32)}),/unavailable/i);native='';assert.equal(f.feature.pendingPeopleText(),null);await assert.rejects(f.feature.refreshRetainedPeopleRecovery(copy),/unavailable/i);native='current';hold=true;const flight=f.feature.refreshRetainedPeopleRecovery(copy);await ready;f.feature.destroy();hold=false;release();await flight;assert.equal(recovery.length,1);}finally{if(release)release();f.feature.destroy();}
+});
+
+test('People pending retirement updates only its exact durable cache entry',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),secondRequest={text:'synthetic',anchor:0,key:'9'.repeat(16),attachments:[x.id]},second=await x.store.beginPeoplePublication({scope:x.scope,peopleKey:x.key,copyInstance:'1'.repeat(32),binding:'binding',native:'',...x.draft,request:secondRequest,files:[{id:x.id,fileToken:x.token,stageRevision:x.revision}]});await x.f.feature.refreshPeopleRecovery(x.scope);assert.equal((await x.state()).pending.length,2);assert.deepEqual(await x.clear(snapshot),{state:'retired'});assert.equal(x.f.feature.pendingPeople().publication,second.publication);assert.equal((await x.state()).pending[0].publication,second.publication);assert.equal((await x.files())[0].fileToken,x.token);assert.equal(x.posts.length,1);x.posts[0].reject(Error('synthetic'));await assert.rejects(flight,/synthetic/);}finally{x.f.feature.destroy();}
+});
+
+test('retained People recovery maps an actual pending publication into review',async()=>{
+ const x=await pendingFenceFixture();let flight,f;try{const started=await x.start();flight=started.flight;const [server,owner,chat,generation]=x.key.split('/'),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:'1'.repeat(32)};f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:'binding'}]):readAnswer([],0,false,view),undefined,undefined,{peopleFileStore:x.store,selectedNode:()=> 'team/'+x.key});f.feature.tick();await f.feature.settled();f.open('team/'+x.key);await f.feature.settled();const copy=f.feature.peopleContext();await f.feature.refreshRetainedPeopleRecovery(copy);const result=f.feature.readRetainedPeoplePending(copy);assert.equal(result.entries.length,1);assert.equal(result.entries[0].publication,started.snapshot.publication);assert.equal(result.entries[0].value,started.snapshot.value);x.posts[0].reject(Error('synthetic offline'));await assert.rejects(flight,/offline/);}finally{f?.feature.destroy();x.f.feature.destroy();if(flight)await flight.catch(()=>{});}
+});
+
+test('People file admission refuses a transaction after feature destruction',async()=>{
+ const x=await pendingFenceFixture(),begin=x.store.beginPeoplePublication;let checked=false;
+ x.store.beginPeoplePublication=async input=>{x.f.feature.destroy();checked=true;assert.equal(input.current(),false);return begin(input);};
+ try{await assert.rejects(x.f.feature.sendPeople(x.key,'synthetic',[x.id],'',{scope:x.scope,head:x.draft.head,version:x.draft.version,files:[{id:x.id,fileToken:x.token,stageRevision:x.revision}],current:()=>true,onPrepared:()=>assert.fail('no admission')}),/cancelled/i);assert.equal(checked,true);assert.equal(x.posts.length,0);assert.equal((await x.state()).pending.length,0);assert.equal((await x.files())[0].fileToken,x.token);}finally{x.f.feature.destroy();}
+});
+
+test('People retry stops when another action retires its pending publication during recovery',async()=>{
+ const x=await pendingFenceFixture();let flight;try{const started=await x.start();flight=started.flight;x.posts[0].reject(Error('synthetic offline'));await assert.rejects(flight,/offline/);const read=x.store.listPeopleRecovery;let retired=false;x.store.listPeopleRecovery=async scope=>{if(!retired){retired=true;assert.deepEqual(await x.clear(started.snapshot),{state:'retired'});}return read(scope);};await assert.rejects(x.f.feature.retryPeople(),error=>error.code==='PEOPLE_LOCAL_RETIRED');assert.equal(x.posts.length,1);assert.equal((await read(x.scope)).pending.length,0);assert.equal((await x.files())[0].fileToken,x.token);}finally{x.f.feature.destroy();if(flight)await flight.catch(()=>{});}
+});
+
+test('People text admission refuses a transaction after feature destruction',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),scope=`people\0${key}\0`,view={...base,server,owner,chat,generation,access:'write'};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=0,checked=false;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},actual=createPeopleFileStore(driver),draft=await actual.savePeopleDraft({scope,text:'saved'}),frozen=await actual.freezePeopleDraft({scope,text:'saved',...draft});let f;
+ const store={...actual,beginPeopleTextPublication:async input=>{f.feature.destroy();checked=true;assert.equal(input.current(),false);return actual.beginPeopleTextPublication(input);}};
+ f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{peopleFileStore:store});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await assert.rejects(f.feature.sendPeople(key,'saved',undefined,'',{scope,...frozen,current:()=>true,requireDurableAdmission:true}),/cancelled/i);assert.equal(checked,true);assert.equal(posts,0);assert.equal(recovery.filter(row=>row.kind==='text-publication').length,0);assert.ok(recovery.some(row=>row.key==='head:'+frozen.head));}finally{f.feature.destroy();}
+});
+
+test('People pending retirement reports lost ownership after its committed store decision',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),decide=x.store.decidePeoplePublication;let current=true;x.store.decidePeoplePublication=async input=>{const result=await decide(input);current=false;return result;};assert.equal(await x.f.feature.clearPeoplePending(snapshot,{scope:x.scope,proof:{state:'locally_discarded'},current:()=>current}),false);assert.equal(x.recovery().find(row=>row.publication===snapshot.publication).state,'retired');assert.equal((await x.files())[0].fileToken,x.token);x.posts[0].reject(Error('synthetic'));await assert.rejects(flight,/synthetic/);}finally{x.f.feature.destroy();}
+});
+
+test('People completion refuses invalid receipts and unavailable transactional capability',async()=>{
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:null});try{assert.equal(await f.feature.finishPeople(null),false);assert.equal(await f.feature.finishPeople({seq:0,peoplePending:{}}),false);assert.equal(await f.feature.finishPeople({seq:1,peoplePending:{}},{current:'invalid'}),false);assert.equal(await f.feature.finishPeople({seq:1,peoplePending:{format:'transactional'}}),false);assert.equal(await f.feature.clearPeoplePending(null,{scope:'scope',proof:{state:'locally_discarded'},current:()=>true}),false);}finally{f.feature.destroy();}
+});
+
+test('People file confirmation updates only the matching durable cache entry',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start(),secondRequest={text:'synthetic',anchor:0,key:'9'.repeat(16),attachments:[x.id]},second=await x.store.beginPeoplePublication({scope:x.scope,peopleKey:x.key,copyInstance:'1'.repeat(32),binding:'binding',native:'',...x.draft,request:secondRequest,files:[{id:x.id,fileToken:x.token,stageRevision:x.revision}]});await x.f.feature.refreshPeopleRecovery(x.scope);x.posts[0].resolve({seq:7});const receipt=await flight,result=await x.f.feature.finishPeople(receipt);assert.equal(result.state,'completed');assert.equal(result.filesConfirmed,false);assert.equal(x.f.feature.pendingPeople().publication,second.publication);assert.equal((await x.state()).pending[0].publication,second.publication);assert.equal((await x.files())[0].fileToken,x.token);assert.equal(x.recovery().find(row=>row.publication===snapshot.publication).state,'completed');}finally{x.f.feature.destroy();}
+});
+
+test('People file confirmation reports lost ownership after its durable decision',async()=>{
+ const x=await pendingFenceFixture();try{const {flight,snapshot}=await x.start();x.posts[0].resolve({seq:7});const receipt=await flight,decide=x.store.decidePeoplePublication;let current=true;x.store.decidePeoplePublication=async input=>{const result=await decide(input);current=false;return result;};assert.equal(await x.f.feature.finishPeople(receipt,{current:()=>current}),false);assert.equal(x.recovery().find(row=>row.publication===snapshot.publication).state,'completed');assert.equal((await x.files())[0].published,7);}finally{x.f.feature.destroy();}
+});
+
+test('People recovery loads completed legacy decisions without changing their raw retry',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`,id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,snapshot={key,copyInstance,binding,instance:'',storageKey,value,publicationKey,text:'legacy',attachments:[id]},view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},store=createPeopleFileStore(driver);await store.recordLegacyPeopleDecision({scope,snapshot,proof:{state:'completed',seq:7,text:'legacy',stage_ids:[id]}});const storage={persistent:true,getItem:k=>k===storageKey?value:null,setItem(){assert.fail('legacy overwrite')},removeItem(){assert.fail('legacy delete')}},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view],[{id:server,people_file_binding:binding}]):readAnswer([],0,false,view),undefined,undefined,{peopleFileStore:store,storage});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await f.feature.refreshPeopleRecovery(scope);const pending=f.feature.pendingPeople();assert.equal(pending.locallyRetired,true);assert.equal(pending.decision.state,'completed');assert.equal(pending.decision.seq,7);assert.equal(storage.getItem(storageKey),value);}finally{f.feature.destroy();}
+});
+
+test('People recovery stops before updating caches when destroyed during its store read',async()=>{
+ let entered,release;const ready=new Promise(resolve=>{entered=resolve;}),store={listPeopleRecovery:async()=>{entered();await new Promise(resolve=>{release=resolve;});return {pending:[],textPending:[],legacy:[]};}},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:store});try{const pending=f.feature.refreshPeopleRecovery('scope');await ready;f.feature.destroy();release();assert.equal(await pending,undefined);assert.equal(f.feature.pendingPeople(),null);}finally{if(release)release();f.feature.destroy();}
+});
+
+test('People recovery ignores retained inventory that settles after destruction',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),scope=`people\0${key}\0copy:${copyInstance}\0`,view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};let entered,release;
+ const ready=new Promise(resolve=>{entered=resolve;}),store={listPeopleRecovery:async()=>({pending:[],textPending:[],legacy:[]}),listRetainedPeopleRecovery:async()=>{entered();await new Promise(resolve=>{release=resolve;});return [];}};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),undefined,undefined,{peopleFileStore:store});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const loading=f.feature.refreshPeopleRecovery(scope);await ready;f.feature.destroy();release();assert.equal(await loading,undefined);assert.equal(f.feature.pendingPeople(),null);}finally{if(release)release();f.feature.destroy();}
+});
+
+test('People legacy retirement reports lost ownership after recording the actual decision',async()=>{
+ const key=['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),copyInstance='1'.repeat(32),binding='binding',scope='scope',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'legacy',anchor:0,key:publicationKey,attachments:[id]}}),storageKey=`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,snapshot={format:'legacy',key,copyInstance,binding,instance:'',storageKey,value,publicationKey,text:'legacy',attachments:[id]};let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],current=true;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},actual=createPeopleFileStore(driver),store={...actual,recordLegacyPeopleDecision:async input=>{const result=await actual.recordLegacyPeopleDecision(input);current=false;return result;}},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:store});
+ try{assert.equal(await f.feature.clearPeoplePending(snapshot,{scope,proof:{state:'locally_discarded'},current:()=>current}),false);assert.equal(recovery.find(row=>row.kind==='legacy-decision').state,'retired');assert.equal(snapshot.value,value);}finally{f.feature.destroy();}
+});
+
+test('legacy People retirement rejects unavailable or nonterminal decision results',async()=>{
+ const key=['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'saved',anchor:0,key:publicationKey,attachments:[id]}}),snapshot={format:'legacy',key,copyInstance,binding,instance:'',storageKey:`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,value,publicationKey,text:'saved',attachments:[id]};
+ for(const store of [{},{recordLegacyPeopleDecision:async()=>({state:'pending'})}]){const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:store});try{assert.equal(await f.feature.clearPeoplePending(snapshot,{scope:'scope',proof:{state:'locally_discarded'},current:()=>true}),false);assert.equal(snapshot.value,value);}finally{f.feature.destroy();}}
+});
+
+test('confirmed legacy People completion records the decision without confirming files',async()=>{
+ const key=['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),copyInstance='1'.repeat(32),binding='binding',id='3'.repeat(16),publicationKey='2'.repeat(16),value=JSON.stringify({instance:'',copyInstance,request:{text:'saved',anchor:0,key:publicationKey,attachments:[id]}}),snapshot={format:'legacy',key,copyInstance,binding,instance:'',storageKey:`scimux-people-file-pending:${key}::${binding}:copy:${copyInstance}`,value,publicationKey,text:'saved',attachments:[id]};let proof;
+ const store={recordLegacyPeopleDecision:async input=>{proof=input.proof;return {state:'completed'};}},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:store});
+ try{assert.deepEqual(await f.feature.finishPeople({seq:7,peoplePending:snapshot},{scope:'scope'}),{state:'completed',seq:7,filesConfirmed:false,draftCleared:false});assert.deepEqual(proof,{state:'completed',seq:7,text:'saved',stage_ids:[id]});let checks=0;assert.equal(await f.feature.finishPeople({seq:8,peoplePending:snapshot},{scope:'scope',current:()=>++checks===1}),false);assert.equal(proof.seq,8);assert.equal(snapshot.value,value);}finally{f.feature.destroy();}
+});
+
+test('People file completion works without a previously loaded cache',async()=>{
+ const key=['a'.repeat(32),'b'.repeat(32),'c'.repeat(16),'d'.repeat(16)].join('/'),copyInstance='1'.repeat(32),binding='binding',scope='scope',id='3'.repeat(16),revision='a'.repeat(64);let files=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}];const driver={read:async()=>files,readWrite:async fn=>{const r=fn(files);files=r.rows;return r.value;},writePeople:async fn=>{const r=fn({files,recovery});files=r.files;recovery=r.recovery;return r.value;}},store=createPeopleFileStore(driver),token=await store.save(scope,id,{name:'saved.txt',type:'text/plain',size:1});await store.setStageRevision(scope,id,revision,token);const draft=await store.savePeopleDraft({scope,text:'caption'}),request={key:'2'.repeat(16),text:'caption',anchor:0,attachments:[id]},saved=await store.beginPeoplePublication({scope,peopleKey:key,copyInstance,binding,native:'',...draft,request,files:[{id,fileToken:token,stageRevision:revision}]}),pending={format:'transactional',scope,publication:saved.publication,head:draft.head,version:draft.version,key,instance:'',copyInstance,binding,storageKey:'idb:'+saved.publication,value:JSON.stringify({instance:'',copyInstance,request}),publicationKey:request.key,text:request.text,attachments:request.attachments},f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([]):readAnswer(),undefined,undefined,{peopleFileStore:store});
+ try{const result=await f.feature.finishPeople({seq:7,peoplePending:pending});assert.equal(result.state,'completed');assert.equal(recovery.find(row=>row.publication===saved.publication).state,'completed');assert.equal((await store.list(scope))[0].published,7);}finally{f.feature.destroy();}
+});
+
+test('People text retry without copy or binding keeps the original durable request',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),scope=`people\0${key}\0`,view={...base,server,owner,chat,generation,access:'write'};delete view.people_copy_instance;let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=[];
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},store=createPeopleFileStore(driver),draft=await store.savePeopleDraft({scope,text:'caption'}),frozen=await store.freezePeopleDraft({scope,text:'caption',...draft}),request={key:'2'.repeat(16),text:'caption',anchor:0},identity={scope,peopleKey:key,copyInstance:'',binding:'',native:'',...frozen,request},saved=await store.beginPeopleTextPublication(identity),f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view]);if(opts?.method==='POST'){posts.push(JSON.parse(opts.body));return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{peopleFileStore:store});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await assert.rejects(f.feature.sendPeople(key,'different',undefined,'',{scope,...frozen,current:()=>true,requireDurableAdmission:true}),/unconfirmed/i);assert.equal(posts.length,0);assert.equal(f.feature.pendingPeopleText().publication,saved.publication);const receipt=await f.feature.sendPeople(key,'caption',undefined,'',{scope,...frozen,current:()=>true,requireDurableAdmission:true});assert.equal(receipt.seq,7);assert.deepEqual(posts,[request]);assert.equal(receipt.peopleTextDecision.identity.publication,saved.publication);assert.equal(f.feature.pendingPeopleText(),null);}finally{f.feature.destroy();}
+});
+
+test('People text with an existing store remains sendable without a copy identity',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),scope=`people\0${key}\0`,view={...base,server,owner,chat,generation,access:'write'};delete view.people_copy_instance;let recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=0;
+ const driver={read:async()=>[],readWrite:async fn=>fn([]).value,writePeople:async fn=>{const result=fn({files:[],recovery});recovery=result.recovery;return result.value;}},store=createPeopleFileStore(driver),draft=await store.savePeopleDraft({scope,text:'caption'}),frozen=await store.freezePeopleDraft({scope,text:'caption',...draft}),f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view]);if(opts?.method==='POST'){posts++;return {seq:7};}return readAnswer([],0,false,view);},undefined,undefined,{peopleFileStore:store});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const context=f.feature.peopleContext();assert.equal(context.writable,true);assert.ok(!context.copyInstance);assert.ok(recovery.some(row=>row.key==='head:'+frozen.head));let error;try{await f.feature.sendPeople(key,'caption',undefined,'',{scope,...frozen,current:()=>true,requireDurableAdmission:true});}catch(err){error=err;}assert.equal(posts,1,'the existing-store text path should not depend on retained-file copy identity');assert.equal(error,undefined);}finally{f.feature.destroy();}
+});
+
+test('page-only People retry refuses different text and repeats the original request',async()=>{
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),view={...base,server,owner,chat,generation,access:'write'};const posts=[];
+ const f=nativeViewFixture(async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view]);if(opts?.method==='POST'){posts.push(JSON.parse(opts.body));if(posts.length===1)throw Error('synthetic uncertain response');return {seq:7};}return readAnswer([],0,false,view);},undefined,n=>new Uint8Array(n).fill(2),{peopleFileStore:null});
+ try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();await assert.rejects(f.feature.sendPeople(key,'first message'),/uncertain/);await assert.rejects(f.feature.sendPeople(key,'newer message'),/unconfirmed/i);assert.equal(posts.length,1);assert.equal((await f.feature.sendPeople(key,'first message')).seq,7);assert.deepEqual(posts[1],posts[0]);}finally{f.feature.destroy();}
+});
+
+test('People recovery loads text for missing and invalid copy identities and inventories valid copies',async()=>{
+ for(const copy of [undefined,7,'bad-copy','1'.repeat(32)]){
+  const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copy},scope=`people\0${key}${copy?'\0copy:'+copy:''}\0`;let inventory=0;
+  const store={listPeopleRecovery:async()=>({pending:[],textPending:[{request:{key:'2'.repeat(16),text:'saved',anchor:0}}],legacy:[]}),listRetainedPeopleRecovery:async input=>{inventory++;assert.equal(input.copyInstance,copy);return [];}};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),undefined,undefined,{peopleFileStore:store});
+  try{f.feature.tick();await f.feature.settled();f.open('team/'+key);await f.feature.settled();const result=await f.feature.refreshPeopleRecovery(scope);assert.equal(result.textPending[0].request.text,'saved');assert.equal(f.feature.pendingPeopleText().request.text,'saved');assert.equal(inventory,copy==='1'.repeat(32)?1:0);}finally{f.feature.destroy();}
+ }
+});
+
+async function durableTextRetirementGuestFixture() {
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),copyInstance='1'.repeat(32),binding='binding',scope=`people\0${key}\0binding:${binding}\0copy:${copyInstance}\0`;let files=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],random=0,serverBinding=binding;const posts=[],waiters=[];
+ const driver={read:async()=>files,readWrite:async fn=>{const next=fn(files);files=next.rows;return next.value;},writePeople:async fn=>{const next=fn({files,recovery});files=next.files;recovery=next.recovery;return next.value;}},store=createPeopleFileStore(driver),draft=await store.savePeopleDraft({scope,text:'saved'}),capture=await store.freezePeopleDraft({scope,text:'saved',...draft}),expected={peopleKey:key,copyInstance,binding,native:'',...capture,request:{text:'saved',anchor:0,key:'2'.repeat(16)}},created=await store.beginPeopleTextPublication({scope,...expected});await store.save(scope,'3'.repeat(16),{name:'kept.txt',type:'text/plain',size:1});
+ const storageValues=new Map([['synthetic-legacy','unchanged']]),storage={persistent:true,getItem:k=>storageValues.get(k)??null,setItem:(k,v)=>storageValues.set(k,v),removeItem:()=>assert.fail('legacy deletion')},view={...base,server,owner,chat,generation,access:'write',people_copy_instance:copyInstance};
+ const api=async(path,opts)=>{if(path==='/api/team/subscriptions')return list([view],[{id:server,people_file_binding:serverBinding}]);if(opts?.method==='POST'){assert.equal(path,`/api/team/subscriptions/${key}/comments`);return new Promise((resolve,reject)=>{posts.push({body:JSON.parse(opts.body),resolve,reject});for(const wake of waiters.splice(0))wake();});}assert.ok(!opts?.method||opts.method==='GET');assert.ok(path.startsWith('/api/team/subscriptions/'));return readAnswer([],0,false,view);};
+ const make=async(selectedKey=key)=>{let f;f=nativeViewFixture(api,undefined,n=>new Uint8Array(n).fill(++random),{storage,peopleFileStore:store,selectedNode:()=>f?.selected()||''});f.feature.tick();await f.feature.settled();f.open('team/'+selectedKey);await f.feature.settled();assert.equal(f.selected(),'team/'+selectedKey);assert.equal(f.feature.peopleContext()?.key,selectedKey);await f.feature.refreshPeopleRecovery(scope);return f;};
+ const waitPost=async count=>{while(posts.length<count)await new Promise(resolve=>waiters.push(resolve));};
+ return {store,scope,key,copyInstance,binding,draft,capture,expected,publication:created.publication,posts,waitPost,make,view,setBinding:value=>{serverBinding=value;},storageValues,recovery:()=>recovery,files:()=>files,admission:{scope,...capture,current:()=>true,requireDurableAdmission:true}};
+}
+
+for(const outcome of ['success','failure']) test(`guest ignores late ${outcome} from an explicitly retired text flight`,async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();let flight;
+ try{assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');flight=f.feature.sendPeople(x.key,'saved',undefined,'',x.admission);flight.catch(()=>{});await x.waitPost(1);assert.deepEqual(x.posts[0].body,x.expected.request);
+  const retired=await x.store.retirePeopleTextPublication({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true});assert.equal(retired.state,'retired');const newer=await x.store.savePeopleDraft({scope:x.scope,text:'saved',head:x.draft.head,expected:x.draft.version}),before=JSON.stringify(x.recovery()),files=JSON.stringify(x.files());
+  if(outcome==='success')x.posts[0].resolve({seq:7});else x.posts[0].reject(Error('synthetic late failure'));await assert.rejects(flight);assert.equal(JSON.stringify(x.recovery()),before);assert.equal(JSON.stringify(x.files()),files);assert.ok(x.recovery().some(row=>row.key==='head:'+newer.head&&row.version===newer.version));assert.equal(x.recovery().find(row=>row.publication===x.publication).state,'retired');assert.equal(x.posts.length,1);assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');
+ }finally{x.posts.forEach(p=>p.reject(Error('fixture cleanup')));if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+test('stale guest retry after another graph retires its exact text request refuses a fresh publication',async()=>{
+ const x=await durableTextRetirementGuestFixture(),first=await x.make(),second=await x.make();let flight,settled=false;
+ try{assert.equal(first.feature.pendingPeopleText().publication,x.publication);assert.equal(second.feature.pendingPeopleText().publication,x.publication);assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');await x.store.retirePeopleTextPublication({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true});const before=JSON.stringify(x.recovery());
+  flight=first.feature.sendPeople(x.key,'saved',undefined,'',x.admission);flight.then(()=>{settled=true;},()=>{settled=true;});for(let i=0;i<4&&!settled&&!x.posts.length;i++)await new Promise(resolve=>setImmediate(resolve));assert.equal(x.posts.length,0);assert.equal(settled,true,'retry must settle without a network request');await assert.rejects(flight,/retired|review|changed/i);assert.equal(x.posts.length,0);assert.equal(JSON.stringify(x.recovery()),before);assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');
+ }finally{x.posts.forEach(post=>post.reject(Error('fixture cleanup')));if(flight)await Promise.race([flight.catch(()=>{}),new Promise(resolve=>setImmediate(resolve))]);first.feature.destroy();second.feature.destroy();}
+});
+
+test('fresh explicit text send after retirement uses a new key and leaves the old decision',async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();let flight;
+ try{assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');await x.store.retirePeopleTextPublication({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true});const newer=await x.store.savePeopleDraft({scope:x.scope,text:'fresh message'});flight=f.feature.sendPeople(x.key,'fresh message',undefined,'',{scope:x.scope,...newer,current:()=>true,requireDurableAdmission:true});flight.catch(()=>{});await x.waitPost(1);assert.notEqual(x.posts[0].body.key,x.expected.request.key);assert.equal(x.posts[0].body.text,'fresh message');assert.equal(x.recovery().find(row=>row.publication===x.publication).state,'retired');x.posts[0].resolve({seq:8});assert.equal((await flight).seq,8);assert.equal(x.posts.length,1);
+ }finally{x.posts.forEach(p=>p.reject(Error('fixture cleanup')));if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+test('reloaded guest preserves an exact retired text decision and unrelated copy pending',async()=>{
+ const x=await durableTextRetirementGuestFixture(),old=await x.make();let fresh;
+ try{assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');const otherScope=`people\0${x.key}\0binding:other\0copy:${'5'.repeat(32)}\0`,draft=await x.store.savePeopleDraft({scope:otherScope,text:'other copy'}),other=await x.store.beginPeopleTextPublication({scope:otherScope,peopleKey:x.key,copyInstance:'5'.repeat(32),binding:'other',native:'',...draft,request:{text:'other copy',anchor:0,key:'6'.repeat(16)}});await x.store.retirePeopleTextPublication({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true});old.feature.destroy();fresh=await x.make();assert.equal(fresh.feature.pendingPeopleText(),null);assert.equal(x.recovery().find(row=>row.publication===x.publication).state,'retired');assert.equal(x.recovery().find(row=>row.publication===other.publication).state,'pending');assert.equal(x.posts.length,0);assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');
+ }finally{old.feature.destroy();fresh?.feature.destroy();}
+});
+
+test('durable text retry is explicit and uses the original immutable key exactly once',async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();let flight;
+ try{assert.equal(x.posts.length,0);assert.equal(f.feature.pendingPeopleText().publication,x.publication);await new Promise(resolve=>setImmediate(resolve));assert.equal(x.posts.length,0);flight=f.feature.sendPeople(x.key,'saved',undefined,'',x.admission);flight.catch(()=>{});await x.waitPost(1);assert.deepEqual(x.posts[0].body,x.expected.request);x.posts[0].resolve({seq:7});assert.equal((await flight).seq,7);assert.equal(x.posts.length,1);assert.equal(x.recovery().find(row=>row.publication===x.publication).state,'completed');assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');
+ }finally{x.posts.forEach(p=>p.reject(Error('fixture cleanup')));if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+for(const first of ['complete','retire']) test(`guest text ${first} first fences the competing terminal outcome`,async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();let flight;
+ try{assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');flight=f.feature.sendPeople(x.key,'saved',undefined,'',x.admission);flight.catch(()=>{});await x.waitPost(1);const args={scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true};
+  if(first==='complete'){x.posts[0].resolve({seq:7});assert.equal((await flight).seq,7);const decision=await x.store.retirePeopleTextPublication(args);assert.equal(decision.state,'completed');assert.equal(decision.seq,7);}else{assert.equal((await x.store.retirePeopleTextPublication(args)).state,'retired');const before=JSON.stringify(x.recovery());x.posts[0].resolve({seq:7});await assert.rejects(flight);assert.equal(JSON.stringify(x.recovery()),before);}
+  assert.equal(x.posts.length,1);assert.equal(x.recovery().filter(row=>row.publication===x.publication&&row.kind==='text-decision').length,1);assert.equal(x.files()[0].file.name,'kept.txt');
+ }finally{x.posts.forEach(p=>p.reject(Error('fixture cleanup')));if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+for(const outcome of ['success','failure']) test(`late ${outcome} for retired text leaves a newer publication and another generation intact`,async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();let flight;
+ try{assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');flight=f.feature.sendPeople(x.key,'saved',undefined,'',x.admission);flight.catch(()=>{});await x.waitPost(1);await x.store.retirePeopleTextPublication({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true});
+  const newerDraft=await x.store.savePeopleDraft({scope:x.scope,text:'saved',head:x.draft.head,expected:x.draft.version}),newer=await x.store.beginPeopleTextPublication({scope:x.scope,peopleKey:x.key,copyInstance:x.copyInstance,binding:x.binding,native:'',...newerDraft,request:{text:'saved',anchor:0,key:'7'.repeat(16)}}),parts=x.key.split('/');parts[3]='e'.repeat(16);const otherKey=parts.join('/'),otherScope=`people\0${otherKey}\0binding:${x.binding}\0copy:${x.copyInstance}\0`,otherDraft=await x.store.savePeopleDraft({scope:otherScope,text:'other generation'}),other=await x.store.beginPeopleTextPublication({scope:otherScope,peopleKey:otherKey,copyInstance:x.copyInstance,binding:x.binding,native:'',...otherDraft,request:{text:'other generation',anchor:0,key:'8'.repeat(16)}}),before=JSON.stringify(x.recovery());
+  if(outcome==='success')x.posts[0].resolve({seq:7});else x.posts[0].reject(Error('synthetic late error'));await assert.rejects(flight);assert.equal(JSON.stringify(x.recovery()),before);assert.equal(x.recovery().find(row=>row.publication===newer.publication).state,'pending');assert.equal(x.recovery().find(row=>row.publication===other.publication).state,'pending');assert.equal(x.posts.length,1);assert.equal(x.files()[0].file.name,'kept.txt');
+ }finally{x.posts.forEach(p=>p.reject(Error('fixture cleanup')));if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+for(const reason of ['destroy','current-loss']) test(`guest queued text retirement preserves all pending rows after ${reason}`,async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();try{assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');const original=x.store.retirePeopleTextPublication;let release,entered,current=true;const ready=new Promise(resolve=>{entered=resolve;});const queued=(async()=>{entered();await new Promise(resolve=>{release=resolve;});return original({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>current});})();await ready;const before=JSON.stringify(x.recovery());if(reason==='destroy')f.feature.destroy();current=false;release();await assert.rejects(queued,/cancel|closed|current/i);assert.equal(JSON.stringify(x.recovery()),before);assert.equal(x.posts.length,0);}finally{f.feature.destroy();}
+});
+
+for(const changed of ['binding','copy','server','owner','chat','generation']) test(`guest does not expose old pending text after ${changed} changes`,async()=>{
+ const x=await durableTextRetirementGuestFixture(),first=await x.make();let next;
+ try{assert.equal(first.feature.pendingPeopleText().publication,x.publication);first.feature.destroy();if(changed==='binding')x.setBinding('replacement');else if(changed==='copy')x.view.people_copy_instance='5'.repeat(32);else x.view[changed]='f'.repeat(changed==='server'||changed==='owner'?32:16);
+  const selected=[x.view.server,x.view.owner,x.view.chat,x.view.generation].join('/');next=await x.make(selected);assert.equal(next.selected(),'team/'+selected);assert.equal(next.feature.peopleContext()?.key,selected);assert.equal(next.feature.pendingPeopleText(),null);assert.equal(x.recovery().find(row=>row.publication===x.publication).state,'pending');assert.equal(x.posts.length,0);assert.equal(x.files()[0].file.name,'kept.txt');
+ }finally{first.feature.destroy();next?.feature.destroy();}
+});
+
+test('committed old text decision survives navigation without mutating replacement view',async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();try{assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');const newer=await x.store.savePeopleDraft({scope:x.scope,text:'new view text',head:x.draft.head,expected:x.draft.version}),result=await x.store.retirePeopleTextPublication({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true});assert.equal(result.state,'retired');const before=JSON.stringify(x.recovery());f.navigate('local');assert.equal(f.selected(),'local');await new Promise(resolve=>setImmediate(resolve));assert.equal(JSON.stringify(x.recovery()),before);assert.ok(x.recovery().some(row=>row.key==='head:'+newer.head&&row.version===newer.version));assert.equal(x.recovery().find(row=>row.publication===x.publication).state,'retired');assert.equal(x.posts.length,0);assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');}finally{f.feature.destroy();}
+});
+
+test('explicit local text retirement records only the reviewed guest identity without requests',async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();try{assert.equal(f.feature.pendingPeopleText().publication,x.publication);assert.equal(typeof x.store.retirePeopleTextPublication,'function','future text retirement API is not implemented');const before=x.recovery().map(row=>structuredClone(row)),files=JSON.stringify(x.files()),result=await x.store.retirePeopleTextPublication({scope:x.scope,publication:x.publication,expected:x.expected,current:()=>true});assert.equal(result.state,'retired');const decision=x.recovery().find(row=>row.publication===x.publication);assert.equal(decision.kind,'text-decision');assert.equal(decision.state,'retired');assert.deepEqual(decision.request,x.expected.request);assert.deepEqual(x.recovery().filter(row=>row!==decision),before.filter(row=>row.publication!==x.publication));assert.equal(JSON.stringify(x.files()),files);assert.equal(x.posts.length,0);assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');}finally{f.feature.destroy();}
+});
+
+async function retainedTextGuestAdapterFixture({mode='received',oldBinding=false,copyInstance='1'.repeat(32),ownerNative='2'.repeat(32)}={}) {
+ const server='a'.repeat(32),owner='b'.repeat(32),chat='c'.repeat(16),generation='d'.repeat(16),key=[server,owner,chat,generation].join('/'),isOwner=mode==='owner-ended',native=isOwner?ownerNative:'',binding='current',savedBinding=oldBinding?'old':binding,scope=`people\0${key}\0binding:${savedBinding}${copyInstance?'\0copy:'+copyInstance:''}\0${isOwner?'n1\0'+native:''}`;let selected=isOwner?'n1':'',instance=native,view={...base,server,owner,chat,generation,access:isOwner?'owner':mode==='readonly'?'read':'write',state:mode.includes('ended')?'ended':'live',...(isOwner?{local_node:'n1'}:{}),people_copy_instance:copyInstance},currentBinding=binding,featureOff=false,files=[],recovery=[{key:'allocator',epoch:'a'.repeat(32),next:1}],posts=[],requests=0,writeCount=0,gate=null;
+ const writePeople=async fn=>{writeCount++;const next=fn({files,recovery});files=next.files;recovery=next.recovery;return next.value;},driver={read:async()=>files,readWrite:async fn=>{const next=fn(files);files=next.rows;return next.value;},writePeople},actual=createPeopleFileStore(driver),draft=await actual.savePeopleDraft({scope,text:'saved'}),capture=await actual.freezePeopleDraft({scope,text:'saved',...draft}),request={key:'3'.repeat(16),text:'saved',anchor:0},admitted=await actual.beginPeopleTextPublication({scope,peopleKey:key,copyInstance,binding:savedBinding,native,...capture,request}),row=structuredClone(recovery.find(item=>item.publication===admitted.publication));await actual.save(scope,'4'.repeat(16),{name:'kept.txt',type:'text/plain',size:1});
+ const store={...actual,async listRetainedPeopleRecovery(input){const result=await actual.listRetainedPeopleRecovery(input);if(gate?.point==='discovery'&&input.kind==='text-publication'){gate.entered();await gate.wait;}return result;},async retirePeopleTextPublication(input){if(gate?.point==='before'){gate.entered();await gate.wait;}const result=await actual.retirePeopleTextPublication(input);if(gate?.point==='after'){gate.entered();await gate.wait;}return result;}},values=new Map([['synthetic-legacy','unchanged']]),storage={persistent:true,keys:()=>[...values.keys()],getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:()=>assert.fail('legacy deletion')};
+ const api=async(path,opts)=>{requests++;if(path==='/api/team/subscriptions'){if(featureOff)throw Object.assign(Error('synthetic off'),{status:404});return list([view],[{id:server,people_file_binding:currentBinding}]);}if(opts?.method&&opts.method!=='GET'){posts.push({path,method:opts.method});throw Error('unexpected publication or control');}return readAnswer([],0,false,view);};
+ const selectedNode=()=>selected,localNodes=()=>[{id:'n1',instance_id:instance,ended_at:''}];
+ const make=async()=>{const graph=nativeViewFixture(api,undefined,undefined,{storage,peopleFileStore:store,selectedNode,selectedUID:()=>chat,localNodes,panel:{select:id=>{selected=id;}}});graph.feature.tick();await graph.feature.settled();if(!isOwner){graph.open('team/'+key);await graph.feature.settled();}return graph;};const f=await make();
+ const hold=point=>{let release,entered;const wait=new Promise(resolve=>{release=resolve;}),ready=new Promise(resolve=>{entered=resolve;});gate={point,wait,entered};return {ready,release};};
+ return {f,make,actual,store,row,draft,capture,scope,key,copyInstance,native,posts,values,selectedNode,localNodes,recovery:()=>recovery,files:()=>files,requests:()=>requests,writes:()=>writeCount,context:()=>isOwner?f.feature.localReviewContexts()[0]:f.feature.peopleContext(),setSelected:value=>{selected=value;},setNative:value=>{instance=value;},setView:value=>{view={...view,...value};},setBinding:value=>{currentBinding=value;},setOff:value=>{featureOff=value;},hold};
+}
+
+for(const mode of ['received','readonly','received-ended','owner-ended']) for(const oldBinding of [false,true]) test(`guest discovers and retires ${oldBinding?'prior':'current'} binding text in ${mode}`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode,oldBinding}),{f}=x;try{const copy=x.context(),before=JSON.stringify(x.recovery()),files=JSON.stringify(x.files());assert.ok(copy);if(mode==='owner-ended'){assert.equal(f.feature.peopleContext(),null);assert.equal(copy.binding,'current');assert.equal(x.row.binding,oldBinding?'old':'current');}
+  assert.equal(typeof f.feature.readRetainedPeopleTextPending,'function','future retained text guest API is not implemented');assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');await f.feature.refreshRetainedPeopleRecovery(copy);const result=f.feature.readRetainedPeopleTextPending(copy);assert.equal(result.unavailable,false);assert.ok(result.entries.some(row=>row.publication===x.row.publication&&row.binding===x.row.binding));assert.equal(JSON.stringify(x.recovery()),before);const reviewed=result.entries.find(row=>row.publication===x.row.publication),original=structuredClone(reviewed);reviewed.request.text='caller mutation';reviewed.request.key='f'.repeat(16);reviewed.binding='changed';assert.equal(x.recovery().find(row=>row.publication===x.row.publication).request.text,'saved');const reread=f.feature.readRetainedPeopleTextPending(copy),again=reread.entries.find(row=>row.publication===x.row.publication);assert.deepEqual(again,original);
+  const retired=await f.feature.retirePeopleText(x.row,{current:()=>true});assert.equal(retired.state,'retired');assert.equal(x.recovery().find(row=>row.publication===x.row.publication).state,'retired');assert.equal(JSON.stringify(x.files()),files);assert.equal(x.values.get('synthetic-legacy'),'unchanged');assert.deepEqual(x.posts,[]);
+ }finally{f.feature.destroy();}
+});
+
+for(const change of ['server','owner','chat','generation','copy','native','missing-copy','caller-false','destroy','navigation']) test(`guest text retirement refuses ${change} before mutating the store`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{const copy=x.context();assert.ok(copy);assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const row=structuredClone(x.row);if(['server','owner','chat','generation'].includes(change)){const parts=row.peopleKey.split('/'),index=['server','owner','chat','generation'].indexOf(change);parts[index]='f'.repeat(parts[index].length);row.peopleKey=parts.join('/');}if(change==='copy')row.copyInstance='f'.repeat(32);if(change==='missing-copy')row.copyInstance='';if(change==='native')x.setNative('9'.repeat(32));if(change==='destroy')f.feature.destroy();if(change==='navigation')x.setSelected('other');const before=JSON.stringify(x.recovery()),writes=x.writes();
+  await assert.rejects(()=>f.feature.retirePeopleText(row,{current:()=>change!=='caller-false'}),/identity|current|cancel|closed|unavailable|review/i);assert.equal(JSON.stringify(x.recovery()),before);assert.equal(x.writes(),writes);assert.deepEqual(x.posts,[]);assert.equal(x.values.get('synthetic-legacy'),'unchanged');
+ }finally{f.feature.destroy();}
+});
+
+for(const change of ['server','owner','chat','generation','copy','binding','native','navigation','destroy','caller-false','rebind']) test(`guest queued text retirement cancels on ${change}`,{timeout:5000},async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;let release;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const gate=x.hold('before');release=gate.release;let current=true;const before=JSON.stringify(x.recovery()),flight=f.feature.retirePeopleText(x.row,{current:()=>current});flight.catch(()=>{});await gate.ready;
+  if(['server','owner','chat','generation','copy','binding'].includes(change)){if(change==='copy')x.setView({people_copy_instance:'9'.repeat(32)});else if(change==='binding')x.setBinding('replacement');else x.setView({[change]:'f'.repeat(change==='server'||change==='owner'?32:16)});f.setTime(20000);f.feature.tick();await f.feature.settled();}if(change==='native')x.setNative('9'.repeat(32));if(change==='navigation')x.setSelected('other');if(change==='destroy')f.feature.destroy();if(change==='caller-false')current=false;if(change==='rebind'){f.feature.destroy();f.feature.bind();}release();await assert.rejects(flight,/identity|current|cancel|closed|unavailable|review/i);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);
+ }finally{if(release)release();f.feature.destroy();}
+});
+
+for(const outcome of ['retired','completed']) test(`guest text retirement repeats exact ${outcome} outcome without extra mutation`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');if(outcome==='completed')await x.actual.finishPeopleTextPublication({scope:x.scope,publication:x.row.publication,expected:x.row,seq:7});const first=await f.feature.retirePeopleText(x.row,{current:()=>true}),before=JSON.stringify(x.recovery());assert.equal(first.state,outcome);if(outcome==='completed')assert.equal(first.seq,7);assert.deepEqual(await f.feature.retirePeopleText(x.row,{current:()=>true}),first);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);}finally{f.feature.destroy();}
+});
+
+for(const change of ['navigation','server','owner','chat','generation','copy','binding','native','destroy','rebind','caller-false']) test(`guest keeps committed text decision and protects ${change} after await`,{timeout:5000},async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;let release;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const gate=x.hold('after');release=gate.release;let current=true;const flight=f.feature.retirePeopleText(x.row,{current:()=>current});flight.catch(()=>{});await gate.ready;assert.equal(x.recovery().find(row=>row.publication===x.row.publication).state,'retired');const before=JSON.stringify(x.recovery());
+  if(change==='navigation')x.setSelected('other');if(['server','owner','chat','generation','copy','binding'].includes(change)){if(change==='copy')x.setView({people_copy_instance:'9'.repeat(32)});else if(change==='binding')x.setBinding('replacement');else x.setView({[change]:'f'.repeat(change==='server'||change==='owner'?32:16)});f.setTime(20000);f.feature.tick();await f.feature.settled();}if(change==='native')x.setNative('9'.repeat(32));if(change==='destroy')f.feature.destroy();if(change==='rebind'){f.feature.destroy();f.feature.bind();}if(change==='caller-false')current=false;const newView=f.feature.pendingPeopleText();release();assert.deepEqual(await flight,{state:'retired'});assert.deepEqual(f.feature.pendingPeopleText(),newView);assert.equal(JSON.stringify(x.recovery()),before);assert.equal(x.recovery().find(row=>row.publication===x.row.publication).state,'retired');assert.deepEqual(x.posts,[]);assert.equal(x.values.get('synthetic-legacy'),'unchanged');
+ }finally{if(release)release();f.feature.destroy();}
+});
+
+test('two guest graphs share an exact durable text retirement without implicit retry',async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'received'}),first=x.f,second=await x.make();try{assert.equal(typeof first.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const result=await second.feature.retirePeopleText(x.row,{current:()=>true});assert.equal(result.state,'retired');const before=JSON.stringify(x.recovery());await assert.rejects(first.feature.sendPeople(x.key,'saved',undefined,'',{scope:x.scope,...x.capture,current:()=>true,requireDurableAdmission:true}),/retired|review|changed|identity/i);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);assert.equal(x.files()[0].file.name,'kept.txt');
+ }finally{first.feature.destroy();second.feature.destroy();}
+});
+
+for(const change of ['server','owner','chat','generation','copy','native','navigation','destroy']) test(`retained text guest reader refuses ${change} context`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.readRetainedPeopleTextPending,'function','future retained text guest API is not implemented');const copy={...x.context()};await f.feature.refreshRetainedPeopleRecovery(copy);if(['server','owner','chat','generation'].includes(change)){const parts=copy.key.split('/'),index=['server','owner','chat','generation'].indexOf(change);parts[index]='f'.repeat(parts[index].length);copy.key=parts.join('/');}if(change==='copy')copy.copyInstance='9'.repeat(32);if(change==='native')x.setNative('9'.repeat(32));if(change==='navigation')x.setSelected('other');if(change==='destroy')f.feature.destroy();const result=f.feature.readRetainedPeopleTextPending(copy);assert.deepEqual(result.entries,[]);if(change!=='native')assert.equal(result.unavailable,true);assert.equal(x.recovery().find(row=>row.publication===x.row.publication).state,'pending');assert.deepEqual(x.posts,[]);
+ }finally{f.feature.destroy();}
+});
+
+for(const outcome of ['success','failure']) for(const edit of ['same','different']) test(`guest adapter retirement fences late ${outcome} and preserves ${edit} newer text`,{timeout:5000},async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();let flight;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const snapshot=structuredClone(x.recovery().find(row=>row.publication===x.publication));flight=f.feature.sendPeople(x.key,'saved',undefined,'',x.admission);flight.catch(()=>{});await x.waitPost(1);assert.deepEqual(x.posts[0].body,x.expected.request);assert.equal((await f.feature.retirePeopleText(snapshot,{current:()=>true})).state,'retired');
+  const newerText=edit==='same'?'saved':'different',newer=await x.store.savePeopleDraft({scope:x.scope,text:newerText,head:x.draft.head,expected:x.draft.version}),saved=await x.store.beginPeopleTextPublication({scope:x.scope,peopleKey:x.key,copyInstance:x.copyInstance,binding:x.binding,native:'',...newer,request:{key:'7'.repeat(16),text:newerText,anchor:0}}),otherScope=`people\0other\0`,otherDraft=await x.store.savePeopleDraft({scope:otherScope,text:'other'}),other=await x.store.beginPeopleTextPublication({scope:otherScope,peopleKey:x.key,copyInstance:'5'.repeat(32),binding:'other',native:'',...otherDraft,request:{key:'8'.repeat(16),text:'other',anchor:0}}),before=JSON.stringify(x.recovery());
+  if(outcome==='success')x.posts[0].resolve({seq:7});else x.posts[0].reject(Error('synthetic late'));await assert.rejects(flight);assert.equal(JSON.stringify(x.recovery()),before);assert.equal(x.recovery().find(row=>row.publication===saved.publication).state,'pending');assert.equal(x.recovery().find(row=>row.publication===other.publication).state,'pending');assert.equal(x.posts.length,1);assert.equal(x.files()[0].file.name,'kept.txt');assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');
+ }finally{x.posts.forEach(p=>p.reject(Error('fixture cleanup')));if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+for(const order of ['completion-first','retirement-first']) test(`guest adapter ${order} reports only the actual text terminal outcome`,{timeout:5000},async()=>{
+ const x=await durableTextRetirementGuestFixture(),f=await x.make();let flight;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const snapshot=structuredClone(x.recovery().find(row=>row.publication===x.publication));flight=f.feature.sendPeople(x.key,'saved',undefined,'',x.admission);flight.catch(()=>{});await x.waitPost(1);
+  if(order==='completion-first'){x.posts[0].resolve({seq:7});assert.equal((await flight).seq,7);const result=await f.feature.retirePeopleText(snapshot,{current:()=>true});assert.equal(result.state,'completed');assert.equal(result.seq,7);}else{assert.equal((await f.feature.retirePeopleText(snapshot,{current:()=>true})).state,'retired');const before=JSON.stringify(x.recovery());x.posts[0].resolve({seq:7});await assert.rejects(flight);assert.equal(JSON.stringify(x.recovery()),before);}
+  assert.equal(x.recovery().filter(row=>row.kind==='text-decision'&&row.publication===x.publication).length,1);assert.equal(x.posts.length,1);assert.equal(x.storageValues.get('synthetic-legacy'),'unchanged');
+ }finally{x.posts.forEach(p=>p.reject(Error('fixture cleanup')));if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+for(const field of ['scope','publication','binding','head','version','request.key','request.text','request.anchor']) test(`guest text retirement rejects changed reviewed ${field}`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const row=structuredClone(x.row),target=field.startsWith('request.')?row.request:row,key=field.startsWith('request.')?field.slice(8):field;target[key]=key==='anchor'?1:'changed';const before=JSON.stringify(x.recovery());await assert.rejects(()=>f.feature.retirePeopleText(row,{current:()=>true}),/identity|current|cancel|closed|unavailable|review|conflict/i);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);
+ }finally{f.feature.destroy();}
+});
+
+for(const value of [undefined,null,false,1]) test(`guest text retirement requires a current callback ${String(value)}`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'received'}),f=x.f;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const before=JSON.stringify(x.recovery()),writes=x.writes();await assert.rejects(()=>f.feature.retirePeopleText(x.row,{current:value}),/identity|current|cancel|closed|unavailable|review/i);assert.equal(x.writes(),writes);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);}finally{f.feature.destroy();}
+});
+
+for(const change of ['server','generation','copy','binding','native','navigation','destroy']) test(`guest discards stale retained text discovery after ${change}`,{timeout:5000},async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;let release;try{assert.equal(typeof f.feature.readRetainedPeopleTextPending,'function','future retained text guest API is not implemented');const original=x.context(),gate=x.hold('discovery');release=gate.release;const flight=f.feature.refreshRetainedPeopleRecovery(original);flight.catch(()=>{});await gate.ready;
+  if(change==='navigation')x.setSelected('other');else if(change==='destroy')f.feature.destroy();else if(change==='native')x.setNative('9'.repeat(32));else {if(change==='copy')x.setView({people_copy_instance:'9'.repeat(32)});else if(change==='binding')x.setBinding('replacement');else x.setView({[change]:'f'.repeat(change==='server'?32:16)});f.setTime(20000);f.feature.tick();await f.feature.settled();}release();await flight.catch(()=>{});const after=f.feature.readRetainedPeopleTextPending(original);assert.deepEqual(after.entries,[]);assert.equal(x.recovery().find(row=>row.publication===x.row.publication).state,'pending');assert.deepEqual(x.posts,[]);
+ }finally{if(release)release();f.feature.destroy();}
+});
+
+for(const snapshot of [null,undefined,{},'',42,[]]) test(`guest text retirement rejects invalid snapshot ${String(snapshot)}`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const before=JSON.stringify(x.recovery()),writes=x.writes();await assert.rejects(()=>f.feature.retirePeopleText(snapshot,{current:()=>true}),/identity|unavailable|invalid|review/i);assert.equal(x.writes(),writes);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);}finally{f.feature.destroy();}
+});
+
+for(const [name,options] of [['missing',undefined],['null',null],['wrong type',42],['empty',{}],['null current',{current:null}],['wrong current',{current:'yes'}]]) test(`guest text retirement rejects ${name} options`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');const before=JSON.stringify(x.recovery()),writes=x.writes();await assert.rejects(()=>f.feature.retirePeopleText(x.row,options),/identity|current|unavailable|invalid|review/i);assert.equal(x.writes(),writes);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);}finally{f.feature.destroy();}
+});
+
+test('guest text retirement rejects unavailable Store capability before admission',async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');delete x.store.retirePeopleTextPublication;const before=JSON.stringify(x.recovery()),writes=x.writes();await assert.rejects(()=>f.feature.retirePeopleText(x.row,{current:()=>true}),/unavailable|recovery/i);assert.equal(x.writes(),writes);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);}finally{f.feature.destroy();}
+});
+
+for(const variant of ['null','undefined','empty','wrong-owner-type','other-owner','binding','key','other-key','empty-copy-instance','copy','copy-type']) test(`retained text guest reader rejects invalid ${variant} copy`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.readRetainedPeopleTextPending,'function','future retained text guest API is not implemented');const good=x.context();await f.feature.refreshRetainedPeopleRecovery(good);let bad={...good};if(variant==='null')bad=null;else if(variant==='undefined')bad=undefined;else if(variant==='empty')bad={};else if(variant==='wrong-owner-type')bad.owner='yes';else if(variant==='other-owner')bad.owner=false;else if(variant==='binding')bad.binding='replacement';else if(variant==='key')bad.key='invalid';else if(variant==='other-key')bad.key='f'.repeat(32)+'/'+good.key.split('/').slice(1).join('/');else if(variant==='empty-copy-instance')bad.copyInstance='';else if(variant==='copy')bad.copyInstance='9'.repeat(32);else bad.copyInstance=42;const before=JSON.stringify(x.recovery()),writes=x.writes();assert.deepEqual(f.feature.readRetainedPeopleTextPending(bad),{entries:[],unavailable:true});assert.equal(x.writes(),writes);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);}finally{f.feature.destroy();}
+});
+
+for(const state of ['destroyed']) test(`disabled guest ${state} rejects text retirement and unavailable retained read`,async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');assert.equal(typeof f.feature.readRetainedPeopleTextPending,'function','future retained text guest API is not implemented');const copy=x.context();if(state==='off'){x.setOff(true);f.setTime(20000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.tabHTML(false),'');}else f.feature.destroy();const before=JSON.stringify(x.recovery()),writes=x.writes();await assert.rejects(()=>f.feature.retirePeopleText(x.row,{current:()=>true}),/closed|unavailable|cancel|off|identity/i);assert.deepEqual(f.feature.readRetainedPeopleTextPending(copy),{entries:[],unavailable:true});assert.equal(x.writes(),writes);assert.equal(JSON.stringify(x.recovery()),before);assert.deepEqual(x.posts,[]);}finally{f.feature.destroy();}
+});
+
+test('offline known owner copy permits local retained text discovery and retirement',async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true}),f=x.f;try{const copy=x.context(),before=structuredClone(x.recovery()),files=JSON.stringify(x.files()),legacy=x.values.get('synthetic-legacy');assert.equal(f.feature.peopleContext(),null);assert.equal(copy.copyInstance,x.copyInstance);assert.equal(x.row.native,x.native);x.setOff(true);f.setTime(20000);f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.tabHTML(false),'');assert.deepEqual(x.posts,[]);const requests=x.requests();
+  assert.equal(typeof f.feature.readRetainedPeopleTextPending,'function','future retained text guest API is not implemented');assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');await f.feature.refreshRetainedPeopleRecovery(copy);const result=f.feature.readRetainedPeopleTextPending(copy);assert.equal(result.unavailable,false);assert.deepEqual(result.entries.find(row=>row.publication===x.row.publication),x.row);assert.equal((await f.feature.retirePeopleText(x.row,{current:()=>true})).state,'retired');const decision=x.recovery().find(row=>row.publication===x.row.publication);assert.deepEqual(decision,{...x.row,key:'text-decision:'+x.row.publication,kind:'text-decision',state:'retired'});assert.deepEqual(x.recovery().filter(row=>row!==decision),before.filter(row=>row.publication!==x.row.publication));assert.equal(JSON.stringify(x.files()),files);assert.equal(x.values.get('synthetic-legacy'),legacy);assert.equal(x.requests(),requests);assert.deepEqual(x.posts,[]);
+ }finally{f.feature.destroy();}
+});
+
+test('ended live owner can review and retire prior-binding text with an empty copy instance',async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true,copyInstance:''}),f=x.f;try{const copy=x.context(),before=structuredClone(x.recovery()),files=JSON.stringify(x.files()),legacy=x.values.get('synthetic-legacy'),requests=x.requests();assert.equal(f.feature.peopleContext(),null);assert.equal(copy.copyInstance,'');assert.equal(copy.binding,'current');assert.equal(x.row.copyInstance,'');assert.equal(x.row.binding,'old');assert.equal(x.row.native,x.native);assert.equal(f.feature.pendingPeopleText(),null);
+  assert.equal(typeof f.feature.readRetainedPeopleTextPending,'function','future retained text guest API is not implemented');assert.equal(typeof f.feature.retirePeopleText,'function','future text retirement guest API is not implemented');await f.feature.refreshRetainedPeopleRecovery(copy);const result=f.feature.readRetainedPeopleTextPending(copy);assert.equal(result.unavailable,false);assert.deepEqual(result.entries.find(row=>row.publication===x.row.publication),x.row);assert.equal(f.feature.readRetainedPeoplePending(copy).unavailable,true);assert.equal((await f.feature.retirePeopleText(x.row,{current:()=>true})).state,'retired');const decision=x.recovery().find(row=>row.publication===x.row.publication);assert.deepEqual(decision,{...x.row,key:'text-decision:'+x.row.publication,kind:'text-decision',state:'retired'});assert.deepEqual(x.recovery().filter(row=>row!==decision),before.filter(row=>row.publication!==x.row.publication));assert.equal(f.feature.pendingPeopleText(),null);assert.equal(JSON.stringify(x.files()),files);assert.equal(x.values.get('synthetic-legacy'),legacy);assert.equal(x.requests(),requests);assert.deepEqual(x.posts,[]);
+ }finally{f.feature.destroy();}
+});
+
+async function textRetirementCacheFixture() {
+ const x=await durableTextRetirementGuestFixture(),f=await x.make(),otherScope=`people\0${x.key}\0binding:old\0copy:${x.copyInstance}\0`,otherDraft=await x.store.savePeopleDraft({scope:otherScope,text:'prior binding'}),other=await x.store.beginPeopleTextPublication({scope:otherScope,peopleKey:x.key,copyInstance:x.copyInstance,binding:'old',native:'',...otherDraft,request:{key:'9'.repeat(16),text:'prior binding',anchor:0}}),copy=f.feature.peopleContext();assert.equal(f.selected(),'team/'+x.key);assert.equal(copy.key,x.key);await f.feature.refreshPeopleRecovery(x.scope);await f.feature.refreshRetainedPeopleRecovery(copy);assert.equal(f.feature.pendingPeopleText().publication,x.publication);assert.deepEqual(f.feature.readRetainedPeopleTextPending(copy).entries.map(row=>row.publication).sort(),[x.publication,other.publication].sort());return {...x,f,copy,other,otherDraft};
+}
+
+test('guest retirement clears exact current text cache while preserving retained prior binding',async()=>{
+ const x=await textRetirementCacheFixture(),f=x.f;try{const old=structuredClone(x.recovery().find(row=>row.publication===x.publication)),prior=structuredClone(x.recovery().find(row=>row.publication===x.other.publication)),files=JSON.stringify(x.files()),legacy=x.storageValues.get('synthetic-legacy'),newer=await x.store.savePeopleDraft({scope:x.scope,text:'newer editable',head:x.draft.head,expected:x.draft.version});assert.equal((await f.feature.retirePeopleText(old,{current:()=>true})).state,'retired');assert.equal(f.feature.pendingPeopleText(),null);const retained=f.feature.readRetainedPeopleTextPending(x.copy);assert.equal(retained.unavailable,false);assert.deepEqual(retained.entries,[prior]);assert.equal(x.recovery().find(row=>row.publication===old.publication).state,'retired');assert.deepEqual(x.recovery().find(row=>row.publication===prior.publication),prior);assert.ok(x.recovery().some(row=>row.key==='head:'+newer.head&&row.version===newer.version));assert.equal(JSON.stringify(x.files()),files);assert.equal(x.storageValues.get('synthetic-legacy'),legacy);assert.equal(x.posts.length,0);}finally{f.feature.destroy();}
+});
+
+test('late retired-text callback preserves a refreshed newer same-scope pending cache', {timeout:5000},async()=>{
+ const x=await textRetirementCacheFixture(),f=x.f,retire=x.store.retirePeopleTextPublication;let release,entered,flight;const ready=new Promise(resolve=>{entered=resolve;});x.store.retirePeopleTextPublication=async args=>{const result=await retire(args);entered();await new Promise(resolve=>{release=resolve;});return result;};
+ try{const old=structuredClone(x.recovery().find(row=>row.publication===x.publication)),files=JSON.stringify(x.files()),legacy=x.storageValues.get('synthetic-legacy');flight=f.feature.retirePeopleText(old,{current:()=>true});flight.catch(()=>{});await ready;assert.equal(x.recovery().find(row=>row.publication===old.publication).state,'retired');const draft=await x.store.savePeopleDraft({scope:x.scope,text:'newer message'}),capture=await x.store.freezePeopleDraft({scope:x.scope,text:'newer message',...draft}),newer=await x.store.beginPeopleTextPublication({scope:x.scope,peopleKey:x.key,copyInstance:x.copyInstance,binding:x.binding,native:'',...capture,request:{key:'8'.repeat(16),text:'newer message',anchor:0}});await f.feature.refreshPeopleRecovery(x.scope);await f.feature.refreshRetainedPeopleRecovery(x.copy);assert.equal(f.feature.pendingPeopleText().publication,newer.publication);assert.deepEqual(f.feature.readRetainedPeopleTextPending(x.copy).entries.map(row=>row.publication).sort(),[newer.publication,x.other.publication].sort());const before=JSON.stringify(x.recovery());release();assert.equal((await flight).state,'retired');assert.equal(f.feature.pendingPeopleText().publication,newer.publication);assert.deepEqual(f.feature.readRetainedPeopleTextPending(x.copy).entries.map(row=>row.publication).sort(),[newer.publication,x.other.publication].sort());assert.equal(JSON.stringify(x.recovery()),before);assert.equal(JSON.stringify(x.files()),files);assert.equal(x.storageValues.get('synthetic-legacy'),legacy);assert.equal(x.posts.length,0);
+ }finally{if(release)release();if(flight)await flight.catch(()=>{});f.feature.destroy();}
+});
+
+test('guest retains and locally retires prior-binding text for an opaque colon native owner',async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true,ownerNative:'synthetic:native'}),f=x.f;
+ try{
+  const copy=x.context(),before=structuredClone(x.recovery()),files=JSON.stringify(x.files()),legacy=x.values.get('synthetic-legacy'),requests=x.requests();
+  assert.equal(x.selectedNode(),'n1');assert.deepEqual(x.localNodes().find(node=>node.id===x.selectedNode()),{id:'n1',instance_id:'synthetic:native',ended_at:''});
+  assert.equal(f.feature.peopleContext(),null);assert.deepEqual(copy,{key:x.key,copyInstance:x.copyInstance,binding:'current',owner:true});assert.equal(x.row.binding,'old');assert.equal(x.row.native,'synthetic:native');assert.deepEqual(x.recovery().find(row=>row.publication===x.row.publication),x.row);
+  await assert.doesNotReject(()=>f.feature.refreshRetainedPeopleRecovery(copy));const retained=f.feature.readRetainedPeopleTextPending(copy);assert.equal(retained.unavailable,false);const reviewed=retained.entries.find(row=>row.publication===x.row.publication);assert.deepEqual(reviewed,x.row);
+  assert.deepEqual(await f.feature.retirePeopleText(reviewed,{current:()=>true}),{state:'retired'});const decision=x.recovery().find(row=>row.publication===x.row.publication);assert.deepEqual(decision,{...x.row,key:'text-decision:'+x.row.publication,kind:'text-decision',state:'retired'});assert.deepEqual(x.recovery().filter(row=>row!==decision),before.filter(row=>row.publication!==x.row.publication));assert.equal(JSON.stringify(x.files()),files);assert.equal(x.values.get('synthetic-legacy'),legacy);assert.equal(x.requests(),requests);assert.deepEqual(x.posts,[]);
+ }finally{f.feature.destroy();}
+});
+
+test('guest rejects prior text retirement when opaque colon native owner is replaced',async()=>{
+ const x=await retainedTextGuestAdapterFixture({mode:'owner-ended',oldBinding:true,ownerNative:'synthetic:native'}),f=x.f;
+ try{
+  const copy=x.context();assert.equal(x.selectedNode(),'n1');assert.equal(x.localNodes().find(node=>node.id===x.selectedNode()).instance_id,x.row.native);assert.equal(x.row.native,'synthetic:native');assert.equal(x.row.binding,'old');assert.deepEqual(copy,{key:x.key,copyInstance:x.copyInstance,binding:'current',owner:true});assert.equal(f.feature.peopleContext(),null);
+  await assert.doesNotReject(()=>f.feature.refreshRetainedPeopleRecovery(copy));const reviewed=f.feature.readRetainedPeopleTextPending(copy).entries.find(row=>row.publication===x.row.publication);assert.deepEqual(reviewed,x.row);
+  x.setNative('replacement:native');assert.equal(x.localNodes().find(node=>node.id===x.selectedNode()).instance_id,'replacement:native');const before=structuredClone(x.recovery()),files=JSON.stringify(x.files()),legacy=x.values.get('synthetic-legacy'),requests=x.requests();
+  await assert.doesNotReject(()=>f.feature.refreshRetainedPeopleRecovery(copy));const retained=f.feature.readRetainedPeopleTextPending(copy);assert.equal(retained.unavailable,false);assert.ok(!retained.entries.some(row=>row.publication===x.row.publication));const writes=x.writes();await assert.rejects(()=>f.feature.retirePeopleText(reviewed,{current:()=>true}),/identity|current|cancel|unavailable|review/i);assert.equal(x.writes(),writes);assert.deepEqual(x.recovery(),before);assert.equal(JSON.stringify(x.files()),files);assert.equal(x.values.get('synthetic-legacy'),legacy);assert.equal(x.requests(),requests);assert.deepEqual(x.posts,[]);
+ }finally{f.feature.destroy();}
 });

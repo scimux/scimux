@@ -254,6 +254,10 @@ func managedUsage(dataDir string) (int64, map[string]int64, error) {
 				}
 				return nil
 			}
+			// Skip only team-copies/<server>/<owner>/<chat>/<generation>/people-records.
+			if top == "team-copies" && entry.IsDir() && exactPeopleRecords(root, path) {
+				return filepath.SkipDir
+			}
 			if !entry.Type().IsRegular() {
 				return nil
 			}
@@ -272,6 +276,15 @@ func managedUsage(dataDir string) (int64, map[string]int64, error) {
 		}
 	}
 	return total, nodes, nil
+}
+
+func exactPeopleRecords(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	return len(parts) == 5 && parts[4] == "people-records"
 }
 
 func liveNodeForPath(top, root, path string) string {
@@ -348,4 +361,53 @@ func saturatingMul(a, b int64) int64 {
 		return max
 	}
 	return a * b
+}
+
+// ReserveSerialized reserves space and holds the shared lock even when the
+// global policy has no configured limits. Callers use it for additional
+// per-copy limits that must be checked across processes.
+func ReserveSerialized(dataDir, nodeID string, incoming int64) (func(), error) {
+	return ReserveSerializedAfter(dataDir, nodeID, incoming, nil)
+}
+
+// ReserveSerializedAfter runs bounded caller-owned recovery under the same
+// lock as the usage check. It must not reserve recursively or perform I/O
+// outside the caller's managed storage.
+func ReserveSerializedAfter(dataDir, nodeID string, incoming int64, recoverFn func() error) (func(), error) {
+	return reserveAfter(dataDir, nodeID, incoming, recoverFn, false)
+}
+
+// ReserveFreeSerializedAfter checks only the minimum-free reserve under the same lock.
+func ReserveFreeSerializedAfter(dataDir string, incoming int64, recoverFn func() error) (func(), error) {
+	return reserveAfter(dataDir, "", incoming, recoverFn, true)
+}
+
+func reserveAfter(dataDir, nodeID string, incoming int64, recoverFn func() error, freeOnly bool) (func(), error) {
+	if incoming < 0 {
+		return nil, fmt.Errorf("storage budget: negative reservation")
+	}
+	if dataDir == "" {
+		return func() {}, nil
+	}
+	release, err := Lock(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if recoverFn != nil {
+		if err := recoverFn(); err != nil {
+			release()
+			return nil, err
+		}
+	}
+	policy := LoadPolicy(dataDir)
+	if freeOnly {
+		err = checkFree(dataDir, incoming, policy.MinFreeBytes)
+	} else {
+		err = check(dataDir, nodeID, incoming, policy)
+	}
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }

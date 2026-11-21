@@ -8634,6 +8634,13 @@ test('received selection ignores forged native bubble controls', () => {
  firstListener(ctx.roots.msgs,'click')({target,preventDefault(){}}); assert.equal(previews,0); assert.equal(ctx.apiCalls.length,0); ctx.feature.destroy();
 });
 
+test('received associated image uses the common preview controller',()=>{
+ const opened=[];let prevented=0;const preview={href:'blob:verified',dataset:{name:'synthetic.png'}};
+ const ctx=makeFeature({sel:'team/s/o/c/g',deps:{sharedPreview:node=>node===preview?{url:preview.href,name:preview.dataset.name}:null,openAssetPreview:value=>opened.push(value)}});
+ ctx.feature.bind();firstListener(ctx.roots.msgs,'click')({target:{closest:selector=>selector==='[data-asset-preview]'?preview:null},preventDefault(){prevented++}});
+ assert.deepEqual(opened,[{url:'blob:verified',name:'synthetic.png'}]);assert.equal(prevented,1);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
 test('legacy owner comments without a recoverable frontier are visible with an honest label', async () => {
  const copy={uid:'u',key:'s/o/u/g',view:{server:'s'},names:{p:'Person'},people:{},mirrors:[{seq:1,t:'start'}],comments:[{seq:1,anchor:1,text:'retained unplaced',author:'p',at:'T'}]};
  const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},api:async path=>path.includes('/chat')?{turns:[{role:'assistant',uid:'u',segment:0,record:2,text:'later local'}],log_uid:'u',segment_index:0,live:'quiet',source:'codex'}:{}});
@@ -9472,4 +9479,13 @@ test('description saved indicator supports the default clock', async () => {
 test('destroy continues cleanup when a long-press disposer throws', () => {
  let called=0;const ctx=makeFeature({deps:{longpress:()=>()=>{called++;if(called===1)throw Error('synthetic cleanup failure')}}});
  ctx.feature.bind();assert.doesNotThrow(()=>ctx.feature.destroy());assert.equal(called,2);
+});
+
+test('common chat file retry is scoped to the active visit and never dispatches an agent',async()=>{
+ let release,clicked=0,replaced=0;const document={createElement:()=>({click(){clicked++}}),querySelector:()=>null};
+ const ctx=makeFeature({sel:'team/s/o/c/g',deps:{document,retryAsset:()=>new Promise(resolve=>{release=resolve})}});ctx.feature.bind();
+ const button={dataset:{attachmentRetry:'/api/team/subscriptions/s/o/c/g/attachments/1/id',name:'synthetic.txt'},isConnected:true,replaceWith(){replaced++}};
+ firstListener(ctx.roots.msgs,'click')({target:{closest:selector=>selector==='[data-attachment-retry]'?button:null}});assert.equal(button.disabled,true);
+ ctx.setSel('n1');ctx.setSelGen(2);ctx.setSel('team/s/o/c/g');ctx.setSelGen(3);release('blob:verified');await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(replaced,0);assert.equal(clicked,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });

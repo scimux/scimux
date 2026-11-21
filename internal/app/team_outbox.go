@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scimux/scimux/internal/asset"
 	"github.com/scimux/scimux/internal/identity"
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/team"
@@ -585,6 +586,9 @@ func mirrorBody(ev sessionlog.Event, agent string) (json.RawMessage, bool) {
 		body := mirrorText{V: 1, T: ev.T, Time: ev.Time, Text: ev.Text, Prov: len(ev.Prov) > 0}
 		if ev.T == "assistant" {
 			body.Agent = agent
+		} else {
+			// Delivered attachment markers name the owner's local files.
+			body.Text = asset.ShareNames(ev.Text)
 		}
 		return rawJSON(body), true
 	case "source":
@@ -971,6 +975,13 @@ func installShareOutbox(a *app, dataDir string, now func() time.Time) {
 	client := newTeamClient()
 	h := newTeamHandler(dataDir, now, client)
 	th := h.(*teamHandler)
+	th.peopleEnabled = func() bool { return !a.teamSettingsGate || a.settings().teamEnabled() }
+	th.ownerInstance = func(nodeID, instance string) bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		n := a.byID[nodeID]
+		return n != nil && n.InstanceID != "" && n.InstanceID == instance && n.EndedAt == ""
+	}
 	box := &shareOutbox{dataDir: dataDir, now: now, client: client, files: &th.mu, shareOps: &th.shareOps}
 	th.shareDelivery = box.delivery
 	a.teamHandler = h

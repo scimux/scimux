@@ -43,6 +43,30 @@ func TestAgentCommandPiOpencode(t *testing.T) {
 	}
 }
 
+func TestCodexConfiguredModelReadsOnlySuppliedSyntheticHome(t *testing.T) {
+	dir := t.TempDir()
+	if got := codexConfiguredModelIn(dir); got != "" {
+		t.Fatalf("missing configuration returned %q", got)
+	}
+	configDir := filepath.Join(dir, ".codex")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(path, []byte("synthetic_setting = true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexConfiguredModelIn(dir); got != "" {
+		t.Fatalf("configuration without model returned %q", got)
+	}
+	if err := os.WriteFile(path, []byte("model = \"synthetic-local-model\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexConfiguredModelIn(dir); got != "synthetic-local-model" {
+		t.Fatalf("configured model = %q", got)
+	}
+}
+
 func TestParseGrokModels(t *testing.T) {
 	// `grok models` marks the default with * and every other id with -;
 	// older CLIs used * for the whole list. Both markers are catalog lines.

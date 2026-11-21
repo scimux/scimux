@@ -15,15 +15,17 @@ import (
 	"github.com/scimux/scimux/internal/referencemedia"
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/storagebudget"
+	"github.com/scimux/scimux/internal/team"
 )
 
 var referenceAssetMarkerRE = regexp.MustCompile(`(!?)\[[^]]*\]\(scimux-asset:([A-Za-z0-9_]+)\)`)
 
 type referenceCaptureRequest struct {
 	Source struct {
-		UID     string `json:"uid"`
-		Segment *int   `json:"segment"`
-		Record  *int   `json:"record"`
+		UID     string                     `json:"uid"`
+		Segment *int                       `json:"segment"`
+		Record  *int                       `json:"record"`
+		Team    *referencemedia.TeamSource `json:"team"`
 	} `json:"source"`
 }
 
@@ -31,6 +33,14 @@ func (a *app) handleReferenceMediaCapture(w http.ResponseWriter, r *http.Request
 	var request referenceCaptureRequest
 	if err := decodeJSON(w, r, &request); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if request.Source.Team != nil {
+		if request.Source.UID != "" || request.Source.Segment != nil || request.Source.Record != nil {
+			http.Error(w, "bad source", http.StatusBadRequest)
+			return
+		}
+		a.captureTeamReferenceMedia(w, request.Source.Team)
 		return
 	}
 	if request.Source.UID == "" || request.Source.Segment == nil || request.Source.Record == nil || *request.Source.Segment < 0 || *request.Source.Record < 0 {
@@ -82,6 +92,85 @@ func (a *app) handleReferenceMediaCapture(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, map[string]any{"text": turn.Text, "media": media})
+}
+
+// captureTeamReferenceMedia copies only bytes already associated with a
+// retained comment. The team handler lock prevents local copy removal while
+// resolving and capturing; no relay fetch or agent operation occurs here.
+func (a *app) captureTeamReferenceMedia(w http.ResponseWriter, source *referencemedia.TeamSource) {
+	handler, _ := a.teamComponents()
+	h, ok := handler.(*teamHandler)
+	if !ok || source.Log != "comments" || source.Seq == 0 || len(source.AttachmentIDs) == 0 || len(source.AttachmentIDs) > 16 {
+		http.Error(w, "source unavailable", http.StatusBadRequest)
+		return
+	}
+	id := team.CopyID{Server: source.Server, Owner: source.Owner, Chat: source.Chat, Generation: source.Generation}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, subs, err := h.loadSubState()
+	if err != nil {
+		http.Error(w, "source unavailable", http.StatusInternalServerError)
+		return
+	}
+	found := false
+	for _, sub := range subs {
+		if sameCopy(sub, id) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		http.Error(w, "source unavailable", http.StatusNotFound)
+		return
+	}
+	records, _, err := team.ReadCopy(h.dataDir, id, team.CommentsLog, source.Seq-1, 1, 4<<20)
+	if err != nil || len(records) != 1 || records[0].Seq != source.Seq {
+		http.Error(w, "source unavailable", http.StatusNotFound)
+		return
+	}
+	entry, _, ok := projectCommentRecord(records[0], "")
+	if !ok {
+		http.Error(w, "source unavailable", http.StatusConflict)
+		return
+	}
+	files, ok := entry["attachments"].([]map[string]any)
+	if !ok {
+		http.Error(w, "source unavailable", http.StatusConflict)
+		return
+	}
+	inputs := make([]referencemedia.CaptureItem, 0, len(source.AttachmentIDs))
+	next := 0
+	for _, attachmentID := range source.AttachmentIDs {
+		for next < len(files) && files[next]["id"] != attachmentID {
+			next++
+		}
+		if next == len(files) {
+			http.Error(w, "source unavailable", http.StatusBadRequest)
+			return
+		}
+		file := files[next]
+		next++
+		name := file["name"].(string) // The fresh validated projector supplies a string.
+		item := referencemedia.CaptureItem{Key: "attachment:team:" + attachmentID, Name: name, State: referencemedia.StateUnavailable}
+		stage, err := team.ReadPeoplePublished(h.dataDir, id, source.Seq, attachmentID)
+		if err == nil && stage.Hash == file["sha256"] && int64(len(stage.Data)) == file["size"] && stage.Name == name && stage.MIME == file["mime"] {
+			media, safe := peopleRasterPreview(stage.Data)
+			ext := strings.ToLower(filepath.Ext(name))
+			if safe && ((media == "image/png" && ext == ".png") || (media == "image/jpeg" && (ext == ".jpg" || ext == ".jpeg"))) {
+				item.State = referencemedia.StateReady
+				item.MIME = media
+				item.Data = stage.Data
+			}
+		}
+		inputs = append(inputs, item)
+	}
+	text, _ := entry["text"].(string)
+	media, err := a.referenceMedia.Capture(referencemedia.Source{Team: source}, text, inputs)
+	if err != nil {
+		referenceMediaError(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"text": text, "media": media})
 }
 
 func (a *app) referenceCaptureItems(logPath, nodeID, text string) ([]referencemedia.CaptureItem, error) {

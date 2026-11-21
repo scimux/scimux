@@ -19,8 +19,8 @@ export function validReferenceMedia(media){
     typeof item.name === "string" && item.name.length > 0 && !/[\0\r\n]/.test(item.name) && STATE.has(item.state));
 }
 
-function unavailableTile(name, esc){
-  return `<span class="attfile missing reference-media-unavailable" role="status"><span>${esc(name || "image")} (unavailable)</span></span>`;
+function unavailableTile(name, esc, detail = "unavailable"){
+  return `<span class="attfile missing reference-media-unavailable" role="status"><span>${esc(name || "image")} (${esc(detail)})</span></span>`;
 }
 
 export function renderReferenceMedia(media, { esc = defaultEsc, assetURL = path => path } = {}){
@@ -28,7 +28,7 @@ export function renderReferenceMedia(media, { esc = defaultEsc, assetURL = path 
     return `<div class="attrow reference-media">${unavailableTile("image", esc)}</div>`;
   }
   const tiles = media.items.map(item => {
-    if (item.state !== "ready") return unavailableTile(item.name, esc);
+    if (item.state !== "ready") return unavailableTile(item.name, esc, item.key.startsWith("attachment:team:") && !/\.(png|jpe?g)$/i.test(item.name) ? "independent copy unsupported" : "unavailable");
     const url = assetURL(`/api/reference-media/${media.capture_id}/assets/${item.id}`);
     return `<a class="attthumb reference-media-thumb" data-asset-preview data-name="${esc(item.name)}" data-tkey="${esc(item.key)}" href="${url}" title="${esc(item.name)}"><img src="${url}" alt="${esc(item.name)}" loading="lazy"></a>`;
   }).join("");

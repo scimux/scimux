@@ -457,6 +457,9 @@ body.cards-open #msgs { overflow: hidden; }
 .attfile.missing { opacity: .6; cursor: default; pointer-events: none; }
 /* an image-only user turn: let the media breathe, drop the chat-bubble skin */
 .turn.media .bubble { background: none; padding: 0; border: none; }
+/* File-only user turns keep the transparent media skin but need a readable chip. */
+.turn.user.media .attfile { color: var(--ink); background: var(--surface); border: 1px solid var(--hairline); }
+.turn.user.media .attfile:hover { background: var(--code-bg); }
 
 /* TUI blocker: raw pane snapshot (the question) + key row (the answer).
    The terminal always renders inline below the last bubble — never a pinned
@@ -560,6 +563,7 @@ body.cards-open #msgs { overflow: hidden; }
 #draftrecovery summary { cursor: pointer; }
 #draftrecovery label { display: block; }
 #draftrecovery textarea { display: block; box-sizing: border-box; width: 100%; min-height: 4em; }
+#draftrecovery a[download] { display: flex; align-items: center; min-height: 44px; color: var(--ink); overflow-wrap: anywhere; }
 #promptbar [contenteditable] {
   flex: 1; resize: none; max-height: 120px;
   font-size: 16px; line-height: 1.4; font-family: inherit; color: var(--ink);
@@ -612,8 +616,11 @@ body.cards-open #msgs { overflow: hidden; }
 #attmenu button:hover { background: var(--code-bg); }
 #attmenu svg { flex: none; opacity: .75; }
 
-#attstage { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+#attstage { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;
+  max-height: 35dvh; overflow: auto; overscroll-behavior: contain; padding: 8px; }
 #attstage[hidden] { display: none; }
+#attstage .btn-tinted { min-height: 44px; }
+#attstage details { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .stagechip {
   position: relative; display: inline-flex; align-items: center; gap: 8px;
   max-width: 210px; padding: 6px 10px 6px 6px;
