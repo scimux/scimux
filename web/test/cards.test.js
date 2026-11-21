@@ -205,6 +205,10 @@ test("cards.css: .readydot is a static petrol disc; no finished card glow", () =
 });
 
 /* ---------- signature / render decision ---------- */
+test('card shape signature remains stable when duplicate IDs compare equal', () => {
+  const card={id:'same',title:'Synthetic'};
+  assert.equal(cardShapeSignature({list:[card,{...card}]}),cardShapeSignature({list:[{...card},card]}));
+});
 test("computeCardsSignature equality for age-only; change forces rebuild", () => {
   const base = {
     list: [{ id: "a", title: "T", description: "d", lane_id: "", ended_at: "", live: "quiet", attention: "", model: "m", effort: "", last_interaction: 1 }],
@@ -1545,10 +1549,11 @@ function cardsActionHarness(opts = {}){
   const docEls = opts.docEls || {};
   const feature = createCardsFeature({
     roots: { tabs, list },
+    requireChatIdentity: !!opts.requireChatIdentity,
     document: {
       title: "",
       querySelector: (sel) => docEls[sel] || null,
-      getElementById: () => null,
+      getElementById: id => docEls['#' + id] || null,
     },
     CSS: { escape: s => s },
     nodes: () => state.nodes,
@@ -1595,7 +1600,7 @@ function cardsActionHarness(opts = {}){
     },
     exitThread: (id) => { effects.exitThread.push(id); },
     openAdopt: (s) => { effects.openAdopt.push(s); },
-    selectNode: (id) => { effects.selectNode.push(id); },
+    selectNode: opts.omitSelectNode ? undefined : (id) => { effects.selectNode.push(id); state.sel = id; },
     setLevel: (n) => { effects.setLevel.push(n); },
     isDesktop: () => opts.isDesktop !== undefined ? opts.isDesktop : true,
     invalidateChatSig: () => { effects.invalidateChatSig++; },
@@ -2017,4 +2022,67 @@ test('tab selection reveals only inside its strip and count updates retain focus
 test('activity buttons expose the selected state without a tablist keyboard contract', () => {
  const html=cardTabsHTML({cardTab:'pinned',laneFilter:'',currentCount:1,archivedCount:2,pinnedCount:1});
  assert.match(html,/data-tab="current"[^>]*aria-pressed="false"/);assert.match(html,/data-tab="pinned"[^>]*aria-pressed="true"/);assert.match(html,/data-tab="archived"[^>]*aria-pressed="false"/);
+});
+
+test('activities rebuild preserves focused group without stealing focus when removed', () => {
+ let groups=[]; const doc={activeElement:null};
+ const root={scrollTop:0,querySelectorAll:sel=>sel === "[data-activity-group]" ? groups : [],contains:el=>groups.includes(el)};
+ const make=key=>({dataset:{activityGroup:key},focus(){doc.activeElement=this}});
+ let old=make('mine');groups=[old];doc.activeElement=old;
+ withCardEditsPreserved(root,'',()=>{groups=[make('mine')];doc.activeElement=null}, {document:doc});
+ assert.equal(doc.activeElement,groups[0]);
+ old=groups[0];doc.activeElement=old;
+ withCardEditsPreserved(root,'',()=>{groups=[];doc.activeElement=null},{document:doc});
+ assert.equal(doc.activeElement,null);
+});
+
+test('activities rebuild preserves focus on a stable card control', () => {
+ const doc={activeElement:null};let controls=[];const make=()=>({dataset:{x:'n1'},focus(){doc.activeElement=this}});
+ const root={scrollTop:0,contains:el=>controls.includes(el),querySelectorAll:sel=>sel==='[data-x]'?controls:[]};
+ const old=make();controls=[old];doc.activeElement=old;
+ withCardEditsPreserved(root,'',()=>{controls=[make()];doc.activeElement=null},{document:doc});
+ assert.equal(doc.activeElement,controls[0]);
+});
+
+test('activities rebuild ignores focus without a stable control key', () => {
+ const active={},doc={activeElement:active};const root={contains:()=>true,querySelectorAll:()=>[],scrollTop:0};
+ withCardEditsPreserved(root,'',()=>{doc.activeElement=null},{document:doc});assert.equal(doc.activeElement,null);
+});
+
+test('removing the selected card retires it through the common selection lifecycle', async () => {
+ const h=cardsActionHarness({nodes:[{id:'n1',title:'Active',live:'active'}],sel:'n1'});
+ await h.clickList(actTarget({trash:'n1'},['[data-trash]']));assert.deepEqual(h.effects.selectNode,['']);
+});
+
+test('empty activities start control opens the new activity picker when available', async () => {
+ let clicks=0;const h=cardsActionHarness({nodes:[],docEls:{'#plusbtn':{click(){clicks++}}}});
+ await h.clickList(actTarget({},['[data-start-first]']));assert.equal(clicks,1);
+ const missing=cardsActionHarness({nodes:[]});await missing.clickList(actTarget({},['[data-start-first]']));
+});
+
+test('a delayed card removal cannot retire a newer selection', async () => {
+ let finish;const h=cardsActionHarness({nodes:[{id:'n1',title:'First'},{id:'n2',title:'Second'}],sel:'n1',api:()=>new Promise(resolve=>finish=resolve)});
+ const pending=h.clickList(actTarget({trash:'n1'},['[data-trash]']));h.state.sel='n2';finish({});await pending;assert.equal(h.state.sel,'n2');assert.deepEqual(h.effects.selectNode,[]);
+});
+
+test('removing a selected card still clears selection without a selection adapter', async () => {
+ const h=cardsActionHarness({nodes:[{id:'n1',title:'Active'}],sel:'n1',omitSelectNode:true});
+ await h.clickList(actTarget({trash:'n1'},['[data-trash]']));assert.equal(h.state.sel,'');
+});
+
+test('a delayed removal response cannot retire a recreated chat with the same id', async () => {
+ let finish;const h=cardsActionHarness({nodes:[{id:'n1',instance_id:'old',title:'Old'}],sel:'n1',api:()=>new Promise(resolve=>finish=resolve)});
+ const pending=h.clickList(actTarget({trash:'n1'},['[data-trash]']));h.state.nodes=[{id:'n1',instance_id:'new',title:'Replacement'}];finish({});await pending;
+ assert.equal(h.state.nodes[0]?.instance_id,'new');assert.equal(h.state.sel,'n1');assert.deepEqual(h.effects.selectNode,[]);assert.deepEqual(h.effects.removeNode,[]);
+});
+
+test('card deletion carries the selected instance in the transported URL', async () => {
+ const calls=[];const h=cardsActionHarness({nodes:[{id:'n1',instance_id:'old id',title:'Old'}],sel:'n1',api:async (url,opts)=>{calls.push({url,opts});return {}}});
+ await h.clickList(actTarget({trash:'n1'},['[data-trash]']));assert.equal(calls[0].url,'/api/nodes/n1?chat_instance=old%20id');assert.equal(calls[0].opts.method,'DELETE');
+});
+
+test('production card removal refuses a missing chat identity', async () => {
+ const h=cardsActionHarness({nodes:[{id:'n1',title:'Legacy closed'}],sel:'n1',requireChatIdentity:true});
+ await h.clickList(actTarget({trash:'n1'},['[data-trash]']));
+ assert.equal(h.effects.apiCalls.length,0);assert.equal(h.effects.removeNode.length,0);assert.equal(h.state.sel,'n1');assert.match(h.effects.alerts[0],/identity.*unavailable/i);
 });

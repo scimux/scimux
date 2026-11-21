@@ -74,6 +74,11 @@ The polling snapshot the UI runs on. Returns:
 }
 ```
 
+Each node also has a server-minted `instance_id` identifying that actual chat
+across reloads and reconnects. A deleted node's reusable `id` can later name
+a different instance. Existing live and closed nodes receive a persisted identity
+during legacy store migration. The instance label is public and is not a credential.
+
 Each entry is the stored node (id, title, prompt, description, rationale,
 lane_id, fork_kind, agent, model, effort, dir, transport, created_at,
 `ended_at`, …) plus the mechanical view: `live` is
@@ -571,6 +576,10 @@ Body: any of `title`, `description`, `lane_id`. Title must stay non-empty.
 Lane assignment is write-once: setting it on an unassigned node succeeds,
 changing an existing assignment is `409`.
 
+The optional `chat_instance` query or `X-Scimux-Chat-Instance` header binds
+the edit to the actual node instance, with the same matching rules as `/send`.
+The description editor uses the query so the check also survives remote access.
+
 To relabel an earlier map station, include `station` with that station's
 start-time key and a non-empty `title`, plus optional `description`. This
 appends a label to the session log for that station, leaving the current
@@ -598,6 +607,13 @@ agent is still live), so it never issues a second kill.
 
 ### `DELETE /api/nodes/{id}`
 
+The optional `chat_instance` query or `X-Scimux-Chat-Instance` header binds
+the deletion to the actual node instance, using the matching rules of `/send`.
+The current browser supplies the query so a delayed request cannot delete a
+replacement that reused the same node ID. Legacy callers may omit it.
+If the current browser cannot obtain an instance identity, it reports that
+removal is unavailable until reconnection instead of submitting an unbound delete.
+
 Appends a `delete` tombstone to the store and archives the node's session
 log to `sessions/archive/`. Uploaded files are archived under
 `attachments/archive/`; session assets are archived too. The node's owned
@@ -614,6 +630,14 @@ creates a fresh scimux-owned chat without importing its history.
 ## Talking to a node
 
 ### `POST /api/nodes/{id}/send`
+
+The current browser sends the node's server-minted `instance_id` as the
+`chat_instance` query parameter and as `X-Scimux-Chat-Instance`. The query
+survives the existing remote transport, which drops unlisted headers. A
+mismatched, empty or repeated query precondition is rejected with 409,
+including when a deleted node's reusable ID now names another chat. If both
+carriers are present, both must match. Legacy callers may omit them; this is
+an identity precondition, not an authorization credential.
 
 Body: `{"text": "…", "attachments": [<ref>, …]}`. Delivers a follow-up turn
 (tmux: paste + Enter; structured transports: a protocol prompt). `409` while a
@@ -666,6 +690,9 @@ image bytes). A turn may carry text, attachments, or both; an attachments-only
 turn is valid, but an entirely empty one is `400`.
 
 ### `POST /api/nodes/{id}/attachments`
+
+The optional `chat_instance` query and `X-Scimux-Chat-Instance` preconditions have the same meaning as for
+`/send`; it is checked after the multipart body arrives and before it is stored.
 
 `multipart/form-data` with one or more files under the field `files`. Stores
 them under `~/.scimux/attachments/{id}/` and returns
@@ -740,6 +767,9 @@ while a send is actively submitting.
 ### `POST /api/nodes/{id}/send/interrupt`
 
 Interrupt the node's in-flight turn.
+The optional `chat_instance` query and `X-Scimux-Chat-Instance` preconditions have the same identity
+meaning as for `/send`. Interrupt admission remains independent of an active
+send so a current chat can still be interrupted.
 
 ### `POST /api/nodes/{id}/key`
 
@@ -1625,6 +1655,13 @@ guest, mirror entries are unseen. The owner's own mirror entries do not count.
 `truncated` says the 4096-entry
 limit prevented a new subscription from being stored. Delivery is `ok`,
 `offline`, `refused` or `changed` as in the share view, and starts at `ok`.
+The browser treats this sequence-based `unread` as a candidate: for unseen
+comments it reads the retained comment pages and classifies their authenticated
+`mine` fields. A proven comment by another seat is unread; only proven local
+comments do not create unread. Missing or incomplete pages leave the browser's
+status unknown. This inspection does not advance either read position, and a
+later local comment cannot mark an earlier incoming comment read. An unseen
+recipient mirror remains unread independently of comments.
 An owned view may include `local_node` and `local_frontier` when its retained owner frontier still
 matches the UID in that local node’s session log. Owned views include `local_order`,
 the retained subscription order used when multiple generations share an anchor.
@@ -1696,7 +1733,12 @@ idempotency key for an explicit retry. Retrying that same pending comment uses
 the same key, so a previously accepted append is not duplicated. People
 discussion is text-only. Its draft is separate from the owner's Agent draft;
 Agent attachments keep the existing staging behavior across destination
-changes and in-flight work.
+changes and in-flight work. For a shared owner chat, Agent is a one-send arm:
+the composer returns to People when an Agent attempt is dispatched, while
+validation failures keep the selected destination and input for correction.
+An uncertain attempt remains unconfirmed; returning to People does not prove
+delivery. Retired drafts are offered for explicit local review when available
+and are never automatically inserted into a replacement instance.
 
 `PUT /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/seen`
 takes `{"mirror":N}`, `{"comments":N}`, or both, with no unknown fields

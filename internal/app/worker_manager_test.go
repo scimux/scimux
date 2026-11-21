@@ -437,7 +437,7 @@ func TestWorkerManagerRecoversInterruptedCreateAndFinishesDurableStops(t *testin
 		Effort: "low", Dir: a.home, Transport: "acp", CreatedAt: createdAt,
 	}
 	deleted := &Node{ID: "deleted", Title: "Deleted", Prompt: "first", Agent: "codex", Dir: a.home, Transport: "codex", CreatedAt: createdAt}
-	ended := &Node{ID: "ended", Title: "Ended", Prompt: "first", Agent: "pi", Dir: a.home, Transport: "acp", CreatedAt: createdAt, EndedAt: createdAt}
+	ended := &Node{ID: "ended", InstanceID: "synthetic-ended-instance", Title: "Ended", Prompt: "first", Agent: "pi", Dir: a.home, Transport: "acp", CreatedAt: createdAt, EndedAt: createdAt}
 	if _, err := first.LaunchNode(fresh, fresh.Model); err != nil {
 		t.Fatal(err)
 	}
@@ -467,6 +467,9 @@ func TestWorkerManagerRecoversInterruptedCreateAndFinishesDurableStops(t *testin
 	got := a.byID[fresh.ID]
 	if got == nil || got.Parent != fresh.Parent || got.Description != fresh.Description || got.Rationale != fresh.Rationale || got.LaneID != fresh.LaneID || got.ForkKind != fresh.ForkKind || got.SessionID != "synthetic-session" {
 		t.Fatalf("recovered node = %#v", got)
+	}
+	if got.InstanceID == "" {
+		t.Fatal("recovered chat lacks a durable instance identity")
 	}
 	if !replacement.manages(fresh.ID) {
 		t.Fatal("recovered node was not attached to its original worker")

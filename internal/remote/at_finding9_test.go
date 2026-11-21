@@ -15,11 +15,22 @@ package remote
 // if every primitive still round-tripped.
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"testing"
 	"time"
 )
+
+func TestWaitLoopRetiresADeletedRendezvousID(t *testing.T) {
+	c := &Client{st: PersistedState{Status: StateDisabled}, devWake: make(chan struct{}, 1)}
+	c.waitLoopRID(context.Background(), "synthetic-retired-id")
+	select {
+	case <-c.devWake:
+	default:
+		t.Fatal("retired rendezvous ID did not wake the supervisor")
+	}
+}
 
 // TestAStrangerHoldingTheComputerKeyGetsNoAnswer is the review's own
 // reproduction. The attacker is given everything §12.2.1 required: the

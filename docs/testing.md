@@ -244,6 +244,12 @@ checked with `node --test web/test/testdata/team-e2e/test-cleanup.mjs
 web/test/testdata/team-e2e/test-tmux-cleanup.mjs`. `SCIMUX_E2E_FAIL_AFTER_NATIVE=1`
 injects an intentional failure; `SCIMUX_E2E_CLEANUP_PROBE=failure` or `signal`
 selects a cleanup probe, not an acceptance run.
+`SCIMUX_E2E_CLEANUP_PROBE=overlap` opens a real synthetic browser and native
+fixture, starts a held teardown, and waits for a signal. With the usual E2E
+environment, `node --test web/test/testdata/team-e2e/test-cleanup-overlap.mjs`
+checks both SIGINT and SIGTERM, the final manifest, coverage and private cleanup.
+The same test also holds an in-flight page coverage capture across each signal
+and verifies that its scripts are collected exactly once.
 
 Use `SCIMUX_E2E_SCENARIO` for a bounded run. The available selections are
 `ui-join`, `stale-membership`, `stale-removed-membership`, `early-native`,
@@ -252,6 +258,40 @@ Use `SCIMUX_E2E_SCENARIO` for a bounded run. The available selections are
 `received-offline`, `permission-lifecycle`, `recipient-leave`, `leave-stale`,
 `leave-empty`, `held-evidence`, `dropped-send`, `reshare-stale`, `ai-source`,
 `viewport-keyboard`, `media-contrast`, `unshared`, and `held-chat-loading`.
+Stage 1 also provides `stage1-scanner`, `stage1-unread`, and
+`stage1-owner-files`: these exercise active and stale chat selection, unread
+authorship and per-card indicators, and the owner's attachment composer.
+They use the same fake agent transports, private seats, and real relay as the
+default run. `stage2-shared-actions` checks shared bubble actions, exact
+bookmark jumps with duplicate text, local annotations and destinations, and
+an explicitly sent owner prompt. `stage2-bookmark-pages` checks an exact jump
+across the shared comment page boundary with duplicate text. These Stage 1 and
+Stage 2 scenarios also run as part of the complete default suite. The bounded
+`recreated-chat-isolation`, `bubble-selection`, and `draft-recovery` scenarios
+exercise reused local identities, pointer selection, and explicit review of
+older saved drafts on desktop and phone. `header-focus` checks Mine and sharer
+disclosure focus during unread updates. `description-save-isolation`,
+`description-recreated-choice`, and `description-choice-order` exercise held
+save responses, reused destination IDs and competing held destination choices.
+`no-selection` opens an empty synthetic seat and removes an active selected
+chat while an old response is held. `delete-recreation-isolation` checks a
+held deletion against a replacement with the same node ID.
+`legacy-closed-recreation` seeds an old closed record and holds its deletion
+across creation of a replacement with the same ID. The scanner journey also
+holds an old active response across a rapid local–shared–local switch and
+an idle reconnect. The default suite also runs each of these scenarios. Its share-selection
+fixture matches the server, owner, chat and generation, so accumulated shares
+from the same owner cannot redirect an assertion to a different card. It also
+uses a fresh shared chat for each focus check: earlier browser contexts may
+still be viewing an older shared chat and legitimately mark its messages read.
+The held-evidence fixture holds the actual send POST response to observe the
+pending marker, and separately holds GET trace responses to distinguish
+accepted from confirmed. It explicitly releases the synthetic agent; delaying
+the fake turn alone does not hold the browser's POST acknowledgement.
+`browser-lifecycle` verifies that completed desktop and phone contexts retain
+their captured coverage through retirement, including a synthetic failure.
+The default run retires completed cases after their screenshots and coverage
+are saved, while keeping each active case's actor contexts together.
 The test-only native fixture uses a marker in its private synthetic HOME to
 stay alive without SessionStart for the startup-failure scenario. Normal
 fixture launches run the usual hook.
@@ -267,6 +307,8 @@ The manifest's assertion IDs map the principal requirements to real journeys:
 | Offline, permissions and leave | `received-offline`: `received-offline-saved-copy-and-draft`, `received-explicit-retry-idempotent`; `permission-lifecycle`: `permission-read-draft-and-denial`; `recipient-leave`, `leave-stale`, `leave-empty`: their `leave-*` assertions |
 | Delivery and drafts | `held-evidence`: `held-evidence-awaiting-not-sent`; `dropped-send`: `dropped-response-explicit-retry-once`; `reshare-stale`: `reshare-stale-response-keeps-new-generation`; `conversation-core`: `trace-held-upload-*` and `trace-failed-upload-*` |
 | Rendering and native recovery | `media-contrast`: `media-caption-contrast`; `viewport-keyboard`: `viewport-control-target`; `held-chat-loading`: `held-chat-loading-reduced-motion`; `native-start-failure`: `native-start-failure-restores-draft` |
+| Selection and owner discussion | `stage1-scanner`: `stage1-stale-active-response-isolated`, `stage1-shared-owner-active`; `stage1-unread`: `stage1-incoming-before-own-stays-unread`, `stage1-own-comment-no-unread` |
+| Owner files and one-send arm | `stage1-owner-files`: `stage1-owner-file-delivered`, `stage1-people-file-feedback`; `conversation-core`: `stage1-owner-send-disarms` |
 
 The mapping identifies exercised behavior, not every combination of transport,
 error and lifecycle state. Tests never substitute callback invocation for a

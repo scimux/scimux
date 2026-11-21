@@ -87,6 +87,7 @@ import { focusAtEnd } from "./caret.js";
 import {
   writePendingForwards,
   writeAwaitingForward,
+  bindDraftIdentity,
 } from "./storage.js";
 
 /* ---------- public constants ---------- */
@@ -365,16 +366,17 @@ export function createErrorField(msg, status){
    title deliberately does not: a control's title is not a progress readout,
    and swapping "Start"→"Starting..." resizes the control mid-press. VoiceOver
    still hears the state; sighted users get the .ctadots indicator instead. */
-export function submitButtonLabel({ editing, submitting }){
+export function submitButtonLabel({ editing, submitting, explicitSend = false }){
   if (editing) return submitting ? "Saving..." : "Save";
+  if (explicitSend) return submitting ? "Starting and sending..." : "Start and send";
   return submitting ? "Starting..." : "Start";
 }
 
 /* The CTA's visible contents: a stable label plus, while submitting, three
    travelling dots. Indeterminate by construction — creating an activity has no
    knowable percentage, and a fake progress bar would be a lie. */
-export function submitButtonHTML({ editing, submitting }){
-  const label = `<span class="ctalabel">${editing ? "Save" : "Start"}</span>`;
+export function submitButtonHTML({ editing, submitting, explicitSend = false }){
+  const label = `<span class="ctalabel">${editing ? "Save" : explicitSend ? "Start &amp; send" : "Start"}</span>`;
   if (!submitting) return label;
   return label + `<span class="ctadots" aria-hidden="true"><i></i><i></i><i></i></span>`;
 }
@@ -447,7 +449,9 @@ export function createSheetsFeature(deps = {}){
   let ncEdit = "";
   let ncEditStop = "";
   let ncForwardSources = [];
+  let ncExplicitSend = false;
   let newActivitySubmitting = false;
+  let createdButUnbound = false;
   let bound = false;
   let probed = false;
   let probeGeneration = 0;
@@ -524,9 +528,10 @@ export function createSheetsFeature(deps = {}){
     }
   }
 
-  function closeSheets(){
-    if (typeof deps.onCloseSheets === "function") deps.onCloseSheets();
+  function closeSheets(owner){
+    if (typeof deps.onCloseSheets === "function") deps.onCloseSheets(owner);
     ncForwardSources = [];
+    ncExplicitSend = false;
     const backdrop = root("backdrop");
     if (backdrop && backdrop.classList) backdrop.classList.remove("on");
     else if (backdrop)
@@ -604,7 +609,7 @@ export function createSheetsFeature(deps = {}){
     const notice = root("nc_muse_privacy");
     if (notice) notice.hidden = !required;
     const start = root("nc_start");
-    if (start) start.disabled = newActivitySubmitting || (required && !ack?.checked);
+    if (start) start.disabled = newActivitySubmitting || createdButUnbound || (required && !ack?.checked);
   }
 
   function applyMuseModelValue(mo, { prev = "", preserveSelection = false } = {}){
@@ -750,10 +755,10 @@ export function createSheetsFeature(deps = {}){
   function renderStartButton({ editing, submitting }){
     const btn = root("nc_start");
     if (!btn) return;
-    btn.innerHTML = submitButtonHTML({ editing, submitting });
+    btn.innerHTML = submitButtonHTML({ editing, submitting, explicitSend:ncExplicitSend });
     if (typeof btn.setAttribute === "function"){
       btn.setAttribute("aria-busy", submitting ? "true" : "false");
-      btn.setAttribute("aria-label", submitButtonLabel({ editing, submitting }));
+      btn.setAttribute("aria-label", submitButtonLabel({ editing, submitting, explicitSend:ncExplicitSend }));
     }
   }
 
@@ -798,6 +803,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   function forkFromTurn(text, parent){
+    createdButUnbound = false;
     ncForwardSources = [];
     ncEdit = ""; ncEditStop = "";
     const sel = typeof d.sel === "function" ? d.sel() : "";
@@ -817,6 +823,7 @@ export function createSheetsFeature(deps = {}){
   function forkFromStation(id){
     const n = nodeById(id);
     if (!n) return;
+    createdButUnbound = false;
     ncForwardSources = [];
     ncEdit = ""; ncEditStop = "";
     ncParent = id;
@@ -835,6 +842,7 @@ export function createSheetsFeature(deps = {}){
   function openActivityEditor(id, stopTime){
     const n = nodeById(id);
     if (!n) return;
+    createdButUnbound = false;
     ncForwardSources = [];
     ncEdit = id;
     ncEditStop = stopTime || "";
@@ -861,7 +869,9 @@ export function createSheetsFeature(deps = {}){
   /* prompt/focusTitle serve Send-to "Start new chat…" (bookmarks openNewActivity
      dep). Defaults keep plain "+" identical. Never bind this bare as a click
      listener — the Event would be destructured as options; use () => openNewActivity(). */
-  function openNewActivity({ prompt = "", focusTitle = false, forwardSources = [] } = {}){
+  function openNewActivity({ prompt = "", focusTitle = false, forwardSources = [], explicitSend = false } = {}){
+    createdButUnbound = false;
+    ncExplicitSend = !!explicitSend;
     ncForwardSources = Array.isArray(forwardSources) ? forwardSources.slice() : [];
     ncParent = ""; ncRationale = ""; ncEdit = ""; ncEditStop = "";
     ncMuseInherit = false;
@@ -890,7 +900,7 @@ export function createSheetsFeature(deps = {}){
   }
 
   async function onStartClick(){
-    if (newActivitySubmitting) return;
+    if (newActivitySubmitting || createdButUnbound) return;
     clearFieldError(root("nc_title"));
     clearFieldError(root("nc_prompt"));
     clearFieldError(root("nc_dir"));
@@ -1013,6 +1023,14 @@ export function createSheetsFeature(deps = {}){
       const n = api
         ? await api("/api/nodes", { method: "POST", body: JSON.stringify(payload) })
         : { id: "new" };
+      if (n && n.id && !bindDraftIdentity(storage, n.id, n.instance_id)) {
+        createdButUnbound = true;
+        if (typeof d.invalidateStateEtag === "function") d.invalidateStateEtag();
+        if (typeof d.tick === "function") await d.tick();
+        if (typeof d.select === "function") d.select(n.id);
+        if (typeof d.alert === "function") d.alert("The chat was created, but draft storage is unavailable. Copy the text before closing this sheet.");
+        return;
+      }
       const echoLaunchPrompt = !(n && (n.initial_delivery === "not_sent"));
       if (n && n.id && !echoLaunchPrompt){
         /* Cross-feature storage contract with composer.js, kept as a literal
@@ -1145,6 +1163,9 @@ export function createSheetsFeature(deps = {}){
     on(root("burger"), "click", () => openSheet("#menu"));
     on(root("plusbtn"), "click", () => openNewActivity());
     on(root("nc_agent"), "change", onAgentChange);
+    on(root("nc_prompt"), "input", () => {
+      if (ncExplicitSend && !String(root("nc_prompt")?.value || "").trim()) ncForwardSources = [];
+    });
     on(root("nc_model"), "change", onModelChange);
     on(root("nc_muse_ack"), "change", () => syncContributorNotice());
     on(root("nc_start"), "click", () => { onStartClick(); });

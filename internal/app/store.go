@@ -234,6 +234,9 @@ func (a *app) loadStore() error {
 		// A binding record is the durable proof that SessionStart ran.
 		a.claudeAck[id] = true
 	}
+	if err := a.migrateLegacyChatIdentities(newUUID, a.appendRecord); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, hookID := range a.claudeHooks {
 		if hookID == "" || seen[hookID] {
@@ -244,6 +247,28 @@ func (a *app) loadStore() error {
 	}
 	if !a.skipHookCleanup {
 		a.cleanupOrphanClaudeHooks()
+	}
+	return nil
+}
+
+// migrateLegacyChatIdentities appends an identity before exposing an existing
+// chat, including a closed one. Its minted value survives restart and cannot
+// be reused by its slug.
+func (a *app) migrateLegacyChatIdentities(mint func() (string, error), appendNode func(storeRecord) error) error {
+	for _, n := range a.nodes {
+		if n.InstanceID != "" {
+			continue
+		}
+		id, err := mint()
+		if err != nil {
+			return fmt.Errorf("allocate legacy chat identity: %w", err)
+		}
+		copy := *n
+		copy.InstanceID = id
+		if err := appendNode(storeRecord{Type: "node", Node: &copy}); err != nil {
+			return fmt.Errorf("persist legacy chat identity: %w", err)
+		}
+		n.InstanceID = id
 	}
 	return nil
 }

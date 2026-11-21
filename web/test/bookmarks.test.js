@@ -1067,6 +1067,55 @@ test("jump to a deleted source opens the preview; fail toast; desktop keeps pane
   assert.equal(fail.feature.jumpToChatAddress({ text: "x" }), false);
 });
 
+test('shared bookmark jump delegates its exact source identity and reports unavailable copies', () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2},calls=[];
+ const ctx=createFeature({bookmarks:[{t:'t1',text:'same words',team:source}],deps:{jumpToSharedSource:s=>{calls.push(s);return false}}});ctx.feature.bind();ctx.feature.setOpen(true);
+ const wrap=el('div',{dataset:{t:'t1'}}),button=el('button',{dataset:{bmact:'jump'}});button.closest=s=>s==='[data-bmact]'?button:s==='.bookmark'?wrap:null;
+ ctx.roots.bookmarkspane.dispatch('click',{target:button});assert.deepEqual(calls,[source]);assert.match(ctx.effects.toast[0],/available|removed/i);assert.deepEqual(ctx.effects.openPreview,[]);
+});
+
+test('the common shared bookmark row toggles its ordinary controls', () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ const ctx=createFeature({bookmarks:[{t:'t1',text:'retained',team:source}]});ctx.feature.bind();ctx.feature.setOpen(true);
+ const row=el('div',{dataset:{t:'t1'}});row.closest=s=>s==='.bookmark'?row:null;
+ ctx.roots.bookmarkspane.dispatch('click',{target:row});assert.match(ctx.roots.bookmarklist.innerHTML,/data-bmact="jump"/);
+ ctx.roots.bookmarkspane.dispatch('click',{target:row});assert.doesNotMatch(ctx.roots.bookmarklist.innerHTML,/data-bmact="jump"/);
+});
+
+test('shared bookmark send-to retains its exact source and forbids implicit new-chat send', () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ const ctx=createFeature({bookmarks:[{t:'t1',text:'human',team:source}]});ctx.feature.bind();ctx.feature.setOpen(true);
+ const wrap=el('div',{dataset:{t:'t1'}}),button=el('button',{dataset:{bmact:'sendto'}});button.closest=s=>s==='[data-bmact]'?button:s==='.bookmark'?wrap:null;
+ ctx.roots.bookmarkspane.dispatch('click',{target:button});assert.doesNotMatch(ctx.roots.sendtoList.innerHTML,/data-newchat/);
+ const dest=el('button',{dataset:{fwd:'n2'}});dest.closest=s=>s==='[data-fwd]'?dest:null;ctx.roots.sendtoList.onclick({target:dest});
+ assert.deepEqual(JSON.parse(ctx.storage.getItem('scimux-sendto-pending:n2')),[source]);
+});
+
+test('shared send-to rejects a fabricated destination when the local list disappears', () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};let nodes=[{id:'n2',title:'Local'}];
+ const ctx=createFeature({deps:{orderedNodes:()=>nodes}});ctx.feature.openSendTo({text:'retained',source,allowNew:false});nodes=[];
+ const dest=el('button',{dataset:{fwd:'n2'}});dest.closest=s=>s==='[data-fwd]'?dest:null;ctx.roots.sendtoList.onclick({target:dest});
+ assert.equal(ctx.storage.getItem('scimux-sendto-pending:n2'),null);
+ const missing=createFeature({deps:{orderedNodes:null}});missing.feature.openSendTo({text:'retained',source,allowNew:false});missing.roots.sendtoList.onclick({target:dest});
+ assert.equal(missing.storage.getItem('scimux-sendto-pending:n2'),null);
+});
+
+test('send-to does not combine a replacement chat draft with the retired chat draft', () => {
+ const nodes={n2:{id:'n2',title:'Replacement',instance_id:'new'}};
+ const ctx=createFeature({nodes,storageInit:{'scimux-draft-owner:n2':'old','scimux-draft:n2':'retired text'}});
+ ctx.feature.openSendTo({text:'fresh quote',allowNew:false});
+ const dest=el('button',{dataset:{fwd:'n2'}});dest.closest=s=>s==='[data-fwd]'?dest:null;ctx.roots.sendtoList.onclick({target:dest});
+ assert.doesNotMatch(ctx.storage.getItem('scimux-draft:n2'),/retired text/);assert.match(ctx.storage.getItem('scimux-draft:n2'),/fresh quote/);
+});
+
+test('Send to preserves the old draft if its recovery archive is damaged', () => {
+ const nodes={n2:{id:'n2',title:'Replacement',instance_id:'new'}};
+ const ctx=createFeature({nodes,storageInit:{'scimux-draft-owner:n2':'old','scimux-draft:n2':'retired text','scimux-retired-drafts:n2:old':'{}'}});
+ ctx.feature.openSendTo({text:'fresh quote',allowNew:false});
+ const dest=el('button',{dataset:{fwd:'n2'}});dest.closest=s=>s==='[data-fwd]'?dest:null;ctx.roots.sendtoList.onclick({target:dest});
+ assert.equal(ctx.storage.getItem('scimux-draft:n2'),'retired text');assert.match(ctx.effects.toast[0],/storage is unavailable/i);assert.deepEqual(ctx.effects.select,[]);
+});
+
 /* ---------- manual create + reply cancel ---------- */
 test("manual general/lane/comment creation; reply chip blur Escape dismiss", () => {
   const ctx = createFeature({
@@ -1584,6 +1633,15 @@ test("bookmarkActionsHTML offers jump in the inbox whenever the bookmark is addr
   assert.match(archived, /data-bmact="jump"/);
 });
 
+test('shared bookmarks offer the common exact jump and local comment controls', () => {
+ const nt={t:'1',text:'same words',team:{server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2}};
+ for(const overflow of [false,true]){
+  const html=bookmarkActionsHTML(nt,{icons:ICONS,context:'pane',overflow});
+  const order=[...html.matchAll(/data-bmact="([a-z]+)"/g)].map(m=>m[1]);assert.deepEqual(order.slice(0,2),['jump','comment']);
+  assert.match(html,/<svg id=j\/>/);assert.match(html,/<svg id=c\/>/);
+ }
+});
+
 test("bookmarkActionsHTML drops jump only when the bookmark has no address at all", () => {
   const manual = bookmarkActionsHTML({ t: "1", text: "typed by hand" }, { icons: ICONS, context: "pane" });
   assert.ok(!manual.includes(`data-bmact="jump"`));
@@ -1897,6 +1955,26 @@ test("P4 case 1: with eligible targets, Start new chat… is the last entry", ()
     /sendto-new|sendto-sep|border-top|role="separator"/.test(html),
     "new-chat entry is visually separated",
   );
+});
+
+test('send-to can require an existing local destination and reject a forged new-chat action', () => {
+  const ctx=createSendToWithNewChat({nodes:sendtoNodes});ctx.feature.bind();
+  ctx.feature.openSendTo({text:'shared human text',allowNew:false});
+  assert.doesNotMatch(ctx.roots.sendtoList.innerHTML,/data-newchat/);
+  ctx.roots.sendtoList.onclick({target:newChatClickTarget()});assert.equal(ctx.openNewActivityCalls.length,0);
+});
+
+test('send-to rejects forged destinations that are not eligible local chats', () => {
+  const ctx=createFeature({nodes:sendtoNodes});ctx.feature.bind();ctx.feature.openSendTo({text:'shared',allowNew:false});
+  const fake=el('button',{dataset:{fwd:'team/server/owner/chat/gen'}});fake.closest=s=>s==='[data-fwd]'?fake:null;
+  ctx.roots.sendtoList.onclick({target:fake});assert.deepEqual(ctx.effects.select,[]);
+  assert.equal(ctx.storage.getItem('scimux-draft:team/server/owner/chat/gen'),null);
+});
+
+test('send-to rejects a shared namespace even if it appears in the supplied node list', () => {
+ const id='team/server/owner/chat/gen',ctx=createFeature({nodes:{[id]:{id,title:'Forged'}}});ctx.feature.bind();ctx.feature.openSendTo({text:'shared',allowNew:false});
+ assert.doesNotMatch(ctx.roots.sendtoList.innerHTML,/data-fwd="team\//);
+ const fake=el('button',{dataset:{fwd:id}});fake.closest=s=>s==='[data-fwd]'?fake:null;ctx.roots.sendtoList.onclick({target:fake});assert.deepEqual(ctx.effects.select,[]);
 });
 
 test("P4 case 2: no eligible targets — entry still present; dead-end message gone", () => {
@@ -2258,4 +2336,29 @@ test('replacing a choice sheet list removes the old keyboard handler', () => {
  ctx.feature.openChoiceList({choices:[{label:'One'}]});assert.equal(typeof old.onkeydown,'function');
  current=next;ctx.feature.openChoiceList({choices:[{label:'Two'}]});assert.equal(old.onkeydown,null);assert.equal(old.onclick,null);assert.equal(typeof next.onkeydown,'function');
  ctx.feature.destroy();assert.equal(next.onkeydown,null);
+});
+
+test('opening a choice or send-to sheet announces its ownership', () => {
+ const owners=[],owner={};const ctx=createFeature({deps:{bubbleController:{chooserOpened:value=>owners.push(value)}}});
+ ctx.feature.openChoiceList({choices:[],bubbleOwner:owner});ctx.feature.openSendTo({text:'synthetic'});
+ assert.deepEqual(owners,[owner,undefined]);ctx.feature.destroy();
+});
+
+test('choice sheet handles a missing destination list without opening a sheet', () => {
+ const ctx=createFeature({deps:{sendtoList:null,document:{querySelector:()=>null}}});
+ ctx.feature.openChoiceList({choices:[{id:'a',label:'A'}]});assert.deepEqual(ctx.effects.openSheet,[]);ctx.feature.destroy();
+});
+
+test('opening send-to on a replacement list retires the previous choice handler', () => {
+ const ctx=createFeature({deps:{sendtoList:null}}),old=el('div'),next=el('div');let current=old;
+ ctx.document.querySelector=sel=>sel==='#sendto_list'?current:null;
+ ctx.feature.openChoiceList({choices:[{id:'a',label:'A'}]});assert.equal(typeof old.onclick,'function');
+ current=next;ctx.feature.openSendTo({text:'synthetic'});assert.equal(old.onclick,null);assert.equal(typeof next.onclick,'function');ctx.feature.destroy();
+});
+
+test('choice selection preserves its owner on close; Escape cancels it', () => {
+ const closes=[],owner={};const ctx=createFeature({deps:{closeSheets:value=>closes.push(value)}});
+ ctx.feature.openChoiceList({bubbleOwner:owner,choices:[{label:'A'}]});const choice={dataset:{choice:'0'},closest:()=>choice};ctx.roots.sendtoList.onclick({target:choice});
+ ctx.feature.openChoiceList({bubbleOwner:owner,choices:[{label:'A'}]});ctx.roots.sendtoList.onkeydown({key:'Escape',preventDefault(){},stopPropagation(){}});
+ assert.deepEqual(closes,[owner,undefined]);ctx.feature.destroy();
 });

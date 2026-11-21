@@ -45,7 +45,7 @@ func (a *app) handleNewNode(w http.ResponseWriter, r *http.Request) {
 	// semantics for an ordinary external pane. The UI never sends these; this
 	// closes the gap for any other client. ForkKind is recomputed in
 	// resolveNode; AXScreenReader is set only at the owned-Claude launch seam.
-	n.ID, n.SessionID, n.Transcript, n.CreatedAt, n.EndedAt, n.ForkKind, n.Adopted, n.AXScreenReader = "", "", "", "", "", "", false, false
+	n.ID, n.InstanceID, n.SessionID, n.Transcript, n.CreatedAt, n.EndedAt, n.ForkKind, n.Adopted, n.AXScreenReader = "", "", "", "", "", "", "", false, false
 	// Resolve and validate the launch configuration first: no request that
 	// fails validation (empty prompt, unknown parent, bad agent or dir) ever
 	// reaches createNode, and the transport decision reads the *resolved* agent
@@ -121,6 +121,11 @@ func (a *app) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		a.mu.Unlock()
 		http.Error(w, "not found", 404)
+		return
+	}
+	if !chatInstanceMatches(r, n.InstanceID) {
+		a.mu.Unlock()
+		http.Error(w, "chat identity changed", http.StatusConflict)
 		return
 	}
 	// Old-station edit: snapshot the label for that stop only, node untouched.
@@ -262,9 +267,19 @@ func (a *app) handleExitNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	gate := a.chatGate(r.PathValue("id"))
+	gate.Lock()
+	defer gate.Unlock()
+	control := a.controlGate(r.PathValue("id"))
+	control.Lock()
+	defer control.Unlock()
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if !a.currentChatInstance(n, r) {
+		http.Error(w, "chat identity changed", http.StatusConflict)
 		return
 	}
 	// Persist the delete before tearing anything down. The store is the

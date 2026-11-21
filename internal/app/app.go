@@ -261,6 +261,7 @@ func (a *app) initMaps() {
 
 type Node struct {
 	ID          string `json:"id"`
+	InstanceID  string `json:"instance_id,omitempty"` // server-minted durable identity, distinct from reusable ID
 	Parent      string `json:"parent,omitempty"`
 	Title       string `json:"title"`
 	Prompt      string `json:"prompt"`                // first prompt == the node's research question
@@ -495,6 +496,9 @@ type app struct {
 	storeMu sync.Mutex
 	// promptGates serialize owner send/clear admission and trace readback.
 	promptGates [64]sync.Mutex
+	// Interrupts must race neither deletion nor a reissued node ID, but must
+	// remain able to interrupt a send holding a prompt gate.
+	controlGates [64]sync.Mutex
 	// settingsMu serializes saveSettings. The document is consent (settings.go),
 	// so its write-then-rename must be one critical section: a save that
 	// reports success has to be the save that reached disk. The settings

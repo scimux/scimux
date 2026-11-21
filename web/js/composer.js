@@ -112,8 +112,34 @@ import {
   clearPendingForwards,
   readAwaitingForward,
   writeAwaitingForward,
+  bindDraftIdentity,
+  archiveRetiredDraft,
+  readRetiredDrafts,
   addPromptSource, clearPromptSources, promptSourceKey, readPromptSources, readPromptFlights, writePromptFlights,
 } from "./storage.js";
+
+export function retiredDraftReviewHTML(entries){
+  return entries.map(({owner, values}) => {
+    const fields = [["Agent draft", values["scimux-draft:"]], ["People draft", values["scimux-people-draft:"]]];
+    let flights = [];
+    try {
+      const parsed = JSON.parse(values["scimux-prompt-flights:"] || "[]");
+      if (Array.isArray(parsed)) flights = parsed.filter(item => item && typeof item === "object");
+    } catch { /* keep other intact drafts visible */ }
+    fields.push(...flights.map(flight => ["Pending Agent draft", flight.text]));
+    const text = fields.filter(([, value]) => typeof value === "string" && value).map(([label, value]) =>
+      `<label>${label}<textarea readonly>${escDefault(value)}</textarea></label>`).join("");
+    const source = values["scimux-prompt-sources:"] || values["scimux-sendto-pending:"] || flights.some(flight => flight.sources?.length)
+      ? '<p>Source references are retained with this saved draft.</p>' : "";
+    const attachments = values["scimux-attachments:"] ? '<p>File references are retained with this saved draft; files may no longer be available.</p>' : "";
+    const temporary = values["scimux-memory-only:"] ? '<p>Available only in this tab.</p>' : "";
+    const delivery = values["scimux-delivery-status:"] === "accepted" ? '<p>Accepted by the earlier chat; confirmation is unavailable here.</p>'
+      : values["scimux-delivery-status:"] === "unconfirmed" ? '<p>Delivery to the earlier chat is unconfirmed.</p>'
+      : values["scimux-delivery-status:"] === "not-dispatched" ? '<p>Not sent.</p>' : "";
+    const context = owner === "unknown" ? "Saved before chat identity could be verified." : "Saved from an earlier chat.";
+    return `<section><p>${context}</p>${temporary}${delivery}${text}${source}${attachments}</section>`;
+  }).join("");
+}
 
 /* ---------- public constants ---------- */
 
@@ -269,9 +295,11 @@ export function stageChipHTML(it, { esc = escDefault, iconFile = "" } = {}){
     ? `<img src="${it.preview}" alt="${disp}">`
     : `<span class="fico">${iconFile}</span>`;
   const spin = it.status === "up" ? `<span class="spin"><i></i></span>` : "";
+  const failure = it.status === "err" ? `<span class="stageerror" role="status">${esc(it.error || "Upload failed")}</span>` : "";
   return `<div class="stagechip ${it.status}" data-key="${it.key}" title="${disp}">
         ${thumb}${spin}<span class="snm">${disp}</span>
         <button class="sx" data-key="${it.key}" aria-label="Remove ${disp}">&times;</button>
+        ${failure}
       </div>`;
 }
 
@@ -354,6 +382,9 @@ export function createComposerFeature(deps){
 
   /* per-node stage map — in-memory only; reload resets */
   const stage = {};
+  const retiredMemory = new Map();
+  const fallbackIdentities = new WeakMap();
+  let fallbackIdentity = 0;
   let stageKey = 0;
 
   let composerBusy = null;
@@ -361,7 +392,10 @@ export function createComposerFeature(deps){
   let canAttach = false;
   let bound = false;
   let composerNode = "";
+  let composerIdentity = "";
+  let identityReady = true;
   let destination = "agent";
+  let destinationVisit = 0;
   let explicitAgent = false;
   let contextKey = "";
   let ownerChoice = false;
@@ -377,8 +411,39 @@ export function createComposerFeature(deps){
   function nodeById(id){
     return typeof d.nodeById === "function" ? d.nodeById(id) : null;
   }
+  function stageIdentity(id){
+    const node = nodeById(id);
+    if (!node) return "";
+    if (node.instance_id) return id + "\0" + node.instance_id;
+    // Tests and older local adapters can provide stable object identities;
+    // production requires the server-minted instance before dispatch.
+    if (d.requireChatIdentity) return "";
+    if (!fallbackIdentities.has(node)) fallbackIdentities.set(node, ++fallbackIdentity);
+    return id + "\0fallback:" + fallbackIdentities.get(node);
+  }
   function peopleContext(){
     return typeof d.peopleContext === "function" ? d.peopleContext() : null;
+  }
+  function currentComposerIdentity(){
+    const id = selId();
+    if (!id || id !== composerNode || !composerIdentity || stageIdentity(id) === composerIdentity) return true;
+    try {
+      const key = "scimux-retired-visible:" + composerIdentity;
+      const raw = storage.getItem(key);
+      let saved = [];
+      if (raw !== null) {
+        try { saved = JSON.parse(raw); } catch { saved = raw; }
+        if (!Array.isArray(saved)) saved = [saved];
+      }
+      storage.setItem(key, JSON.stringify([...saved, promptText()]));
+      if (!archiveRetiredDraft(storage, id, composerIdentity.split("\0")[1], {
+        [isPeople() ? "scimux-people-draft:" : "scimux-draft:"]: promptText(),
+      })) throw new Error("draft archive unavailable");
+    }
+    catch { alertFn("This chat was replaced. Copy the visible draft before continuing."); return false; }
+    onSelect();
+    alertFn("This chat was replaced. Review the current draft before sending.");
+    return false;
   }
   function peopleDraftKey(id){ return "scimux-people-draft:" + id; }
   function isPeople(){ return destination === "people"; }
@@ -406,20 +471,33 @@ export function createComposerFeature(deps){
 
   function clearPrompt(){ setPromptText(""); }
 
+  /* Stop targets the local agent: in Agent mode while busy, and for the
+     owner in People mode while busy as long as no People text is typed. */
+  function stopAvailable(){
+    return !!composerBusy && (!isPeople() || (ownerChoice && !promptText().trim()));
+  }
+
   function setComposerBusy(active){
     if (composerBusy === !!active) return; /* poll-safe: no DOM churn per tick */
     composerBusy = !!active;
-    const chrome = busyChrome(composerBusy && !isPeople());
+    renderBusy();
+  }
+
+  function renderBusy(){
+    const stop = stopAvailable();
+    const chrome = busyChrome(stop);
     if (promptbar && promptbar.classList)
       promptbar.classList.toggle("busy", chrome.busy);
     if (sendbtn){
       if (sendbtn.classList) sendbtn.classList.toggle("stop", chrome.stopClass);
-      sendbtn.innerHTML = composerBusy && !isPeople()
-        ? (icons.ICON_STOP || "")
-        : (icons.ICON_SEND || "");
+      sendbtn.innerHTML = stop ? (icons.ICON_STOP || "") : (icons.ICON_SEND || "");
       if (typeof sendbtn.setAttribute === "function")
         sendbtn.setAttribute("aria-label", chrome.ariaLabel);
       sendbtn.title = chrome.title;
+      if (!stop && isPeople() && ownerChoice) {
+        sendbtn.setAttribute("aria-label", "Send message to people");
+        sendbtn.title = "Send message to people";
+      }
       if (!isPeople() && ownerChoice && !composerBusy) {
         sendbtn.setAttribute("aria-label", "Send message to agent");
         sendbtn.title = "Send message to agent";
@@ -467,8 +545,8 @@ export function createComposerFeature(deps){
     if (!on) closeAttMenu();
   }
 
-  function staged(id){
-    return stage[id] || (stage[id] = []);
+  function staged(key){
+    return stage[key] || (stage[key] = []);
   }
 
   function clearStageRemoveListeners(){
@@ -480,7 +558,7 @@ export function createComposerFeature(deps){
   function renderStage(){
     if (!attstage) return;
     const id = selId();
-    const items = id && !isPeople() ? (stage[id] || []) : [];
+    const items = id && !isPeople() ? (stage[stageIdentity(id)] || []) : [];
     clearStageRemoveListeners();
     if (!items.length){
       attstage.hidden = true;
@@ -511,7 +589,7 @@ export function createComposerFeature(deps){
   function removeStaged(key){
     const id = selId();
     if (!id) return;
-    const arr = stage[id] || [];
+    const arr = stage[stageIdentity(id)] || [];
     const i = arr.findIndex(x => String(x.key) === String(key));
     if (i < 0) return;
     if (arr[i].preview) URLImpl.revokeObjectURL(arr[i].preview);
@@ -519,7 +597,7 @@ export function createComposerFeature(deps){
     renderStage();
   }
 
-  async function uploadOne(it, dest){
+  async function uploadOne(it, dest, identity, instance){
     if (!FormDataImpl){
       it.status = "err";
       it.error = "FormData unavailable";
@@ -533,8 +611,8 @@ export function createComposerFeature(deps){
       const fetchImpl = d.fetchImpl || (typeof fetch !== "undefined" ? fetch : null);
       if (!fetchImpl) throw new Error("fetch unavailable");
       const r = await fetchImpl(
-        `/api/nodes/${encodeURIComponent(dest)}/attachments`,
-        withCsrf({ method: "POST", body: fd }),
+        `/api/nodes/${encodeURIComponent(dest)}/attachments${instance ? `?chat_instance=${encodeURIComponent(instance)}` : ""}`,
+        withCsrf({ method: "POST", body: fd, ...(instance ? {headers:{"X-Scimux-Chat-Instance":instance}} : {}) }),
       );
       if (!r.ok) throw new Error((await r.text()) || r.statusText);
       const body = await r.json();
@@ -544,13 +622,20 @@ export function createComposerFeature(deps){
       it.status = "err";
       it.error = e.message;
     }
-    if (selId() === dest) renderStage();
+    if (selId() === dest && stageIdentity(dest) === identity) renderStage();
   }
 
   function addFiles(files, dest){
+    if (!currentComposerIdentity()) return;
     dest = dest || selId();
-    if (isPeople() || !canAttach || !dest || dest.startsWith("team/") || !files || !files.length) return;
-    const arr = staged(dest);
+    if (!identityReady) return;
+    if (!files || !files.length) return;
+    if (isPeople()) { alertFn("People messages currently support text only. Choose Agent to attach files."); return; }
+    if (!canAttach || !dest || dest.startsWith("team/")) return;
+    const identity = stageIdentity(dest);
+    if (!identity) { alertFn("This chat's identity is unavailable. Reconnect before attaching files."); return; }
+    const instance = nodeById(dest)?.instance_id || "";
+    const arr = staged(identity);
     const list = Array.from(files);
     for (const f of list){
       const isImage = isImageFileType(f.type);
@@ -564,7 +649,7 @@ export function createComposerFeature(deps){
         status: "up",
       };
       arr.push(it);
-      uploadOne(it, dest);
+      uploadOne(it, dest, identity, instance);
     }
     if (selId() === dest) renderStage();
   }
@@ -583,19 +668,32 @@ export function createComposerFeature(deps){
     try { storage.removeItem(draftStorageKey(id)); } catch { /* stays until it can be */ }
   }
 
+  function renderRecovery(id){
+    if (!roots.recovery) return;
+    const entries = id ? [...readRetiredDrafts(storage, id), ...(retiredMemory.get(id) || [])] : [];
+    roots.recovery.hidden = !entries.length;
+    roots.recovery.innerHTML = entries.length
+      ? `<details><summary>Review saved drafts</summary>${retiredDraftReviewHTML(entries)}</details>` : "";
+  }
+
   function onSelect({preferAgent = false} = {}){
+    destinationVisit++;
     /* restore this node's draft and stage; hide + until chat confirms turns */
     const id = selId();
     if (composerNode && composerNode !== id && !promptText().trim() &&
-        !sendingDestinations.has(composerNode) && !readAwaitingForward(storage, composerNode, nowFn()))
+        !sendingDestinations.has(composerIdentity) && !readAwaitingForward(storage, composerNode, nowFn()))
       clearPendingForwards(storage, composerNode);
     composerNode = id;
+    composerIdentity = stageIdentity(id);
+    identityReady = bindDraftIdentity(storage, id, nodeById(id)?.instance_id || "");
+    renderRecovery(id);
     const context = peopleContext();
     contextKey = context?.key || "";
     ownerChoice = !!context?.owner && !id.startsWith("team/");
     explicitAgent = !!preferAgent && !id.startsWith("team/");
     destination = !explicitAgent && (id.startsWith("team/") || contextKey) ? "people" : "agent";
-    setPromptText(isPeople() ? (storage.getItem(peopleDraftKey(id)) || "") : savedDraft(id));
+    setPromptText(identityReady ? (isPeople() ? (storage.getItem(peopleDraftKey(id)) || "") : savedDraft(id)) : "");
+    if (!identityReady) alertFn("Draft storage is unavailable. Reconnect before using this chat's composer.");
     refreshDestination();
     setAttachAvail(false);
     renderStage();
@@ -625,12 +723,15 @@ export function createComposerFeature(deps){
   }
 
   function setDestination(next){
+    if (!currentComposerIdentity()) return;
+    if (!identityReady) return;
     const context = peopleContext();
     if (next !== "agent" && next !== "people") return;
     if (next === "agent" && context && !context.owner) return;
     if (next === "agent" && (selId().startsWith("team/") || !nodeById(selId()))) return;
     if (next === "people" && !context && !ownerChoice) return;
     if (destination === next) { refreshDestination(); return; }
+    destinationVisit++;
     destination = next;
     explicitAgent = next === "agent";
     setPromptText(isPeople() ? (storage.getItem(peopleDraftKey(selId())) || "") : savedDraft(selId()));
@@ -638,6 +739,8 @@ export function createComposerFeature(deps){
   }
 
   function preparePrompt(text, source){
+    if (!currentComposerIdentity()) return false;
+    if (!identityReady) return false;
     const id = selId();
     if (!id || id.startsWith("team/") || !nodeById(id) || nodeById(id).ended_at || !promptSourceKey(source) ||
         typeof d.canPreparePrompt !== "function" || !d.canPreparePrompt(source) || !String(text || "").trim()) return false;
@@ -648,7 +751,7 @@ export function createComposerFeature(deps){
     setDestination("agent");
     setPromptText(merged);
     if (prompt) focusAtEnd(prompt);
-    if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged();
+    if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id);
     return true;
   }
 
@@ -661,36 +764,49 @@ export function createComposerFeature(deps){
     if (merged) keepDraft(id, merged);
     const recovered = (Array.isArray(attachments) ? attachments : []).filter(item => item && item.ref && typeof item.name === "string")
       .map(item => ({key:++stageKey, name:item.name, isImage:!!item.isImage, preview:"", ref:item.ref, status:"done"}));
-    if (recovered.length) stage[id] = restoreStageOnFailure(stage[id] || [], recovered);
+    const identity = stageIdentity(id);
+    if (recovered.length && identity) stage[identity] = restoreStageOnFailure(stage[identity] || [], recovered);
     if (selId() === id && !isPeople()) { setPromptText(merged); renderStage(); }
   }
 
   async function sendPeople(){
     const context = peopleContext(); const id = selId(); const text = promptText();
-    if (!context || !context.writable || !text.trim() || new TextEncoder().encode(text).length > 16384 || peopleSending.has(id) || typeof d.sendPeople !== "function") return;
+    const identity = id.startsWith("team/") ? id : (stageIdentity(id) || (context?.key ? "people/" + context.key : ""));
+    const sameIdentity = () => id.startsWith("team/") || (identity.startsWith("people/")
+      ? selId() === id && peopleContext()?.key === context.key : stageIdentity(id) === identity);
+    if (!context || !context.writable || !identity || !text.trim() || new TextEncoder().encode(text).length > 16384 || peopleSending.has(identity) || typeof d.sendPeople !== "function") return;
     const revision = peopleRevisions.get(id) || 0;
-    peopleSending.add(id);
+    peopleSending.add(identity);
     try {
       await d.sendPeople(context.key, text);
+      if (!sameIdentity()) return;
       if ((peopleRevisions.get(id) || 0) === revision && storage.getItem(peopleDraftKey(id)) === text) {
         storage.removeItem(peopleDraftKey(id));
         if (selId() === id && isPeople() && promptText() === text) clearPrompt();
       }
-    } catch (err) { if (err) alertFn(err.message); }
-    finally { peopleSending.delete(id); }
+    } catch (err) { if (err && selId() === id && sameIdentity()) alertFn(err.message); }
+    finally { peopleSending.delete(identity); }
   }
 
   async function interruptPrompt(){
+    if (!currentComposerIdentity()) return;
     const cur = selId();
     if (!cur || !nodeById(cur)) return;
     const dest = cur;
+    const identity = stageIdentity(dest);
+    if (!identity) { alertFn("This chat's identity is unavailable. Reconnect before interrupting."); return; }
+    const instance = nodeById(dest)?.instance_id || "";
+    const visit = destinationVisit;
+    const isCurrent = () => selId() === dest && destinationVisit === visit && stageIdentity(dest) === identity;
     try {
       if (typeof d.api === "function")
-        await d.api(`/api/nodes/${encodeURIComponent(dest)}/send/interrupt`, { method: "POST" });
+        await d.api(`/api/nodes/${encodeURIComponent(dest)}/send/interrupt${instance ? `?chat_instance=${encodeURIComponent(instance)}` : ""}`, { method: "POST", ...(instance ? {headers:{"X-Scimux-Chat-Instance":instance}} : {}) });
+      if (!isCurrent()) return;
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       if (typeof d.scheduleTick === "function") d.scheduleTick(250);
       else if (typeof d.tick === "function") setTimeoutFn(d.tick, 250);
     } catch (err) {
+      if (!isCurrent()) return;
       /* surface every failure, including 409 (in flight / closed / unconfirmed) */
       if (err) alertFn(err.message);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
@@ -715,45 +831,83 @@ export function createComposerFeature(deps){
   }
 
   async function sendPrompt(){
+    if (!currentComposerIdentity()) return;
+    if (!identityReady) return;
     if (isPeople()) return sendPeople();
     if (typeof d.agentAllowed === "function" && !d.agentAllowed()) return;
     const text = promptText().trim();
     const cur = selId();
-    if (!cur || cur.startsWith("team/") || sendingDestinations.has(cur)) return;
+    if (!cur || cur.startsWith("team/")) return;
     if (nodeById(cur)?.ended_at) return; /* closed thread: server would 409 */
     const dest = cur; /* capture: selection may change while send is in flight */
+    const identity = stageIdentity(dest);
+    if (!identity) { alertFn("This chat's identity is unavailable. Reconnect before sending."); return; }
+    if (sendingDestinations.has(identity)) return;
+    const instance = nodeById(dest)?.instance_id || "";
+    const visit = destinationVisit;
+    const armedOwner = ownerChoice;
     const draftRevision = agentRevisions.get(dest) || 0;
     const originalStored = savedDraft(dest);
-    const items = (stage[dest] || []).slice();
+    const items = (stage[identity] || []).slice();
     const sourceSnapshot = readPromptSources(storage, dest);
     const turns = typeof d.getLastTurns === "function" ? d.getLastTurns() : [];
     const last = turns?.length ? turns[turns.length-1] : null;
     const boundary = last ? {uid:last.uid, segment:last.segment ?? 0, record:last.record} : null;
     const flight = {id:newPromptFlightID(nowFn()), text, sources:sourceSnapshot, boundary, attachments:[], at:nowFn(), accepted:false};
-    sendingDestinations.add(dest);
+    sendingDestinations.add(identity);
     writePromptFlights(storage, dest, [...readPromptFlights(storage, dest), flight]);
     clearPromptSources(storage, dest);
-    if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged();
+    if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(dest);
     function restoreSources(){
       sourceSnapshot.forEach(source => addPromptSource(storage, dest, source));
       writePromptFlights(storage, dest, readPromptFlights(storage, dest).filter(item => item.id !== flight.id));
-      if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged();
+      if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(dest);
+    }
+    function retireFlight(status = "not-dispatched", trace = null){
+      try {
+        const key = "scimux-retired-flight:" + identity;
+        const prior = JSON.parse(storage.getItem(key) || "[]");
+        const saved = Array.isArray(prior) ? prior : [prior];
+        storage.setItem(key, JSON.stringify([...saved, {text, sources:sourceSnapshot, attachments:items.filter(item=>item.ref).map(item=>({name:item.name,ref:item.ref}))}]));
+      } catch { /* in-memory stage still holds the files */ }
+      const owner = identity.split("\0")[1];
+      const recovered = {
+        "scimux-draft:":text,
+        "scimux-prompt-sources:":JSON.stringify(sourceSnapshot),
+        "scimux-attachments:":JSON.stringify(items.filter(item=>item.ref).map(item=>({name:item.name,ref:item.ref}))),
+        "scimux-delivery-status:":status,
+        "scimux-delivery-trace:":JSON.stringify(trace),
+      };
+      if (!archiveRetiredDraft(storage, dest, owner, recovered)) {
+        const previous = retiredMemory.get(dest) || [];
+        retiredMemory.set(dest, [...previous, {owner, values:{...recovered, "scimux-memory-only:":true}}]);
+      }
+      if (selId() === dest) renderRecovery(dest);
+      writePromptFlights(storage, dest, readPromptFlights(storage, dest).filter(item => item.id !== flight.id));
+      sendingDestinations.delete(identity);
     }
     if (anyUploading(items)) await waitForUploads(items);
+    if (stageIdentity(dest) !== identity) {
+      // Never restore an old flight into the replacement chat's draft. Keep
+      // a separate local recovery copy for the retired identity instead.
+      retireFlight();
+      return;
+    }
     const refs = completedRefs(items);
-    if (!hasSendPayload(text, refs)) { restoreSources(); sendingDestinations.delete(dest); return; }
+    if (!hasSendPayload(text, refs)) { restoreSources(); sendingDestinations.delete(identity); return; }
     const destNode = nodeById(dest);
     if (destNode && String(destNode.agent || "").toLowerCase() === "claude" &&
         isClaudeNativeForkCommand(text)){
       restoreSources();
-      sendingDestinations.delete(dest);
+      sendingDestinations.delete(identity);
       alertFn("Claude /fork is not supported. Use scimux's Fork action to start a fresh chat that inherits launch configuration but not conversation history.");
       return;
     }
     flight.attachments = items.filter(item => item.status === "done" && item.ref).map(item => ({name:item.name, isImage:item.isImage, ref:item.ref}));
     writePromptFlights(storage, dest, readPromptFlights(storage, dest).map(item => item.id === flight.id ? {...item, attachments:flight.attachments} : item));
     if (selId() === dest && !isPeople() && (agentRevisions.get(dest) || 0) === draftRevision) clearPrompt();
-    stage[dest] = (stage[dest] || []).filter(item => !items.includes(item)); /* keep files added while uploads settled */
+    const dispatchedItems = armedOwner ? items.filter(item => item.status === "done" && item.ref) : items;
+    stage[identity] = (stage[identity] || []).filter(item => !dispatchedItems.includes(item)); /* retain unsent and newly staged files */
     if (selId() === dest) renderStage();
     /* optimistic echo, painted before the POST even resolves */
     const chatSig = typeof d.getChatSig === "function" ? d.getChatSig() : "";
@@ -770,20 +924,23 @@ export function createComposerFeature(deps){
     try {
       let res = null;
       if (typeof d.api === "function"){
-        res = await d.api(`/api/nodes/${encodeURIComponent(dest)}/send`, {
+        if (armedOwner && destinationVisit === visit && selId() === dest && !isPeople()) setDestination("people");
+        res = await d.api(`/api/nodes/${encodeURIComponent(dest)}/send${instance ? `?chat_instance=${encodeURIComponent(instance)}` : ""}`, {
           method: "POST",
+          ...(instance ? {headers:{"X-Scimux-Chat-Instance":instance}} : {}),
           body: JSON.stringify({ text, attachments: refs, trace: true }),
         });
       }
-      /* 200 with status:"unconfirmed" is not-delivered — keep the draft */
+      if (stageIdentity(dest) !== identity) { retireFlight(res?.status === "unconfirmed" ? "unconfirmed" : "accepted", res?.trace || null); return; }
+      /* An unconfirmed outcome is not proof of delivery or non-delivery. */
       if (res && res.status === "unconfirmed") {
         restoreSources();
-        alertFn("not delivered — check the terminal");
+        alertFn("Delivery unconfirmed — check the terminal before retrying.");
         if (typeof d.clearSentEchoFor === "function") d.clearSentEchoFor(dest);
         const newer = savedDraft(dest);
         const merged = mergeFailedDraft(text, newer);
-        if (items.length)
-          stage[dest] = restoreStageOnFailure(stage[dest] || [], items);
+        if (dispatchedItems.length)
+          stage[identity] = restoreStageOnFailure(stage[identity] || [], dispatchedItems);
         /* On screen first: the composer is the copy the user can see, and a
            storage that refuses must not be the reason they never get it back. */
         if (selId() === dest && !isPeople()){
@@ -794,10 +951,11 @@ export function createComposerFeature(deps){
         if (typeof d.invalidateChat === "function") d.invalidateChat();
         if (typeof d.scheduleTick === "function") d.scheduleTick(400);
         else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
-        sendingDestinations.delete(dest);
+        sendingDestinations.delete(identity);
         return;
       }
       writePromptFlights(storage, dest, readPromptFlights(storage, dest).map(item => item.id === flight.id ? {...item, accepted:true, address:res?.trace} : item));
+      if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(dest);
       /* Delivered, so the saved copy is finally redundant. Removing it any
          earlier -- as this did, before the request was even made -- destroys
          the one copy that outlives the tab while the send can still fail. */
@@ -808,14 +966,15 @@ export function createComposerFeature(deps){
          beyond the pre-send transcript boundary. */
       if (pending.length && text && !readAwaitingForward(storage, dest, nowFn()))
         writeAwaitingForward(storage, dest, text, turns?.length || 0, nowFn());
-      sendingDestinations.delete(dest);
+      sendingDestinations.delete(identity);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
-      items.forEach(x => {
+      dispatchedItems.forEach(x => {
         if (x.preview) URLImpl.revokeObjectURL(x.preview);
       });
       if (typeof d.scheduleTick === "function") d.scheduleTick(400);
       else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
     } catch (err) {
+      if (stageIdentity(dest) !== identity) { retireFlight("unconfirmed"); return; }
       restoreSources();
       /* surface every failure, including 409 (unconfirmed / in flight / closed) */
       if (err) alertFn(err && err.message);
@@ -823,24 +982,26 @@ export function createComposerFeature(deps){
       if (typeof d.clearSentEchoFor === "function") d.clearSentEchoFor(dest);
       const newer = savedDraft(dest);
       const merged = mergeFailedDraft(text, newer);
-      if (items.length)
-        stage[dest] = restoreStageOnFailure(stage[dest] || [], items);
+      if (dispatchedItems.length)
+        stage[identity] = restoreStageOnFailure(stage[identity] || [], dispatchedItems);
       if (selId() === dest && !isPeople()){
         setPromptText(merged);
         renderStage();
       }
       if (merged) keepDraft(dest, merged);
-      sendingDestinations.delete(dest);
+      sendingDestinations.delete(identity);
     }
   }
 
   /* ---------- event adapters ---------- */
 
   function onPromptInput(){
+    if (!currentComposerIdentity()) return;
+    if (!identityReady) return;
     resizePrompt();
     const id = selId();
-    if (id && isPeople()) { peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1); storage.setItem(peopleDraftKey(id), promptText()); }
-    else if (id) { agentRevisions.set(id, (agentRevisions.get(id) || 0) + 1); keepDraft(id, promptText()); if (!promptText().trim()) { clearPromptSources(storage, id); if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(); } }
+    if (id && isPeople()) { peopleRevisions.set(id, (peopleRevisions.get(id) || 0) + 1); storage.setItem(peopleDraftKey(id), promptText()); if (composerBusy) renderBusy(); }
+    else if (id) { agentRevisions.set(id, (agentRevisions.get(id) || 0) + 1); keepDraft(id, promptText()); if (!promptText().trim()) { clearPromptSources(storage, id); if (typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(id); } }
   }
 
   function onPromptPaste(e){
@@ -884,7 +1045,7 @@ export function createComposerFeature(deps){
   }
 
   function onSendClick(){
-    if (composerBusy && !isPeople()) interruptPrompt();
+    if (stopAvailable()) interruptPrompt();
     else sendPrompt();
   }
 
@@ -1027,6 +1188,7 @@ export function createComposerFeature(deps){
     resizePrompt,
     renderStage,
     onSelect,
+    reconcileIdentity: currentComposerIdentity,
     preparePrompt,
     recoverPromptDraft,
     agentDraftText,

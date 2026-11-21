@@ -114,7 +114,7 @@ import {
 import { hashStr as hashStrDefault } from "./lanes.js";
 import { sendableNodes } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
-import { addPendingForward } from "./storage.js";
+import { addPendingForward, promptSourceKey, bindDraftIdentity } from "./storage.js";
 import { mediaTextAndTiles, legacyMediaTextAndTiles, hasSupportedImageMarker } from "./reference-media.js";
 import {
   createPopoverMenu,
@@ -275,6 +275,11 @@ export function bookmarkListHTML(opts){
    workspace's zones shown one at a time there is no inbox alongside the pane,
    so the pane's paperclip IS the route into placement (it opens the workspace
    in placing mode) and the armed mode is the next screen, not an invisible one. */
+export function sharedBookmarkSource(nt){
+  const source = nt?.team;
+  return source && (source.log === "mirror" || source.log === "comments") && promptSourceKey(source) ? source : null;
+}
+
 export function bookmarkActionsHTML(nt, opts){
   const {
     icons = {}, context = "pane", workspaceOpen = false, singleZone = false,
@@ -284,7 +289,8 @@ export function bookmarkActionsHTML(nt, opts){
   /* Comment is pane-only and withheld on comment rows (no nesting) and when
      the bookmark has no node. When withheld, promote Copy into the primary
      slot so it never has a hole and no action appears twice. */
-  const canComment = context === "pane" && !!(nt && nt.node && !nt.anchor);
+  const shared = sharedBookmarkSource(nt);
+  const canComment = context === "pane" && !!(nt && (nt.node || shared) && !nt.anchor);
   const b = (act, label, icon, extra = "") =>
     `<button class="btn-plain${extra}" data-bmact="${act}" aria-label="${label}">${icon || ""}</button>`;
   const into = icons.ICON_INTO
@@ -294,7 +300,7 @@ export function bookmarkActionsHTML(nt, opts){
   /* Phone / narrow: keep the pre-P5 bar so 6×44 never clips the card. */
   if (overflow){
     return `<div class="actionbar tear">
-        ${nt.node || nt.uid ? b("jump", "open in activity", icons.ICON_JUMP) : ""}
+        ${nt.node || nt.uid || shared ? b("jump", "open in activity", icons.ICON_JUMP) : ""}
         ${canComment ? b("comment", "comment", icons.ICON_COMMENT) : b("copy", "copy", icons.ICON_COPY)}
         ${canPlace ? b("note", "use in note", icons.ICON_CLIP) : ""}
         ${b("more", "more actions", icons.ICON_MENU_DOTS)}
@@ -303,7 +309,7 @@ export function bookmarkActionsHTML(nt, opts){
 
   /* Flat (default / desktop): primaries, then former menu entries in order. */
   let html = `<div class="actionbar tear">`;
-  if (nt && (nt.node || nt.uid)) html += b("jump", "open in activity", icons.ICON_JUMP);
+  if (nt && (nt.node || nt.uid || shared)) html += b("jump", "open in activity", icons.ICON_JUMP);
   if (canComment) html += b("comment", "comment", icons.ICON_COMMENT);
   else html += b("copy", "copy", icons.ICON_COPY);
   if (canPlace) html += b("note", "use in note", icons.ICON_CLIP);
@@ -796,14 +802,21 @@ export function createBookmarksFeature(deps){
           title: "Send bookmark to\u2026",
           role: nt.role || "",
           who: nt.who || "", prov: nt.prov,
-          source: (nt.node || nt.uid) ? {
+          source: sharedBookmarkSource(nt) || ((nt.node || nt.uid) ? {
             node: nt.node || "", turnTime: nt.turnTime || "",
             ...(nt.uid ? { uid: nt.uid, segment: Number(nt.segment) || 0, record: Number(nt.record) || 0 } : {}),
-          } : null,
+          } : null),
+          ...(sharedBookmarkSource(nt) ? {allowNew:false} : {}),
         });
         return;
       }
-      if (act.dataset.bmact === "jump" && (nt.node || nt.uid)){
+      if (act.dataset.bmact === "jump" && sharedBookmarkSource(nt)){
+        if (typeof d.wsOpen === "function" && d.wsOpen() && typeof d.closeWorkspace === "function") d.closeWorkspace();
+        if (typeof d.isDesktop === "function" && !d.isDesktop()) setOpen(false);
+        if (typeof d.jumpToSharedSource !== "function" || !d.jumpToSharedSource(nt.team)) {
+          if (typeof d.toast === "function") d.toast("This shared message is unavailable — the saved text is still here.");
+        }
+      } else if (act.dataset.bmact === "jump" && (nt.node || nt.uid)){
         if (!jumpToChatAddress({
           node: nt.node, uid: nt.uid, segment: nt.segment,
           record: nt.record, turnTime: nt.turnTime, text: nt.text,
@@ -894,7 +907,8 @@ export function createBookmarksFeature(deps){
   /* The one send-to dialogue. Both entry points — a chat bubble's "send to…"
      and a bookmark long-press — land here, so the target filter and order can
      never drift apart between them. Only the sheet title differs. */
-  function openChoiceList({ title = "Choose…", choices = [], onChoose } = {}){
+  function openChoiceList({ title = "Choose…", choices = [], onChoose, bubbleOwner } = {}){
+    d.bubbleController?.chooserOpened(bubbleOwner);
     const listEl = d.sendtoList || (doc && doc.querySelector && doc.querySelector("#sendto_list"));
     if (!listEl) return;
     const titleEl = d.sendtoTitle || (doc && doc.querySelector && doc.querySelector("#sendto_title"));
@@ -922,7 +936,7 @@ export function createBookmarksFeature(deps){
       if (!button) return;
       const choice = choices[Number(button.dataset.choice)];
       listEl.onkeydown = null;
-      if (typeof d.closeSheets === "function") d.closeSheets();
+      if (typeof d.closeSheets === "function") d.closeSheets(bubbleOwner);
       if (choice && typeof onChoose === "function") onChoose(choice);
     };
     listEl.onclick = sendtoClickHandler;
@@ -931,7 +945,8 @@ export function createBookmarksFeature(deps){
     listEl.querySelector?.("[data-choice]")?.focus({preventScroll:true});
   }
 
-  function openSendTo({ text = "", exceptId = "", title = "", role = "", who = "", prov, source = null } = {}){
+  function openSendTo({ text = "", exceptId = "", title = "", role = "", who = "", prov, source = null, allowNew = true } = {}){
+    d.bubbleController?.chooserOpened();
     if (sendtoListWithHandler?.onkeydown === choiceKeyHandler) sendtoListWithHandler.onkeydown = null;
     /* Disclose once, here, rather than at each of the four callers: the two
        branches below (seed a new chat, merge into a live draft) both carry the
@@ -945,7 +960,8 @@ export function createBookmarksFeature(deps){
     const titleEl = d.sendtoTitle ||
       (doc && doc.querySelector && doc.querySelector("#sendto_title"));
     if (titleEl && title) titleEl.textContent = title;
-    const groups = sendableNodes(nodes, { exceptId, pinned: pins });
+    const localOnly = list => list.filter(n => n && typeof n.id === "string" && !n.id.startsWith("team/"));
+    const groups = sendableNodes(localOnly(nodes), { exceptId, pinned: pins });
     const item = n => sendToItemHTML(n, {
       esc,
       laneColor: id => lm.color(id),
@@ -961,10 +977,10 @@ export function createBookmarksFeature(deps){
     /* Always offer "Start new chat…" — including when nothing live can receive.
        Distinct data-newchat (never data-fwd) so the handler cannot treat it as
        a node id. No parent/lineage: openNewActivity clears ncParent. */
-    const newChat =
+    const newChat = allowNew ?
       `<div class="sendto-new" role="separator"></div>` +
       `<button type="button" class="pos-item" data-newchat style="width:100%;text-align:left">` +
-      `Start new chat\u2026</button>`;
+      `Start new chat\u2026</button>` : (!targets ? '<div class="empty">No local chats available.</div>' : "");
     listEl.innerHTML = targets + newChat;
     if (sendtoListWithHandler && sendtoListWithHandler !== listEl &&
         sendtoListWithHandler.onclick === sendtoClickHandler)
@@ -973,6 +989,7 @@ export function createBookmarksFeature(deps){
       /* data-newchat before data-fwd — a shared attribute would open a phantom chat. */
       const startNew = ev.target.closest && ev.target.closest("[data-newchat]");
       if (startNew){
+        if (!allowNew) return;
         if (typeof d.closeSheets === "function") d.closeSheets();
         if (typeof d.openNewActivity === "function")
           d.openNewActivity({ prompt: body, focusTitle: true, forwardSources: source ? [source] : [] });
@@ -983,6 +1000,14 @@ export function createBookmarksFeature(deps){
       const b = ev.target.closest && ev.target.closest("[data-fwd]");
       if (!b) return;
       const tgt = b.dataset.fwd;
+      const available = sendableNodes(localOnly(typeof d.orderedNodes === "function" ? d.orderedNodes() : []), { exceptId, pinned: pins });
+      if (![...groups.pinned, ...groups.recent].some(n => n.id === tgt) ||
+          ![...available.pinned, ...available.recent].some(n => n.id === tgt)) return;
+      const target = [...available.pinned, ...available.recent].find(n => n.id === tgt);
+      if (!bindDraftIdentity(storage, tgt, target?.instance_id)) {
+        if (typeof d.toast === "function") d.toast("Draft storage is unavailable for this chat.");
+        return;
+      }
       const prev = (storage && storage.getItem(DRAFT_KEY_PREFIX + tgt)) || "";
       if (storage)
         storage.setItem(DRAFT_KEY_PREFIX + tgt, mergeBookmarkIntoDraft(prev, body));

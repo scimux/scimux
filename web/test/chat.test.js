@@ -39,6 +39,8 @@ import {
   splitPermTitle,
   bubbleActionsHTML,
   bubbleMarkersHTML,
+  sentToMarkerModel,
+  sharedBookmarkMarkerModel,
   keyRowHTML,
   peekBlockHTML,
   echoBubbleHTML,
@@ -711,6 +713,41 @@ test("Claude permission click posts dialog_id without claiming request identity"
   assert.equal(body.dialog_id, "epoch-click-7");
   assert.equal(body.request_id, undefined);
   ctx.feature.destroy();
+});
+
+test('a rejected approval from an earlier visit cannot alter a later visit', async () => {
+  let reject;const alerts=[];
+  const ctx=makeFeature({nodes:acpApprovalNodes(),chatPayload:acpApprovalPayload(),
+    api:path=>path.endsWith('/key')?new Promise((_resolve,fail)=>{reject=fail;}):Promise.resolve({}),deps:{alert:message=>alerts.push(message)}});
+  ctx.feature.bind();await ctx.feature.render();const key=el('button',{dataset:{key:'1',requestId:'old'}});
+  firstListener(ctx.roots.keyrow,'click')({target:key});
+  ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);
+  ctx.feature.onSelectChange();ctx.setSel('n1');ctx.setSelGen(3);await ctx.feature.render();
+  const before=ctx.roots.keyrow.innerHTML;reject(Error('old approval error'));await new Promise(r=>setImmediate(r));
+  assert.deepEqual(alerts,[]);assert.equal(ctx.roots.keyrow.innerHTML,before);ctx.feature.destroy();
+});
+
+test('a successful approval from an earlier visit does not schedule work for the new visit', async () => {
+  let resolve,ticks=0;
+  const ctx=makeFeature({nodes:acpApprovalNodes(),chatPayload:acpApprovalPayload(),api:path=>path.endsWith('/key')?new Promise(done=>{resolve=done;}):Promise.resolve({}),deps:{scheduleTick:()=>ticks++}});
+  ctx.feature.bind();await ctx.feature.render();firstListener(ctx.roots.keyrow,'click')({target:el('button',{dataset:{key:'1'}})});
+  ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);resolve({});await new Promise(r=>setImmediate(r));
+  assert.equal(ticks,0);ctx.feature.destroy();
+});
+
+test('an accepted approval schedules the fallback tick for its current visit', async () => {
+  let ticks=0;const timers=[];
+  const ctx=makeFeature({nodes:acpApprovalNodes(),chatPayload:acpApprovalPayload(),deps:{scheduleTick:null,tick:()=>ticks++,setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{}}});
+  ctx.feature.bind();await ctx.feature.render();firstListener(ctx.roots.keyrow,'click')({target:el('button',{dataset:{key:'1'}})});
+  await new Promise(r=>setImmediate(r));const retry=timers.find(timer=>timer.ms===400);assert.ok(retry);retry.fn();assert.equal(ticks,1);ctx.feature.destroy();
+});
+
+test('a delayed approval tick cannot run in a different visit', async () => {
+  let ticks=0;const timers=[];
+  const ctx=makeFeature({nodes:acpApprovalNodes(),chatPayload:acpApprovalPayload(),deps:{scheduleTick:null,tick:()=>ticks++,setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{}}});
+  ctx.feature.bind();await ctx.feature.render();firstListener(ctx.roots.keyrow,'click')({target:el('button',{dataset:{key:'1'}})});
+  await new Promise(r=>setImmediate(r));const retry=timers.find(timer=>timer.ms===400);assert.ok(retry);
+  ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);retry.fn();assert.equal(ticks,0);ctx.feature.destroy();
 });
 
 test("pending_prompt seeds a pale echo; restore_draft clears it", async () => {
@@ -1962,7 +1999,7 @@ function defaultChatPayload(overrides = {}){
 }
 
 function makeFeature(overrides = {}){
-  const roots = makeRoots();
+  const roots = overrides.roots || makeRoots();
   const nodes = overrides.nodes || [{
     id: "n1", title: "Alpha", agent: "claude", model: "sonnet",
     live: "quiet", attention: "", lane_id: "L1", description: "d",
@@ -3092,6 +3129,93 @@ test("tmux numbered key click is one semantic POST without delayed Enter", async
   ctx.feature.destroy();
 });
 
+test("switching from active local chat to received chat clears work pulse", async () => {
+  const ctx = makeFeature({
+    chatPayload: {
+      turns: [{ role: "user", text: "synthetic" }],
+      live: "active", delivery: "ok", source: "tmux",
+      chat_started: "2026-01-01T00:00:00Z", prior_turns: 0, assets: {},
+    },
+  });
+  try {
+    await ctx.feature.render();
+    assert.equal(ctx.roots.workpulse.classList.contains("on"), true);
+    // Match app.select: retire the old selection before selecting received;
+    // received rendering does not call the native chat renderer.
+    ctx.feature.onSelectChange();
+    ctx.setSel("team/s/o/c/g");
+    ctx.setSelGen(2);
+    assert.equal(ctx.roots.workpulse.classList.contains("on"), false,
+      "received chat must not inherit local activity");
+  } finally {
+    ctx.feature.destroy();
+  }
+});
+
+test("history from an earlier visit cannot refresh the same node after A-B-A", async () => {
+  let resolveHistory;
+  const ctx = makeFeature({api:(path)=> path.includes('history=1')
+    ? new Promise(resolve=>{resolveHistory=resolve;}) : Promise.resolve({turns:[],assets:{}})});
+  const pending = ctx.feature.loadHistory('n1','');
+  ctx.feature.onSelectChange(); ctx.setSel('team/s/o/c/g'); ctx.setSelGen(2);
+  ctx.feature.onSelectChange(); ctx.setSel('n1'); ctx.setSelGen(3);
+  resolveHistory({segments:[],assets:{}}); await pending;
+  assert.equal(ctx.apiCalls.filter(call=>call.path.includes('/chat') && !call.path.includes('history=1')).length,0);
+  ctx.feature.destroy();
+});
+
+test('history errors are shown only for the visit that requested them', async () => {
+  let reject;const alerts=[];
+  const ctx=makeFeature({api:()=>new Promise((_resolve,fail)=>{reject=fail;}),deps:{alert:message=>alerts.push(message)}});
+  let pending=ctx.feature.loadHistory('n1','');reject(Error('current'));await pending;assert.deepEqual(alerts,['current']);
+  pending=ctx.feature.loadHistory('n1','');ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);
+  ctx.feature.onSelectChange();ctx.setSel('n1');ctx.setSelGen(3);reject(Error('old'));await pending;
+  assert.deepEqual(alerts,['current']);ctx.feature.destroy();
+});
+
+test("retiring a local selection clears its schema warning before a received chat opens", async () => {
+  const ctx=makeFeature({nodes:[{id:'n1',agent:'muse',muse_schema_warning:'muse_schema_fingerprint_mismatch'}]});
+  await ctx.feature.render(); assert.equal(ctx.roots.muse_schema_warn.hidden,false);
+  ctx.feature.onSelectChange(); ctx.setSel('team/s/o/c/g'); ctx.setSelGen(2);
+  assert.equal(ctx.roots.muse_schema_warn.hidden,true);
+  ctx.feature.destroy();
+});
+
+test('cold loading and stale A response cannot repaint after A-received-A or no selection', async () => {
+  let release;const timers=[];let calls=0;
+  const ctx=makeFeature({chatConditional:()=>++calls===1?new Promise(resolve=>{release=resolve;}):({status:200,etag:'new',data:{...defaultChatPayload(),live:'quiet'}}),
+    deps:{setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{}}});
+  const old=ctx.feature.render();timers[0]();assert.equal(ctx.roots.chatloading.hidden,false);
+  ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);
+  assert.equal(ctx.roots.chatloading.hidden,true);assert.equal(ctx.roots.convtools.hidden,true);timers[0]();assert.equal(ctx.roots.chatloading.hidden,true);
+  ctx.feature.onSelectChange();ctx.setSel('n1');ctx.setSelGen(3);await ctx.feature.render();
+  release({status:200,etag:'old',data:{...defaultChatPayload(),live:'active'}});await old;
+  assert.equal(ctx.roots.workpulse.classList.contains('on'),false);
+  ctx.feature.onSelectChange();ctx.setSel('');ctx.setSelGen(4);await ctx.feature.render();
+  ctx.feature.renderHead();
+  assert.equal(ctx.roots.workpulse.classList.contains('on'),false);assert.equal(ctx.roots.convtools.hidden,true);assert.equal(ctx.effects.setComposerClosed.at(-1),true);
+  ctx.feature.destroy();
+});
+
+test('old peek response cannot repaint a later visit to the same node', async () => {
+  let release,calls=0;const quiet={...defaultChatPayload(),live:'quiet'};
+  const ctx=makeFeature({api:path=>path.includes('/peek')?new Promise(resolve=>{release=resolve;}):Promise.resolve({}),
+    chatConditional:()=>({status:200,etag:'x',data:++calls===1?{...quiet,attention:'inspect',fallback:true}:quiet})});
+  const old=ctx.feature.render();await new Promise(r=>setImmediate(r));assert.equal(typeof release,'function');
+  ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);
+  ctx.feature.onSelectChange();ctx.setSel('n1');ctx.setSelGen(3);await ctx.feature.render();
+  release('stale private pane');await old;assert.doesNotMatch(ctx.roots.msgs.innerHTML,/stale private pane/);
+  assert.equal(ctx.roots.workpulse.classList.contains('on'),false);ctx.feature.destroy();
+});
+
+test('retiring a compacting chat for no selection removes its visible status and controls', async () => {
+  const ctx=makeFeature({chatPayload:compactingPayload(true)});ctx.feature.bind();await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML,/compacting/);assert.equal(ctx.effects.setComposerBusy.at(-1),true);
+  ctx.feature.onSelectChange();ctx.setSel('');ctx.setSelGen(2);await ctx.feature.render();
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/compacting/);assert.equal(ctx.effects.setComposerBusy.at(-1),false);
+  assert.equal(ctx.roots.workpulse.classList.contains('on'),false);assert.equal(ctx.roots.convtools.hidden,true);ctx.feature.destroy();
+});
+
 test("work-pulse start/stop via activity chrome", async () => {
   const { feature, roots } = makeFeature({
     chatPayload: {
@@ -3767,6 +3891,14 @@ test("P2b 5: a pending measure observer is released on destroy", async () => {
   assert.equal(obs.disconnected, true, "destroy must not leak the observer");
 });
 
+test('a retired approval observer cannot replace the current visit observer', async () => {
+  const spy=roSpy();const ctx=makeFeature({nodes:acpApprovalNodes(),chatPayload:acpApprovalPayload(),deps:{ResizeObserver:spy.RO,requestAnimationFrame:()=>0}});
+  ctx.roots.keyrow._permMaskMetrics={scrollHeight:0,clientHeight:0};ctx.feature.bind();await ctx.feature.render();
+  const old=spy.forMask(),oldMask=old.targets[0];ctx.feature.onSelectChange();ctx.setSel('n1');ctx.setSelGen(2);await ctx.feature.render();
+  const current=spy.observers.filter(o=>o.targets.some(t=>String(t.className||'').includes('permask'))).at(-1);
+  assert.notEqual(current,old);oldMask.clientHeight=200;old.cb([]);assert.equal(current.disconnected,false);ctx.feature.destroy();
+});
+
 test("P2b 6: an observer firing on a still-empty box must not spin", async () => {
   const observers = [];
   class RO {
@@ -4122,6 +4254,26 @@ test("P1 DOM 8: pin while clientHeight is 0 re-asserts once the box gains height
   assert.ok(atBottom(roots.msgs),
     `after layout, expected near bottom, got scrollTop=${roots.msgs.scrollTop}`);
   feature.destroy();
+});
+
+test('retired scroll callbacks cannot move a received chat', async () => {
+  const rafs=[],observers=[];
+  const ctx=makeFeature({deps:{requestAnimationFrame:fn=>{rafs.push(fn);return rafs.length;},ResizeObserver:class{constructor(cb){observers.push(cb);}observe(){}disconnect(){}}}});
+  ctx.roots.msgs.scrollHeight=3000;ctx.roots.msgs.clientHeight=0;ctx.feature.onSelectChange();await ctx.feature.render();
+  assert.ok(rafs.length);assert.ok(observers.length);
+  ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);
+  ctx.roots.msgs.clientHeight=600;ctx.roots.msgs.scrollTop=100;
+  for(const fn of rafs)fn();for(const fn of observers)fn([]);
+  assert.equal(ctx.roots.msgs.scrollTop,100);ctx.feature.destroy();
+});
+
+test('missing chat roots and failing layout observers remain safe', async () => {
+  const rafs=[],roots=makeRoots();roots.msgs=null;roots.chathead=null;
+  const missing=makeFeature({roots,deps:{requestAnimationFrame:fn=>{rafs.push(fn);return rafs.length;}}});
+  missing.feature.renderHead();await missing.feature.render();missing.feature.jumpToNow();assert.ok(rafs.length);rafs.forEach(fn=>fn());missing.feature.destroy();
+  const broken=makeFeature({nodes:[{id:'n1',title:'Synthetic'}],deps:{ResizeObserver:class{constructor(){throw Error('observer unavailable');}},requestAnimationFrame:()=>0}});
+  broken.roots.msgs.clientHeight=0;broken.feature.onSelectChange();await broken.feature.render();
+  assert.equal(broken.roots.chatagentlogo.title,'agent');broken.feature.destroy();
 });
 
 test("P1 DOM 9: ResizeObserver re-clamps when content shrinks after a pin", async () => {
@@ -5187,6 +5339,15 @@ function tapBubbleTurn(ctx, bk = "i:0"){
   return turn;
 }
 
+test('ordinary human bubble exposes its action row to keyboard activation', async () => {
+ const ctx=makeFeature({chatPayload:{turns:[{role:'user',text:'synthetic'}],live:'quiet'}});ctx.feature.bind();await ctx.feature.render();
+ assert.match(ctx.roots.msgs.innerHTML,/class="bubble"[^>]*tabindex="0"/);
+ const turn=el('div',{className:'turn user',dataset:{bk:'i:0'}}),bubble=el('div',{className:'bubble'});turn.appendChild(bubble);ctx.roots.msgs.appendChild(turn);
+ const closest=bubble.closest.bind(bubble);bubble.closest=selector=>selector==='.bubble'?bubble:closest(selector);
+ let prevented=false;firstListener(ctx.roots.msgs,'keydown')({key:'Enter',target:bubble,preventDefault(){prevented=true}});
+ assert.equal(prevented,true);assert.equal(bubActionRows(ctx).length,1);ctx.feature.destroy();
+});
+
 /* A document whose selection reports what a click-drag would have left behind. */
 function selectingDocument(text){
   return {
@@ -5274,6 +5435,41 @@ function clickBact(ctx, bact){
   return btn;
 }
 
+test('ordinary Send to preserves the exact source address and role', async () => {
+ const sent=[],ctx=makeFeature({chatPayload:{turns:[{role:'assistant',text:'synthetic answer',uid:'log',segment:2,record:7}],live:'quiet'},deps:{openSendTo:value=>sent.push(value)}});
+ ctx.feature.bind();await ctx.feature.render();tapBubbleTurn(ctx);clickBact(ctx,'sendto');
+ assert.equal(sent.length,1);assert.equal(sent[0].role,'assistant');assert.deepEqual(sent[0].source,{node:'n1',turnTime:'',uid:'log',segment:2,record:7});ctx.feature.destroy();
+});
+
+test('an empty conditional response retires loading without painting stale chat', async () => {
+ const ctx=makeFeature({chatConditional:async()=>({status:200,data:null})});ctx.feature.bind();
+ await ctx.feature.render();assert.doesNotMatch(ctx.roots.msgs.innerHTML,/synthetic answer/);ctx.feature.destroy();
+});
+
+test('keyboard events outside a turn and an unavailable prompt adapter do not prepare text', async () => {
+ const ctx=makeFeature({chatPayload:{turns:[{role:'user',text:'synthetic'}],live:'quiet'},deps:{canPreparePrompt:()=>true,preparePrompt:null}});
+ ctx.feature.bind();await ctx.feature.render();firstListener(ctx.roots.msgs,'keydown')({key:'Enter',target:el('div'),preventDefault(){throw Error('unexpected activation')}});
+ tapBubbleTurn(ctx);assert.doesNotThrow(()=>clickBact(ctx,'prompt'));ctx.feature.destroy();
+});
+
+test('bookmark capture uses empty optional fields and suppresses an exact duplicate arriving during capture', async () => {
+ let finish;const bookmarks=[],ops=[];
+ const ctx=makeFeature({nodes:[{id:'n1',title:'Local'}],chatPayload:{turns:[{role:'assistant'}],live:'quiet'},deps:{bookmarks:()=>bookmarks,captureBookmark:value=>new Promise(resolve=>{finish=()=>resolve({...value,uid:'u',segment:0,record:1})}),uiMutate:op=>ops.push(op)}});
+ ctx.feature.bind();await ctx.feature.render();tapBubbleTurn(ctx);clickBact(ctx,'bookmark');
+ bookmarks.push({uid:'u',segment:0,record:1});finish();await Promise.resolve();assert.deepEqual(ops,[]);ctx.feature.destroy();
+});
+
+test('bookmark capture tolerates an unavailable list and missing optional turn fields', async () => {
+ let bookmarks=[];const saved=[],ctx=makeFeature({chatPayload:{turns:[{role:'user'}],live:'quiet'},deps:{bookmarks:()=>bookmarks,uiMutate:op=>saved.push(op)}});
+ ctx.feature.bind();await ctx.feature.render();tapBubbleTurn(ctx);bookmarks=null;clickBact(ctx,'bookmark');
+ assert.equal(saved.length,1);assert.equal(saved[0].bookmark.text,'');assert.equal(saved[0].bookmark.turnTime,'');ctx.feature.destroy();
+});
+
+test('bookmark duplicate comparison tolerates missing text and time', async () => {
+ const ops=[],ctx=makeFeature({chatPayload:{turns:[{role:'user'}],live:'quiet'},deps:{bookmarks:()=>[{node:'n1',turnTime:'',text:''}],uiMutate:op=>ops.push(op)}});
+ ctx.feature.bind();await ctx.feature.render();tapBubbleTurn(ctx);clickBact(ctx,'bookmark');assert.deepEqual(ops,[]);ctx.feature.destroy();
+});
+
 test("P3C: copy action calls copyText and shows copied ack", async () => {
   const copied = [];
   const ctx = makeFeature({
@@ -5351,6 +5547,14 @@ test("image bookmark waits for capture and ignores a late response after selecti
   await Promise.resolve(); await Promise.resolve();
   assert.equal(ops.length, 0);
   ctx.feature.destroy();
+});
+
+test('bookmark capture from an earlier visit cannot commit after returning to the same chat', async () => {
+ let finish;const ops=[];
+ const ctx=makeFeature({chatPayload:{turns:[{role:'assistant',text:'synthetic',uid:'u',record:1}],live:'quiet'},deps:{bookmarks:()=>[],uiMutate:op=>ops.push(op),captureBookmark:()=>new Promise(resolve=>{finish=resolve})}});
+ ctx.feature.bind();await ctx.feature.render();tapBubbleTurn(ctx,'i:0');clickBact(ctx,'bookmark');
+ ctx.feature.onSelectChange();ctx.setSel('n2');ctx.setSelGen(2);ctx.feature.onSelectChange();ctx.setSel('n1');ctx.setSelGen(3);
+ finish({text:'synthetic',uid:'u',segment:0,record:1});await Promise.resolve();await Promise.resolve();assert.deepEqual(ops,[]);ctx.feature.destroy();
 });
 
 test("image bookmark capture failure is retryable through the real bubble action", async () => {
@@ -6705,7 +6909,7 @@ function foldBubble(role, record, text, segment = 0, uid = "log-1"){
 
 function foldTurnHTML(i, role, time, text){
   return '\n      <div class="turn ' + role + '" data-i="' + i + '" data-bk="i:' + i + '">'
-    + '\n\t\t<div class="bubble" title="' + role + "|" + time + '">' + text + "</div>"
+    + '\n\t\t<div class="bubble" title="' + role + "|" + time + '" tabindex="0">' + text + "</div>"
     + "\n      </div>";
 }
 
@@ -8504,6 +8708,80 @@ test('in-flight source keeps its exact local marker while awaiting delivery', as
  ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/Awaiting prompt delivery/);ctx.feature.destroy();
 });
 
+test('an accepted prompt source has a distinct unconfirmed marker', async () => {
+ const source={uid:'u',segment:0,record:1},flight={id:1,text:'accepted',accepted:true,sources:[source]};
+ const storage={getItem:key=>key==='scimux-prompt-flights:n1'?JSON.stringify([flight]):null,setItem(){},removeItem(){}};
+ const ctx=makeFeature({storage,chatPayload:{turns:[{...source,role:'assistant',text:'answer'}],live:'quiet',source:'acp'}});
+ ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/Accepted; awaiting confirmation/);
+ assert.doesNotMatch(ctx.roots.msgs.innerHTML,/Awaiting prompt delivery|Sent as prompt/);ctx.feature.destroy();
+});
+
+test('an accepted source with unavailable confirmation never claims a confirmed send', async () => {
+ const source={uid:'u',segment:0,record:1},flight={id:1,text:'accepted',accepted:true,terminalUnknown:true,sources:[source]};
+ const storage={getItem:key=>key==='scimux-prompt-flights:n1'?JSON.stringify([flight]):null,setItem(){},removeItem(){}};
+ const ctx=makeFeature({storage,chatPayload:{turns:[{...source,role:'assistant',text:'answer'}],live:'quiet',source:'acp'}});
+ ctx.feature.bind();await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/Accepted; confirmation unavailable/);
+ assert.doesNotMatch(ctx.roots.msgs.innerHTML,/Sent as prompt/);ctx.feature.destroy();
+});
+
+test('prompt markers repaint the exact current local and discussion sources without a new poll', async () => {
+ const local={uid:'u',segment:0,record:1},team={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,text:'draft',accepted:true,sources:[local,team]}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ const copy={key:'s/o/c/g',uid:'u',view:{...team,title:'Shared'},names:{o:'Owner'},people:{},mirrors:[],comments:[{seq:1,anchor:0,author:'o',mine:false,text:'comment'}]};
+ const ctx=makeFeature({storage,chatPayload:{turns:[{...local,role:'assistant',text:'answer'}],log_uid:'u',segment_index:0,live:'quiet',source:'acp'},deps:{ownerDiscussion:()=>[copy]}});
+ await ctx.feature.render();const updates=[];
+ const bubble=label=>({querySelector:()=>({contains:()=>false,remove:()=>updates.push(label+' removed')}),insertAdjacentHTML:(_where,html)=>updates.push(label+' '+html)});
+ const turn={dataset:{bk:'i:0'},querySelector:()=>bubble('local')},discussion={dataset:{gkey:'s/o/c/g',cseq:'1'},querySelector:()=>bubble('discussion')};
+ ctx.roots.msgs.querySelectorAll=selector=>selector==='.turn[data-bk]'?[turn]:selector==='.gmsg[data-gkey][data-cseq]'?[discussion]:[];
+ ctx.feature.refreshPromptMarkers('other');assert.deepEqual(updates,[]);
+ ctx.feature.refreshPromptMarkers('n1');assert.equal(updates.length,4);assert.match(updates[1],/Accepted; awaiting confirmation/);assert.match(updates[3],/Accepted; awaiting confirmation/);
+ values.clear();ctx.feature.refreshPromptMarkers('n1');assert.deepEqual(updates.slice(4),['local removed','discussion removed']);
+ values.set('scimux-prompt-flights:n1',JSON.stringify([{id:2,accepted:true,sources:[local]}]));
+ ctx.roots.msgs.querySelectorAll=selector=>selector==='.turn[data-bk]'?[{dataset:{bk:'missing'},querySelector:()=>null},{dataset:{bk:'i:0'},querySelector:()=>({querySelector:()=>null,insertAdjacentHTML:(_where,html)=>updates.push(html)})}]:[];
+ ctx.feature.refreshPromptMarkers('n1');assert.match(updates.at(-1),/Accepted; awaiting confirmation/);
+ ctx.roots.msgs.querySelectorAll=selector=>selector==='.turn[data-bk]'?[{dataset:{bk:'i:0'},querySelector:()=>null}]:[];
+ ctx.feature.refreshPromptMarkers('n1');assert.equal(updates.length,7);
+ ctx.feature.onSelectChange();ctx.setSel('team/s/o/c/g');ctx.setSelGen(2);ctx.feature.refreshPromptMarkers('n1');assert.equal(updates.length,7);ctx.feature.destroy();
+});
+
+test('refreshing prompt markers preserves focus on an existing bookmark control', async () => {
+ const source={uid:'u',record:1},values=new Map([['scimux-prompt-flights:n1',JSON.stringify([{id:1,accepted:true,sources:[source]}])]]);
+ const storage={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)};
+ const focused={dataset:{bmarker:'bookmark'}};let restored=0;
+ const doc={activeElement:focused,createElement:tag=>el(tag),querySelector:()=>null};
+ const ctx=makeFeature({storage,chatPayload:{turns:[{...source,role:'assistant',text:'answer'}],live:'quiet',source:'acp'},deps:{document:doc}});
+ await ctx.feature.render();const old={contains:x=>x===focused,remove(){}},replacement={focus:()=>restored++};
+ const bubble={querySelector:selector=>selector==='.bubblemarkers'?old:selector==='[data-bmarker="bookmark"]'?replacement:null,insertAdjacentHTML(){}};
+ ctx.roots.msgs.querySelectorAll=selector=>selector==='.turn[data-bk]'?[{dataset:{bk:'i:0'},querySelector:()=>bubble}]:[];
+ ctx.feature.refreshPromptMarkers('n1');assert.equal(restored,1);ctx.feature.destroy();
+});
+
+test('owner shared timeline labels human prompts without a destination suffix', async () => {
+ const copy={key:'s/o/c/g',uid:'u',view:{server:'s',owner:'o',chat:'c',generation:'g',title:'Shared'},names:{},people:{},mirrors:[],comments:[]};
+ const ctx=makeFeature({chatPayload:{turns:[{uid:'u',record:1,role:'user',text:'human'}],log_uid:'u',live:'quiet',source:'acp'},deps:{ownerDiscussion:()=>[copy]}});
+ await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/<div class="gwho">You<\/div>/);assert.doesNotMatch(ctx.roots.msgs.innerHTML,/You · Agent/);ctx.feature.destroy();
+});
+
+test('owner shared timeline names the actual assistant harness', async () => {
+ const copy={key:'s/o/c/g',uid:'u',view:{server:'s',owner:'o',chat:'c',generation:'g',title:'Shared'},names:{},people:{},mirrors:[],comments:[]};
+ const ctx=makeFeature({nodes:[{id:'n1',title:'Alpha',agent:'codex'}],chatPayload:{turns:[{uid:'u',record:1,role:'assistant',agent:'Codex',text:'answer'}],log_uid:'u',live:'quiet',source:'acp'},deps:{ownerDiscussion:()=>[copy]}});
+ await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/<div class="gwho">Codex · agent<\/div>/);ctx.feature.destroy();
+});
+
+test('a non-human, non-assistant local record does not acquire a shared speaker label', async () => {
+ const copy={key:'s/o/c/g',uid:'u',view:{server:'s',owner:'o',chat:'c',generation:'g',title:'Shared'},names:{},people:{},mirrors:[],comments:[]};
+ const ctx=makeFeature({chatPayload:{turns:[{uid:'u',record:1,role:'system',text:'system record'}],log_uid:'u',live:'quiet'},deps:{ownerDiscussion:()=>[copy]}});
+ await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/system record/);assert.doesNotMatch(ctx.roots.msgs.innerHTML,/class="gwho"/);ctx.feature.destroy();
+});
+
+test('retiring a chat with missing agent metadata leaves approval controls reset', async () => {
+ const roots=makeRoots();roots.autoapprove=el('button');
+ const ctx=makeFeature({roots,nodes:[{id:'n1',title:'Unknown'}],chatPayload:{turns:[],live:'quiet',source:'acp'}});
+ await ctx.feature.render();ctx.feature.onSelectChange();
+ assert.equal(ctx.roots.autoapprove.getAttribute('aria-pressed'),'false');ctx.feature.destroy();
+});
+
 test('chat navigation cancels description editing and retracts its optimistic echo', () => {
  const ctx=makeFeature();ctx.feature.setSentEcho({node:'n1',text:'queued'});ctx.feature.clearSentEchoFor('n1');ctx.feature.cancelEditorsForNav();ctx.feature.destroy();
 });
@@ -8714,6 +8992,42 @@ test('an active discussion editor survives a changed timeline and keeps its anch
  assert.deepEqual(selection,[3,7,'forward']); assert.equal(body.scrollTop,110);
 });
 
+test('an open discussion action row survives a local timeline rebuild', async () => {
+ const {captureDiscussionEditor,restoreDiscussionEditor}=await import('../js/chat.js');let focused=false;
+ const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},getBoundingClientRect:()=>({top:120}),after(row){this.row=row}};
+ const button={focus(){focused=true}},row={previousElementSibling:turn,contains:x=>x===button};
+ const body={scrollTop:80,querySelector:s=>s==='[data-gactions]'?row:null};
+ const saved=captureDiscussionEditor(body,{activeElement:button});assert.ok(saved);
+ const fresh={dataset:{...turn.dataset},replaceWith(old){this.replaced=old}};body.querySelectorAll=()=>[fresh];
+ assert.equal(restoreDiscussionEditor(body,saved),true);assert.equal(fresh.replaced,turn);assert.equal(turn.row,row);assert.equal(focused,true);
+});
+
+test('retaining a discussion action row keeps newly rendered source markers', async () => {
+ const {captureDiscussionEditor,restoreDiscussionEditor}=await import('../js/chat.js');
+ const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},innerHTML:'<div class="bubble">message</div>',getBoundingClientRect:()=>({top:120}),after(row){this.row=row}};
+ const row={previousElementSibling:turn,contains:()=>false},body={scrollTop:0,querySelector:s=>s==='[data-gactions]'?row:null};
+ const saved=captureDiscussionEditor(body,{}),fresh={dataset:{...turn.dataset},innerHTML:'<div class="bubble"><button data-bmarker="prompt">confirmed</button>message</div>',replaceWith(){}};
+ body.querySelectorAll=()=>[fresh];assert.equal(restoreDiscussionEditor(body,saved),true);assert.match(turn.innerHTML,/confirmed/);
+});
+
+test('a focused discussion marker remains focused when its bubble refreshes', async () => {
+ const {captureDiscussionEditor,restoreDiscussionEditor}=await import('../js/chat.js');let focused=false;
+ const oldMarker={dataset:{bmarker:'prompt'}},newMarker={focus(options){focused=options.preventScroll}};
+ const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},innerHTML:'old',contains:value=>value===oldMarker,querySelector:s=>s==='[data-bmarker="prompt"]'?newMarker:null,getBoundingClientRect:()=>({top:120}),after(){}};
+ const row={previousElementSibling:turn,contains:()=>false},body={scrollTop:0,querySelector:s=>s==='[data-gactions]'?row:null};
+ const saved=captureDiscussionEditor(body,{activeElement:oldMarker}),fresh={dataset:{...turn.dataset},innerHTML:'new',replaceWith(){}};
+ body.querySelectorAll=()=>[fresh];assert.equal(restoreDiscussionEditor(body,saved),true);assert.equal(focused,true);
+});
+
+test('a focused discussion bubble remains focused when its content refreshes', async () => {
+ const {captureDiscussionEditor,restoreDiscussionEditor}=await import('../js/chat.js');let focused=false;
+ const oldBubble={classList:{contains:name=>name==='bubble'}},newBubble={focus(options){focused=options.preventScroll}};
+ const turn={dataset:{gkey:'s/o/u/g',cseq:'2'},innerHTML:'old',contains:value=>value===oldBubble,querySelector:s=>s==='.bubble'?newBubble:null,getBoundingClientRect:()=>({top:120}),after(){}};
+ const row={previousElementSibling:turn,contains:()=>false},body={scrollTop:0,querySelector:s=>s==='[data-gactions]'?row:null};
+ const saved=captureDiscussionEditor(body,{activeElement:oldBubble}),fresh={dataset:{...turn.dataset},innerHTML:'new',replaceWith(){}};
+ body.querySelectorAll=()=>[fresh];assert.equal(restoreDiscussionEditor(body,saved),true);assert.equal(focused,true);
+});
+
 test('an exact source jump wins over an open editor anchor on a long rebuilt timeline', async () => {
  let turns = [{uid:'u',segment:0,record:1,role:'user',text:'destination'}];
  const doc = {activeElement:null, createElement:tag=>el(tag), querySelector:()=>null};
@@ -8897,11 +9211,108 @@ test('multiple prompt destinations advertise their count and dialog', () => {
   assert.match(two, /bmarkercount[^>]*>2</);
 });
 
-test('shared owner timeline distinguishes Agent prompts from People comments', async () => {
+test('sent-to markers match the complete shared source identity', () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const other={...source,seq:2};const links=[{source,destination:{node:'n1'}},{source:other,destination:{node:'n2'}}];
+ assert.deepEqual(sentToMarkerModel(source,'',links),[links[0]]);
+ assert.deepEqual(sentToMarkerModel({...source,generation:'other'},'',links),[]);
+});
+
+test('shared bookmark markers match the exact source rather than duplicate text', () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ const bookmarks=[{t:'one',text:'same',team:{...source,seq:1}},{t:'two',text:'same',team:source}];
+ assert.equal(sharedBookmarkMarkerModel(source,bookmarks).bookmark.t,'two');
+ assert.equal(sharedBookmarkMarkerModel({...source,generation:'other'},bookmarks),null);
+});
+
+test('owner discussion renders the ordinary bookmark and send-to markers', async () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'comments',seq:1};
+ const copy={uid:'u',key:'s/o/u/g',view:{...source},names:{a:'A'},people:{},mirrors:[{seq:1,local_segment:0,local_record:1}],comments:[{seq:1,anchor:1,text:'comment',author:'a'}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy],bookmarks:()=>[{t:'one',team:source}],forwardLinks:()=>[{source,destination:{node:'n2'}}]},chatPayload:{turns:[{role:'assistant',uid:'u',record:1,text:'answer'}],log_uid:'u',live:'quiet'}});
+ await ctx.feature.render();assert.match(ctx.roots.msgs.innerHTML,/aria-label="Open bookmark"/);assert.match(ctx.roots.msgs.innerHTML,/aria-label="Open sent-to destination"/);ctx.feature.destroy();
+});
+
+test('owner discussion bookmark marker opens the exact saved bookmark', async () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'comments',seq:1},opened=[];
+ const copy={uid:'u',key:'s/o/u/g',view:{...source},names:{a:'A'},people:{},mirrors:[{seq:1,local_segment:0,local_record:1}],comments:[{seq:1,anchor:1,text:'comment',author:'a'}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy],bookmarks:()=>[{t:'saved',team:source}],openBookmark:t=>opened.push(t)},chatPayload:{turns:[{role:'assistant',uid:'u',record:1,text:'answer'}],log_uid:'u',live:'quiet'}});
+ ctx.feature.bind();await ctx.feature.render();const turn=el('div',{className:'turn',dataset:{gkey:'s/o/u/g',cseq:'1'}}),marker=el('button',{dataset:{bmarker:'bookmark'}});turn.appendChild(marker);ctx.roots.msgs.appendChild(turn);firstListener(ctx.roots.msgs,'click')({target:marker});
+ assert.deepEqual(opened,['saved']);ctx.feature.destroy();
+});
+
+test('received shared markers open only their own bookmark and deliberate local destinations', () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'comments',seq:2};
+ const choices=[],jumps=[],opened=[],toasts=[];
+ const links=[{source,destination:{node:'n1'},sent_at:'T'},{source,destination:{node:'missing'}}];
+ const ctx=makeFeature({deps:{bookmarks:()=>[{t:'saved',team:source}],forwardLinks:()=>links,openBookmark:t=>opened.push(t),openChoiceList:o=>choices.push(o),jumpToChatAddress:a=>{jumps.push(a);return false},toast:m=>toasts.push(m)}});
+ ctx.feature.openSharedMarker({...source,seq:1},'bookmark');assert.deepEqual(opened,[]);
+ ctx.feature.openSharedMarker(source,'bookmark');assert.deepEqual(opened,['saved']);
+ ctx.feature.openSharedMarker(source,'sendto');assert.equal(choices[0].choices.length,2);
+ choices[0].onChoose(choices[0].choices[1]);assert.deepEqual(jumps,[{node:'missing'}]);assert.match(toasts[0],/no longer available/i);
+ links.splice(0,links.length,{source});ctx.feature.openSharedMarker(source,'sendto');assert.deepEqual(jumps[1],{});assert.match(toasts[1],/no longer available/i);
+ ctx.feature.destroy();
+});
+
+test('ordinary bookmark and sent-to markers handle missing destination details honestly', async () => {
+ const source={uid:'u',segment:0,record:2},choices=[],opened=[];
+ const usages=[{note_id:'n1',section_id:'s1',reference_id:'r1',source},{note_id:'n2',section_id:'s2',reference_id:'r2',source}];
+ const links=[{source},{source,destination:{}}];
+ const ctx=makeFeature({chatPayload:{turns:[{...source,role:'assistant',text:'answer'}],live:'quiet'},deps:{noteUsages:()=>usages,forwardLinks:()=>links,jumpToChatAddress:null,openNoteUsage:u=>opened.push(u),openChoiceList:o=>choices.push(o)}});
+ ctx.feature.bind();await ctx.feature.render();clickBubbleMarker(ctx,'i:0','bookmark');
+ assert.deepEqual(choices[0].choices.map(x=>x.label),['Note › Section','Note › Section']);choices[0].onChoose(choices[0].choices[0]);assert.deepEqual(opened,[usages[0]]);
+ clickBubbleMarker(ctx,'i:0','sendto');assert.equal(choices[1].choices.length,2);choices[1].onChoose(choices[1].choices[0]);ctx.feature.destroy();
+});
+
+test('owner shared bookmark jump highlights the exact discussion sequence', async () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'comments',seq:2};
+ const copy={uid:'u',key:'s/o/u/g',view:{...source},names:{},people:{},mirrors:[{seq:1,local_segment:0,local_record:1}],comments:[{seq:1,anchor:1,text:'same',author:'a'},{seq:2,anchor:1,text:'same',author:'a'}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},chatPayload:{turns:[{role:'assistant',uid:'u',segment:0,record:1,text:'answer'}],log_uid:'u',live:'quiet'}});
+ const target=el('div',{dataset:{gkey:'s/o/u/g',cseq:'2'}});target.scrollIntoView=()=>{target.scrolled=true};
+ const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);ctx.roots.msgs.querySelector=s=>s==='[data-gkey="s/o/u/g"][data-cseq="2"]'?target:query(s);
+ ctx.setPending({node:'n1',team:source,ts:1_000_000});await ctx.feature.render();assert.equal(target.scrolled,true);assert.equal(ctx.getPending(),null);ctx.feature.destroy();
+});
+
+test('owner discussion jump loads prior history without starting duplicate loads', async () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'comments',seq:2};
+ const ctx=makeFeature({chatPayload:{turns:[{role:'assistant',uid:'u',record:1,text:'answer'}],log_uid:'u',prior_turns:1,live:'quiet'}});
+ ctx.setPending({node:'n1',team:source,ts:1_000_000});await ctx.feature.render();
+ assert.equal(ctx.getPending().histLoading,true);assert.equal(ctx.apiCalls.filter(x=>x.path.includes('history=1')).length,1);
+ await ctx.feature.render();assert.equal(ctx.apiCalls.filter(x=>x.path.includes('history=1')).length,1);ctx.feature.destroy();
+});
+
+test('owner mirror jump uses the authoritative local record mapping', async () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'mirror',seq:7};
+ const copy={uid:'u',key:'s/o/u/g',view:{...source},names:{},people:{},mirrors:[{seq:7,t:'assistant',local_segment:0,local_record:2}],comments:[]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},chatPayload:{turns:[{role:'assistant',uid:'u',segment:0,record:1,text:'same'},{role:'assistant',uid:'u',segment:0,record:2,text:'same'}],log_uid:'u',live:'quiet'}});
+ const target=el('div');target.scrollIntoView=()=>{target.scrolled=true};const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);ctx.roots.msgs.querySelector=s=>s==='.turn[data-i="1"]'?target:query(s);
+ ctx.setPending({node:'n1',team:source,ts:1_000_000});await ctx.feature.render();assert.equal(target.scrolled,true);assert.equal(ctx.getPending(),null);ctx.feature.destroy();
+});
+
+test('owner mirror jump never invents a local history address for a missing mapping', async () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'mirror',seq:7};
+ for (const mirror of [null,{seq:7,t:'assistant',local_segment:-1,local_record:2},{seq:7,t:'assistant',local_segment:0,local_record:-1}]) {
+  const warnings=[];
+  const copy={uid:'u',key:'s/o/u/g',view:{...source},names:{},people:{},mirrors:mirror?[mirror]:[],comments:[]};
+  const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy],toast:message=>warnings.push(message)},chatPayload:{turns:[{role:'assistant',uid:'u',record:1,text:'same'}],log_uid:'u',live:'quiet'}});
+  ctx.setPending({node:'n1',team:source,ts:1_000_000});await ctx.feature.render();
+  if (mirror) {assert.match(warnings[0],/unavailable/i);assert.equal(ctx.getPending(),null);}
+  else {assert.deepEqual(warnings,[]);assert.deepEqual(ctx.getPending().team,source);}
+  ctx.feature.destroy();
+ }
+});
+
+test('an owner shared jump from an earlier visit cannot scroll a later visit', async () => {
+ const source={server:'s',owner:'o',chat:'u',generation:'g',log:'comments',seq:2};
+ const ctx=makeFeature({chatPayload:{turns:[{role:'assistant',text:'answer'}],live:'quiet'}}),target=el('div');target.scrollIntoView=()=>{target.scrolled=true};
+ const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);ctx.roots.msgs.querySelector=s=>s==='[data-gkey="s/o/u/g"][data-cseq="2"]'?target:query(s);
+ ctx.setPending({node:'n1',team:source,visit:1,ts:1_000_000});ctx.setSelGen(3);await ctx.feature.render();assert.notEqual(target.scrolled,true);assert.equal(ctx.getPending(),null);ctx.feature.destroy();
+});
+
+test('shared owner timeline retains both the prompt and discussion with human labels', async () => {
  const copy={uid:'u',key:'s/o/u/g',view:{server:'s'},names:{},people:{},mirrors:[{seq:1,local_segment:0,local_record:1}],comments:[{seq:1,anchor:1,text:'human comment',author:'o',mine:true}]};
  const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},chatPayload:{turns:[{role:'user',uid:'u',segment:0,record:1,text:'agent prompt'}],log_uid:'u',live:'quiet'}});
  ctx.feature.bind();await ctx.feature.loadHistory('n1','');
- assert.match(ctx.roots.msgs.innerHTML,/You · Agent/);assert.match(ctx.roots.msgs.innerHTML,/You · People/);ctx.feature.destroy();
+ assert.match(ctx.roots.msgs.innerHTML,/data-bk="i:0"[^]*?>You<\/div><p>agent prompt<\/p>/);assert.match(ctx.roots.msgs.innerHTML,/data-cseq="1"[^]*?>You<\/div><p>human comment<\/p>/);ctx.feature.destroy();
 });
 
 test('another shared log does not label an unrelated owner prompt', async () => {
@@ -8970,4 +9381,95 @@ test('a poll captures the focused editor scroll and selection after its response
  const pending=ctx.feature.render();body.scrollTop=4500;input.selectionStart=3;input.selectionEnd=6;
  response.resolve({turns:[{role:'assistant',text:'new data',uid:'u',segment:0,record:0}],log_uid:'u',live:'quiet'});await pending;
  assert.equal(body.scrollTop,4600);assert.deepEqual(selection,[3,6,'forward']);assert.equal(input.value,'latest edit');ctx.feature.destroy();
+});
+
+test("coordinator: a previous description save cannot end newer editing in another chat", async () => {
+  let finish;
+  const oldResponse = new Promise(resolve => { finish = resolve; });
+  const ctx = makeFeature({nodes:[{id:"n1",title:"Original",agent:"codex",description:"old"},{id:"n2",title:"Other",agent:"codex",description:"other"}],
+    api: async (path, options) => options?.method === "PATCH" ? oldResponse : {},
+    deps:{setTimeout:()=>1,clearTimeout:()=>{}}});
+  ctx.feature.bind();
+  ctx.feature.useTurnAsDescription("Synthetic first description");
+  firstListener(ctx.roots.infobtn,"click")();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ctx.apiCalls.filter(c=>c.opts?.method==="PATCH").length,1);
+  ctx.feature.onSelectChange();ctx.setSel("n2");ctx.setSelGen(2);
+  ctx.feature.useTurnAsDescription("Synthetic newer description");
+  assert.equal(ctx.feature.isEditingDesc(),true);
+  finish({id:"n1",title:"Original",agent:"codex",description:"Synthetic first description"});
+  await new Promise(resolve=>setImmediate(resolve));
+  console.log(JSON.stringify({coordinatorLateDescription:{editing:ctx.feature.isEditingDesc(),value:ctx.roots.chatdescinput.value}}));
+  assert.equal(ctx.feature.isEditingDesc(),true,"an old save response must not close the new chat's active editor");
+  assert.equal(ctx.roots.chatdescinput.value,"Synthetic newer description");
+  ctx.feature.destroy();
+});
+
+test('description editor refuses a chat without durable identity when required', () => {
+ const alerts=[];const ctx=makeFeature({nodes:[{id:'n1',title:'Legacy'}],deps:{requireChatIdentity:true,alert:value=>alerts.push(value)}});
+ ctx.feature.useTurnAsDescription('synthetic');assert.equal(ctx.feature.isEditingDesc(),false);assert.match(alerts[0],/identity/i);ctx.feature.destroy();
+});
+
+test('description save preserves newer typing in the same editor', async () => {
+ let finish; const pending=new Promise(resolve=>{finish=resolve}); const updated=[];
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'one',title:'One'}],api:async (_path,opts)=>opts?.method==='PATCH'?pending:{},deps:{setTimeout:()=>1,clearTimeout:()=>{},updateLocalNode:n=>updated.push(n)}});
+ ctx.feature.bind();ctx.feature.useTurnAsDescription('first');firstListener(ctx.roots.infobtn,'click')();
+ ctx.roots.chatdescinput.value='newer typing';finish({id:'n1',instance_id:'one',description:'first'});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.feature.isEditingDesc(),true);assert.equal(ctx.roots.chatdescinput.value,'newer typing');assert.equal(updated.length,1);ctx.feature.destroy();
+});
+
+test('description editor cannot save into a recreated chat with the same id', async () => {
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'old',title:'Original'}],api:async()=>({}),deps:{setTimeout:()=>1,clearTimeout:()=>{}}});
+ ctx.feature.bind();ctx.feature.useTurnAsDescription('old description');ctx.nodes.splice(0,1,{id:'n1',instance_id:'new',title:'Replacement'});
+ firstListener(ctx.roots.infobtn,'click')();await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.apiCalls.filter(call=>call.opts?.method==='PATCH').length,0);ctx.feature.destroy();
+});
+
+test('out-of-order description saves do not roll back a newer save or rename', async () => {
+ const resolvers=[];let ctx;
+ ctx=makeFeature({nodes:[{id:'n1',instance_id:'one',title:'Old title',description:'initial'}],api:async (_path,opts)=>opts?.method==='PATCH'?new Promise(resolve=>resolvers.push(resolve)):{},deps:{setTimeout:()=>1,clearTimeout:()=>{},updateLocalNode:n=>Object.assign(ctx.nodes[0],n)}});
+ ctx.feature.bind();ctx.feature.useTurnAsDescription('first');firstListener(ctx.roots.infobtn,'click')();
+ ctx.feature.useTurnAsDescription('second');firstListener(ctx.roots.infobtn,'click')();ctx.nodes[0].title='Renamed';
+ resolvers[1]({id:'n1',instance_id:'one',title:'Old title',description:'second'});await new Promise(resolve=>setImmediate(resolve));
+ resolvers[0]({id:'n1',instance_id:'one',title:'Old title',description:'first'});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ctx.nodes[0].description,'second');assert.equal(ctx.nodes[0].title,'Renamed');ctx.feature.destroy();
+});
+
+test('earlier duplicate description save cannot close the editor of a pending newer save', async () => {
+ const resolvers=[];const ctx=makeFeature({nodes:[{id:'n1',instance_id:'one',title:'One'}],api:async (_path,opts)=>opts?.method==='PATCH'?new Promise(resolve=>resolvers.push(resolve)):{},deps:{setTimeout:()=>1,clearTimeout:()=>{}}});
+ ctx.feature.bind();ctx.feature.useTurnAsDescription('same');firstListener(ctx.roots.infobtn,'click')();firstListener(ctx.roots.infobtn,'click')();
+ resolvers[0]({id:'n1',instance_id:'one',description:'same'});await new Promise(resolve=>setImmediate(resolve));assert.equal(ctx.feature.isEditingDesc(),true);
+ resolvers[1]({id:'n1',instance_id:'one',description:'same'});await new Promise(resolve=>setImmediate(resolve));assert.equal(ctx.feature.isEditingDesc(),false);ctx.feature.destroy();
+});
+
+test('retired panel ignores pending description completion and focus callbacks', async () => {
+ let finish;const timers=[],updates=[];const ctx=makeFeature({nodes:[{id:'n1',instance_id:'one',title:'One'}],api:async (_path,opts)=>opts?.method==='PATCH'?new Promise(resolve=>finish=resolve):{},deps:{setTimeout:fn=>{timers.push(fn);return timers.length},clearTimeout:()=>{},updateLocalNode:n=>updates.push(n)}});
+ ctx.feature.bind();ctx.feature.useTurnAsDescription('draft');firstListener(ctx.roots.infobtn,'click')();ctx.feature.destroy();timers.forEach(fn=>fn());
+ finish({id:'n1',instance_id:'one',description:'draft'});await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(updates,[]);
+});
+
+test('description save failures and saved timers belong to their editing visit', async () => {
+ const timers=[],alerts=[];let now=1000,fail=false;
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'one',title:'One'},{id:'n2',instance_id:'two',title:'Two'}],api:async (_path,opts)=>{if(opts?.method==='PATCH'){if(fail)throw Error('synthetic failure');return {id:'n1',instance_id:'one',description:''}}return {}},deps:{setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length},clearTimeout:()=>{},now:()=>now,alert:msg=>alerts.push(msg)}});
+ ctx.feature.bind();ctx.feature.useTurnAsDescription('');firstListener(ctx.roots.infobtn,'click')();await new Promise(resolve=>setImmediate(resolve));
+ const saved=timers.find(x=>x.ms>0);assert.ok(saved);now+=10000;saved.fn();assert.equal(ctx.feature.isEditingDesc(),false);
+ ctx.feature.useTurnAsDescription('next');fail=true;firstListener(ctx.roots.infobtn,'click')();await new Promise(resolve=>setImmediate(resolve));assert.match(alerts.at(-1),/synthetic failure/);assert.equal(ctx.feature.isEditingDesc(),true);
+ ctx.feature.onSelectChange();ctx.setSel('n2');ctx.setSelGen(2);ctx.feature.useTurnAsDescription('new visit');saved.fn();assert.equal(ctx.feature.isEditingDesc(),true);assert.equal(ctx.roots.chatdescinput.value,'new visit');ctx.feature.destroy();
+});
+
+test('description long press and save reject lost identity', async () => {
+ let press;const alerts=[];const ctx=makeFeature({nodes:[{id:'n1',instance_id:'one',title:'One'}],deps:{requireChatIdentity:true,alert:msg=>alerts.push(msg),longpress:(_root,selector,fn)=>{if(selector==='#chatdesc')press=fn;return ()=>{}},setTimeout:()=>1,clearTimeout:()=>{}}});
+ ctx.feature.bind();press();ctx.nodes[0].instance_id='';firstListener(ctx.roots.infobtn,'click')();await new Promise(resolve=>setImmediate(resolve));assert.match(alerts.at(-1),/identity/i);assert.equal(ctx.apiCalls.length,0);
+ ctx.feature.cancelDescEdit();press();assert.equal(ctx.feature.isEditingDesc(),false);assert.match(alerts.at(-1),/identity/i);ctx.feature.destroy();
+});
+
+test('description saved indicator supports the default clock', async () => {
+ const timers=[];const ctx=makeFeature({nodes:[{id:'n1',instance_id:'one',title:'One'}],api:async (_path,opts)=>opts?.method==='PATCH'?{id:'n1',instance_id:'one',description:'saved'}:{},deps:{now:null,setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length},clearTimeout:()=>{}}});
+ ctx.feature.bind();ctx.feature.useTurnAsDescription('saved');firstListener(ctx.roots.infobtn,'click')();await new Promise(resolve=>setImmediate(resolve));
+ const saved=timers.find(x=>x.ms>0);assert.ok(saved);saved.fn();ctx.feature.destroy();
+});
+
+test('destroy continues cleanup when a long-press disposer throws', () => {
+ let called=0;const ctx=makeFeature({deps:{longpress:()=>()=>{called++;if(called===1)throw Error('synthetic cleanup failure')}}});
+ ctx.feature.bind();assert.doesNotThrow(()=>ctx.feature.destroy());assert.equal(called,2);
 });

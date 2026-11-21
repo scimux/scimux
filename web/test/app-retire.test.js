@@ -109,6 +109,17 @@ async function bootTwice(t, { secondGraph = false } = {}) {
   return { host, rec, first, second, firstListeners, firstTimers };
 }
 
+test('app graphs reject missing transport and host dependencies before boot', async () => {
+  for (const path of ['../js/app.js','../js/app.js?graph=successor']) {
+    const {createApp}=await import(path);
+    const valid={fetchImpl:async()=>{},assetURL:x=>x,document:{},window:{}};
+    for (const key of ['fetchImpl','assetURL','document','window']) {
+      const input={...valid,[key]:undefined};
+      await assert.rejects(createApp(input),new RegExp(key+' is required'));
+    }
+  }
+});
+
 test("app: booting twice in one window leaves no listener from the first instance", async (t) => {
   const { rec, firstListeners } = await bootTwice(t);
   assert.ok(firstListeners.length > 0,
@@ -413,12 +424,126 @@ test("owner local chat retains its authoritative turn and shows an anchored huma
   } finally { app.retire(); }
 });
 
+for (const modulePath of ['../js/app.js','../js/app.js?graph=successor']) test('the app refuses a send when an older server cannot identify the chat instance: '+modulePath, async () => {
+ const host=installHost({});host.window.localStorage.setItem('scimux-sel','n1');const posts=[];
+ const fetchImpl=async(path,opts)=>{path=String(path);if(opts?.method==='POST')posts.push(path);
+  if(path.startsWith('/api/state'))return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex'}],unadopted:[],hostname:'synthetic',version:'old',sys:{}});
+  if(path.startsWith('/api/nodes/n1/chat'))return jsonResponse({turns:[],live:'quiet',source:'codex'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import(modulePath)).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200);const prompt=host.byId.get('prompt');prompt.innerText='synthetic';prompt.dispatchEvent({type:'input',target:prompt});await host.byId.get('sendbtn').click();await flush(30);assert.ok(!posts.some(path=>path.split('?')[0]==='/api/nodes/n1/send'));} finally {app.retire()}
+});
+
+for (const modulePath of ['../js/app.js','../js/app.js?graph=successor']) test('a same-slug replacement retires an in-flight chat response: '+modulePath, async () => {
+ const host=installHost({});host.window.localStorage.setItem('scimux-sel','n1');const clock=instrument(host);let generation='old',release,reads=0;
+ const held=new Promise(resolve=>{release=resolve});
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state'))return jsonResponse({nodes:[{id:'n1',instance_id:generation,title:'Local',agent:'codex'}],unadopted:[],hostname:'synthetic',version:'test',sys:{}});
+  if(path.startsWith('/api/nodes/n1/chat')){if(++reads===1)return held;return jsonResponse({turns:[{role:'assistant',text:'replacement'}],live:'quiet',source:'codex'});}
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import(modulePath)).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200);generation='new';const tick=clock.liveTimers().find(t=>t.kind==='timeout'&&t.ms===2000);assert.ok(tick);tick.fn();await flush(200);
+  release(jsonResponse({turns:[{role:'assistant',text:'retired response'}],live:'working',source:'codex'}));await flush(200);
+  assert.doesNotMatch(host.byId.get('msgs').innerHTML,/retired response/);
+ } finally {app.retire()}
+});
+
+for (const modulePath of ['../js/app.js','../js/app.js?graph=successor']) test('a missing selected node followed by slug reuse does not revive its old draft: '+modulePath, async () => {
+ const host=installHost({});host.window.localStorage.setItem('scimux-sel','n1');const clock=instrument(host);let generation='old';
+ const prompt=host.byId.get('prompt');Object.defineProperty(prompt,'innerText',{get(){return this.textContent},set(value){this.textContent=value},configurable:true});
+ const fetchImpl=async(path,opts)=>{path=String(path);
+  if(path.startsWith('/api/state'))return jsonResponse({nodes:generation==='missing'?[]:[{id:'n1',instance_id:generation,title:'Local',agent:'codex'}],unadopted:[],hostname:'synthetic',version:'test',sys:{}});
+  if(path.startsWith('/api/nodes/n1/chat'))return jsonResponse({turns:[],live:'quiet',source:'codex'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import(modulePath)).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200);prompt.innerText='retired text';prompt.dispatchEvent({type:'input',target:prompt});generation='missing';
+  clock.liveTimers().filter(t=>t.kind==='timeout'&&t.ms===2000).at(-1).fn();await flush(200);
+  generation='new';clock.liveTimers().filter(t=>t.kind==='timeout'&&t.ms===2000).at(-1).fn();await flush(200);
+  assert.doesNotMatch(prompt.innerText,/retired text/);
+ } finally {app.retire()}
+});
+
+for (const modulePath of ['../js/app.js','../js/app.js?graph=successor']) test('the app wires shared fork to an explicit fresh-chat send: '+modulePath, async () => {
+ const host=installHost({});host.window.localStorage.setItem('scimux-sel','n1');const copied=[];
+ host.window.isSecureContext=true;host.window.navigator.clipboard={writeText:text=>{copied.push(text);return Promise.resolve()}};
+ const view={server:'s',owner:'o',chat:'c',generation:'g',access:'owner',state:'live',local_node:'n1',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
+ const calls=[];const fetchImpl=async(path,opts)=>{path=String(path);calls.push(path);
+  if(path==='/api/ui')return jsonResponse({lanes:[],groups:[],archived:[],pinned:[],bookmarks:[{t:'missing',text:'Saved',team:{server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:9}}]});
+  if(path.startsWith('/api/state'))return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers')return jsonResponse({servers:[{id:'s',name:'Team'}]});
+  if(path==='/api/team/shares/n1')return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
+  if(path==='/api/team/subscriptions')return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+  if(path.includes('/comments?'))return jsonResponse({entries:[{seq:1,anchor:1,text:'Quoted reply',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false});
+  if(path.includes('/subscriptions/s/o/c/g?'))return jsonResponse({view,entries:[{seq:1,t:'assistant',text:'answer',local_segment:0,local_record:4}],next:1,more:false});
+  if(path.startsWith('/api/nodes/n1/chat'))return jsonResponse({turns:[{role:'assistant',text:'answer',uid:'c',record:4}],decisions:[],source:'codex',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import(modulePath)).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200);await new Promise(r=>setTimeout(r,20));
+  const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,insertAdjacentHTML(_where,html){this.rowHTML=html;this.nextElementSibling={remove(){}}}};
+  const bubble={closest:s=>s==='.bubble'?bubble:(s==='[data-cseq]'||s==='[data-seq], [data-cseq]')?turn:null};host.byId.get('msgs').dispatchEvent({type:'click',target:bubble});
+  const fork={dataset:{gact:'fork'},closest:s=>s==='[data-gact]'?fork:null};host.byId.get('msgs').dispatchEvent({type:'click',target:fork});
+  assert.match(host.byId.get('nc_prompt').value,/Quoted reply/);assert.equal(host.byId.get('nc_start').getAttribute('aria-label'),'Start and send');
+  const copy={dataset:{gact:'copy'},closest:s=>s==='[data-gact]'?copy:null};host.byId.get('msgs').dispatchEvent({type:'click',target:copy});assert.deepEqual(copied,['Quoted reply']);
+  const legacyCopies=[];host.window.isSecureContext=false;host.document.execCommand=command=>{legacyCopies.push(command);return true};
+  host.byId.get('msgs').dispatchEvent({type:'click',target:copy});assert.deepEqual(legacyCopies,['copy']);
+  const bookmark={dataset:{gact:'bookmark'},closest:s=>s==='[data-gact]'?bookmark:null};host.byId.get('msgs').dispatchEvent({type:'click',target:bookmark});await flush(50);
+  host.byId.get('bookmarksbtn').dispatchEvent({type:'click',preventDefault(){},stopPropagation(){}});assert.match(host.byId.get('bookmarklist').innerHTML,/Quoted reply/);
+  const sendto={dataset:{gact:'sendto'},closest:s=>s==='[data-gact]'?sendto:null};host.byId.get('msgs').dispatchEvent({type:'click',target:sendto});assert.match(host.byId.get('sendto_list').innerHTML,/Local/);
+  const more={dataset:{gact:'more'},closest:s=>s==='[data-gact]'?more:null};host.byId.get('msgs').dispatchEvent({type:'click',target:more});assert.match(host.byId.get('sendto_list').innerHTML,/Rename person/);
+  const desc={dataset:{gact:'desc'},closest:s=>s==='[data-gact]'?desc:null};host.byId.get('msgs').dispatchEvent({type:'click',target:desc});
+  const choice={dataset:{choice:'0'},closest:s=>s==='[data-choice]'?choice:null};host.byId.get('sendto_list').onclick({target:choice});await flush(50);
+  assert.match(host.byId.get('chatdescinput').value,/Quoted reply/);
+  const row={dataset:{t:'missing'}},jump={dataset:{bmact:'jump'},closest:s=>s==='[data-bmact]'?jump:s==='.bookmark'?row:null};
+  host.byId.get('bookmarkspane').dispatchEvent({type:'click',target:jump});await flush(200);await new Promise(r=>setTimeout(r,20));
+  const toast=host.document.body.children.find(x=>x.id==='toast');assert.match(toast?.textContent||'',/unavailable/i);
+ } finally {app.retire()}
+});
+
+for (const modulePath of ['../js/app.js','../js/app.js?graph=successor']) for (const local of [true,false]) test('the app wires received source markers to the shared bookmark: '+modulePath+' local='+local, async () => {
+ const host=installHost({});host.window.localStorage.setItem('scimux-sel',local?'n1':'');
+ const msgs=host.byId.get('msgs');msgs.insertAdjacentHTML=(_where,html)=>{msgs.innerHTML+=html};
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ const view={...source,access:'write',state:'live',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
+ const calls=[];const fetchImpl=async(path,opts)=>{path=String(path);calls.push(path);
+  if(path==='/api/ui')return jsonResponse({lanes:[],groups:[],archived:[],pinned:[],bookmarks:[{t:'saved',text:'Discussion',team:source},{t:'stale',text:'Retained stale',team:{...source,generation:'stale'}}]});
+  if(path==='/api/team/subscriptions/s/o/c/g' && opts?.method==='DELETE')return jsonResponse({});
+  if(path.startsWith('/api/state'))return jsonResponse({nodes:local?[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}]:[],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path==='/api/team/servers')return jsonResponse({servers:[{id:'s',name:'Team'}]});
+  if(path==='/api/team/subscriptions')return jsonResponse({subscriptions:[view],servers:[],truncated:false});
+  if(path.includes('/comments?'))return jsonResponse({entries:[{seq:1,anchor:0,text:'Discussion',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false});
+  if(path.includes('/subscriptions/s/o/c/g?'))return jsonResponse({view,entries:[],next:0,more:false});
+  if(path.startsWith('/api/nodes/n1/chat'))return jsonResponse({turns:[],decisions:[],source:'codex',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import(modulePath)).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(200);await new Promise(r=>setTimeout(r,20));
+  const card={dataset:{open:'team/s/o/c/g'},closest:s=>s==='[data-open]'?card:null};host.byId.get('cardlist').dispatchEvent({type:'click',target:card,preventDefault(){},stopPropagation(){}});
+  await flush(200);await new Promise(r=>setTimeout(r,20));assert.equal(host.window.localStorage.getItem('scimux-sel'),'team/s/o/c/g');assert.match(host.byId.get('msgs').innerHTML,/data-bmarker="bookmark"/,calls.join(',')+' note='+host.byId.get('guestnote').textContent);
+  const turn={dataset:{cseq:'1'}},marker={dataset:{bmarker:'bookmark'},closest:s=>s==='[data-bmarker]'?marker:s==='[data-seq], [data-cseq]'?turn:null};
+  host.byId.get('msgs').dispatchEvent({type:'click',target:marker});assert.match(host.byId.get('bookmarklist').innerHTML,/Discussion/);
+  let scrolled=0;const original=msgs.querySelector.bind(msgs);msgs.querySelector=s=>s==='[data-cseq="1"]'?{scrollIntoView(){scrolled++},classList:{add(){},remove(){}}}:original(s);
+  const row={dataset:{t:'saved'}},jump={dataset:{bmact:'jump'},closest:s=>s==='[data-bmact]'?jump:s==='.bookmark'?row:null};
+  host.byId.get('bookmarkspane').dispatchEvent({type:'click',target:jump});assert.equal(scrolled,1);
+  host.byId.get('notesbtn').dispatchEvent({type:'click',preventDefault(){},stopPropagation(){}});await flush(50);
+  const inboxRow={dataset:{t:'saved'}},inboxJump={dataset:{bmact:'jump'},closest:s=>s==='[data-bmact]'?inboxJump:s==='.wsibookmark'?inboxRow:null};
+  host.byId.get('wsinboxlist').dispatchEvent({type:'click',target:inboxJump});assert.equal(scrolled,2);
+  host.byId.get('notesbtn').dispatchEvent({type:'click',preventDefault(){},stopPropagation(){}});await flush(50);
+  inboxRow.dataset.t='stale';host.byId.get('wsinboxlist').dispatchEvent({type:'click',target:inboxJump});
+  const toast=host.document.body.children.find(x=>x.id==='toast');assert.match(toast?.textContent||'',/unavailable/i);assert.equal(scrolled,2);
+  host.byId.get('guestremove').dispatchEvent({type:'click'});await flush(100);assert.equal(host.window.localStorage.getItem('scimux-sel'),local?'n1':'');
+ } finally {app.retire()}
+});
+
 test('owner from-now frontier places anchor zero and start comments before a new mirrored turn', async () => {
   const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
   const view={server:'s',owner:'o',chat:'c',generation:'g',access:'owner',state:'live',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
   const fetchImpl=async(path,opts)=>{
     path=String(path);
-    if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+    if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
     if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
     if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
     if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
@@ -438,7 +563,7 @@ test('owner timeline includes an ended retained generation beside the current ge
   const base={server:'s',owner:'o',chat:'c',access:'owner',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0,local_node:'n1'};
   const old={...base,generation:'old',state:'ended'}, live={...base,generation:'new',state:'live'};
   const fetchImpl=async(path,opts)=>{path=String(path);
-    if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+    if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
     if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
     if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'new',state:'active',members:[]});
     if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[old,live],servers:[],truncated:false});
@@ -457,7 +582,7 @@ test('ended retained owner discussion appears after recreation without an active
  const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
  const view={server:'s',owner:'o',chat:'c',generation:'old',access:'owner',state:'ended',local_node:'n1',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
  const fetchImpl=async(path,opts)=>{path=String(path);
-  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
   if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
   if(path==='/api/team/shares/n1') return new Response('{"error":"not_found"}',{status:404});
   if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
@@ -477,7 +602,7 @@ test('owner reply anchored after clear appears in an empty current segment', asy
  const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
  const view={server:'s',owner:'o',chat:'c',generation:'g',access:'owner',state:'live',title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
  const fetchImpl=async(path,opts)=>{path=String(path);
-  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
   if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
   if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
   if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
@@ -493,7 +618,7 @@ test('owner reply anchored after clear appears in an empty current segment', asy
 test('local node named team can read and send through the real app routing', async () => {
  const host=installHost({}); host.window.localStorage.setItem('scimux-sel','team'); const calls=[];
  const fetchImpl=async(path,opts)=>{path=String(path);calls.push({path,method:opts?.method||'GET'});
-  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'team',title:'Team',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'team',instance_id:'team-generation',title:'Team',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
   if(path==='/api/team/servers') return jsonResponse({servers:[]});
   if(path==='/api/team/shares/team') return new Response('{"error":"not_found"}',{status:404});
   if(path.startsWith('/api/nodes/team/chat')) return jsonResponse({turns:[{role:'assistant',text:'local'}],live:'quiet',source:'codex'});
@@ -502,7 +627,7 @@ test('local node named team can read and send through the real app routing', asy
  const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
  try {await flush(200); await new Promise(r=>setTimeout(r,10));
   const prompt=host.byId.get('prompt'); prompt.innerText='hello'; prompt.dispatchEvent({type:'input',target:prompt}); await host.byId.get('sendbtn').click(); await flush(30);
-  assert.ok(calls.some(c=>c.path==='/api/nodes/team/chat')); assert.ok(calls.some(c=>c.path==='/api/nodes/team/send' && c.method==='POST'));
+  assert.ok(calls.some(c=>c.path==='/api/nodes/team/chat')); assert.ok(calls.some(c=>c.path==='/api/nodes/team/send?chat_instance=team-generation' && c.method==='POST'));
  } finally {app.retire()}
 });
 
@@ -510,7 +635,7 @@ test('owner anchor zero is visible at the saved frontier before any mirror arriv
  const host=installHost({}); host.window.localStorage.setItem('scimux-sel','n1');
  const view={server:'s',owner:'o',chat:'c',generation:'g',access:'owner',state:'live',local_node:'n1',local_frontier:{node:'n1',segment:0,record:1},title:'Chat',server_name:'Team',owner_name:'Owner',first_seen:'1',seen_comments:0,seen_mirror:0};
  const fetchImpl=async(path,opts)=>{path=String(path);
-  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
   if(path==='/api/team/servers') return jsonResponse({servers:[{id:'s',name:'Team'}]});
   if(path==='/api/team/shares/n1') return jsonResponse({node:'n1',uid:'c',server:'s',generation:'g',state:'active',members:[]});
   if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
@@ -553,7 +678,7 @@ test('received metadata that arrives before a delayed state response still resto
  };
  const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
  try {await flush(150); assert.equal(typeof resolveState,'function');
-  resolveState(jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}}));
+  resolveState(jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}}));
   await flush(150); assert.equal(host.window.localStorage.getItem('scimux-sel'),'team/s/o/c/g'); assert.equal(host.byId.get('chattitle').textContent,'Received');
  } finally {app.retire()}
 });
@@ -562,7 +687,7 @@ test('phone received card opens chat and back returns to Activities', async () =
  const host=installHost({}); const phone=()=>({matches:false,addEventListener(){},removeEventListener(){},addListener(){},removeListener(){}}); globalThis.matchMedia=phone; host.window.matchMedia=phone;
  const view={server:'s',owner:'o',chat:'c',generation:'g',access:'read',state:'live',title:'Received',server_name:'Team',owner_name:'Owner',first_seen:'1'};
  const fetchImpl=async(path,opts)=>{path=String(path);
-  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path.startsWith('/api/state')) return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'Local',agent:'codex',created_at:'T0'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
   if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
   if(path.includes('/comments?')) return jsonResponse({entries:[],names:{},next:0,more:false});
   if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[],next:0,more:false});
@@ -607,4 +732,28 @@ test('app restores a rejected in-flight Agent prompt without dispatching a retry
  };
  const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
  try{await flush(200);assert.match(prompt.textContent,/rejected draft/);assert.ok(host.window.localStorage.getItem('scimux-prompt-sources:n1'));assert.equal(posts.filter(p=>p.includes('/api/nodes/')).length,0);}finally{app.retire();}
+});
+
+test('late send completion cannot repaint another selected chat', async () => {
+ const host=installHost({});host.window.localStorage.setItem('scimux-sel','n1');let finishSend;const calls=[];
+ const prompt=host.byId.get('prompt');Object.defineProperty(prompt,'innerText',{get(){return this.textContent},set(value){this.textContent=value},configurable:true});
+ const fetchImpl=async(path,opts)=>{path=String(path);calls.push({path,method:opts?.method||'GET'});
+  if(path==='/api/nodes/n1/send?chat_instance=generation-1'&&opts?.method==='POST')return new Promise(resolve=>{finishSend=resolve});
+  if(path.startsWith('/api/state'))return jsonResponse({nodes:[{id:'n1',instance_id:'generation-1',title:'First',agent:'codex'},{id:'n2',instance_id:'generation-2',title:'Second',agent:'codex'}],unadopted:[],hostname:'computer',version:'test',sys:{}});
+  if(path.startsWith('/api/nodes/')&&path.includes('/chat'))return jsonResponse({turns:[],source:'acp',live:'quiet'});
+  return host.trapFetch(path,opts);
+ };
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try{await flush(200);prompt.innerText='first draft';prompt.dispatchEvent({type:'input',target:prompt});host.window.localStorage.setItem('scimux-prompt-sources:n1',JSON.stringify([{uid:'u',segment:0,record:1}]));host.byId.get('sendbtn').click();await flush(100);assert.equal(typeof finishSend,'function');
+  const card={dataset:{open:'n2'},closest:s=>s==='[data-open]'?card:null};host.byId.get('cardlist').dispatchEvent({type:'click',target:card,preventDefault(){},stopPropagation(){}});await flush(100);
+  assert.equal(host.window.localStorage.getItem('scimux-sel'),'n2');
+  prompt.innerText='second draft';prompt.dispatchEvent({type:'input',target:prompt});const before=calls.filter(c=>c.path.startsWith('/api/nodes/n2/chat')).length;
+  finishSend(jsonResponse({ok:true}));await flush(100);assert.equal(prompt.innerText,'second draft');assert.equal(calls.filter(c=>c.path.startsWith('/api/nodes/n2/chat')).length,before);
+ }finally{app.retire()}
+});
+
+test('startup reports when drafts are limited to this tab', async () => {
+ const host=installHost({});host.window.localStorage=null;
+ const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl:host.trapFetch,assetURL:identityAssetURL,document:host.document,window:host.window});
+ try {await flush(30);const toast=host.document.body.children.find(x=>x.id==='toast');assert.match(toast?.textContent||'',/kept in this tab/);} finally {app.retire()}
 });

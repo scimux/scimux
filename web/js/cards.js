@@ -348,6 +348,10 @@ export function withCardEditsPreserved(root, editingDesc, render, {
   syncLanePicker,
 } = {}){
   if (!root) { render(); return; }
+  const focusable = [["activityGroup","activity-group"], ["attnfold","attnfold"], ["open","open"], ["x","x"], ["pinAction","pin-action"], ["saveDesc","save-desc"], ["exit","exit"], ["archAction","arch-action"], ["trash","trash"], ["startFirst","start-first"]];
+  const active = root.contains?.(doc?.activeElement) ? doc.activeElement : null;
+  const focusAttr = active && focusable.find(([key]) => Object.prototype.hasOwnProperty.call(active.dataset || {}, key));
+  const focusValue = focusAttr && active.dataset[focusAttr[0]];
   const saved = {};
   let focusKey = "", selStart = 0, selEnd = 0;
   const fields = root.querySelectorAll ? root.querySelectorAll("input, textarea, select") : [];
@@ -366,6 +370,10 @@ export function withCardEditsPreserved(root, editingDesc, render, {
   const scrollTop = root.scrollTop;
   render();
   if (typeof scrollTop === "number") root.scrollTop = scrollTop;
+  if (focusAttr && (!doc.activeElement || doc.activeElement === doc.body)) {
+    const controls = root.querySelectorAll?.(`[data-${focusAttr[1]}]`) || [];
+    for (const control of controls) if (control.dataset[focusAttr[0]] === focusValue && !control.disabled && (!control.getClientRects || control.getClientRects().length)) { control.focus?.({preventScroll:true}); break; }
+  }
   if (!Object.keys(saved).length) return;
   const after = root.querySelectorAll ? root.querySelectorAll("input, textarea, select") : [];
   for (const el of after){
@@ -451,7 +459,7 @@ export function createCardsFeature(deps){
       const status = view.state === "ended" ? "Sharing ended" : view.access === "write" ? "Can comment" : "Can view";
       return `<div class="card shared-card ${selected ? "selected" : ""} ${g("actionCard", "") === n.id ? "actions-open" : ""}" ${g("cardTab", "current") === "pinned" ? 'draggable="true"' : ""} id="card-${escape(n.id)}">
         <span class="stripe"></span><button class="go" data-open="${escape(n.id)}" aria-label="open ${escape(title)}"></button>
-        <div class="row1"><span class="title">${escape(title)}</span>${pinned ? `<span class="pinflag" aria-label="pinned">${icons.ICON_PIN || ""}</span>` : ""}${view.unread ? '<span class="activity-unread" aria-label="unread"></span>' : ""}</div>
+        <div class="row1"><span class="agent-logo" title="Shared activity">${icons.ICON_USERS || ""}</span><span class="title">${escape(title)}</span>${pinned ? `<span class="pinflag" aria-label="pinned">${icons.ICON_PIN || ""}</span>` : ""}${view.unread ? '<span class="activity-unread" aria-label="unread"></span>' : view.unreadUnknown ? '<span title="Unread status unavailable" aria-label="Unread status unavailable">?</span>' : ""}</div>
         <div class="status">${escape(status)}</div><div class="actions roundactions"><button class="pin" data-pin-action="${escape(n.id)}" aria-label="${pinned ? "unpin" : "pin"}">${pinned ? (icons.ICON_UNPIN || "") : (icons.ICON_PIN || "")}</button></div></div>`;
     }
     const desc = n.description || n.prompt || "";
@@ -478,6 +486,8 @@ export function createCardsFeature(deps){
           : `<span class="title" data-title="${escape(n.id)}">${escape(n.title)}</span>`}
         <button class="save-desc" data-save-desc="${escape(n.id)}" aria-label="save description">${icons.ICON_CHECK || ""}</button>
         ${pinned ? `<span class="pinflag" title="pinned" aria-label="pinned">${icons.ICON_PIN || ""}</span>` : ""}
+        ${d.sharedTab?.ownerUnread?.(n.id) ? '<span class="activity-unread" aria-label="unread"></span>' : ""}
+        ${d.sharedTab?.ownerUnreadStatus?.(n.id) === "unknown" ? '<span title="Unread status unavailable" aria-label="Unread status unavailable">?</span>' : ""}
         <button class="chev" data-x="${escape(n.id)}" aria-label="summary">&#8250;</button>
       </div>
       <div class="status">${cardStatusHTML(n, flip, { escape, ageFn, statusText, selectedId: sel, seenAt: g("readySeen", {}) })}</div>
@@ -654,7 +664,7 @@ export function createCardsFeature(deps){
     const groups = cardTab === "current" || cardTab === "shared" ? sharedGroups() : [];
     const activityShape = JSON.stringify([groups, [...activityFolds],
       cardArr.filter(item => item.shared).map(item => item.shared), d.sharedTab?.selected?.() || "",
-      Boolean(d.sharedTab?.mineUnread?.())]);
+      Boolean(d.sharedTab?.mineUnread?.()), Boolean(d.sharedTab?.mineUnknown?.()), [...cardArr, ...foldList].filter(item => !item.shared).map(item => [item.id, d.sharedTab?.ownerUnread?.(item.id), d.sharedTab?.ownerUnreadStatus?.(item.id)]).sort((a,b) => a[0].localeCompare(b[0]))]);
     const sig = activityShape + computeCardsSignature({
       list: cardArr, foldList, sel, expanded, cardTab, laneFilter,
       attnFoldOpen,
@@ -695,15 +705,15 @@ export function createCardsFeature(deps){
         list.innerHTML = foldHtml + (cardArr.length ? cardArr.map(cardHTML).join("") : emptyCardsHTML({ laneFilter, cardTab }));
         return;
       }
-      const header = (key, label, unread) => `<button class="attnfold activity-group ${activityFolds.has(key) ? "" : "open"}" data-activity-group="${escape(key)}" aria-expanded="${!activityFolds.has(key)}"><span class="foldlabel">${escape(label)}</span>${unread ? '<span class="activity-unread" aria-label="unread"></span>' : ""}<span class="foldchev">&#8250;</span></button>`;
+      const header = (key, label, unread, unknown) => `<button class="attnfold activity-group ${activityFolds.has(key) ? "" : "open"}" data-activity-group="${escape(key)}" aria-expanded="${!activityFolds.has(key)}"><span class="foldlabel">${escape(label)}</span>${unread ? '<span class="activity-unread" aria-label="unread"></span>' : unknown ? '<span title="Unread status unavailable" aria-label="Unread status unavailable">?</span>' : ""}<span class="foldchev">&#8250;</span></button>`;
       let html = "";
       if (cardTab === "current") {
         const mine = activityFolds.has("mine") ? cardArr.filter(hardAttention) : cardArr;
-        html = header("mine", "Mine", Boolean(d.sharedTab?.mineUnread?.())) + foldHtml + (mine.length ? mine.map(cardHTML).join("") : (!cardArr.length && !foldList.length ? emptyCardsHTML({laneFilter, cardTab}) : ""));
+        html = header("mine", "Mine", Boolean(d.sharedTab?.mineUnread?.()), Boolean(d.sharedTab?.mineUnknown?.())) + foldHtml + (mine.length ? mine.map(cardHTML).join("") : (!cardArr.length && !foldList.length ? emptyCardsHTML({laneFilter, cardTab}) : ""));
       }
       for (const group of groups) {
         const key = "owner/" + group.key;
-        html += header(key, group.label, group.items.some(item => item.unread));
+        html += header(key, group.label, group.items.some(item => item.unread), group.items.some(item => item.unreadUnknown));
         if (!activityFolds.has(key)) html += group.items.map(view => cardHTML({id:sharedActivityId(view),shared:view})).join("");
       }
       list.innerHTML = html || '<div class="empty">No shared activities yet.</div>';
@@ -829,19 +839,29 @@ export function createCardsFeature(deps){
       const id = trash.dataset.trash;
       const n = nodeById(id);
       if (!n) return;
+      const instance = n.instance_id || "";
+      if (!instance && d.requireChatIdentity) {
+        d.alert?.("This chat's identity is unavailable. Reconnect before removing it.");
+        return;
+      }
       const msg = n.adopted
         ? `Remove "${n.title}" from scimux? Its saved history will be archived and the retired external tmux session will keep running.`
         : `Remove "${n.title}" and close its running session/link?`;
       if (typeof d.confirm === "function" ? !d.confirm(msg) : !confirm(msg)) return;
       try {
-        await d.api(`/api/nodes/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await d.api(`/api/nodes/${encodeURIComponent(id)}${instance ? `?chat_instance=${encodeURIComponent(instance)}` : ""}`, { method: "DELETE" });
+        const current = nodeById(id);
+        if (current && (current.instance_id || "") !== instance) return;
         if (isArchived(id) && typeof d.uiMutate === "function") d.uiMutate({ k: "unarch", id });
         if (isPinned(id) && typeof d.uiMutate === "function") d.uiMutate({ k: "unpin", id });
         if (typeof d.removeNode === "function") d.removeNode(id);
         else {
           /* shell mutates nodes array */
         }
-        if (g("sel", "") === id) set("sel", "");
+        if (g("sel", "") === id) {
+          if (typeof d.selectNode === "function") d.selectNode("");
+          else set("sel", "");
+        }
         set("actionCard", "");
         set("editingDesc", "");
         if (typeof d.invalidateStateEtag === "function") d.invalidateStateEtag();

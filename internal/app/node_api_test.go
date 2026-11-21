@@ -866,7 +866,7 @@ func TestHandleNewNodeScrubsServerOwnedFields(t *testing.T) {
 	f := &fakeTmux{}
 	a := newTestApp(t, f)
 	body := `{"title":"Sneaky","agent":"claude","dir":"` + a.home + `",` +
-		`"id":"pwned","adopted":true,"ended_at":"2020-01-01T00:00:00Z",` +
+		`"id":"pwned","instance_id":"forged-instance","adopted":true,"ended_at":"2020-01-01T00:00:00Z",` +
 		`"transcript":"/etc/shadow","session_id":"forged","fork_kind":"s",` +
 		`"ax_screen_reader":true}`
 	rec := newNode(a, body)
@@ -888,6 +888,9 @@ func TestHandleNewNodeScrubsServerOwnedFields(t *testing.T) {
 	}
 	if n.ID == "pwned" {
 		t.Error("id trusted from body instead of minted server-side")
+	}
+	if n.InstanceID == "" || n.InstanceID == "forged-instance" {
+		t.Errorf("instance identity was not minted by the server: %q", n.InstanceID)
 	}
 	if n.ForkKind != "" {
 		t.Errorf("fork_kind trusted from body: %q (a root has no fork)", n.ForkKind)

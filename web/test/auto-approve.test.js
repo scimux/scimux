@@ -955,6 +955,42 @@ test("P4 manual disable POSTs enabled:false; selected-node routing ignores stale
   }
 });
 
+test("auto-approval response from an earlier visit cannot repaint a later visit to the same node", async () => {
+  const releases = [];
+  let refresh;
+  const ctx = makeFeature({apiConditionalGet:()=>new Promise(resolve=>{refresh=resolve;}),api: path => path.includes('/auto-approve')
+    ? new Promise(resolve => releases.push(resolve))
+    : Promise.resolve({turns:[],assets:{}})});
+  ctx.feature.bind();
+  const first = firstListener(ctx.roots.autoapprove,'click')();
+  ctx.feature.onSelectChange(); ctx.setSel('other'); ctx.setSelGen(2);
+  ctx.feature.onSelectChange(); ctx.setSel('g1'); ctx.setSelGen(3);
+  const second = firstListener(ctx.roots.autoapprove,'click')();
+  releases[0]({supported:true,enabled:true,phase:'primed',count:0}); await new Promise(r=>setImmediate(r));
+  assert.equal(ctx.roots.autoapprove.getAttribute('aria-pressed'),'false');
+  if (refresh) refresh({status:304}); await first;
+  releases[1]({supported:true,enabled:false,phase:'off',count:0}); await new Promise(r=>setImmediate(r));
+  if (refresh) refresh({status:304}); await second;
+  ctx.feature.destroy();
+});
+
+test('auto-approval errors affect only their visit and retain server state', async () => {
+  const rejects=[];const ctx=makeFeature({api:path=>path.includes('/auto-approve')?new Promise((_resolve,reject)=>rejects.push(reject)):Promise.resolve({turns:[],assets:{}})});
+  ctx.feature.bind();ctx.roots.autoapprove.disabled=true;await firstListener(ctx.roots.autoapprove,'click')();assert.equal(rejects.length,0);
+  ctx.roots.autoapprove.disabled=false;const stale=firstListener(ctx.roots.autoapprove,'click')();
+  ctx.feature.onSelectChange();ctx.setSel('other');ctx.setSelGen(2);ctx.feature.onSelectChange();ctx.setSel('g1');ctx.setSelGen(3);
+  const current=firstListener(ctx.roots.autoapprove,'click')();rejects[0](Error('old error'));await stale;
+  assert.doesNotMatch(ctx.roots.autoapprove.innerHTML,/old error/);
+  rejects[1](Error('new error'));await current;assert.match(ctx.roots.autoapprove.innerHTML,/new error/);ctx.feature.destroy();
+});
+
+test('auto-approval tolerates a missing attribute reader and reports an empty error', async () => {
+  const ctx=makeFeature({api:path=>path.includes('/auto-approve')?Promise.reject({}):Promise.resolve({turns:[],assets:{}})});
+  ctx.feature.bind();ctx.roots.autoapprove.getAttribute=null;
+  await firstListener(ctx.roots.autoapprove,'click')();
+  assert.match(ctx.roots.autoapprove.innerHTML,/auto-approve failed/);ctx.feature.destroy();
+});
+
 test("P4 poll: server reset turns UI off; count repaint; 304 no DOM rebuild; ETag isolation", async () => {
   let payload = {
     turns: [{ role: "user", text: "hi", record: 1 }],

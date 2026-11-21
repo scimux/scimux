@@ -73,6 +73,39 @@ func (a *app) node(r *http.Request) (*Node, bool) {
 	return n, ok
 }
 
+// gateIndex picks the shared stripe for a reusable node ID.
+func gateIndex(id string) uint32 {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(id))
+	return hash.Sum32() % 64
+}
+
+// chatGate serializes delivery and upload commits with deletion of a reusable
+// slug. Callers must recheck ownership after acquiring it.
+func (a *app) chatGate(id string) *sync.Mutex {
+	return &a.promptGates[gateIndex(id)]
+}
+
+func (a *app) controlGate(id string) *sync.Mutex {
+	return &a.controlGates[gateIndex(id)]
+}
+
+func chatInstanceMatches(r *http.Request, instance string) bool {
+	requested := r.Header.Get("X-Scimux-Chat-Instance")
+	if requested != "" && (instance == "" || requested != instance) {
+		return false
+	}
+	values, present := r.URL.Query()["chat_instance"]
+	return !present || (len(values) == 1 && instance != "" && values[0] == instance)
+}
+
+func (a *app) currentChatInstance(n *Node, r *http.Request) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	current := a.byID[n.ID]
+	return current == n && chatInstanceMatches(r, n.InstanceID)
+}
+
 // refuseEnded reports whether the node is a deliberately closed ("ended")
 // thread and, if so, writes a 409. /exit makes the ended head an immutable
 // dead-end cap; every mutation endpoint (send, /clear, upload, interrupt,
@@ -151,18 +184,20 @@ func (a *app) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Claude /fork is not supported; use scimux's Fork action to create a fresh node that inherits launch configuration but not conversation history", http.StatusBadRequest)
 		return
 	}
+	// Fixed-size striped gates serialize all owner sends and clears with the
+	// trace snapshots, without retaining a receipt or a lock per node.
+	gate := a.chatGate(n.ID)
+	gate.Lock()
+	defer gate.Unlock()
+	if !a.currentChatInstance(n, r) {
+		http.Error(w, "chat identity changed", http.StatusConflict)
+		return
+	}
 	atts, err := a.resolveAttachments(n.ID, body.Attachments)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	// Fixed-size striped gates serialize all owner sends and clears with the
-	// trace snapshots, without retaining a receipt or a lock per node.
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(n.ID))
-	gate := &a.promptGates[hash.Sum32()%uint32(len(a.promptGates))]
-	gate.Lock()
-	defer gate.Unlock()
 
 	// delivered is what the transport receives and records: the user's text with
 	// a plain-text reference to each uploaded file appended (extendPrompt). The
@@ -571,9 +606,16 @@ func (a *app) handleSendResolve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleSendInterrupt(w http.ResponseWriter, r *http.Request) {
+	gate := a.controlGate(r.PathValue("id"))
+	gate.Lock()
+	defer gate.Unlock()
 	n, ok := a.node(r)
 	if !ok {
 		http.Error(w, "not found", 404)
+		return
+	}
+	if !a.currentChatInstance(n, r) {
+		http.Error(w, "chat identity changed", http.StatusConflict)
 		return
 	}
 	if a.refuseRetiredExternal(w, n) {

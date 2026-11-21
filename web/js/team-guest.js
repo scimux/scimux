@@ -1,7 +1,8 @@
 /* Shared subscription list and read-only guest view. */
-import { esc, md, stripAssetRefs, bubbleTitle } from "./format.js";
+import { esc, md, stripAssetRefs, bubbleTitle, bubbleSpeaker } from "./format.js";
 import { pinnedOrder } from "./map-model.js";
 import { promptSourceKey } from "./storage.js";
+import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
 
 const LIST = "/api/team/subscriptions";
 
@@ -104,7 +105,7 @@ export function guestGroups(subs, servers, people = {}) {
   return result;
 }
 
-export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, people = () => ({}), panel, storage = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove }) {
+export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, toast, people = () => ({}), localNodes = () => [], panel, bubbleController = createBubbleActionController(), storage = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove, classificationTimeoutMs = 8000 }) {
   let off = false;
   let destroyed = false;
   let answer = { subscriptions: [], servers: [], truncated: false };
@@ -114,13 +115,116 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   let hasAnswer = false;
   const pending = new Set();
   let bound = false;
+  let removeBubbleListeners = null;
   let open = null;
   let owner = null;
   const ownerCopies = new Map();
   let actionOwner = null;
+  let pendingOwnerJump = null;
   let ownerShare = null;
   let readGeneration = 0;
   let knownPeople = {};
+  const classificationJobs = new Map();
+  const classificationQueue = [];
+  const classificationProgress = new Map();
+  const classificationResults = new Map();
+  const classificationCancels = new Set();
+  let classificationActive = 0;
+
+  // This is presentation evidence, not a read position. The durable comments
+  // copy is populated by GET; only the existing /seen operation marks it read.
+  function unreadState(view) {
+    if (view.state !== "live") return "read";
+    if (!view.unread) return "read";
+    if (view.access !== "owner" && view.mirror_last > view.seen_mirror) return "unread";
+    if (view.comments_last > view.seen_comments) return view.commentUnread || "unknown";
+    return "unread";
+  }
+  function presented(view) {
+    const state = unreadState(view);
+    return {...view, unread: state === "unread", unreadUnknown: state === "unknown"};
+  }
+  function setCommentUnread(view, state) {
+    Object.defineProperty(view, "commentUnread", {value:state, writable:true, configurable:true});
+  }
+  async function readClassificationPage(path) {
+    const controller = new AbortController();
+    let timer, cancel;
+    const timeout = new Promise(resolve => {
+      cancel = () => { controller.abort(); resolve(null); };
+      timer = setTimeout(cancel, classificationTimeoutMs);
+    });
+    classificationCancels.add(cancel);
+    try { return await Promise.race([api(path, {signal:controller.signal}), timeout]); }
+    finally { clearTimeout(timer); classificationCancels.delete(cancel); }
+  }
+  async function classifyComments(view) {
+    const key = guestKey(view);
+    const saved = classificationProgress.get(key);
+    let cursor = saved && saved.seen === view.seen_comments && saved.next <= view.comments_last ? saved.next : view.seen_comments;
+    if (cursor === view.seen_comments) classificationProgress.delete(key);
+    let gap = false;
+    try {
+      for (let pageNo = 0; pageNo < 40 && cursor < view.comments_last; pageNo++) {
+        const page = await readClassificationPage(LIST + "/" + guestKey(view) + "/comments?after=" + cursor);
+        if (!page || !Array.isArray(page.entries) || !Number.isSafeInteger(page.next) || page.next <= cursor) return "unknown";
+        let expected = cursor + 1;
+        for (const entry of page.entries) {
+          if (!Number.isSafeInteger(entry.seq) || entry.seq < expected || entry.seq > page.next) return "unknown";
+          if (entry.seq !== expected || typeof entry.mine !== "boolean") gap = true;
+          if (entry.mine === false && entry.seq <= view.comments_last) { classificationProgress.delete(key); return "unread"; }
+          expected = entry.seq + 1;
+        }
+        if (expected <= Math.min(page.next, view.comments_last)) gap = true;
+        cursor = page.next;
+        if (!gap) classificationProgress.set(key, {seen:view.seen_comments, next:cursor});
+      }
+      if (gap || cursor >= view.comments_last) classificationProgress.delete(key);
+      return cursor >= view.comments_last && !gap ? "read" : "unknown";
+    } catch { return "unknown"; }
+  }
+  function pumpClassifications() {
+    while (!destroyed && classificationActive < 4 && classificationQueue.length) {
+      const job = classificationQueue.shift();
+      const view = job.view;
+      const seen = view.seen_comments, last = view.comments_last;
+      classificationActive++;
+      classifyComments(view).then(state => {
+        classificationActive--;
+        classificationJobs.delete(job.key);
+        const current = answer.subscriptions.find(item => guestKey(item) === job.key);
+        if (!destroyed && current && current.seen_comments === seen && current.comments_last === last) {
+          const known = classificationResults.get(job.key);
+          if (known && known.state === "unread" && known.seen === seen && known.last < last) state = "unread";
+          if (state !== "unknown") classificationResults.set(job.key, {seen, last, state});
+          setCommentUnread(current, state);
+          invalidateCards();
+        } else if (!destroyed && current) classifyList([current]);
+        job.done();
+        pumpClassifications();
+      });
+    }
+  }
+  function classifyList(views) {
+    for (const view of views) {
+      if (view.state !== "live" || !view.unread || view.comments_last <= view.seen_comments || (view.access !== "owner" && view.mirror_last > view.seen_mirror)) continue;
+      const key = guestKey(view);
+      const result = classificationResults.get(key);
+      if (result && result.seen === view.seen_comments) {
+        if (result.last === view.comments_last) { setCommentUnread(view, result.state); continue; }
+        if (result.state === "unread" && result.last < view.comments_last) setCommentUnread(view, "unread");
+      }
+      const prior = classificationJobs.get(key);
+      if (prior) { prior.view = view; continue; }
+      let done;
+      const promise = new Promise(resolve => { done = resolve; });
+      const job = {key, view, done};
+      classificationJobs.set(key, job);
+      classificationQueue.push(job);
+      track(promise);
+    }
+    pumpClassifications();
+  }
 
   function track(promise) {
     pending.add(promise);
@@ -128,13 +232,14 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function tabHTML(active) {
     if (off) return "";
-    const received = answer.subscriptions.filter(item => item.access !== "owner");
+    const received = activities();
     if (!received.length) return "";
     let cls = "";
     if (active) cls = "on";
     const count = received.filter(item => item.unread).length;
     let badge = "";
     if (count) badge = `<span class="tabbadge" aria-label="${count} unread">${count}</span>`;
+    else if (received.some(item => item.unreadUnknown)) badge = '<span class="tabbadge" aria-label="unread status unavailable">?</span>';
     return `<button data-tab="shared" class="${cls}" aria-pressed="${active}">Shared with me${badge}</button>`;
   }
   async function load() {
@@ -149,6 +254,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       hasAnswer = true;
       answer = next;
+      const present = new Set(next.subscriptions.map(guestKey));
+      for (const key of classificationProgress.keys()) if (!present.has(key)) classificationProgress.delete(key);
+      for (const key of classificationResults.keys()) if (!present.has(key)) classificationResults.delete(key);
+      classifyList(next.subscriptions);
       if (open && !next.subscriptions.some(view => guestKey(view) === open.key)) {
         readGeneration++;
         open.busy = false;
@@ -174,6 +283,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function tick() {
     if (destroyed) return;
+    refreshMarkers();
     const time = now();
     for (const copy of ownerCopies.values()) if (!copy.busy && time - copy.lastRead >= 5000) startOwnerRead(copy);
     if (open) {
@@ -229,7 +339,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function openView(view) {
     readGeneration++;
     const key = guestKey(view);
-    open = { key, view, next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), row: null, lastRead: 0, busy: false, failed: false, empty: false, removing: false, removeNote: false };
+    open = { key, view, visit:bubbleController.captureVisit(), next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), markerHTML:new Map(), row: null, lastRead: 0, busy: false, failed: false, empty: false, removing: false, removeNote: false };
     header(view);
     $("msgs").innerHTML = '<div class="previewtrunc">Loading…</div>';
     $("guestnote").textContent = "";
@@ -238,6 +348,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     startRead();
   }
   function close() {
+    if (bubbleController.current()?.kind === "shared") bubbleController.clear();
     open = null;
     readGeneration++;
     $("msgs").innerHTML = "";
@@ -247,18 +358,50 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (event.key === "Escape" && event.target?.dataset?.grename !== undefined) {
       event.preventDefault(); event.stopPropagation(); restoreNameRow(); return;
     }
-    if (event.key === "Enter" || event.key === " ") {
-      if (!event.target) return;
-      const bubble = event.target.closest(".bubble");
-      if (bubble === event.target) {
-        event.preventDefault();
-        toggleAction(bubble);
-      }
-      return;
-    }
+    activateBubbleKey(event, {doc, win:doc.defaultView, activate:toggleAction});
 
   }
   function more() { startRead(); }
+  function refreshMarkers() {
+    const current = open;
+    if (!current || !panel.sharedMarkers) return;
+    for (const turn of $("msgs").querySelectorAll("[data-seq], [data-cseq]")) {
+      const key = turn.dataset.cseq !== undefined ? "comments/" + turn.dataset.cseq : "mirror/" + turn.dataset.seq;
+      const entry = current.entries.get(key), capture = entry && guestCapture(entry, current.view, current.names, knownPeople);
+      if (!capture) continue;
+      const html = panel.sharedMarkers(capture.team) || "";
+      if (current.markerHTML.get(key) === html) continue;
+      const bubble = turn.querySelector(".bubble");
+      if (!bubble) continue;
+      const old = bubble.querySelector(".bubblemarkers"), active = doc.activeElement;
+      const marker = old && old.contains(active) && active?.dataset?.bmarker;
+      const restore = ["bookmark", "prompt", "sendto"].includes(marker);
+      if (old) old.remove();
+      if (html) bubble.insertAdjacentHTML("afterbegin", html);
+      if (restore) bubble.querySelector(`[data-bmarker="${marker}"]`)?.focus({preventScroll:true});
+      current.markerHTML.set(key, html);
+    }
+  }
+  function resolveSharedJump(current, moreMirror, moreComments) {
+    const target = current.jump;
+    if (!target || open !== current) return false;
+    const key = target.log + "/" + target.seq;
+    const entry = current.entries.get(key);
+    if (entry) {
+      const selector = target.log === "comments" ? `[data-cseq="${target.seq}"]` : `[data-seq="${target.seq}"]`;
+      const element = entry.omitted === undefined ? $("msgs").querySelector(selector) : null;
+      if (element) {
+        element.scrollIntoView({block:"center"});
+        element.classList?.add("jumpflash");
+        setTimeout(() => element.classList?.remove("jumpflash"), 1600);
+      } else $("guestnote").textContent = "This shared message is unavailable — its saved bookmark remains.";
+      current.jump = null;
+      return false;
+    }
+    const hasMore = target.log === "comments" ? moreComments : moreMirror;
+    if (!hasMore) { $("guestnote").textContent = "This shared message is unavailable — its saved bookmark remains."; current.jump = null; }
+    return hasMore;
+  }
   function startRead() {
     if (off) return;
     if (!open) return;
@@ -275,7 +418,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function currentRead(current, gen) {
     if (destroyed) return false;
     if (open !== current) return false;
-    return gen === readGeneration;
+    return gen === readGeneration && bubbleController.isCurrentVisit(current.visit);
   }
   function insertOrdered(body, html, key) {
     for (const element of body.children) {
@@ -295,18 +438,18 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     let hasEntries = false;
     let morePages = false;
     let moreComments = false;
+    let continueJump = false;
     function insertUpdate(html, key) {
       const row = current.row;
       const editing = !!row?.renaming;
-      const top = editing ? row.turn.getBoundingClientRect?.().top : undefined;
-      const nearEnd = body.scrollHeight - body.scrollTop - body.clientHeight <= 80;
+      const snapshot = bubbleController.captureViewport(body, {anchor:editing ? row.turn : null});
       insertOrdered(body, html, key);
-      if (editing && current.row === row && row.renaming) {
-        if (typeof top === "number") body.scrollTop += row.turn.getBoundingClientRect().top - top;
-      } else if (!first && nearEnd) body.scrollTop = body.scrollHeight;
+      const anchor = editing && current.row === row && row.renaming ? row.turn : null;
+      bubbleController.restoreViewport(snapshot, {anchor, follow:!first});
     }
     try {
       for (let n = 0; n < 40; n++) {
+        const previous = current.next;
         const result = await api(LIST + "/" + current.key + "?after=" + current.next);
         if (!currentRead(current, gen)) return;
         current.view = result.view;
@@ -319,7 +462,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (current.first) { body.innerHTML = ""; current.first = false; }
         for (const entry of result.entries) {
           current.entries.set("mirror/" + entry.seq, entry);
-          const rendered = guestEntryHTML(entry, result.view.owner_name, result.view.server, result.view.owner, knownPeople, result.view.access);
+          const capture = guestCapture(entry, result.view, current.names, knownPeople);
+          const markers = capture ? panel.sharedMarkers?.(capture.team) || "" : "";
+          if (capture) current.markerHTML.set("mirror/" + entry.seq, markers);
+          const rendered = guestEntryHTML(entry, result.view.owner_name, result.view.server, result.view.owner, knownPeople, result.view.access, markers);
           if (rendered) {
             if (current.empty) { body.innerHTML = ""; current.empty = false; }
             insertUpdate(rendered, [entry.seq, 0, 0]);
@@ -328,21 +474,27 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         }
         current.next = result.next;
         morePages = result.more;
+        if (current.jump && morePages && current.next <= previous) { morePages = false; break; }
         if (!morePages) break;
       }
       for (let n = 0; n < 40; n++) {
+        const previous = current.cnext;
         const result = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext);
         if (!currentRead(current, gen)) return;
         Object.assign(current.names, result.names);
         if (refreshPeople()) invalidateCards();
         for (const message of result.entries) {
           if (current.empty) { body.innerHTML = ""; current.empty = false; }
-          insertUpdate(guestMessageHTML(message, current.names, current.view.server, knownPeople), [message.anchor, 1, message.seq]);
+          const capture = guestCapture(message, current.view, current.names, knownPeople);
+          const markers = capture ? panel.sharedMarkers?.(capture.team) || "" : "";
+          if (capture) current.markerHTML.set("comments/" + message.seq, markers);
+          insertUpdate(guestMessageHTML(message, current.names, current.view.server, knownPeople, "", markers), [message.anchor, 1, message.seq]);
           current.entries.set("comments/" + message.seq, message);
           hasEntries = true;
         }
         current.cnext = result.next;
         moreComments = result.more;
+        if (current.jump && moreComments && current.cnext <= previous) { moreComments = false; break; }
         if (!moreComments) break;
       }
       if (first && !current.row?.renaming) {
@@ -364,6 +516,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         } else body.scrollTop = body.scrollHeight;
       }
       $("guestmore").hidden = !morePages && !moreComments;
+      current.moreMirror = morePages; current.moreComments = moreComments;
+      continueJump = resolveSharedJump(current, morePages, moreComments);
       const marks = {};
       if (current.next > current.seen) marks.mirror = current.next;
       if (current.cnext > current.commentsSeen) marks.comments = current.cnext;
@@ -378,6 +532,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       if (code === "not_found") { current.failed = true; panel.changed(); }
     } finally {
       if (current.busy === gen) current.busy = false;
+      if (continueJump && currentRead(current, gen)) startRead();
     }
   }
   async function markSeen(current, gen, marks) {
@@ -398,6 +553,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
           if (view.mirror_last > view.seen_mirror) view.unread = true;
         }
       }
+      delete view.commentUnread;
+      classifyList([view]);
       if (JSON.stringify(view) !== before) invalidateCards();
     } catch {}
   }
@@ -426,11 +583,18 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const current = actionView();
     if (!current) return;
     if (!event.target.closest) return;
-    const action = event.target.closest("[data-gact]");
-    if (action) { runAction(action.dataset.gact); return; }
-    if (event.target.closest("a") || event.target.closest("[data-bmarker]")) return;
-    const bubble = event.target.closest(".bubble");
-    if (bubble) toggleAction(bubble);
+    const marker = event.target.closest("[data-bmarker]");
+    if (marker && open) {
+      const turn = marker.closest("[data-seq], [data-cseq]");
+      const key = turn?.dataset?.cseq !== undefined ? "comments/" + turn.dataset.cseq : "mirror/" + turn?.dataset?.seq;
+      const entry = current.entries.get(key);
+      const capture = entry && guestCapture(entry, current.view, current.names, knownPeople);
+      if (capture) panel.openMarker?.(capture.team, marker.dataset.bmarker);
+      return;
+    }
+    if (event.target.closest("[data-bmarker]")) return;
+    routeBubbleClick({target:event.target, actionSelector:"[data-gact]", doc, win:doc.defaultView,
+      findTurn:target => target.closest(".bubble"), onAction:action => runAction(action.dataset.gact), onTurn:toggleAction});
   }
   function toggleAction(bubble) {
     const turn = bubble.closest("[data-seq], [data-cseq]");
@@ -447,19 +611,20 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!entry) return;
     const capture = guestCapture(entry, current.view, current.names, knownPeople);
     if (!capture) return;
-    const previous = current.row;
-    if (previous) {
-      previous.turn.nextElementSibling?.remove();
+    const selected = bubbleController.toggle({key:"shared/" + current.key + "/" + key, target:turn, kind:"shared", close:() => {
+      current.row?.turn.nextElementSibling?.remove();
       current.row = null;
-      if (previous.turn === turn) return;
-    }
-    turn.insertAdjacentHTML("afterend", '<div class="bubactions" data-gactions>' + actionButtons(capture) + '</div>');
+    }});
+    if (!selected) return;
+    renderActionRow({doc, turn, html:actionButtons(capture), shared:true});
     current.row = { turn, capture, entry, renaming: false };
   }
   function actionButtons(capture) {
-    let buttons = '<button data-gact="bookmark">bookmark</button><button data-gact="sendto">send to&#8230;</button>';
-    if (actionView() && !open && canPreparePrompt(capture.team)) buttons += '<button data-gact="prompt"><span class="rot90r">' + panel.promptIcon + '</span>use as prompt</button>';
-    if (capture.role === "person") buttons += '<button data-gact="rename">rename person</button>';
+    let buttons = panel.bubbleActions({time:capture.turnTime}, {
+      shared:true, iconBranch:panel.branchIcon || "", iconInto:panel.promptIcon || "", iconCopy:panel.copyIcon || "",
+      prompt:!!(actionView() && !open && canPreparePrompt(capture.team)),
+    });
+    if (capture.role === "person") buttons += '<button data-gact="more" aria-label="more actions">' + (panel.moreIcon || "") + '</button>';
     return buttons;
   }
   function restoreNameRow() {
@@ -470,7 +635,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const row = current.row.turn.nextElementSibling;
     current.row.renaming = false;
     row.innerHTML = actionButtons(current.row.capture);
-    row.querySelector('[data-gact="rename"]').focus();
+    row.querySelector('[data-gact="more"]').focus();
   }
   function editPerson() {
     const current = actionView();
@@ -499,12 +664,33 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function runAction(action) {
     const current = actionView();
     if (!current.row) return;
+    bubbleController.cancelAction();
     const capture = current.row.capture;
+    if (action === "fork") { dispatchBubbleAction("fork", capture, {fork:panel.fork ? text => panel.fork({...capture,text}) : null}); return; }
+    if (action === "desc") {
+      dispatchBubbleAction("desc",capture,{controller:bubbleController,choose:panel.chooseDescription,nodes:localNodes,
+        isCurrent:() => actionView() === current && current.row?.capture === capture,
+        verify:panel.chooseDescription ? async (id,instance) => {
+          const state = await api("/api/state");
+          return (state.nodes || []).some(n => n.id === id && n.instance_id === instance && !n.ended_at);
+        } : null,
+        unavailable:() => toast?.("That chat is no longer available. Choose a current local chat."),
+        describe:panel.chooseDescription ? (id,value) => panel.editDescription?.(id,value) : (_id,value) => panel.describe?.(value)});
+      return;
+    }
+    if (action === "copy") { dispatchBubbleAction("copy", capture, {copy:panel.copy}); return; }
+    if (action === "more" && capture.role === "person") {
+      panel.choosePersonAction?.({title:"More actions", choices:[{id:"rename",label:"Rename person"}], onChoose:choice => {
+        if (choice?.id === "rename" && actionView() === current && current.row?.capture === capture) editPerson();
+      }});
+      return;
+    }
     if (action === "prompt") {
-      if (!open && ownerCurrent(current) && canPreparePrompt(capture.team)) {
-        const entry = current.row.entry;
-        panel.preparePrompt({...capture, role:"person", who:guestName(current.view.server, entry.author, current.names[entry.author], knownPeople)}, capture.team);
-      }
+      dispatchBubbleAction("prompt", {...capture,source:capture.team}, {
+        canPrepare:() => !open && ownerCurrent(current) && canPreparePrompt(capture.team),
+        prepare:panel.preparePrompt ? (text,source) => { const entry = current.row.entry;
+          panel.preparePrompt({...capture,text,...(capture.role === "person" ? {who:guestName(current.view.server,entry.author,current.names[entry.author],knownPeople)} : {})},source); } : null,
+      });
       return;
     }
     if (action === "rename") { editPerson(); return; }
@@ -512,13 +698,16 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (action === "name-use") { savePerson(true); return; }
     if (action === "bookmark") {
       const keys = ["server", "owner", "chat", "generation", "log", "seq"];
-      const duplicate = bookmarks().some(item => item.team && keys.every(key => item.team[key] === capture.team[key]));
-      if (duplicate) { $("guestnote").textContent = "Already bookmarked."; return; }
-      uiMutate({ k: "bookmark-add", bookmark: { t: new Date(now()).toISOString(), ...capture } });
-      $("guestnote").textContent = "Bookmarked.";
+      dispatchBubbleAction("bookmark", capture, {
+        exists:value => bookmarks().some(item => item.team && keys.every(key => item.team[key] === value.team[key])),
+        isCurrent:() => actionView() === current && current.row?.capture === capture,
+        duplicate:() => { $("guestnote").textContent = "Already bookmarked."; },
+        capture:value => ({t:new Date(now()).toISOString(),...value}),
+        commit:value => { uiMutate({k:"bookmark-add",bookmark:value}); refreshMarkers(); $("guestnote").textContent = "Bookmarked."; },
+      });
     }
     if (action === "sendto") {
-      openSendTo({ text: capture.text, exceptId: "", title: "Send to…", role: capture.role, who: capture.who, prov: capture.prov, source: null });
+      dispatchBubbleAction("sendto", {...capture, source:capture.team, shared:true}, {sendTo:openSendTo});
     }
   }
   async function remove(current) {
@@ -555,27 +744,40 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (bound) return;
     bound = true;
     $("guestmore").addEventListener("click", more);
-    $("msgs").addEventListener("keydown", panelKeydown);
-    $("msgs").addEventListener("click", sharedClick);
+    removeBubbleListeners = bubbleController.listen($("msgs"), {click:sharedClick, keydown:panelKeydown});
     $("guestremove").addEventListener("click", removeClick);
   }
   function destroy() {
     if (bound) {
       $("guestmore").removeEventListener("click", more);
-      $("msgs").removeEventListener("keydown", panelKeydown);
-      $("msgs").removeEventListener("click", sharedClick);
+      removeBubbleListeners();
+      removeBubbleListeners = null;
       $("guestremove").removeEventListener("click", removeClick);
     }
     open = null; owner = null; ownerShare = null; ownerCopies.clear(); actionOwner = null;
     readGeneration++;
     bound = false;
     destroyed = true;
+    for (const cancel of classificationCancels) cancel();
+    classificationProgress.clear();
+    classificationResults.clear();
+    while (classificationQueue.length) {
+      const job = classificationQueue.shift();
+      classificationJobs.delete(job.key);
+      job.done();
+    }
   }
   async function settled() {
     while (pending.size) await Promise.all([...pending]);
   }
-  function activities() { return answer.subscriptions.filter(view => view.access !== "owner"); }
-  function mineUnread() { return answer.subscriptions.some(view => view.access === "owner" && view.unread); }
+  function activities() { return answer.subscriptions.filter(view => view.access !== "owner").map(presented); }
+  function mineUnread() { return answer.subscriptions.some(view => view.access === "owner" && unreadState(view) === "unread"); }
+  function mineUnknown() { return answer.subscriptions.some(view => view.access === "owner" && unreadState(view) === "unknown"); }
+  function ownerUnreadStatus(id) {
+    const states = answer.subscriptions.filter(view => view.access === "owner" && view.local_node === id).map(unreadState);
+    return states.includes("unread") ? "unread" : states.includes("unknown") ? "unknown" : "read";
+  }
+  function ownerUnread(id) { return !!id && ownerUnreadStatus(id) === "unread"; }
   function groups() { return sharedGroups(); }
   function sharedGroups() { return guestGroups(activities(), answer.servers, knownPeople); }
   function openActivity(id) {
@@ -583,6 +785,32 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!view) return;
     panel.select(id);
     invalidateCards();
+  }
+  function jumpToSource(source) {
+    if (!source || !promptSourceKey(source) || !["mirror", "comments"].includes(source.log)) return false;
+    const key = guestKey(source);
+    const view = answer.subscriptions.find(item => guestKey(item) === key);
+    if (!view) return false;
+    bubbleController.clear();
+    if (view.access === "owner") {
+      if (!view.local_node || view.local_node.startsWith("team/") || !panel.ownerJump) return false;
+      panel.select(view.local_node, "jump");
+      pendingOwnerJump = {node:view.local_node, key, source};
+      if (panel.ownerJump(view.local_node, source) === false) { pendingOwnerJump = null; return false; }
+      const current = ownerCopies.get(key);
+      const found = current && (source.log === "comments" ? current.entries.has("comments/" + source.seq) : current.mirrors.some(item => item.seq === source.seq));
+      if (found) { pendingOwnerJump = null; panel.ownerChanged(); }
+      else if (current && !current.busy) startOwnerRead(current);
+      return true;
+    }
+    const id = "team/" + key;
+    if (!open || open.key !== key) panel.select(id, "jump");
+    if (!open || open.key !== key) return false;
+    open.jump = {log:source.log, seq:source.seq};
+    if (!open.busy) {
+      if (resolveSharedJump(open, open.moreMirror, open.moreComments)) startRead();
+    }
+    return true;
   }
   function selectActivity(id) {
     if (open && "team/" + open.key === id) return;
@@ -598,6 +826,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function reconcileOwner() {
     const share = ownerShare;
     const node = selectedNode();
+    if (pendingOwnerJump && pendingOwnerJump.node !== node) pendingOwnerJump = null;
     const uid = selectedUID();
     const relevant = answer.subscriptions.filter(v => !!node && !!uid && v.access === "owner" && v.chat === uid);
     const keep = new Set(relevant.map(guestKey));
@@ -631,20 +860,35 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   async function readOwner(current) {
     const before = ownerRenderSignature(current);
     let painted = false;
+    let moreMirror = false, moreComments = false, continueJump = false;
     try {
       for (let n = 0; n < 40; n++) {
+        const previous = current.next;
         const page = await api(LIST + "/" + current.key + "?after=" + current.next);
         if (!ownerCurrent(current)) return;
         current.view = page.view; current.mirrors.push(...page.entries); current.next = page.next;
-        if (!page.more) break;
+        moreMirror = page.more;
+        if (pendingOwnerJump?.key === current.key && moreMirror && current.next <= previous) { moreMirror = false; break; }
+        if (!moreMirror) break;
       }
       for (let n = 0; n < 40; n++) {
+        const previous = current.cnext;
         const page = await api(LIST + "/" + current.key + "/comments?after=" + current.cnext);
         if (!ownerCurrent(current)) return;
         Object.assign(current.names, page.names); current.comments.push(...page.entries);
         for (const entry of page.entries) current.entries.set("comments/" + entry.seq, entry);
         current.cnext = page.next;
-        if (!page.more) break;
+        moreComments = page.more;
+        if (pendingOwnerJump?.key === current.key && moreComments && current.cnext <= previous) { moreComments = false; break; }
+        if (!moreComments) break;
+      }
+      if (pendingOwnerJump?.key === current.key && pendingOwnerJump.node === current.node) {
+        const source = pendingOwnerJump.source;
+        const found = source.log === "comments" ? current.entries.has("comments/" + source.seq) : current.mirrors.some(item => item.seq === source.seq);
+        const more = source.log === "comments" ? moreComments : moreMirror;
+        if (found) pendingOwnerJump = null;
+        else if (more) continueJump = true;
+        else { pendingOwnerJump = null; panel.ownerUnavailable?.(source); }
       }
       if (before !== ownerRenderSignature(current)) { panel.ownerChanged(); painted = true; }
       if (current.cnext > current.view.seen_comments) {
@@ -653,12 +897,21 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
           current.view.seen_comments = current.cnext; current.view.unread = false;
           const listed = answer.subscriptions.find(view => guestKey(view) === current.key);
           if (listed) { listed.seen_comments = current.cnext; listed.unread = listed.comments_last > current.cnext; }
+          if (listed) { delete listed.commentUnread; classifyList([listed]); }
           invalidateCards();
         }
       }
     } catch {
       if (!painted && ownerCurrent(current) && before !== ownerRenderSignature(current)) panel.ownerChanged();
-    } finally { if (ownerCurrent(current)) current.busy = false; }
+      if (ownerCurrent(current) && pendingOwnerJump?.key === current.key) {
+        const source = pendingOwnerJump.source; pendingOwnerJump = null; panel.ownerUnavailable?.(source);
+      }
+    } finally {
+      if (ownerCurrent(current)) {
+        current.busy = false;
+        if (continueJump && pendingOwnerJump?.key === current.key) startOwnerRead(current);
+      }
+    }
   }
   function ownerSnapshots() {
     return [...ownerCopies.values()].filter(copy => ownerCurrent(copy)).sort((a,b) => (Number.isInteger(a.order) ? a.order : Infinity) - (Number.isInteger(b.order) ? b.order : Infinity) || a.key.localeCompare(b.key)).map(copy => {
@@ -708,7 +961,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     return result;
   }
   function selectedActivity() { return open ? "team/" + open.key : ""; }
-  return { tick, refresh, bind, destroy, settled, selectActivity, setOwnerShare, localIdentityChanged, ownerSnapshot, ownerSnapshots, canPreparePrompt, peopleContext, sendPeople, loaded: () => hasAnswer, hasActivity: id => activities().some(view => "team/" + guestKey(view) === id), tab: { tabHTML, activities, groups, mineUnread, open: openActivity, selected: selectedActivity } };
+  return { tick, refresh, refreshMarkers, bind, destroy, settled, selectActivity, setOwnerShare, localIdentityChanged, ownerSnapshot, ownerSnapshots, canPreparePrompt, peopleContext, sendPeople, jumpToSource, loaded: () => hasAnswer, hasActivity: id => activities().some(view => "team/" + guestKey(view) === id), tab: { tabHTML, activities, groups, mineUnread, mineUnknown, ownerUnread, ownerUnreadStatus, open: openActivity, selected: selectedActivity } };
 }
 
 export function guestStateText(view) {
@@ -730,16 +983,17 @@ export function guestErrorText(code) {
 export function guestMessageHTML(entry, names, server = "", people = {}, ownerKey = "", markers = "") {
   let cls = "turn assistant gmsg";
   let who = guestName(server, entry.author, names[entry.author], people);
-  let name = `<div class="gwho" data-seat="${esc(entry.author)}">${esc(who)}</div>`;
-  if (entry.mine) { cls = "turn user gmsg"; name = `<div class="gwho">You · People</div>`; }
+  let speakerAttributes = `data-seat="${esc(entry.author)}"`;
+  if (entry.mine) { cls = "turn user gmsg"; who = bubbleSpeaker({mine:true}); speakerAttributes = ""; }
   let tab = "";
   if (entry.text) tab = ' tabindex="0"';
-  return `<div class="${cls}" data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"${ownerKey ? ` data-gkey="${esc(ownerKey)}"` : ""}><div class="bubble" title="${esc(entry.at)}"${tab}>${markers}${name}${md(entry.text)}</div></div>`;
+  return renderBubbleTurn({turnClass:cls, turnAttributes:`data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"${ownerKey ? ` data-gkey="${esc(ownerKey)}"` : ""}`,
+    bubbleAttributes:`title="${esc(entry.at)}"${tab}`, markers, speakerName:who, speakerAttributes, text:entry.text, formatText:md});
 }
 export function guestHexKey(bytes) {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 }
-export function guestEntryHTML(entry, ownerName, server = "", seat = "", people = {}, access = "") {
+export function guestEntryHTML(entry, ownerName, server = "", seat = "", people = {}, access = "", markers = "") {
   let line = "";
   if (entry.t === "start") {
     line = "Shared with its history.";
@@ -754,19 +1008,18 @@ export function guestEntryHTML(entry, ownerName, server = "", seat = "", people 
     if (entry.t === "user") {
       if (access !== "owner") {
         who = guestName(server, seat, ownerName, people);
-        seatAttrs = ` data-seat="${esc(seat)}" data-prompt="1" data-prov="${entry.prov === true}"`;
+        seatAttrs = `data-seat="${esc(seat)}" data-prompt="1" data-prov="${entry.prov === true}"`;
       }
       who += " · prompt";
       if (entry.prov === true) who += " · includes forwarded AI text";
     } else {
-      who = entry.agent;
-      if (!who) who = "Agent";
+      who = bubbleSpeaker({agent:entry.agent || "Agent"});
     }
-    let content = "This message was too large to share.";
-    if (entry.omitted === undefined) content = md(stripAssetRefs(entry.text));
+    const text = entry.omitted === undefined ? stripAssetRefs(entry.text) : null;
     let tab = "";
     if (entry.omitted === undefined) { if (entry.text) tab = ' tabindex="0"'; }
-    return `<div class="turn assistant" data-seq="${esc(entry.seq)}"><div class="bubble" title="${esc(bubbleTitle(entry.t, entry.time))}"${tab}><div class="gwho"${seatAttrs}>${esc(who)}</div>${content}</div></div>`;
+    return renderBubbleTurn({turnClass:"turn assistant", turnAttributes:`data-seq="${esc(entry.seq)}"`, bubbleAttributes:`title="${esc(bubbleTitle(entry.t, entry.time))}"${tab}`,
+      markers, speakerName:who, speakerAttributes:seatAttrs, text, formatText:value => value === null ? "This message was too large to share." : md(value)});
   } else return "";
   return `<div class="previewtrunc" data-seq="${esc(entry.seq)}">${line}</div>`;
 }

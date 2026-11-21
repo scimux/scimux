@@ -92,7 +92,7 @@ import {
 } from "./api.js";
 import { createCardsFeature } from "./cards.js";
 import { createMapFeature, escapeDockStep } from "./map.js";
-import { createChatFeature, assetBubbleBodyHTML } from "./chat.js";
+import { createChatFeature, assetBubbleBodyHTML, bubbleActionsHTML, sharedBubbleMarkersHTML } from "./chat.js";
 import { createComposerFeature } from "./composer.js";
 import {
   createBookmarksFeature,
@@ -122,6 +122,7 @@ import { createPairingFeature, createDeviceList, createUnlinkControl, createPair
 import { createSharingSection } from "./team-ui.js";
 import { createShareFeature } from "./team-share.js";
 import { createGuestFeature } from "./team-guest.js";
+import { createBubbleActionController } from "./menu.js";
 import { createPollingFeature } from "./polling.js";
 import { installInsetRefresh } from "./insets.js";
 import { APP_SLOT, claimAppSlot, createTeardown, createTimerBook } from "./lifecycle.js";
@@ -325,6 +326,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   /* thumbtack / thumbtack-slash — Font Awesome Free 7 (classic solid), CC BY 4.0.
      Inlined like every other glyph (no webfont dependency); filled, so these use
      fill="currentColor" over the project's usual stroke icons. */
+  /* Font Awesome Free 6.7.2 classic solid users, CC BY 4.0; see legal/font-awesome.LICENSE. */
+  const ICON_USERS = `<svg viewBox="0 0 640 512" fill="currentColor" data-icon="users" aria-hidden="true"><path d="M144 0a80 80 0 1 1 0 160A80 80 0 1 1 144 0zM512 0a80 80 0 1 1 0 160A80 80 0 1 1 512 0zM0 298.7C0 239.8 47.8 192 106.7 192l42.7 0c15.9 0 31 3.5 44.6 9.7c-1.3 7.2-1.9 14.7-1.9 22.3c0 38.2 16.8 72.5 43.3 96c-.2 0-.4 0-.7 0L21.3 320C9.6 320 0 310.4 0 298.7zM405.3 320c-.2 0-.4 0-.7 0c26.6-23.5 43.3-57.8 43.3-96c0-7.6-.7-15-1.9-22.3c13.6-6.3 28.7-9.7 44.6-9.7l42.7 0C592.2 192 640 239.8 640 298.7c0 11.8-9.6 21.3-21.3 21.3l-213.3 0zM224 224a96 96 0 1 1 192 0 96 96 0 1 1 -192 0zM128 485.3C128 411.7 187.7 352 261.3 352l117.3 0C452.3 352 512 411.7 512 485.3c0 14.7-11.9 26.7-26.7 26.7l-330.7 0c-14.7 0-26.7-11.9-26.7-26.7z"/></svg>`;
   const ICON_PIN = `<svg width="13" height="13" viewBox="0 0 640 640" fill="currentColor" aria-hidden="true">
     <path d="M160 96C160 78.3 174.3 64 192 64L448 64C465.7 64 480 78.3 480 96C480 113.7 465.7 128 448 128L418.5 128L428.8 262.1C465.9 283.3 494.6 318.5 507 361.8L510.8 375.2C513.6 384.9 511.6 395.2 505.6 403.3C499.6 411.4 490 416 480 416L160 416C150 416 140.5 411.3 134.5 403.3C128.5 395.3 126.5 384.9 129.3 375.2L133 361.8C145.4 318.5 174 283.3 211.2 262.1L221.5 128L192 128C174.3 128 160 113.7 160 96zM288 464L352 464L352 576C352 593.7 337.7 608 320 608C302.3 608 288 593.7 288 576L288 464z"/></svg>`;
   const ICON_UNPIN = `<svg width="13" height="13" viewBox="0 0 640 640" fill="currentColor" aria-hidden="true">
@@ -604,9 +607,11 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   const laneModel = () => laneModelMod(nodes, getUI().lanes);
   const isArchived = id => isArchivedMod(id, getUI().archived);
 
-  const guestFeature = own(createGuestFeature({ api, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)), uiMutate: op => uiMutate(op), bookmarks: () => getUI().bookmarks, openSendTo: opts => bookmarksFeature.openSendTo(opts), people: () => getUI().people, storage: store, selectedNode: () => sel, selectedUID: () => localLogIdentity.node === sel ? localLogIdentity.uid : "", localAgentAvailable: () => { const node = nodeById(sel); return !!node && !node.ended_at; }, confirmRemove: confirm, panel: { promptIcon: ICON_INTO, preparePrompt: (capture, source) => composerFeature.preparePrompt(discloseQuoted(capture.text, capture), {...source, role:capture.role, who:capture.who, prov:capture.prov}), select: id => { select(id); if (!isDesktop()) setLevel(1); }, loaded: () => { if (sel.startsWith("team/") && guestFeature.hasActivity(sel) && guestFeature.tab.selected() !== sel) select(sel); }, changed: () => { if (composerFeature) composerFeature.refreshDestination(); }, ownerChanged: () => { ownerPending = ownerExpected && !guestFeature.peopleContext()?.owner; if (composerFeature) composerFeature.contextChanged(); if (chatFeature) { chatFeature.invalidate(); refreshChat(); } }, removed: () => { const first = orderedNodes()[0]; if (first) { select(first.id); $("#chattitle").focus(); } else { select(""); setLevel(2); $("#plusbtn").focus(); } } } }));
+  const bubbleController = createBubbleActionController();
+  const guestFeature = own(createGuestFeature({ bubbleController, api, toast, doc: document, now: () => Date.now(), invalidateCards: () => { cardsFeature.invalidate(); cardsFeature.render(); }, randomBytes: n => crypto.getRandomValues(new Uint8Array(n)), uiMutate: op => uiMutate(op), bookmarks: () => getUI().bookmarks, openSendTo: opts => bookmarksFeature.openSendTo(opts), people: () => getUI().people, localNodes: () => orderedNodes(), storage: store, selectedNode: () => sel, selectedUID: () => localLogIdentity.node === sel ? localLogIdentity.uid : "", localAgentAvailable: () => { const node = nodeById(sel); return !!node && !node.ended_at; }, confirmRemove: confirm, panel: { sharedMarkers: source => sharedBubbleMarkersHTML(source, {bookmarks:getUI().bookmarks, links:getUI().forward_links, iconBookmark:ICON_BUBBLE_BOOKMARK, iconInto:ICON_INTO}), openMarker: (source, kind) => chatFeature.openSharedMarker(source, kind), ownerUnavailable: source => { if (pendingJump?.team === source) { pendingJump = null; toast("This shared message is unavailable — the saved bookmark remains."); } }, ownerJump: (node, source) => { pendingJump = {node, team:source, visit:selGen, ts:Date.now()}; chatFeature.invalidate(); refreshChat(); return true; }, bubbleActions: bubbleActionsHTML, branchIcon: ICON_BRANCH, copyIcon: ICON_COPY, moreIcon: ICON_MENU_DOTS, promptIcon: ICON_INTO, choosePersonAction: opts => bookmarksFeature.openChoiceList(opts), fork: capture => sheetsFeature.openNewActivity({prompt:discloseQuoted(capture.text, capture), focusTitle:true, forwardSources:[capture.team], explicitSend:true}), copy: text => copyText(text), chooseDescription: opts => bookmarksFeature.openChoiceList(opts), editDescription: (id, capture) => { select(id); chatFeature.useTurnAsDescription(discloseQuoted(capture.text, capture)); }, preparePrompt: (capture, source) => composerFeature.preparePrompt(discloseQuoted(capture.text, capture), {...source, role:capture.role, who:capture.who, prov:capture.prov}), select: (id, how) => { select(id, how); if (!isDesktop()) setLevel(1); }, loaded: () => { if (sel.startsWith("team/") && guestFeature.hasActivity(sel) && guestFeature.tab.selected() !== sel) select(sel); }, changed: () => { if (composerFeature) composerFeature.refreshDestination(); }, ownerChanged: () => { ownerPending = ownerExpected && !guestFeature.peopleContext()?.owner; if (composerFeature) composerFeature.contextChanged(); if (chatFeature) { chatFeature.invalidate(); refreshChat(); } }, removed: () => { const first = orderedNodes()[0]; if (first) { select(first.id); $("#chattitle").focus(); } else { select(""); setLevel(2); $("#plusbtn").focus(); } } } }));
   /* Activities card feature factory — owns #cardtabs/#cardlist only. */
   const cardsFeature = own(createCardsFeature({
+    requireChatIdentity: true,
     sharedTab: guestFeature.tab,
     storage: store,
     roots: { tabs: $("#cardtabs"), list: $("#cardlist") },
@@ -647,7 +652,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     laneName,
     laneList,
     icons: {
-      ICON_CHECK, ICON_PIN, ICON_UNPIN, ICON_END,
+      ICON_CHECK, ICON_PIN, ICON_UNPIN, ICON_END, ICON_USERS,
       ICON_ARCHIVE, ICON_RESTORE, ICON_TRASH,
     },
     api,
@@ -827,6 +832,8 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     overlay: $("#assetpreview"),
   }));
   const chatFeature = own(createChatFeature({
+    bubbleController,
+    requireChatIdentity: true,
     roots: {
       chathead: $("#chathead"),
       chattitle: $("#chattitle"),
@@ -936,8 +943,10 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   /* Composer singleton — prompt bar, drafts, staging, attachments, send/interrupt.
      Outside every polled render region (invariant). */
   composerFeature = own(createComposerFeature({
+    requireChatIdentity: true,
     roots: {
       promptbar: $("#promptbar"),
+      recovery: $("#draftrecovery"),
       destination: $("#destination"),
       destinationPeople: $("#destinationpeople"),
       destinationAgent: $("#destinationagent"),
@@ -955,7 +964,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     nodeById: id => nodeById(id),
     peopleContext: () => guestFeature.peopleContext(),
     canPreparePrompt: source => guestFeature.canPreparePrompt(source),
-    promptSourcesChanged: () => { chatFeature.invalidate(); refreshChat(); },
+    promptSourcesChanged: id => { if (id !== sel) return; chatFeature.refreshPromptMarkers(id); chatFeature.invalidate(); refreshChat(); },
     agentAllowed: () => !ownerPending,
     sendPeople: (key, text) => guestFeature.sendPeople(key, text),
     isPhoneTouch,
@@ -985,6 +994,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
   /* Bookmarks feature — pane, flags, clamp, reply composer, jump, send-to.
      openNotes is lazy so Notes workspace (Packet 7F) is never imported here. */
   bookmarksFeature = own(createBookmarksFeature({
+    bubbleController,
     roots: {
       bookmarkspane: $("#bookmarkspane"),
       bookmarktabs: $("#bookmarktabs"),
@@ -1032,8 +1042,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     select: (id, how) => select(id, how),
     setLevel: n => setLevel(n),
     openSheet: id => sheetsFeature.openSheet(id),
-    closeSheets: () => sheetsFeature.closeSheets(),
+    closeSheets: owner => sheetsFeature.closeSheets(owner),
     openNewActivity: opts => sheetsFeature.openNewActivity(opts),
+    jumpToSharedSource: source => guestFeature.jumpToSource(source),
     setPendingJump: v => { pendingJump = v; },
     openPreview: (uid, seg, rec, at) => openPreview(uid, seg, rec, at),
     invalidateChat: () => chatFeature.invalidate(),
@@ -1106,6 +1117,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     openSendTo: opts => bookmarksFeature.openSendTo(opts),
     onUsagesChange: () => chatFeature.invalidate(),
     onVisibilityChange: () => { bookmarksFeature.invalidate(); renderBookmarksPane(); },
+    jumpToSharedSource: source => { setReturnContext(RETURN_NOTE, {title:notesFeature.activeTitle()}); const ok = guestFeature.jumpToSource(source); if (ok) notesFeature.close(); else { returnCtx = null; renderChatBack(); } return ok; },
     jumpToChatAddress: a => {
       setReturnContext(RETURN_NOTE, { title: notesFeature.activeTitle() });
       const ok = jumpToChatAddress(a);
@@ -1218,7 +1230,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     renderChatHead: () => renderChatHead(),
     renderMap: () => renderMap(),
     alert: msg => alert(msg),
-    onCloseSheets: () => clearVibeInspectChoice($("#m_vibe_inspect")),
+    onCloseSheets: owner => { clearVibeInspectChoice($("#m_vibe_inspect")); bubbleController.sheetClosed(owner); },
   }));
 
   /* Device pairing + the list of who holds a grant — Packet S8.
@@ -1397,7 +1409,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
 
   /* selGen guards async work: any await that outlives a selection change must
      not touch the DOM for the node the user has already left. */
-  let selGen = 0;
+  let selGen = bubbleController.selectVisit(sel);
   /* hashStr imported from /js/lanes.js */
 
   /* Contextual return (UI review item 18) — a jump out of the wall map, the
@@ -1429,7 +1441,7 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     returnCtx = returnAfterSelection(returnCtx, how);
     renderChatBack();
     const changed = sel !== id;
-    if (changed){ chatFeature.onSelectChange(); mapFeature.invalidate(); selGen++; }   /* history is per-visit, reloaded on demand */
+    if (changed){ chatFeature.onSelectChange(); mapFeature.invalidate(); selGen = bubbleController.selectVisit(id); }   /* history is per-visit, reloaded on demand */
     else {
       /* same node re-select still discards a pending "use as description" */
       chatFeature.onReselect();
@@ -1457,13 +1469,9 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     $("#guestremove").hidden = !received;
     if (!received) { $("#guestmore").hidden = true; $("#guestnote").textContent = ""; }
     if (received) {
-      composerFeature.setComposerBusy(false);
       composerFeature.setComposerClosed(false);
       $("#chatdetails").hidden = true;
-      $("#gauge").hidden = true;
       $("#chatdot").className = "dot";
-      $("#keyrow").innerHTML = "";
-      $("#convtools").hidden = true;
       $("#infobtn").hidden = true;
       $("#sharebtn").hidden = true;
       $("#sharestatus").hidden = true;
@@ -2089,6 +2097,17 @@ export async function createApp({ fetchImpl, assetURL, document, window } = {}) 
     setVersion: v => { $("#m_version").textContent = v; },
     publishState: st => {
       nodes = st.nodes || [];
+      if (composerRestored && sel && !sel.startsWith("team/") && !nodeById(sel)) {
+        select("");
+      } else if (composerRestored && sel && !sel.startsWith("team/") && !composerFeature.reconcileIdentity()) {
+        chatFeature.onSelectChange();
+        selGen = bubbleController.selectVisit(sel);
+        pendingJump = null;
+        ownerPending = true; ownerExpected = false; ownerShareUID = "";
+        localLogIdentity = {node:"",uid:""};
+        guestFeature.setOwnerShare(sel, null);
+        mapFeature.invalidate();
+      }
       let nextSeen = pruneReadySeen(readySeen, nodes);
       const open = nodeById(sel);
       if (open && open.turn_done) nextSeen = ackReadySeen(nextSeen, open);

@@ -4,6 +4,8 @@ import * as guestModule from "../js/team-guest.js";
 import { readFileSync } from "node:fs";
 import { jsonResponse } from "./s2-helpers.js";
 import { decodeResponse } from "../js/api.js";
+import { bubbleActionsHTML } from '../js/chat.js';
+import { createBubbleActionController } from '../js/menu.js';
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
@@ -115,10 +117,10 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
   const routed = (path, opts) => path.includes("/comments?") ? commentsApi(path, opts) : api(path, opts);
   let feature;
   const callbacks = extra.panel || {};
-  const panel = { promptIcon:"", preparePrompt() {}, ...callbacks,
+  const panel = { bubbleActions:bubbleActionsHTML, promptIcon:"", preparePrompt() {}, ...callbacks,
     loaded: callbacks.loaded || (() => {}), changed: callbacks.changed || (() => {}), ownerChanged: callbacks.ownerChanged || (() => {}),
     removed() { selected = "local"; callbacks.removed?.(); },
-    select(id) { selected = id; callbacks.select?.(id); feature.selectActivity(id); } };
+    select(id) { selected = id; callbacks.select?.(id); if (!extra.skipPanelSelect) feature.selectActivity(id); } };
   feature = createGuestFeature({ api: routed, doc, now: () => time, invalidateCards: () => invalidations++, randomBytes, selectedNode: () => "", selectedUID: () => "c", localAgentAvailable: () => true, confirmRemove: extra.confirm || (() => true), ...extra, panel });
   const get = id => elements.get("#" + id);
   feature.bind();
@@ -333,6 +335,15 @@ test("native reader: opening another chat drops the first pending answer", async
   f.feature.tick(); await f.feature.settled(); f.open();
   f.open("team/" + guestKey(second)); assert.equal(f.feature.tab.selected(), "team/" + guestKey(second)); old.resolve(readAnswer([{ t: "user", text: "stale", seq: 1 }], 1)); await f.feature.settled();
   assert.match(f.get("msgs").innerHTML, /second/); assert.doesNotMatch(f.get("msgs").innerHTML, /stale/);
+});
+
+test('shared read cannot paint after the common visit changes away and back', async () => {
+ const held=deferred(), controller=createBubbleActionController();controller.selectVisit('team/s/o/c/g');
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):held.promise,undefined,undefined,{bubbleController:controller});
+ f.feature.tick();await f.feature.settled();f.open();
+ controller.selectVisit('n1');controller.selectVisit('team/s/o/c/g');
+ held.resolve(readAnswer([{t:'user',text:'old answer',seq:1}],1));await f.feature.settled();
+ assert.doesNotMatch(f.get('msgs').innerHTML,/old answer/);f.feature.destroy();
 });
 
 test("native reader: following waits five seconds and never moves focus while reading", async () => {
@@ -740,6 +751,13 @@ test("owner subscriptions do not create a Shared with me tab", async () => {
 
 const commentsAnswer = (entries = [], next = 0, more = false, names = {}) => ({ entries, names, last: next, next, more });
 
+test('shared speaker labels identify humans and agent harness without destination suffixes', () => {
+  const mine=guestMessageHTML({seq:1,anchor:0,author:'me',mine:true,text:'hello'},{});
+  assert.match(mine,/>You<\/div>/);assert.doesNotMatch(mine,/You · People/);
+  const agent=guestEntryHTML({t:'assistant',seq:2,text:'answer',agent:'Codex'},'Owner');
+  assert.match(agent,/>Codex · agent<\/div>/);
+});
+
 test("guest messages escape text names and time and show authorship", () => {
   const entry = { seq: 3, anchor: 1, author: "a", mine: false, at: '<&"', text: '```\n<&"\n```' };
   const other = guestMessageHTML(entry, { a: '<&"' });
@@ -750,7 +768,7 @@ test("guest messages escape text names and time and show authorship", () => {
   assert.ok(guestMessageHTML(entry, {}).includes("Unknown person"));
   const mine = guestMessageHTML({ ...entry, mine: true }, { a: "Name" });
   assert.ok(mine.includes('class="turn user gmsg"'));
-  assert.match(mine, /You · People/);
+  assert.match(mine, />You<\/div>/);
 });
 
 test("guest mirror prompts name their human source", () => {
@@ -881,6 +899,263 @@ function sharedActionBubble(seq) {
   return { turn, bubble };
 }
 
+test('shared bubble actions reveal the stored sent time and omit absent time', async () => {
+ const entries=[{t:'user',seq:1,text:'dated',time:'2026-01-02T03:04:00Z'},{t:'user',seq:2,text:'undated'}];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer(entries,2),undefined,undefined,{bookmarks:()=>[],uiMutate(){},openSendTo(){}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const dated=sharedActionBubble(1);f.click('msgs',dated.bubble);assert.match(dated.turn.rowHTML,/<div class="bubwhen">[^<]+<\/div>[^]*data-gact=/);
+ const undated=sharedActionBubble(2);f.click('msgs',undated.bubble);assert.doesNotMatch(undated.turn.rowHTML,/bubwhen/);f.feature.destroy();
+});
+
+test('shared bubbles expose the ordinary action order and icons', async () => {
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'assistant',seq:1,text:'answer'}],1),undefined,undefined,{bookmarks:()=>[],uiMutate(){},openSendTo(){},panel:{promptIcon:'INTO',branchIcon:'FORK',copyIcon:'COPY'}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const turn=sharedActionBubble(1);f.click('msgs',turn.bubble);
+ const html=turn.turn.rowHTML,actions=[...html.matchAll(/data-gact="(fork|sendto|desc|bookmark|copy)"/g)].map(m=>m[1]);
+ assert.deepEqual(actions,['fork','sendto','desc','bookmark','copy']);assert.match(html,/FORK/);assert.match(html,/INTO/);assert.match(html,/COPY/);f.feature.destroy();
+});
+
+test('shared action commands pass captured text to local capability adapters', async () => {
+ const calls=[], entry={t:'assistant',seq:1,text:'answer',agent:'Codex',time:'then'};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([entry],1),undefined,undefined,{bookmarks:()=>[],uiMutate(){},openSendTo(){},panel:{fork:c=>calls.push(['fork',c]),describe:c=>calls.push(['desc',c]),copy:t=>calls.push(['copy',t])}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ for(const name of ['fork','desc','copy'])f.click('msgs',{dataset:{gact:name},closest:s=>s==='[data-gact]'?{dataset:{gact:name}}:null});
+ assert.deepEqual(calls.map(c=>c[0]),['fork','desc','copy']);assert.equal(calls[0][1].team.seq,1);assert.equal(calls[1][1].role,'assistant');assert.equal(calls[2][1],'answer');f.feature.destroy();
+});
+
+test('description selection offers only live local nodes and revalidates a chosen target', async () => {
+ const chosen=[],nodes=[{id:'local',title:'Local',instance_id:'local-instance'},{id:'closed',title:'Closed',ended_at:'then'}];let menu;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):path==='/api/state'?{nodes}:readAnswer([{t:'user',seq:1,text:'human'}],1),undefined,undefined,{localNodes:()=>nodes,bookmarks:()=>[],uiMutate(){},openSendTo(){},panel:{chooseDescription:options=>{menu=options},editDescription:(id,c)=>chosen.push([id,c])}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ const action={dataset:{gact:'desc'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);
+ assert.deepEqual(menu.choices.map(x=>x.id),['local']);menu.onChoose({id:'closed'});assert.deepEqual(chosen,[]);
+ menu.onChoose({id:'local'});await new Promise(resolve=>setImmediate(resolve));assert.equal(chosen[0][0],'local');assert.equal(chosen[0][1].text,'human');
+  nodes[0].ended_at='then';menu.onChoose({id:'local'});assert.equal(chosen.length,1);
+  nodes[0].ended_at='';f.navigate('elsewhere');menu.onChoose({id:'local'});assert.equal(chosen.length,1);f.feature.destroy();
+});
+
+test('shared send-to carries its exact source and permits existing local targets only', async () => {
+ const sends=[],entry={t:'assistant',seq:1,text:'answer',agent:'Codex'};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([entry],1),undefined,undefined,{bookmarks:()=>[],uiMutate(){},openSendTo:x=>sends.push(x)});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ const action={dataset:{gact:'sendto'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);
+ assert.deepEqual(sends[0].source,{server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:1});assert.equal(sends[0].allowNew,false);f.feature.destroy();
+});
+
+test('received bubbles render the common marker for their exact source', async () => {
+ const calls=[],f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'assistant',seq:1,text:'answer'}],1),async()=>commentsAnswer([{seq:2,anchor:1,text:'comment',author:'a'}],2),undefined,{panel:{sharedMarkers:source=>{calls.push(source);return '<span data-marker-proof></span>'}}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal((f.get('msgs').innerHTML.match(/data-marker-proof/g)||[]).length,2);assert.deepEqual(calls.map(x=>[x.log,x.seq]),[['mirror',1],['comments',2]]);f.feature.destroy();
+});
+
+test('an omitted shared comment never acquires a source marker', async () => {
+ let markerCalls=0;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer(),async()=>commentsAnswer([{seq:1,anchor:0,author:'a',omitted:'too_large'}],1),undefined,{panel:{sharedMarkers:()=>{markerCalls++;return 'marker'}}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();assert.equal(markerCalls,0);assert.doesNotMatch(f.get('msgs').innerHTML,/marker/);f.feature.destroy();
+});
+
+test('received marker activation delegates the exact shared identity', async () => {
+ const calls=[],f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'assistant',seq:1,text:'answer'}],1),undefined,undefined,{panel:{openMarker:(source,kind)=>calls.push({source,kind})}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const turn={dataset:{seq:'1'}},marker={dataset:{bmarker:'bookmark'},closest:s=>s==='[data-bmarker]'?marker:s==='[data-seq], [data-cseq]'?turn:null};f.click('msgs',marker);
+ assert.deepEqual(calls,[{source:{server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:1},kind:'bookmark'}]);f.feature.destroy();
+});
+
+test('received marker refresh updates its existing bubble without losing focused marker', async () => {
+ let html='<div class="bubblemarkers"><button data-bmarker="bookmark"></button></div>',focused=0;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'assistant',seq:1,text:'answer'}],1),undefined,undefined,{panel:{sharedMarkers:()=>html}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const active={dataset:{bmarker:'bookmark'}},old={contains:x=>x===active,remove(){}},replacement={focus(){focused++}},bubble={querySelector:s=>s==='.bubblemarkers'?old:s==='[data-bmarker="bookmark"]'?replacement:null,insertAdjacentHTML(){}};
+ f.doc.activeElement=active;f.get('msgs').querySelectorAll=s=>s==='[data-seq], [data-cseq]'?[{dataset:{seq:'1'},querySelector:()=>bubble}]:[];
+ html='<div class="bubblemarkers"><button data-bmarker="bookmark">new</button></div>';f.feature.refreshMarkers();assert.equal(focused,1);f.feature.destroy();
+});
+
+test('marker refresh ignores unrelated or missing bubbles and updates a comment without stealing focus', async () => {
+ let html='<span data-bmarker="bookmark"></span>',inserted=[];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'assistant',seq:1,text:'answer'}],1),async()=>commentsAnswer([{seq:2,anchor:1,text:'comment',author:'a'}],2),undefined,{panel:{sharedMarkers:()=>html}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const bubble={querySelector:()=>null,insertAdjacentHTML:(_where,value)=>inserted.push(value)};
+ f.get('msgs').querySelectorAll=()=>[{dataset:{seq:'99'},querySelector:()=>bubble},{dataset:{seq:'1'},querySelector:()=>null},{dataset:{cseq:'2'},querySelector:()=>bubble}];
+ html='<span data-bmarker="sendto"></span>';f.feature.refreshMarkers();assert.deepEqual(inserted,[html]);
+ f.feature.refreshMarkers();assert.deepEqual(inserted,[html]);f.feature.destroy();
+});
+
+test('shared bookmark jump selects the exact sequence even when text is duplicated', async () => {
+ const view={...base,access:'write'};const hits=[],scrolls=[];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>commentsAnswer([{seq:1,anchor:0,text:'same',author:'a'},{seq:2,anchor:0,text:'same',author:'a'}],2,false,{a:'Writer'}));
+ f.get('msgs').querySelector=selector=>{hits.push(selector);return selector.startsWith('[data-cseq=')?{scrollIntoView(){scrolls.push(selector)},classList:{add(){},remove(){}}}:null};
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ assert.equal(f.feature.jumpToSource(source),true);await f.feature.settled();assert.ok(hits.includes('[data-cseq="2"]'));assert.equal(scrolls.at(-1),'[data-cseq="2"]');
+ assert.equal(f.feature.jumpToSource({...source,generation:'stale'}),false);f.feature.destroy();
+});
+
+test('jumping to a shared source retires the previous action row', async () => {
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'assistant',seq:1,text:'answer'}],1));
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);assert.ok(item.turn.nextElementSibling);
+ assert.equal(f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:1}),true);assert.equal(item.turn.nextElementSibling,null);f.feature.destroy();
+});
+
+test('an owner bookmark resolves only through its verified local node and exact shared identity', async () => {
+ const view={...base,access:'owner',local_node:'owned'},jumps=[];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),undefined,undefined,{panel:{ownerJump:(node,source)=>{jumps.push({node,source});return true}}});
+ f.feature.tick();await f.feature.settled();const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2};
+ assert.equal(f.feature.jumpToSource(source),true);assert.equal(f.selected(),'owned');assert.deepEqual(jumps,[{node:'owned',source}]);
+ assert.equal(f.feature.jumpToSource({...source,generation:'stale'}),false);f.feature.destroy();
+});
+
+test('bookmark navigation rejects invalid identities and owners without a verified local destination', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};
+ for (const [local_node,ownerJump] of [['',()=>true],['team/s/o/c/g',()=>true],['owned',undefined],['owned',()=>false]]) {
+  const view={...base,access:'owner',local_node};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),undefined,undefined,{panel:{ownerJump}});
+  f.feature.tick();await f.feature.settled();
+  assert.equal(f.feature.jumpToSource(source),false);
+  assert.equal(f.feature.jumpToSource(null),false);
+  assert.equal(f.feature.jumpToSource({...source,log:'other'}),false);
+  assert.equal(f.feature.jumpToSource({...source,seq:0}),false);
+  f.feature.destroy();
+ }
+});
+
+test('bookmark navigation reports a missing mirror instead of matching another bubble', async () => {
+ const view={...base,access:'write',unread:false};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view));
+ f.feature.tick();await f.feature.settled();
+ assert.equal(f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:8}),true);
+ await f.feature.settled();assert.match(f.get('guestnote').textContent,/unavailable/i);f.feature.destroy();
+});
+
+test('bookmark navigation cannot act when the host declines selection', async () => {
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer(),undefined,undefined,{skipPanelSelect:true});
+ f.feature.tick();await f.feature.settled();
+ assert.equal(f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1}),false);
+ assert.equal(f.feature.tab.selected(),'');f.feature.destroy();
+});
+
+test('a stalled mirror page cannot keep a bookmark jump polling forever', async () => {
+ let reads=0;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):(reads++,readAnswer([],0,true)));
+ f.feature.tick();await f.feature.settled();assert.equal(f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:9}),true);await f.feature.settled();
+ assert.ok(reads<=40);assert.match(f.get('guestnote').textContent,/unavailable/i);f.feature.destroy();
+});
+
+test('an already loaded mirror jumps by sequence and reports an omitted record truthfully', async () => {
+ const source={server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:1};
+ for (const omitted of [false,true]) {
+  const record={t:'assistant',seq:1,text:'answer',...(omitted?{omitted:'too_large'}:{})};let hit='';
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([record],1));
+  f.get('msgs').querySelector=selector=>({scrollIntoView(){hit=selector},classList:{add(){},remove(){}}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();hit='';
+  assert.equal(f.feature.jumpToSource(source),true);
+  if(omitted){assert.equal(hit,'');assert.match(f.get('guestnote').textContent,/unavailable/i);}
+  else assert.equal(hit,'[data-seq="1"]');
+  f.feature.destroy();
+ }
+});
+
+test('owner mirror bookmark uses a loaded copy with the exact sequence', async () => {
+ const view={...base,access:'owner',local_node:'n1',unread:false},source={server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:1};let changed=0;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([{t:'assistant',seq:1,text:'answer'}],1,false,view),undefined,undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',panel:{ownerJump:()=>true,ownerChanged:()=>changed++}});
+ f.feature.tick();await f.feature.settled();const before=changed;assert.equal(f.feature.jumpToSource(source),true);assert.equal(changed,before+1);f.feature.destroy();
+});
+
+test('an owner mirror jump resolves when its requested page arrives', async () => {
+ const view={...base,access:'owner',local_node:'n1',unread:false},source={server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:9};let selected='',unavailable=[];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([{t:'assistant',seq:9,text:'answer',local_segment:0,local_record:2}],9,false,view),undefined,undefined,{selectedNode:()=>selected,selectedUID:()=>selected?'c':'',panel:{select:id=>{selected=id},ownerJump:()=>true,ownerUnavailable:s=>unavailable.push(s)}});
+ f.feature.tick();await f.feature.settled();assert.equal(f.feature.jumpToSource(source),true);f.feature.localIdentityChanged();await f.feature.settled();
+ assert.ok(f.feature.ownerSnapshots()[0].mirrors.some(x=>x.seq===9));assert.deepEqual(unavailable,[]);f.feature.destroy();
+});
+
+test('owner bookmark loading continues past the page bound until the exact comment arrives', async () => {
+ const view={...base,access:'owner',local_node:'n1',unread:false,comments_last:41},source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:41};let selected='';
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async path=>{const seq=Number(path.split('after=')[1])+1;return commentsAnswer([{seq,anchor:0,text:'same',author:'a'}],seq,seq<41,{a:'Writer'});},undefined,{selectedNode:()=>selected,selectedUID:()=>selected?'c':'',panel:{select:id=>{selected=id},ownerJump:()=>true}});
+ f.feature.tick();await f.feature.settled();assert.equal(f.feature.jumpToSource(source),true);f.feature.localIdentityChanged();await f.feature.settled();
+ assert.ok(f.feature.ownerSnapshots()[0].comments.some(x=>x.seq===41));f.feature.destroy();
+});
+
+test('owner bookmark reports an unavailable source when its saved copy cannot be read', async () => {
+ const view={...base,access:'owner',local_node:'n1',unread:false},source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:9};let selected='',unavailable=[];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>{throw Error('offline')},undefined,{selectedNode:()=>selected,selectedUID:()=>selected?'c':'',panel:{select:id=>{selected=id},ownerJump:()=>true,ownerUnavailable:s=>unavailable.push(s)}});
+ f.feature.tick();await f.feature.settled();f.feature.jumpToSource(source);f.feature.localIdentityChanged();await f.feature.settled();assert.deepEqual(unavailable,[source]);f.feature.destroy();
+});
+
+test('owner bookmark stops stalled mirror and comment pages without inventing a target', async () => {
+ for(const log of ['mirror','comments']) {
+  const view={...base,access:'owner',local_node:'n1',unread:false},source={server:'s',owner:'o',chat:'c',generation:'g',log,seq:9};let selected='',unavailable=[];
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,log==='mirror',view),async()=>commentsAnswer([],0,log==='comments'),undefined,{selectedNode:()=>selected,selectedUID:()=>selected?'c':'',panel:{select:id=>{selected=id},ownerJump:()=>true,ownerUnavailable:s=>unavailable.push(s)}});
+  f.feature.tick();await f.feature.settled();assert.equal(f.feature.jumpToSource(source),true);f.feature.localIdentityChanged();await f.feature.settled();
+  assert.deepEqual(unavailable,[source]);f.feature.destroy();
+ }
+});
+
+test('an owner bookmark loading in an old chat is retired on navigation', async () => {
+ const held=deferred(),view={...base,access:'owner',local_node:'n1',unread:false},source={server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:9};let selected='',unavailable=[];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):held.promise,undefined,undefined,{selectedNode:()=>selected,selectedUID:()=>selected==='n1'?'c':'',panel:{select:id=>{selected=id},ownerJump:()=>true,ownerUnavailable:s=>unavailable.push(s)}});
+ f.feature.tick();await f.feature.settled();assert.equal(f.feature.jumpToSource(source),true);f.feature.localIdentityChanged();selected='other';f.feature.localIdentityChanged();
+ held.resolve(readAnswer([],0,false,view));await f.feature.settled();assert.deepEqual(unavailable,[]);f.feature.destroy();
+});
+
+test('owner bookmark uses an already loaded copy without a fresh network read', async () => {
+ const view={...base,access:'owner',local_node:'n1',unread:false},source={server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:1};let reads=0,unavailable=0;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>{reads++;if(reads>1)throw Error('offline');return commentsAnswer([{seq:1,anchor:0,author:'a',text:'saved'}],1,false)},undefined,{selectedNode:()=> 'n1',selectedUID:()=> 'c',panel:{ownerJump:()=>true,ownerUnavailable:()=>unavailable++}});
+ f.feature.tick();await f.feature.settled();assert.equal(f.feature.jumpToSource(source),true);await f.feature.settled();assert.equal(reads,1);assert.equal(unavailable,0);f.feature.destroy();
+});
+
+test('shared bookmark jump continues across bounded comment pages', async () => {
+ const view={...base,access:'write',unread:false,comments_last:41,seen_comments:0};const scrolls=[];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async path=>{
+  const seq=Number(path.split('after=')[1])+1;return commentsAnswer([{seq,anchor:0,text:'same',author:'a'}],seq,seq<41,{a:'Writer'});
+ });
+ f.get('msgs').querySelector=selector=>selector==='[data-cseq="41"]'?{scrollIntoView(){scrolls.push(selector)},classList:{add(){},remove(){}}}:null;
+ f.feature.tick();await f.feature.settled();assert.equal(f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:41}),true);
+ await f.feature.settled();assert.deepEqual(scrolls,['[data-cseq="41"]']);f.feature.destroy();
+});
+
+test('a jump in an already open chat continues the remaining mirror pages', async () => {
+ let scrolled=false;
+ const f=nativeViewFixture(async path=>{if(path==='/api/team/subscriptions')return list([base]);const seq=Number(path.split('after=')[1])+1;return readAnswer([{seq,t:'assistant',text:'answer'}],seq,seq<41)});
+ f.get('msgs').querySelector=selector=>selector==='[data-seq="41"]'?{scrollIntoView(){scrolled=true},classList:{add(){},remove(){}}}:null;
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ assert.equal(f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:41}),true);await f.feature.settled();assert.equal(scrolled,true);f.feature.destroy();
+});
+
+test('a delayed bookmark page cannot scroll or replace a later selection', async () => {
+ const held=deferred(),view={...base,access:'write',unread:false};let scrolls=0;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),()=>held.promise);
+ f.get('msgs').querySelector=()=>({scrollIntoView(){scrolls++},classList:{add(){},remove(){}}});
+ f.feature.tick();await f.feature.settled();
+ assert.equal(f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2}),true);
+ f.navigate();held.resolve(commentsAnswer([{seq:2,text:'late',author:'a'}],2));await f.feature.settled();
+ assert.equal(scrolls,0);assert.doesNotMatch(f.get('msgs').innerHTML,/late/);assert.equal(f.selected(),'local');f.feature.destroy();
+});
+
+test('shared bookmark jump stops if a paginated source makes no progress', async () => {
+ let reads=0;const view={...base,access:'write',unread:false};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([],0,false,view),async()=>{if(++reads>45)throw Error('too many');return commentsAnswer([],0,true);});
+ f.feature.tick();await f.feature.settled();f.feature.jumpToSource({server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:9});await f.feature.settled();
+ assert.ok(reads<=40);assert.match(f.get('guestnote').textContent,/unavailable/i);f.feature.destroy();
+});
+
+test('renaming a person is offered from a secondary action menu', async () => {
+ let menu;const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'user',seq:1,text:'human'}],1),undefined,undefined,{bookmarks:()=>[],uiMutate(){},openSendTo(){},panel:{choosePersonAction:opts=>{menu=opts}}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ assert.match(item.turn.rowHTML,/data-gact="more"/);assert.doesNotMatch(item.turn.rowHTML,/data-gact="rename"/);
+ const action={dataset:{gact:'more'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);assert.deepEqual(menu.choices.map(x=>x.id),['rename']);f.feature.destroy();
+});
+
+test('description chooser with no local destinations offers no implicit target', async () => {
+ let choices;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'user',seq:1,text:'human'}],1),undefined,undefined,{panel:{chooseDescription:menu=>{choices=menu.choices}}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ const action={dataset:{gact:'desc'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);assert.deepEqual(choices,[]);f.feature.destroy();
+});
+
+test('description chooser labels an untitled local destination', async () => {
+ let choices;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'user',seq:1,text:'human'}],1),undefined,undefined,{localNodes:()=>[{id:'n1',instance_id:'one'}],panel:{chooseDescription:menu=>{choices=menu.choices}}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ const action={dataset:{gact:'desc'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);assert.deepEqual(choices,[{id:'n1',label:'Untitled chat'}]);f.feature.destroy();
+});
+
 test("shared actions open, close, move, bookmark and send", async () => {
   const stored = [], ops = [], sends = [];
   const entries = [{ t: "user", seq: 1, text: "one", time: "then" }, { t: "assistant", seq: 2, text: "two", agent: "A", time: "then" }];
@@ -895,7 +1170,7 @@ test("shared actions open, close, move, bookmark and send", async () => {
   const action = name => ({ dataset: { gact: name }, closest(sel) { return sel === "[data-gact]" ? this : null; } });
   click(action("bookmark")); assert.equal(ops.length, 1); assert.equal(ops[0].bookmark.role, "assistant"); assert.equal(ops[0].bookmark.t, new Date(0).toISOString()); assert.equal(f.get("guestnote").textContent, "Bookmarked.");
   click(action("bookmark")); assert.equal(ops.length, 1); assert.equal(f.get("guestnote").textContent, "Already bookmarked.");
-  click(action("sendto")); assert.equal(f.feature.tab.selected(), "team/s/o/c/g"); assert.deepEqual(sends, [{ text: "two", exceptId: "", title: "Send to…", role: "assistant", who: undefined, prov: undefined, source: null }]);
+  click(action("sendto")); assert.equal(f.feature.tab.selected(), "team/s/o/c/g"); assert.deepEqual(sends, [{ text: "two", exceptId: "", title: "Send to…", role: "assistant", who: undefined, prov: undefined, source: {server:'s',owner:'o',chat:'c',generation:'g',log:'mirror',seq:2}, allowNew:false }]);
 });
 
 test("shared action keyboard, links and ticks keep focus and the row", async () => {
@@ -942,7 +1217,7 @@ test("shared actions ignore invalid targets and capture comments", async () => {
   const omitted = sharedActionBubble(1); f.click("msgs", omitted.bubble); assert.equal(omitted.turn.nextElementSibling, null);
   const message = sharedActionBubble(0); message.turn.dataset = { cseq: "2" }; f.click("msgs", message.bubble);
   action.dataset.gact = "sendto"; f.click("msgs", action);
-  assert.deepEqual(sends, [{ text: "message", exceptId: "", title: "Send to…", role: "person", who: "Ann", prov: undefined, source: null }]);
+  assert.deepEqual(sends, [{ text: "message", exceptId: "", title: "Send to…", role: "person", who: "Ann", prov: undefined, source: {server:'s',owner:'o',chat:'c',generation:'g',log:'comments',seq:2}, allowNew:false }]);
   const keydown = f.get("msgs").listeners.get("keydown");
   keydown({ key: "a" }); keydown({ key: "Enter", target: message.bubble, preventDefault() {} });
 });
@@ -1068,7 +1343,7 @@ function sharedRenameBubble(seq, fixture) {
     const renameButton = { focus() { fixture.doc.activeElement = renameButton; } };
     const row = { dataset: { gactions: "" }, remove() { turn.nextElementSibling = null; }, querySelector(sel) {
       if (sel === "[data-grename]") return field;
-      if (sel === '[data-gact="rename"]') return renameButton;
+      if (sel === '[data-gact="more"]') return renameButton;
       return null;
     } };
     Object.defineProperty(row, "innerHTML", { get() { return inner; }, set(value) {
@@ -1095,7 +1370,7 @@ test("person rename edits local names and updates labels without closing the row
     f.get("msgs").querySelectorAll = sel => sel === "[data-seat]" ? [label] : [];
     f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
     const bubble = sharedRenameBubble(1, f); f.click("msgs", bubble.bubble);
-    assert.match(bubble.turn.nextElementSibling.innerHTML, /data-gact="rename"/);
+    assert.match(bubble.turn.nextElementSibling.innerHTML, /data-gact="more"/);
     sharedNameAction(f, "rename"); const row = bubble.turn.nextElementSibling, field = row.querySelector("[data-grename]");
     assert.ok(field); assert.equal(field.value, "Local"); assert.equal(f.doc.activeElement, field); field.value = typed;
     f.setTime(5000); f.feature.tick(); await f.feature.settled(); assert.equal(row.querySelector("[data-grename]"), field); assert.equal(field.value, typed);
@@ -1103,8 +1378,19 @@ test("person rename edits local names and updates labels without closing the row
     assert.deepEqual(ops, [{ k: "person-name", key: "s/o", name: expected }]); assert.equal(f.invalidations(), before + 1);
     const shown = expected || "Owner"; assert.equal(f.get("chatmission").textContent, "From " + shown + " · Server");
     assert.equal(label.textContent, shown + " · prompt · includes forwarded AI text");
-    assert.equal(f.doc.activeElement, row.querySelector('[data-gact="rename"]'));
+    assert.equal(f.doc.activeElement, row.querySelector('[data-gact="more"]'));
   }
+});
+
+test('secondary person menu renames only the still-selected discussion', async () => {
+ let menu;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'user',seq:1,text:'human'}],1),undefined,undefined,{panel:{choosePersonAction:options=>{menu=options}}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ const first=sharedRenameBubble(1,f);f.click('msgs',first.bubble);sharedNameAction(f,'more');menu.onChoose({id:'other'});
+ assert.equal(first.turn.nextElementSibling.querySelector('[data-grename]'),null);menu.onChoose({id:'rename'});
+ assert.ok(first.turn.nextElementSibling.querySelector('[data-grename]'));
+ const second=sharedRenameBubble(1,f);f.click('msgs',second.bubble);sharedNameAction(f,'more');const stale=menu;f.navigate();stale.onChoose({id:'rename'});
+ assert.equal(f.feature.tab.selected(),'');f.feature.destroy();
 });
 
 test("owner comments offer rename only for other people and Escape cancels", async () => {
@@ -1114,14 +1400,14 @@ test("owner comments offer rename only for other people and Escape cancels", asy
     {selectedNode:()=>"n1", people:()=>({}), uiMutate:op=>ops.push(op), bookmarks:()=>[], openSendTo() {}});
   f.feature.tick(); await f.feature.settled();
   const mine = sharedRenameBubble(0, f); mine.turn.dataset = {cseq:"1",gkey:guestKey(view)};
-  f.click("msgs", mine.bubble); assert.doesNotMatch(mine.turn.nextElementSibling.innerHTML, /data-gact="rename"/); f.click("msgs", mine.bubble);
+  f.click("msgs", mine.bubble); assert.doesNotMatch(mine.turn.nextElementSibling.innerHTML, /data-gact="more"/); f.click("msgs", mine.bubble);
   const other = sharedRenameBubble(0, f); other.turn.dataset = {cseq:"2",gkey:guestKey(view)};
   f.click("msgs", other.bubble); sharedNameAction(f, "rename");
   const row=other.turn.nextElementSibling, field=row.querySelector("[data-grename]"); assert.equal(field.value,"Writer");
   let prevented=false, stopped=false;
   f.get("msgs").listeners.get("keydown")({key:"Escape",target:field,preventDefault(){prevented=true},stopPropagation(){stopped=true}});
   assert.equal(prevented,true); assert.equal(stopped,true); assert.deepEqual(ops,[]);
-  assert.equal(f.doc.activeElement,row.querySelector('[data-gact="rename"]')); f.feature.destroy();
+  assert.equal(f.doc.activeElement,row.querySelector('[data-gact="more"]')); f.feature.destroy();
 });
 
 
@@ -1278,6 +1564,155 @@ test("activity adapter opens only received subscriptions and uses native navigat
   assert.equal(f.feature.tab.selected(),"team/"+guestKey(view));
   assert.equal(f.get("chattitle").textContent,"Chat");
   f.navigate(); assert.equal(f.feature.tab.selected(),"");
+});
+
+test('owner unread excludes own comments without hiding an earlier unseen collaborator comment', async () => {
+  const view={...base,access:'owner',local_node:'local',unread:true,comments_last:2,seen_comments:0};
+  let comments=[{seq:1,anchor:0,author:'o',mine:true,text:'mine'},{seq:2,anchor:0,author:'o',mine:true,text:'mine too'}];
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),
+    async()=>commentsAnswer(comments,comments.length,false));
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(f.feature.tab.ownerUnread('local'),false,'own comments are not incoming');
+  comments.push({seq:3,anchor:0,author:'other',mine:false,text:'incoming'},{seq:4,anchor:0,author:'o',mine:true,text:'mine later'});
+  view.comments_last=4;
+  f.feature.refresh(); await f.feature.settled();
+  assert.equal(f.feature.tab.ownerUnread('local'),true,'later own comment must not hide incoming');
+  f.feature.destroy();
+});
+
+test('unchanged classified comment ranges are reused while new sequences are inspected', async () => {
+  const view={...base,access:'owner',local_node:'local',unread:true,comments_last:1,seen_comments:0};let reads=0;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>{reads++;return commentsAnswer([{seq:1,mine:true,text:'mine'}],1,false);});
+  f.feature.tick();await f.feature.settled();const invalidations=f.invalidations();f.feature.refresh();await f.feature.settled();assert.equal(reads,1);
+  assert.equal(f.invalidations(),invalidations,'unchanged classified state does not rebuild cards');
+  f.feature.destroy();
+});
+
+test('unavailable comment authorship remains unknown rather than inventing an unread message', async () => {
+  const view={...base,access:'owner',local_node:'local',unread:true,comments_last:1,seen_comments:0};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>{throw Error('offline');});
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(f.feature.tab.ownerUnread('local'),false);
+  assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unknown');
+  f.feature.destroy();
+});
+
+test('received comment unread excludes self while an unseen owner mirror remains unread', async () => {
+  const view={...base,access:'write',unread:true,mirror_last:1,seen_mirror:1,comments_last:1,seen_comments:0};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:'self',mine:true,text:'self'}],1,false));
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(f.feature.tab.activities()[0].unread,false);
+  view.mirror_last=2; f.feature.refresh(); await f.feature.settled();
+  assert.equal(f.feature.tab.activities()[0].unread,true);
+  f.feature.destroy();
+});
+
+test('comment classification detects incoming across pages and never marks them seen', async () => {
+  const view={...base,access:'owner',local_node:'local',unread:true,comments_last:3,seen_comments:0};
+  const reads=[],writes=[];
+  const f=nativeViewFixture(async (path,opts)=>{if(path==='/api/team/subscriptions')return list([view]); if(opts?.method) writes.push(path); return readAnswer();},async path=>{
+    reads.push(path);
+    if(path.endsWith('after=0')) return commentsAnswer([{seq:1,mine:true,text:'own'}],1,true);
+    return commentsAnswer([{seq:2,mine:false,text:'incoming'},{seq:3,mine:true,text:'own'}],3,false);
+  });
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(f.feature.tab.ownerUnread('local'),true);
+  assert.deepEqual(reads.map(path=>path.split('?')[1]),['after=0','after=1']); assert.deepEqual(writes,[]);
+  f.feature.destroy();
+});
+
+test('a gap in projected comments is unknown and a later proved incoming record still counts', async () => {
+  const view={...base,access:'owner',local_node:'local',unread:true,comments_last:3,seen_comments:0};
+  let incoming=false;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>commentsAnswer([{seq:2,mine:!incoming,text:'entry'},{seq:3,mine:true,text:'own'}],3,false));
+  f.feature.tick(); await f.feature.settled(); assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unknown');
+  incoming=true; f.feature.refresh(); await f.feature.settled(); assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unread');
+  f.feature.destroy();
+});
+
+test('stale classification cannot overwrite a newer list after a subscription disappears', async () => {
+  const gate=deferred(),view={...base,access:'owner',local_node:'local',unread:true,comments_last:1,seen_comments:0}; let present=true;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list(present?[view]:[]):readAnswer(),async()=>gate.promise);
+  f.feature.tick(); await new Promise(r=>setImmediate(r)); present=false; f.feature.refresh();
+  gate.resolve(commentsAnswer([{seq:1,mine:false,text:'incoming'}],1,false)); await f.feature.settled();
+  assert.equal(f.feature.tab.ownerUnread('local'),false); f.feature.destroy();
+});
+
+test('repeated list refreshes do not start unbounded duplicate comment classifiers', async () => {
+  const gate=deferred(),view={...base,access:'owner',local_node:'local',unread:true,comments_last:1,seen_comments:0}; let reads=0;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>{reads++;return gate.promise;});
+  f.feature.tick(); await new Promise(r=>setImmediate(r));assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unknown');
+  for(let i=0;i<8;i++){f.feature.refresh();await new Promise(r=>setImmediate(r));}
+  assert.equal(reads,1);
+  gate.resolve(commentsAnswer([{seq:1,mine:false,text:'incoming'}],1,false)); await f.feature.settled();
+  assert.equal(f.feature.tab.ownerUnread('local'),true); f.feature.destroy();
+});
+
+test('destroy releases queued comment classification work without starting it', async () => {
+  const gate=deferred(), views=Array.from({length:6},(_,i)=>({...base,chat:'c'+i,access:'owner',local_node:'n'+i,unread:true,comments_last:1,seen_comments:0})); let reads=0;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list(views):readAnswer(),async()=>{reads++;return gate.promise;});
+  f.feature.tick(); await new Promise(r=>setImmediate(r)); assert.equal(reads,4); f.feature.destroy();
+  gate.resolve(commentsAnswer([{seq:1,mine:true,text:'own'}],1,false));
+  await Promise.race([f.feature.settled(),new Promise((_r,reject)=>setTimeout(()=>reject(Error('queued work did not retire')),100))]);
+  assert.equal(reads,4);
+});
+
+test('stalled comment reads time out so a later subscription can classify', async () => {
+  const views=Array.from({length:5},(_,i)=>({...base,chat:'c'+i,access:'owner',local_node:'n'+i,unread:true,comments_last:1,seen_comments:0}));
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list(views):readAnswer(),
+    async path=>path.includes('/c4/')?commentsAnswer([{seq:1,mine:false,text:'incoming'}],1,false):new Promise(()=>{}),undefined,{classificationTimeoutMs:10});
+  f.feature.tick();await Promise.race([f.feature.settled(),new Promise((_r,reject)=>setTimeout(()=>reject(Error('classification queue stalled')),200))]);
+  assert.equal(f.feature.tab.ownerUnreadStatus('n0'),'unknown');assert.equal(f.feature.tab.ownerUnread('n4'),true);f.feature.destroy();
+});
+
+test('classification retains proven incoming evidence when a newer page is malformed', async () => {
+  const gate=deferred(), view={...base,access:'owner',local_node:'local',unread:true,comments_last:1,seen_comments:0}; let calls=0;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>{
+    calls++;if(calls===1)return gate.promise;
+    if(calls===2)return commentsAnswer([{seq:1,mine:true,text:'own'},{seq:2,mine:false,text:'incoming'}],2,false);
+    return {entries:[{seq:4,mine:true}],next:2,more:false};
+  });
+  f.feature.tick();await new Promise(r=>setImmediate(r));view.comments_last=2;f.feature.refresh();await new Promise(r=>setImmediate(r));
+  gate.resolve(commentsAnswer([{seq:1,mine:true,text:'own'}],1,false));await f.feature.settled();
+  assert.equal(calls,2);assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unread');
+  view.comments_last=3;f.feature.refresh();await f.feature.settled();assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unread');
+  f.feature.destroy();
+});
+
+test('comment classification treats malformed or incomplete page evidence as unknown', async () => {
+  const cases=[
+    {entries:null,next:1}, {entries:[],next:0},
+    {entries:[{seq:0,mine:false}],next:1}, {entries:[{seq:2,mine:false}],next:1},
+    {entries:[{seq:1}],next:1}, {entries:[],next:1},
+  ];
+  for (const page of cases) {
+    const view={...base,access:'owner',local_node:'local',unread:true,comments_last:1,seen_comments:0};
+    const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>page);
+    f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unknown');f.feature.destroy();
+  }
+});
+
+test('comment classification caps catch-up pages and reports unknown until complete', async () => {
+  const view={...base,access:'owner',local_node:'local',unread:true,comments_last:41,seen_comments:0};let calls=0;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>{calls++;return commentsAnswer([{seq:calls,mine:true,text:'own'}],calls,true);});
+  f.feature.tick();await f.feature.settled();assert.equal(calls,40);assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unknown');f.feature.destroy();
+});
+
+test('bounded classification resumes after forty pages instead of rereading the same prefix', async () => {
+  const view={...base,access:'owner',local_node:'local',unread:true,comments_last:41,seen_comments:0};let calls=0;
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async path=>{
+    calls++;const after=Number(path.split('after=')[1]);const seq=after+1;return commentsAnswer([{seq,mine:seq!==41,text:'entry'}],seq,seq<41);
+  });
+  f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unknown');
+  f.feature.refresh();await f.feature.settled();assert.equal(calls,41);assert.equal(f.feature.tab.ownerUnreadStatus('local'),'unread');f.feature.destroy();
+});
+
+test('received unknown status is announced in its tab and group without an unread claim', async () => {
+  const view={...base,access:'write',unread:true,mirror_last:1,seen_mirror:1,comments_last:1,seen_comments:0};
+  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer(),async()=>{throw Error('offline');});
+  f.feature.tick();await f.feature.settled();assert.match(f.feature.tab.tabHTML(false),/unread status unavailable/);
+  assert.equal(f.feature.tab.activities()[0].unread,false);assert.equal(f.feature.tab.groups()[0].items[0].unreadUnknown,true);f.feature.destroy();
 });
 
 test("shared list omits owner copies even when a received item exists", async () => {
@@ -1572,7 +2007,7 @@ test('normal panel Escape restores the rename action without leaving the convers
  const action={dataset:{gact:'rename'},closest:s=>s==='[data-gact]'?action:null}; f.click('msgs',action);
  const field=item.turn.nextElementSibling.querySelector('[data-grename]'); assert.ok(field);
  f.get('msgs').listeners.get('keydown')({key:'Escape',target:field,preventDefault(){},stopPropagation(){}});
- assert.equal(f.feature.tab.selected(),'team/s/o/c/g'); assert.match(item.turn.nextElementSibling.innerHTML,/data-gact="rename"/); f.feature.destroy();
+ assert.equal(f.feature.tab.selected(),'team/s/o/c/g'); assert.match(item.turn.nextElementSibling.innerHTML,/data-gact="more"/); f.feature.destroy();
 });
 
 test('forged keyboard activation for an unknown owner generation cannot open an action', async () => {
@@ -1641,6 +2076,31 @@ test('owner comment prompt action prepares attributed source and recipient forge
  const gt={dataset:{cseq:'1'},nextElementSibling:null,insertAdjacentHTML(_where,html){this.rowHTML=html;this.nextElementSibling={remove(){}}}};
  const gb={closest:s=>s==='.bubble'?gb:s==='[data-seq], [data-cseq]'?gt:null};
  g.click('msgs',gb); assert.doesNotMatch(gt.rowHTML,/data-gact="prompt"/); g.click('msgs',action); assert.equal(prepared.length,1); g.feature.destroy();
+});
+
+test('preparing an owner-authored People message retains its own authorship', async () => {
+ const owner={...base,access:'owner',local_node:'n1'},prepared=[];
+ const panel={ids:{},loaded(){},select(){},removed(){},ownerChanged(){},promptIcon:'I',preparePrompt:(...args)=>prepared.push(args)};
+ const comments=async()=>({entries:[{seq:1,anchor:0,text:'my own note',author:'self',mine:true,prov:true}],names:{self:'Owner'},next:1,more:false});
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([owner]):readAnswer([],0,false,owner),comments,undefined,{panel,selectedNode:()=>'n1'});
+ f.feature.tick();await f.feature.settled();
+ const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,insertAdjacentHTML(){this.nextElementSibling={remove(){}}}};
+ const bubble={closest:s=>s==='.bubble'?bubble:(s==='[data-cseq]'||s==='[data-seq], [data-cseq]')?turn:null};f.click('msgs',bubble);
+ const action={dataset:{gact:'prompt'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);
+ assert.equal(prepared[0][0].role,'user');assert.equal(prepared[0][0].who,undefined);assert.equal(prepared[0][0].prov,true);f.feature.destroy();
+});
+
+test('owner marker and unavailable action adapters cannot activate another action', async () => {
+ const owner={...base,access:'owner',local_node:'n1'};
+ const panel={ids:{},loaded(){},select(){},removed(){},ownerChanged(){},fork:null,preparePrompt:null};
+ const comments=async()=>({entries:[{seq:1,anchor:0,text:'reply',author:'p'}],names:{p:'Alex'},next:1,more:false});
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([owner]):readAnswer([],0,false,owner),comments,undefined,{panel,selectedNode:()=>'n1'});
+ f.feature.tick();await f.feature.settled();
+ const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,insertAdjacentHTML(){this.nextElementSibling={remove(){}}}};
+ const bubble={closest:s=>s==='.bubble'?bubble:(s==='[data-cseq]'||s==='[data-seq], [data-cseq]')?turn:null};f.click('msgs',bubble);
+ const marker={closest:s=>s==='[data-bmarker]'?marker:null};f.click('msgs',marker);
+ for(const name of ['fork','prompt']) {const action={dataset:{gact:name},closest:s=>s==='[data-gact]'?action:null};assert.doesNotThrow(()=>f.click('msgs',action));}
+ f.feature.destroy();
 });
 
 test('owner prompt capability requires a selected local chat and known UID', () => {
@@ -1718,7 +2178,7 @@ test('native reader: canceling a received editor during a poll restores normal b
  const input=item.turn.nextElementSibling.querySelector('[data-grename]');body.scrollTop=800;waiting=true;f.setTime(5000);f.feature.tick();
  body.listeners.get('keydown')({key:'Escape',target:input,preventDefault(){},stopPropagation(){}});
  gate.resolve(commentsAnswer([{seq:1,anchor:1,text:'arrived',author:'p'}],1,false,{p:'Person'}));await f.feature.settled();
- assert.equal(body.scrollTop,body.scrollHeight);assert.match(body.innerHTML,/arrived/);assert.equal(f.doc.activeElement,item.turn.nextElementSibling.querySelector('[data-gact="rename"]'));f.feature.destroy();
+ assert.equal(body.scrollTop,body.scrollHeight);assert.match(body.innerHTML,/arrived/);assert.equal(f.doc.activeElement,item.turn.nextElementSibling.querySelector('[data-gact="more"]'));f.feature.destroy();
 });
 
 test('coordinator selected received reader recovers after gate loss during an in-flight read', async () => {
@@ -1865,7 +2325,7 @@ test('received removal asks for local-copy confirmation and restores focus on ca
 
 test('owner People comments identify their human destination', () => {
   const html=guestMessageHTML({seq:1,anchor:0,text:'human message',author:'o',mine:true},{},'s',{},'s/o/c/g');
-  assert.match(html,/You · People/);assert.match(html,/human message/);
+  assert.match(html,/>You<\/div>/);assert.match(html,/human message/);
 });
 
 test('removal confirmation cannot delete a different chat selected during the dialog', async () => {
@@ -1888,4 +2348,53 @@ test('owner prompt capability follows the local agent, independent of sharing st
  assert.equal(f.feature.canPreparePrompt(source),false,'closed or missing local agent cannot accept a prompt');
  available=true;assert.equal(f.feature.canPreparePrompt(source),true,'ended sharing and offline relay do not close the local agent');
  f.feature.destroy();
+});
+
+test('coordinator: known incoming unread survives a later own append while tail classification is pending', async () => {
+ let last=1, reads=0,release;
+ const held=new Promise(resolve=>release=resolve);
+ const incoming={seq:1,anchor:0,author:'other',mine:false,text:'synthetic incoming'};
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([{...base,access:'owner',local_node:'local',mirror_last:0,seen_mirror:0,unread:true,comments_last:last,seen_comments:0}]):readAnswer(),async()=>{if(++reads>1)await held;return commentsAnswer(last===1?[incoming]:[incoming,{seq:2,anchor:0,author:'o',mine:true,text:'synthetic own append'}],last,false);});
+ try{
+  f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.ownerUnread('local'),true);
+  last=2;f.feature.refresh();await new Promise(r=>setImmediate(r));
+  assert.equal(f.feature.tab.ownerUnread('local'),true,'a later append cannot revoke already proven incoming unread evidence');
+ }finally{release();await f.feature.settled();f.feature.destroy();}
+});
+
+test('known incoming evidence is retired when the read position advances past it', async () => {
+ let last=1,seen=0;
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([{...base,access:'owner',local_node:'local',unread:true,comments_last:last,seen_comments:seen}]):readAnswer(),async path=>{
+  const after=Number(path.split('after=')[1]);return after===0?commentsAnswer([{seq:1,mine:false,text:'incoming'}],1,false):commentsAnswer([{seq:2,mine:true,text:'own'}],2,false);
+ });
+ f.feature.tick();await f.feature.settled();assert.equal(f.feature.tab.ownerUnread('local'),true);
+ last=2;seen=1;f.feature.refresh();await f.feature.settled();assert.equal(f.feature.tab.ownerUnreadStatus('local'),'read');f.feature.destroy();
+});
+
+
+test('coordinator: shared bubble selection uses the ordinary drag-selection guard', async () => {
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([{t:'assistant',seq:1,text:'Synthetic selectable text'}],1),undefined,undefined,{bookmarks:()=>[],uiMutate(){},openSendTo(){}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+ f.doc.getSelection=()=>({isCollapsed:false,toString:()=> 'Synthetic selectable'});
+ const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ assert.equal(item.turn.rowHTML,undefined,'selecting text must not toggle bubble actions');
+ f.feature.destroy();
+});
+
+test('description verification reports unavailable destinations and preserves the current visit', async () => {
+ let menu,mode='missing';const notices=[],applied=[],nodes=[{id:'local',instance_id:'one',title:'Local'}];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):path==='/api/state'?(mode==='error'?Promise.reject(Error('offline')):{}):readAnswer([{t:'user',seq:1,text:'human'}],1),undefined,undefined,{toast:value=>notices.push(value),localNodes:()=>nodes,panel:{chooseDescription:value=>menu=value,editDescription:id=>applied.push(id)}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ const action={dataset:{gact:'desc'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);
+ menu.onChoose(menu.choices[0]);await new Promise(resolve=>setImmediate(resolve));assert.equal(notices.length,1);assert.deepEqual(applied,[]);
+ mode='error';menu.onChoose(menu.choices[0]);await new Promise(resolve=>setImmediate(resolve));assert.equal(notices.length,2);assert.deepEqual(applied,[]);f.feature.destroy();
+});
+
+test('another shared bubble action retires pending description verification', async () => {
+ let menu,finish;const selected=[],copies=[],nodes=[{id:'local',instance_id:'one',title:'Local'}];
+ const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):path==='/api/state'?new Promise(resolve=>finish=resolve):readAnswer([{t:'user',seq:1,text:'human'}],1),undefined,undefined,{localNodes:()=>nodes,panel:{chooseDescription:value=>menu=value,editDescription:id=>selected.push(id),copy:text=>copies.push(text)}});
+ f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();const item=sharedActionBubble(1);f.click('msgs',item.bubble);
+ const action=name=>({dataset:{gact:name},closest:s=>s==='[data-gact]'?{dataset:{gact:name}}:null});
+ f.click('msgs',action('desc'));menu.onChoose(menu.choices[0]);await Promise.resolve();f.click('msgs',action('copy'));finish({nodes});await new Promise(resolve=>setImmediate(resolve));
+ assert.deepEqual(selected,[]);assert.deepEqual(copies,['human']);f.feature.destroy();
 });

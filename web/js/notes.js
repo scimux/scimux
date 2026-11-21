@@ -109,6 +109,7 @@ import {
   bookmarkClampState as bookmarkClampStateDefault,
   bookmarkActionsHTML as bookmarkActionsHTMLDefault,
   bookmarkMenuHTML as bookmarkMenuHTMLDefault,
+  sharedBookmarkSource,
 } from "./bookmarks.js";
 import { mediaTextAndTiles, legacyMediaTextAndTiles, hasSupportedImageMarker } from "./reference-media.js";
 import {
@@ -1853,14 +1854,19 @@ export function createNotesFeature(deps){
           title: "Send bookmark to\u2026",
           role: nt.role || "",
           who: nt.who || "", prov: nt.prov,
-          source: (nt.node || nt.uid) ? {
+          source: sharedBookmarkSource(nt) || ((nt.node || nt.uid) ? {
             node: nt.node || "", turnTime: nt.turnTime || "",
             ...(nt.uid ? { uid: nt.uid, segment: Number(nt.segment) || 0, record: Number(nt.record) || 0 } : {}),
-          } : null,
+          } : null),
+          ...(sharedBookmarkSource(nt) ? {allowNew:false} : {}),
         });
         return;
       case "jump":
         /* jumpToChatAddress closes this workspace itself when it resolves */
+        if (sharedBookmarkSource(nt)) {
+          if (typeof d.jumpToSharedSource !== "function" || !d.jumpToSharedSource(nt.team)) toast("That shared message is unavailable; the bookmark remains saved.");
+          return;
+        }
         if (!(nt.node || nt.uid)) return;
         if (!jumpToChatAddress({
           node: nt.node, uid: nt.uid, segment: nt.segment,
