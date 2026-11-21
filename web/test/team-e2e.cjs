@@ -708,6 +708,10 @@ async function stage1OwnerFiles(mode,ownerSeat,readerSeat) {
   assertID('stage1-owner-file-delivered-'+mode,body.attachments?.length===1&&sent.includes(body.attachments[0].path)&&fs.readFileSync(body.attachments[0].path,'utf8')==='synthetic delivered file'&&after.attempted===before.attempted+1&&after.controls===before.controls);
   assertID('stage1-owner-file-disarms-'+mode,(await page.locator('#destinationpeople').getAttribute('aria-pressed'))==='true'&&(await page.locator('#prompt').innerText())==='People draft '+mode);
   manifest['stage1-owner-files-'+mode]={before,after};await screenshot(page,'stage1-owner-files-'+mode+'.png');
+  // What leaves the owner's computer names the file, never the owner's local path.
+  const shared=await ownerSeat.api('/api/team/shares/'+chat.id),mirrorLog=path.join(relay.dir,'channels',ownerSeat.self,shared.uid,'mirror.jsonl');
+  const relayed=await until(()=>{try{const text=fs.readFileSync(mirrorLog,'utf8');return text.includes('Owner file prompt '+mode)?text:null;}catch{return null;}},40000,'owner file turn on relay');
+  assertID('stage1-owner-file-name-only-on-relay-'+mode,relayed.includes('[attached file: owner-file.txt]')&&!relayed.includes(ownerSeat.data)&&!relayed.includes(path.dirname(body.attachments[0].path)));
 }
 
 async function peopleCopyReplacement(mode,ownerSeat,readerSeat){

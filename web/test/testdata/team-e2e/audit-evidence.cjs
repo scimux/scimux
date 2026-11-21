@@ -79,7 +79,7 @@ function auditManifest(manifest, profile) {
   for (const mode of modes) {
     const required = ['early-native-visible-no-agent-dispatch', 'no-selection-explicit-send-only',
       'stage1-scanner-explicit-dispatch-only', 'stage1-shared-owner-idle', 'stage1-discussion-zero-agent-dispatch',
-      'stage1-owner-file-delivered', 'stage2-fork-fresh-local', 'stage2-prompt-one-dispatch',
+      'stage1-owner-file-delivered', 'stage1-owner-file-name-only-on-relay', 'stage2-fork-fresh-local', 'stage2-prompt-one-dispatch',
       'dropped-response-explicit-retry-once', 'held-evidence-confirmed-after-release',
       'ai-source-explicit-exact-mirrored', 'trace-explicit-one-dispatch', 'trace-second-explicit-dispatch',
       'native-trace-one-exact-multiline'];
