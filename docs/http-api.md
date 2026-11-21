@@ -686,7 +686,10 @@ node ownership and security boundary as the existing send and chat routes.
 upload directory (others are rejected `400`). For each, a plain-text line
 `[attached image|file: /abs/path]` is appended to the delivered prompt so the
 agent reads the file — one uniform mechanism across all transports (no inline
-image bytes). A turn may carry text, attachments, or both; an attachments-only
+image bytes). When the chat is shared, the copy mirrored to recipients
+carries only the file name (`[attached file: notes.txt]`); the agent and the
+local log keep the absolute path. Agent replies are mirrored as written.
+A turn may carry text, attachments, or both; an attachments-only
 turn is valid, but an entirely empty one is `400`.
 
 ### `POST /api/nodes/{id}/attachments`

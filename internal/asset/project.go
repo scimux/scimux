@@ -49,6 +49,29 @@ func Project(text string, byPath map[string]sessionlog.AssetEvent) string {
 	})
 }
 
+// shareMarkerRE matches a delivered attachment marker up to the "]" that ends
+// its line, as extendPrompt writes it, so a "]" or newline inside the path
+// cannot end the match early and leave part of the directory behind.
+var shareMarkerRE = regexp.MustCompile(`(?s)\[attached (image|file): (.+?)\](\n|$)`)
+
+// storedNameRE matches the random prefix the upload handler adds to a stored
+// attachment name ("<8 hex>-<original name>").
+var storedNameRE = regexp.MustCompile(`(?s)^[0-9a-f]{8}-(.+)$`)
+
+// ShareNames rewrites each attachment marker to carry only the file's name,
+// for text that leaves this computer: "[attached file: /abs/0a1b2c3d-a.txt]"
+// becomes "[attached file: a.txt]". The local log keeps the full marker.
+func ShareNames(text string) string {
+	return shareMarkerRE.ReplaceAllStringFunc(text, func(m string) string {
+		sub := shareMarkerRE.FindStringSubmatch(m)
+		name := filepath.Base(sub[2])
+		if stored := storedNameRE.FindStringSubmatch(name); stored != nil {
+			name = stored[1]
+		}
+		return "[attached " + sub[1] + ": " + name + "]" + sub[3]
+	})
+}
+
 var assetRefRE = regexp.MustCompile(`scimux-asset:([A-Za-z0-9_]+)`)
 
 // ReferencedIDs extracts every scimux-asset:<id> reference from already

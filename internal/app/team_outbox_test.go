@@ -373,6 +373,53 @@ func TestOutboxCopiesTheFilteredLog(t *testing.T) {
 	}
 }
 
+// The owner's local attachment paths stay on the owner's computer: the relay
+// receives only the file names, while the local session log keeps the full
+// delivered text.
+func TestOutboxSharesAttachmentNamesNotPaths(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	local := filepath.Join(dir, "attachments", shareNode)
+	userText := "compare these\n\n[attached file: " + local + "/0a1b2c3d-notes.txt]\n[attached image: " + local + "/deadbeef-plot.png]"
+	agentText := "I read [attached file: " + local + "/0a1b2c3d-notes.txt]"
+	for _, ev := range []sessionlog.Event{
+		{T: "meta", Time: "2026-11-12T09:30:00Z", Meta: &sessionlog.MetaEvent{Node: shareNode, UID: shareUID, Agent: "codex", Created: "2026-11-12T09:30:00Z"}},
+		{T: "user", Time: "2026-11-12T09:31:00Z", Text: userText},
+		{T: "assistant", Time: "2026-11-12T09:32:00Z", Text: agentText},
+	} {
+		appendOutbox(t, dir, ev)
+	}
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Scope: "all", Title: "North"})
+	box.tick(context.Background())
+	sent := mirrorCall(t, snapshotCalls(calls))
+	var req struct {
+		Entries []struct {
+			Key  string          `json:"key"`
+			Body json.RawMessage `json:"body"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(sent.body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Entries) != 3 {
+		t.Fatalf("entries = %+v", req.Entries)
+	}
+	assertMirrorEqual(t, string(req.Entries[1].Body), `{"v":1,"t":"user","time":"2026-11-12T09:31:00Z","text":"compare these\n\n[attached file: notes.txt]\n[attached image: plot.png]"}`)
+	// Agent output is shared as the agent wrote it.
+	var agent struct{ Text string }
+	if err := json.Unmarshal(req.Entries[2].Body, &agent); err != nil || agent.Text != agentText {
+		t.Fatalf("assistant body = %s", req.Entries[2].Body)
+	}
+	if strings.Contains(string(req.Entries[1].Body), dir) {
+		t.Fatalf("user entry leaked a local path: %s", req.Entries[1].Body)
+	}
+	logged, err := os.ReadFile(chatLogPath(dir, shareNode))
+	if err != nil || !strings.Contains(string(logged), local+"/0a1b2c3d-notes.txt") {
+		t.Fatal("local session log lost the delivered attachment path")
+	}
+}
+
 func restartedBox(t *testing.T, dir string, script *outboxScript) (*shareOutbox, *[]shareCall) {
 	t.Helper()
 	srv, calls := recordOutbox(t, script)
