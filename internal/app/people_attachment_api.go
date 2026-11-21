@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/scimux/scimux/internal/identity"
 	"github.com/scimux/scimux/internal/storagebudget"
@@ -190,7 +191,7 @@ func (h *teamHandler) stagePeopleAttachment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	part, err := reader.NextPart()
-	if err != nil || part.FormName() != "files" || !peopleSafeName(part.FileName()) {
+	if err != nil || part.FormName() != "files" || !peopleSafeName(part.FileName()) || strings.ContainsFunc(part.FileName(), peopleBidiControl) {
 		writeTeamError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
@@ -329,7 +330,7 @@ func (h *teamHandler) readPeopleStage(w http.ResponseWriter, r *http.Request, id
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
-	writeJSONStatus(w, http.StatusOK, map[string]any{"id": stage.ID, "sha256": stage.Hash, "size": len(stage.Data), "name": stage.Name, "mime": stage.MIME, "revision": team.PeopleStageRevision(stage)})
+	writeJSONStatus(w, http.StatusOK, map[string]any{"id": stage.ID, "sha256": stage.Hash, "size": len(stage.Data), "name": peopleVisibleName(stage.Name), "mime": stage.MIME, "revision": team.PeopleStageRevision(stage)})
 }
 
 func (h *teamHandler) removePeopleStage(w http.ResponseWriter, r *http.Request, id team.CopyID, stageID string) {
@@ -491,7 +492,7 @@ func (h *teamHandler) readPeopleAttachment(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write(stage.Data)
 		return
 	}
-	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": stage.Name})
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": peopleVisibleName(stage.Name)})
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", disposition)

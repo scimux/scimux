@@ -1800,7 +1800,10 @@ query precondition. A successful response includes an attachment descriptor:
 `id`, `sha256`, `size`, `name`, advisory `mime`, and the immutable stage
 `revision` used for local removal. Files must contain at
 least one byte and be at most 4 MiB; a message can contain at most 16 files
-and 16 MiB total. Names are bounded, sanitized UTF-8 leaf names. These limits
+and 16 MiB total. Names are bounded, sanitized UTF-8 leaf names. New uploads
+reject bidi controls U+061C, U+200E–U+200F, U+202A–U+202E, and U+2066–U+2069.
+A retained name is shown and downloaded with those characters removed, or as
+`file` if that would be empty, `.`, or `..`. These limits
 do not alter ordinary Agent uploads.
 
 Stage metadata uses GET on `.../attachments/stage/{id}` with the current

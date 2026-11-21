@@ -127,12 +127,21 @@ function blobType(kind) {
 
 /* The loader owns the computer document as well as its graph. rv must not
  * learn createApp's API or which verified objects are styles and assets. */
-export function createRemoteAssetTransport({ channel, assets, createObjectURL, revokeObjectURL = url => URL.revokeObjectURL(url), peopleByteBudget = 256 * 1024 * 1024 }) {
+export function createRemoteAssetTransport({ channel, assets, createObjectURL, revokeObjectURL = url => URL.revokeObjectURL(url), peopleByteBudget = 256 * 1024 * 1024, peopleAssetCap = 4096 }) {
   const pending = new Map();
   let peopleServers = new Set(), verifiedServers = new Map(), copyInstances = new Map(), capabilityVisit = 0, capabilityPending = null;
   const serverEpoch = new Map();
   const peopleAssets = new Map(), copyEpoch = new Map();
   let peopleBytes = 0;
+  function peopleRoom(extra) {
+    if (extra > peopleByteBudget) return false;
+    for (const [path, size] of peopleAssets) {
+      if (peopleAssets.size < peopleAssetCap && peopleBytes + extra <= peopleByteBudget) return true;
+      revokeObjectURL(assets.get(path));
+      assets.delete(path); peopleAssets.delete(path); peopleBytes -= size;
+    }
+    return peopleBytes + extra <= peopleByteBudget && peopleAssets.size < peopleAssetCap;
+  }
   async function load(path) {
     // Requests are limited to canonical local assets and exact shared-message
     // associations. The server independently authorizes every association.
@@ -142,7 +151,6 @@ export function createRemoteAssetTransport({ channel, assets, createObjectURL, r
     const copy = shared ? path.slice(0, path.indexOf('/attachments/')) : '';
     if (shared && copyInstances.get(copy) !== new URLSearchParams(path.split('?')[1]).get('copy_instance')) return;
     const epoch = copyEpoch.get(copy) || 0, server = shared ? copy.split('/')[4] : '', binding = serverEpoch.get(server) || 0;
-    if ((shared || nativeAttachment) && (peopleAssets.size >= 4096 || peopleBytes >= peopleByteBudget)) return;
     if (pending.has(path)) return pending.get(path);
     const task = (async () => {
       try {
@@ -163,8 +171,13 @@ export function createRemoteAssetTransport({ channel, assets, createObjectURL, r
           try { while (capabilityPending && !timedOut) await Promise.race([capabilityPending, timeout]); }
           finally { clearTimeout(timer); }
         }
-        if (shared && (capabilityPending || !peopleServers.has(server) || binding !== (serverEpoch.get(server) || 0) || epoch !== (copyEpoch.get(copy) || 0) || peopleAssets.size >= 4096 || peopleBytes + bytes.byteLength > peopleByteBudget)) return;
-        if (nativeAttachment && (peopleAssets.size >= 4096 || peopleBytes + bytes.byteLength > peopleByteBudget)) return;
+        if (shared && (capabilityPending || !peopleServers.has(server) || binding !== (serverEpoch.get(server) || 0) || epoch !== (copyEpoch.get(copy) || 0))) return;
+        if ((shared || nativeAttachment) && !peopleRoom(bytes.byteLength)) return;
+        if ((shared || nativeAttachment) && peopleAssets.has(path)) {
+          revokeObjectURL(assets.get(path));
+          peopleBytes -= peopleAssets.get(path);
+          assets.delete(path); peopleAssets.delete(path);
+        }
         assets.set(path, createObjectURL(new Blob([bytes], { type })));
         if (shared || nativeAttachment) { peopleAssets.set(path, bytes.byteLength); peopleBytes += bytes.byteLength; }
       } catch {
@@ -277,6 +290,7 @@ export function createRemoteAssetTransport({ channel, assets, createObjectURL, r
       let response;
       try { response = await channel(...args); }
       catch (err) { if (isCapabilities) { if (visit === capabilityVisit) { applyCapabilities(null); capabilityPending = null; } settle(); } throw err; }
+      if (isCapabilities && !response.ok) { if (visit === capabilityVisit) { applyCapabilities(null); capabilityPending = null; } settle(); }
       if (deleteCopy && response.ok && copyInstances.get(deletePath) === deleteInstance && (copyEpoch.get(deletePath) || 0) === deleteEpoch && (requestedInstance === null || requestedInstance === deleteInstance)) {
         const copy = deletePath; copyEpoch.set(copy, (copyEpoch.get(copy) || 0) + 1);
         for (const [path, size] of peopleAssets) if (path.startsWith(copy + '/attachments/')) {

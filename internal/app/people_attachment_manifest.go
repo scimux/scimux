@@ -73,7 +73,7 @@ func projectPeopleAttachments(raw json.RawMessage, fallback string, entry map[st
 		if total > 16<<20 {
 			return
 		}
-		out = append(out, map[string]any{"id": f.ID, "sha256": f.SHA256, "size": f.Size, "name": f.Name, "mime": f.MIME})
+		out = append(out, map[string]any{"id": f.ID, "sha256": f.SHA256, "size": f.Size, "name": peopleVisibleName(f.Name), "mime": f.MIME})
 	}
 	entry["text"] = text
 	entry["attachments"] = out
@@ -90,4 +90,23 @@ func peopleSafeName(name string) bool {
 		}
 	}
 	return true
+}
+
+func peopleBidiControl(r rune) bool {
+	return r == '\u061c' || r == '\u200e' || r == '\u200f' || r >= '\u202a' && r <= '\u202e' || r >= '\u2066' && r <= '\u2069'
+}
+
+// peopleVisibleName strips bidi controls for display. Stored names stay unchanged.
+// A name that would become empty, ".", or ".." is shown as "file".
+func peopleVisibleName(name string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if peopleBidiControl(r) {
+			return -1
+		}
+		return r
+	}, name)
+	if cleaned == "" || cleaned == "." || cleaned == ".." {
+		return "file"
+	}
+	return cleaned
 }

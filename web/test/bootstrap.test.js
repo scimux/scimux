@@ -41,14 +41,14 @@ test("remote People capability refresh fails closed while a newer result is pend
  release(new Response(JSON.stringify({servers:[]})));await (await refresh).json();
 });
 
-test("remote retained attachment cache stays bounded and removes copies on explicit deletion", async()=>{
+test("remote retained attachment cache removes both copies on explicit deletion", async()=>{
  const server="a".repeat(32),owner="b".repeat(32),chat="c".repeat(16),generation="d".repeat(16),id="0123456789abcdef";
  const base=`/api/team/subscriptions/${server}/${owner}/${chat}/${generation}`;const revoked=[];const assets=new Map();
  const channel=async(path,opts)=>{if(path==="/api/team/subscriptions")return new Response(JSON.stringify({people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:"supported"}],subscriptions:[{server,owner,chat,generation,people_copy_instance:"f".repeat(32)}]}));if(path.split("?")[0]===base+"/comments")return new Response(JSON.stringify({entries:[{seq:1,attachments:[{id,size:2,mime:"image/png"}]}]}));if(opts?.method==="DELETE")return new Response(null,{status:204});return new Response(new Uint8Array([1,2]),{headers:{"Content-Type":path.endsWith("&preview=1")?"image/png":"application/octet-stream"}})};
- const transport=createRemoteAssetTransport({channel,assets,createObjectURL:()=>"blob:synthetic",revokeObjectURL:url=>revoked.push(url),peopleByteBudget:2});
+ const transport=createRemoteAssetTransport({channel,assets,createObjectURL:()=>"blob:synthetic",revokeObjectURL:url=>revoked.push(url),peopleByteBudget:4});
  await (await transport.fetchImpl("/api/team/subscriptions")).json();await (await transport.fetchImpl(base+"/comments?copy_instance="+"f".repeat(32))).json();
- assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),"blob:synthetic");assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}&preview=1`),"");
- await transport.fetchImpl(base,{method:"DELETE"});assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),"");assert.deepEqual(revoked,["blob:synthetic"]);
+ assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),"blob:synthetic");assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}&preview=1`),"blob:synthetic");
+ await transport.fetchImpl(base,{method:"DELETE"});assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}`),"");assert.equal(transport.assetURL(base+`/attachments/1/${id}?copy_instance=${"f".repeat(32)}&preview=1`),"");assert.deepEqual(revoked,["blob:synthetic","blob:synthetic"]);
 });
 
 test("a delayed remote attachment cannot restore a deleted copy cache", async()=>{
@@ -1061,17 +1061,17 @@ test('remote native attachment preload preserves its existing size and type boun
  assert.equal(oversized.assetURL(file),'');assert.equal(created,0);
 });
 
-test('remote native preloads respect the shared byte budget without hiding the accepted file',async()=>{
+test('remote native preloads evict the oldest file to stay within the shared byte budget',async()=>{
 	const route='/api/nodes/n1/attachments',assets=new Map();let created=0;
-	const transport=createRemoteAssetTransport({assets,peopleByteBudget:1,createObjectURL:()=>`blob:synthetic-${++created}`,channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-first.txt'},{path:'/synthetic/76543210-second.txt'}]})):new Response('x',{headers:{'Content-Type':'application/octet-stream'}})});
+	const transport=createRemoteAssetTransport({assets,peopleByteBudget:1,createObjectURL:()=>`blob:synthetic-${++created}`,revokeObjectURL:()=>{},channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-first.txt'},{path:'/synthetic/76543210-second.txt'}]})):new Response('x',{headers:{'Content-Type':'application/octet-stream'}})});
  await (await transport.fetchImpl(route,{method:'POST'})).json();
-	assert.equal(transport.assetURL(route+'/01234567-first.txt'),'blob:synthetic-1');assert.equal(transport.assetURL(route+'/76543210-second.txt'),'');assert.equal(created,1);
+	assert.equal(transport.assetURL(route+'/01234567-first.txt'),'');assert.equal(transport.assetURL(route+'/76543210-second.txt'),'blob:synthetic-2');assert.equal(created,2);assert.equal(assets.size,1);
 });
 
-test('remote native preload refuses a response that exceeds the remaining byte budget',async()=>{
+test('remote native preload evicts an older file when the new one fits the byte budget',async()=>{
  const route='/api/nodes/n1/attachments';let created=0,reads=0;
- const transport=createRemoteAssetTransport({assets:new Map(),peopleByteBudget:2,createObjectURL:()=>`blob:synthetic-${++created}`,channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-first.txt'},{path:'/synthetic/76543210-second.txt'}]})):(reads++,new Response(path.includes('first')?'x':'xx',{headers:{'Content-Type':'application/octet-stream'}}))});
- await (await transport.fetchImpl(route,{method:'POST'})).json();assert.equal(transport.assetURL(route+'/01234567-first.txt'),'blob:synthetic-1');assert.equal(transport.assetURL(route+'/76543210-second.txt'),'');assert.equal(created,1);assert.equal(reads,2);
+ const transport=createRemoteAssetTransport({assets:new Map(),peopleByteBudget:2,createObjectURL:()=>`blob:synthetic-${++created}`,revokeObjectURL:()=>{},channel:async(path,opts)=>opts?.method==='POST'?new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-first.txt'},{path:'/synthetic/76543210-second.txt'}]})):(reads++,new Response(path.includes('first')?'x':'xx',{headers:{'Content-Type':'application/octet-stream'}}))});
+ await (await transport.fetchImpl(route,{method:'POST'})).json();assert.equal(transport.assetURL(route+'/01234567-first.txt'),'');assert.equal(transport.assetURL(route+'/76543210-second.txt'),'blob:synthetic-2');assert.equal(created,2);assert.equal(reads,2);
 });
 
 test('remote native upload preload ignores malformed attachment addresses',async()=>{
@@ -1267,4 +1267,235 @@ test('remote People prefetch requires a valid capability server identity',async(
   await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();assert.equal(downloads,0);assert.equal(transport.assetURL(file),'');
   advertised=server;await (await transport.fetchImpl(root)).json();await (await transport.fetchImpl(copy+'/comments?copy_instance='+instance)).json();assert.equal(downloads,1);assert.equal(transport.assetURL(file),'blob:verified');
  }
+});
+
+function peopleCaps(server, owner, chat, generation, instance) {
+  return {people_attachments:{version:1,max_file_bytes:4194304,max_files:16,max_total_bytes:16777216},servers:[{id:server,people_files:'supported'}],subscriptions:[{server,owner,chat,generation,people_copy_instance:instance}]};
+}
+
+test('a failed capability poll releases a shared file wait without trusting the server', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+  const caps=peopleCaps(server, owner, chat, generation, instance);
+  let polls=0, releaseFile, releasePoll, entered;
+  const started=new Promise(resolve=>{entered=resolve});
+  let files=0;
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>'blob:should-not-appear',channel:async path=>{
+    if(path===root){
+      if(++polls===1)return new Response(JSON.stringify(caps));
+      if(polls===2)return new Promise(resolve=>{releasePoll=()=>resolve(new Response(JSON.stringify({error:'unavailable'}),{status:500}))});
+      return new Response(JSON.stringify(caps));
+    }
+    if(++files===1){entered();return new Promise(resolve=>{releaseFile=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))})}
+    return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  const pending=transport.retryAsset(file);await started;
+  const refresh=transport.fetchImpl(root);releaseFile();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(transport.assetURL(file),'');
+  releasePoll();
+  const outcome=await Promise.race([
+    pending.then(url=>({url})),
+    new Promise(resolve=>setImmediate(()=>setImmediate(()=>resolve({stalled:true})))),
+  ]);
+  assert.equal(outcome.stalled,undefined,'a 5xx capability poll left the shared file wait pending');
+  assert.equal(outcome.url,'');
+  assert.equal(transport.assetURL(file),'');
+  const body=await (await refresh).json();
+  assert.equal(body.error,'unavailable');
+  assert.equal(await transport.retryAsset(file),'');
+  await (await transport.fetchImpl(root)).json();
+  assert.equal(await transport.retryAsset(file),'blob:should-not-appear');
+});
+
+test('a stale capability failure does not clear a newer poll', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+  const caps=peopleCaps(server, owner, chat, generation, instance);
+  let polls=0, releaseFile, releaseStale, releaseFresh, entered;
+  const started=new Promise(resolve=>{entered=resolve});
+  const transport=createRemoteAssetTransport({assets:new Map(),createObjectURL:()=>'blob:kept',channel:async path=>{
+    if(path===root){
+      if(++polls===1)return new Response(JSON.stringify(caps));
+      if(polls===2)return new Promise(resolve=>{releaseStale=()=>resolve(new Response(JSON.stringify({error:'stale'}),{status:500}))});
+      return new Promise(resolve=>{releaseFresh=()=>resolve(new Response(JSON.stringify(caps)))});
+    }
+    entered();return new Promise(resolve=>{releaseFile=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  const pending=transport.retryAsset(file);await started;
+  const stale=transport.fetchImpl(root);
+  const fresh=transport.fetchImpl(root);
+  releaseFile();
+  await new Promise(resolve=>setImmediate(resolve));
+  releaseStale();
+  await stale;
+  const stillWaiting=await Promise.race([
+    pending.then(()=>'released'),
+    new Promise(resolve=>setImmediate(()=>setImmediate(()=>resolve('waiting')))),
+  ]);
+  assert.equal(stillWaiting,'waiting');
+  releaseFresh();
+  await (await fresh).json();
+  assert.equal(await pending,'blob:kept');
+  const staleBody=await (await stale).json();
+  assert.equal(staleBody.error,'stale');
+  assert.equal(transport.assetURL(file),'blob:kept');
+});
+
+test('people file cache evicts the oldest entry and allows that path again', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const caps=peopleCaps(server, owner, chat, generation, instance);
+  const ids=['0123456789abcdef','fedcba9876543210','0011223344556677'];
+  const path=id=>`${copy}/attachments/1/${id}?copy_instance=${instance}`;
+  const revoked=[], reads=[];
+  let n=0;
+  const assets=new Map();
+  const transport=createRemoteAssetTransport({assets,peopleByteBudget:2,peopleAssetCap:2,createObjectURL:()=>`blob:synthetic-${++n}`,revokeObjectURL:url=>revoked.push(url),channel:async request=>{
+    if(request===root)return new Response(JSON.stringify(caps));
+    reads.push(request);return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  assert.equal(await transport.retryAsset(path(ids[0])),'blob:synthetic-1');
+  assert.equal(await transport.retryAsset(path(ids[1])),'blob:synthetic-2');
+  assert.equal(await transport.retryAsset(path(ids[2])),'blob:synthetic-3');
+  assert.equal(transport.assetURL(path(ids[0])),'');
+  assert.equal(transport.assetURL(path(ids[1])),'blob:synthetic-2');
+  assert.equal(transport.assetURL(path(ids[2])),'blob:synthetic-3');
+  assert.deepEqual(revoked,['blob:synthetic-1']);
+  assert.equal(assets.size,2);
+  assert.equal(await transport.retryAsset(path(ids[0])),'blob:synthetic-4');
+  assert.equal(reads.filter(item=>item===path(ids[0])).length,2);
+  assert.equal(transport.assetURL(path(ids[0])),'blob:synthetic-4');
+});
+
+test('an in-flight people file is not evicted', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const caps=peopleCaps(server, owner, chat, generation, instance);
+  const flight=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+  const older=`${copy}/attachments/1/fedcba9876543210?copy_instance=${instance}`;
+  const newer=`${copy}/attachments/1/0011223344556677?copy_instance=${instance}`;
+  const revoked=[];
+  let release, n=0, entered;
+  const started=new Promise(resolve=>{entered=resolve});
+  const assets=new Map();
+  const transport=createRemoteAssetTransport({assets,peopleByteBudget:1,createObjectURL:()=>`blob:synthetic-${++n}`,revokeObjectURL:url=>revoked.push(url),channel:async request=>{
+    if(request===root)return new Response(JSON.stringify(caps));
+    if(request===flight){entered();return new Promise(resolve=>{release=()=>resolve(new Response('x',{headers:{'Content-Type':'application/octet-stream'}}))})}
+    return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  const pending=transport.retryAsset(flight);await started;
+  assert.equal(await transport.retryAsset(older),'blob:synthetic-1');
+  assert.equal(await transport.retryAsset(newer),'blob:synthetic-2');
+  assert.deepEqual(revoked,['blob:synthetic-1']);
+  assert.equal(transport.assetURL(flight),'');
+  release();
+  assert.equal(await pending,'blob:synthetic-3');
+  assert.equal(transport.assetURL(flight),'blob:synthetic-3');
+  assert.deepEqual(revoked,['blob:synthetic-1','blob:synthetic-2']);
+});
+
+test('a people file larger than the byte budget is refused', async () => {
+  const route='/api/nodes/n1/attachments';
+  const revoked=[];
+  let n=0;
+  const assets=new Map();
+  const transport=createRemoteAssetTransport({assets,peopleByteBudget:2,createObjectURL:()=>`blob:synthetic-${++n}`,revokeObjectURL:url=>revoked.push(url),channel:async(request,opts)=>{
+    if(opts?.method==='POST')return new Response(JSON.stringify({attachments:[{path:'/synthetic/01234567-small.txt'},{path:'/synthetic/76543210-large.txt'}]}));
+    return new Response(request.endsWith('large.txt')?'xyz':'x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(route,{method:'POST'})).json();
+  assert.equal(transport.assetURL(route+'/01234567-small.txt'),'blob:synthetic-1');
+  assert.equal(transport.assetURL(route+'/76543210-large.txt'),'');
+  assert.deepEqual(revoked,[]);
+  assert.equal(assets.size,1);
+});
+
+test('a zero people entry cap refuses a file without evicting', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const file=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+  const revoked=[], assets=new Map();
+  const transport=createRemoteAssetTransport({assets,peopleByteBudget:100,peopleAssetCap:0,createObjectURL:()=>'blob:should-not-appear',revokeObjectURL:url=>revoked.push(url),channel:async request=>{
+    if(request===root)return new Response(JSON.stringify(peopleCaps(server, owner, chat, generation, instance)));
+    return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  assert.equal(await transport.retryAsset(file),'');
+  assert.deepEqual(revoked,[]);
+  assert.equal(assets.size,0);
+});
+
+test('replacing a cached people path revokes the previous url and does not double-count bytes', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const caps=peopleCaps(server, owner, chat, generation, instance);
+  const first=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+  const second=`${copy}/attachments/1/fedcba9876543210?copy_instance=${instance}`;
+  const revoked=[], assets=new Map();
+  let n=0, hide=false;
+  assets.has=key=>hide&&key===first?false:Map.prototype.has.call(assets,key);
+  const transport=createRemoteAssetTransport({assets,peopleByteBudget:2,peopleAssetCap:10,createObjectURL:()=>`blob:synthetic-${++n}`,revokeObjectURL:url=>revoked.push(url),channel:async request=>{
+    if(request===root)return new Response(JSON.stringify(caps));
+    return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  assert.equal(await transport.retryAsset(first),'blob:synthetic-1');
+  hide=true;
+  assert.equal(await transport.retryAsset(first),'blob:synthetic-2');
+  assert.equal(await transport.retryAsset(second),'blob:synthetic-3');
+  assert.equal(transport.assetURL(first),'blob:synthetic-2');
+  assert.equal(transport.assetURL(second),'blob:synthetic-3');
+  assert.deepEqual(revoked,['blob:synthetic-1']);
+  assert.equal(assets.size,2);
+});
+
+test('people file cache evicts the oldest entry when only the entry cap is full', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const caps=peopleCaps(server, owner, chat, generation, instance);
+  const ids=['0123456789abcdef','fedcba9876543210','0011223344556677'];
+  const path=id=>`${copy}/attachments/1/${id}?copy_instance=${instance}`;
+  const revoked=[], assets=new Map();
+  let n=0;
+  const transport=createRemoteAssetTransport({assets,peopleByteBudget:1000,peopleAssetCap:2,createObjectURL:()=>`blob:synthetic-${++n}`,revokeObjectURL:url=>revoked.push(url),channel:async request=>{
+    if(request===root)return new Response(JSON.stringify(caps));
+    return new Response('x',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  assert.equal(await transport.retryAsset(path(ids[0])),'blob:synthetic-1');
+  assert.equal(await transport.retryAsset(path(ids[1])),'blob:synthetic-2');
+  assert.equal(await transport.retryAsset(path(ids[2])),'blob:synthetic-3');
+  assert.equal(transport.assetURL(path(ids[0])),'');
+  assert.equal(transport.assetURL(path(ids[1])),'blob:synthetic-2');
+  assert.equal(transport.assetURL(path(ids[2])),'blob:synthetic-3');
+  assert.deepEqual(revoked,['blob:synthetic-1']);
+  assert.equal(assets.size,2);
+});
+
+test('people file cache evicts the oldest entry when only the byte budget is full', async () => {
+  const server='a'.repeat(32), owner='b'.repeat(32), chat='c'.repeat(16), generation='d'.repeat(16), instance='f'.repeat(32);
+  const root='/api/team/subscriptions', copy=`${root}/${server}/${owner}/${chat}/${generation}`;
+  const caps=peopleCaps(server, owner, chat, generation, instance);
+  const first=`${copy}/attachments/1/0123456789abcdef?copy_instance=${instance}`;
+  const second=`${copy}/attachments/1/fedcba9876543210?copy_instance=${instance}`;
+  const revoked=[], assets=new Map();
+  let n=0;
+  const transport=createRemoteAssetTransport({assets,peopleByteBudget:3,peopleAssetCap:100,createObjectURL:()=>`blob:synthetic-${++n}`,revokeObjectURL:url=>revoked.push(url),channel:async request=>{
+    if(request===root)return new Response(JSON.stringify(caps));
+    return new Response(request===first?'xx':'yy',{headers:{'Content-Type':'application/octet-stream'}});
+  }});
+  await (await transport.fetchImpl(root)).json();
+  assert.equal(await transport.retryAsset(first),'blob:synthetic-1');
+  assert.equal(await transport.retryAsset(second),'blob:synthetic-2');
+  assert.equal(transport.assetURL(first),'');
+  assert.equal(transport.assetURL(second),'blob:synthetic-2');
+  assert.deepEqual(revoked,['blob:synthetic-1']);
+  assert.equal(assets.size,1);
 });
