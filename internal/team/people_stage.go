@@ -398,7 +398,7 @@ func savePeopleNamedRecordLocked(dataDir string, id CopyID, stage PeopleStage, e
 				return ErrPeopleStage
 			}
 			if peopleStageTemp(entry.Name()) {
-				if err := copyRoot.Remove(name); err != nil {
+				if err := peopleRecordIO.remove(copyRoot, name); err != nil {
 					return ErrPeopleStage
 				}
 				return nil

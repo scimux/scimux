@@ -109,10 +109,22 @@ func runWithHandles(args []string, handles Handles, browser bool) Result {
 		return sealInherited(runtime.GOARCH, func() syscall.Errno {
 			// close_range(3, UINT_MAX, CLOSE_RANGE_CLOEXEC) marks descriptors
 			// without closing or enumerating them; exec maps explicit handles.
-			_, _, errno := syscall.Syscall(436, 3, ^uintptr(0)>>32, 4)
-			return errno
+			return closeRangeCloexec(3, ^uintptr(0)>>32)
 		})
 	}, browser)
+}
+
+func closeRangeCloexec(first, last uintptr) syscall.Errno {
+	_, _, errno := syscall.Syscall(436, first, last, 4)
+	return errno
+}
+
+// DescriptorSealAvailable reports whether this system accepts the
+// explicit-handle seal. A container's seccomp profile or an older kernel can
+// refuse it; the adapter then fails before launch. The probe marks a
+// descriptor range above any open descriptor, so it changes nothing.
+func DescriptorSealAvailable() error {
+	return sealInherited(runtime.GOARCH, func() syscall.Errno { return closeRangeCloexec(1<<30, 1<<30) })
 }
 
 func run(args []string, handles Handles, seal func() error, browser bool) Result {

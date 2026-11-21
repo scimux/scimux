@@ -1226,10 +1226,17 @@ func TestPeopleStageCommitRefusesUnremovableOrphan(t *testing.T) {
 	if err := os.WriteFile(orphan, []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(records, 0500); err != nil {
-		t.Fatal(err)
+	// Root ignores directory permissions, so the failed cleanup is injected.
+	original := peopleRecordIO
+	t.Cleanup(func() { peopleRecordIO = original })
+	refused := 0
+	peopleRecordIO.remove = func(r *os.Root, name string) error {
+		if filepath.Base(name) == filepath.Base(orphan) {
+			refused++
+			return fs.ErrPermission
+		}
+		return original.remove(r, name)
 	}
-	t.Cleanup(func() { _ = os.Chmod(records, 0700) })
 	path, err := copyPath(dir, id)
 	if err != nil {
 		t.Fatal(err)
@@ -1244,12 +1251,10 @@ func TestPeopleStageCommitRefusesUnremovableOrphan(t *testing.T) {
 		defer release()
 		return savePeopleRecordLocked(dir, id, stage, encoded, "people-stages")
 	}
-	if err := commit(); err == nil {
-		t.Fatal("unremovable orphan allowed stage commit")
+	if err := commit(); !errors.Is(err, ErrPeopleStage) || refused != 1 {
+		t.Fatalf("unremovable orphan allowed stage commit: %v (refused %d)", err, refused)
 	}
-	if err := os.Chmod(records, 0700); err != nil {
-		t.Fatal(err)
-	}
+	peopleRecordIO.remove = original.remove
 	if data, err := os.ReadFile(orphan); err != nil || string(data) != "partial" {
 		t.Fatalf("failed cleanup changed orphan: %v", err)
 	}
@@ -1559,6 +1564,20 @@ func TestPeopleStageOrphanCleanupFailureKeepsExistingBytes(t *testing.T) {
 	}
 }
 
+// failListing reports a listing error for one directory, as a permission
+// failure would, while the directory and its contents stay in place.
+type failListing struct {
+	fs.FS
+	dir string
+}
+
+func (f failListing) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == f.dir {
+		return nil, fs.ErrPermission
+	}
+	return fs.ReadDir(f.FS, name)
+}
+
 func TestPeopleStageRecoveryRejectsUnreadableManagedTree(t *testing.T) {
 	dir, id := t.TempDir(), sampleCopyID()
 	stage := syntheticPeopleStage()
@@ -1572,23 +1591,60 @@ func TestPeopleStageRecoveryRejectsUnreadableManagedTree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "synthetic"), []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0000); err != nil {
-		t.Fatal(err)
+	// Root lists a chmod 000 directory, so the listing failure is injected.
+	original := peopleRecordIO
+	t.Cleanup(func() { peopleRecordIO = original })
+	listed := 0
+	peopleRecordIO.walk = func(fsys fs.FS, root string, visit fs.WalkDirFunc) error {
+		if root == "people-pending" {
+			listed++
+			fsys = failListing{FS: fsys, dir: root}
+		}
+		return original.walk(fsys, root, visit)
 	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0700) })
 	other := stage
 	other.ID = "fedcba9876543210"
-	if err := SavePeopleStage(dir, id, other); err == nil {
-		t.Fatal("unreadable managed tree allowed a new stage")
+	if err := SavePeopleStage(dir, id, other); !errors.Is(err, ErrPeopleStage) || listed == 0 {
+		t.Fatalf("unreadable managed tree allowed a new stage: %v (listings %d)", err, listed)
 	}
-	if err := os.Chmod(path, 0700); err != nil {
-		t.Fatal(err)
-	}
+	peopleRecordIO.walk = original.walk
 	if data, err := os.ReadFile(filepath.Join(path, "synthetic")); err != nil || string(data) != "keep" {
 		t.Fatalf("failed recovery changed retained data: %v", err)
 	}
 	if got, err := ReadPeopleStage(dir, id, stage.ID); err != nil || !bytes.Equal(got.Data, stage.Data) {
 		t.Fatalf("failed recovery lost prior stage: %v", err)
+	}
+	if err := SavePeopleStage(dir, id, other); err != nil {
+		t.Fatalf("explicit retry after repair failed: %v", err)
+	}
+}
+
+// A managed tree that resolves outside the copy is refused for every user,
+// and recovery never follows it.
+func TestPeopleStageRecoveryRejectsEscapingManagedTree(t *testing.T) {
+	dir, id := t.TempDir(), sampleCopyID()
+	stage := syntheticPeopleStage()
+	if err := SavePeopleStage(dir, id, stage); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-pending")
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "aaaaaaaaaaaaaaaa-0000000000000000.tmp"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Fatal(err)
+	}
+	other := stage
+	other.ID = "fedcba9876543210"
+	if err := SavePeopleStage(dir, id, other); !errors.Is(err, ErrPeopleStage) {
+		t.Fatalf("escaping managed tree allowed a new stage: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(outside, "aaaaaaaaaaaaaaaa-0000000000000000.tmp")); err != nil || string(data) != "keep" {
+		t.Fatalf("recovery followed the escaping tree: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
 	}
 	if err := SavePeopleStage(dir, id, other); err != nil {
 		t.Fatalf("explicit retry after repair failed: %v", err)

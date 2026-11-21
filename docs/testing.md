@@ -39,7 +39,10 @@ child has a separate 210-second bound.
 The optional explicit-handle adapter is only for a fresh, dedicated test
 supervisor process. On Linux amd64 and arm64 it requires `close_range` with
 `CLOSE_RANGE_CLOEXEC`; other architectures or an unavailable syscall fail
-before launching the runner. This is not a production prerequisite. The
+before launching the runner. This is not a production prerequisite. Its
+real-process tests check `testowned.DescriptorSealAvailable` and skip, naming
+the error, where a container's seccomp profile or kernel refuses that call. The
+pull-request workflow on a hosted runner still runs them. The
 adapter takes ownership of the handles and closes them after the launch
 attempt, including a failed prerequisite or launch. Its runner streams are
 separate from the supervisor's cleanup proof.

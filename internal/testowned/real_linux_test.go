@@ -18,6 +18,17 @@ import (
 	"time"
 )
 
+// requireDescriptorSeal skips an explicit-handle test where this system
+// refuses the adapter's close_range(CLOSE_RANGE_CLOEXEC) seal, for example
+// under a container seccomp profile. The adapter then reports a prerequisite
+// failure before launch, which native_linux_test.go covers.
+func requireDescriptorSeal(t *testing.T) {
+	t.Helper()
+	if err := DescriptorSealAvailable(); err != nil {
+		t.Skipf("explicit-handle supervisor prerequisite unavailable: close_range: %v", err)
+	}
+}
+
 // waitHandleFixture waits each direct supervisor before the fixture reaper
 // examines adopted children. Timeout never treats a killed supervisor as proof.
 func waitHandleFixture(t *testing.T, guard *fixtureReaper, cmd *exec.Cmd) func() error {
@@ -79,6 +90,7 @@ func TestExplicitHandlesStartFailureHelper(t *testing.T) {
 }
 
 func TestHandleProofReadTimeoutIsBoundedAndReaped(t *testing.T) {
+	requireDescriptorSeal(t)
 	_, guard := fixtureRoot(t)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSupervisorHandlesClosedOnStartFailure$")
 	cmd.Env = append(os.Environ(), "TESTOWNED_BLOCK_PROOF_HELPER=1")
@@ -129,6 +141,7 @@ func TestUnregisteredHandleHelper(t *testing.T) {
 }
 
 func TestHandleProbeTimeoutIsBoundedAndReaped(t *testing.T) {
+	requireDescriptorSeal(t)
 	_, guard := fixtureRoot(t)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestUnregisteredHandleNotInherited$")
 	cmd.Env = append(os.Environ(), "TESTOWNED_BLOCK_HANDLE_HELPER=1")
@@ -158,6 +171,7 @@ func TestHandleProbeTimeoutIsBoundedAndReaped(t *testing.T) {
 }
 
 func TestUnregisteredHandleNotInherited(t *testing.T) {
+	requireDescriptorSeal(t)
 	guard := installFixtureReaper(t)
 	var readers, writers []*os.File
 	for range 3 {
@@ -194,6 +208,7 @@ func TestUnregisteredHandleNotInherited(t *testing.T) {
 }
 
 func TestHandleOrphanEarlyExitPreservesNeighbor(t *testing.T) {
+	requireDescriptorSeal(t)
 	guard := installFixtureReaper(t)
 	neighbor, input, output := startNeighbor(t)
 	defer finishNeighbor(t, guard, neighbor, input, output)
@@ -257,6 +272,7 @@ func TestHandleOrphanEarlyExitPreservesNeighbor(t *testing.T) {
 }
 
 func TestSupervisorHandlesClosedOnStartFailure(t *testing.T) {
+	requireDescriptorSeal(t)
 	guard := installFixtureReaper(t)
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -302,6 +318,7 @@ func TestSupervisorHandlesClosedOnStartFailure(t *testing.T) {
 }
 
 func TestSupervisorExplicitHandlesAndEOF(t *testing.T) {
+	requireDescriptorSeal(t)
 	guard := installFixtureReaper(t)
 	readers := make([]*os.File, 3)
 	writers := make([]*os.File, 3)
@@ -561,6 +578,7 @@ func TestBrowserHandlesHelper(t *testing.T) {
 }
 
 func TestBrowserHandlesLaunchAndProof(t *testing.T) {
+	requireDescriptorSeal(t)
 	guard := installFixtureReaper(t)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBrowserHandlesHelper$")
 	cmd.Env = append(os.Environ(), "TESTOWNED_PREFLIGHT_HELPER=1")

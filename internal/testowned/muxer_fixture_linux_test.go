@@ -86,6 +86,7 @@ func testMuxerOuterObservation(t *testing.T, failure string) {
 	if testing.Short() {
 		t.Skip("requires tmux and process exec")
 	}
+	requireDescriptorSeal(t)
 	root, err := os.MkdirTemp("", "testowned-")
 	if err != nil {
 		t.Fatal(err)
@@ -285,6 +286,7 @@ func testMuxerOuterFixture(t *testing.T, failure string) {
 	if testing.Short() {
 		t.Skip("requires tmux and process exec")
 	}
+	requireDescriptorSeal(t)
 	root, err := os.MkdirTemp("", "testowned-")
 	if err != nil {
 		t.Fatal(err)
@@ -394,6 +396,7 @@ func testMuxerRootBeforeProof(t *testing.T, mode string) {
 	if testing.Short() {
 		t.Skip("requires tmux and process exec")
 	}
+	requireDescriptorSeal(t)
 	root, err := os.MkdirTemp("", "testowned-")
 	if err != nil {
 		t.Fatal(err)
