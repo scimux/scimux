@@ -60,7 +60,7 @@ const standard = [
 const people = [
   'people-files', 'people-uncertain-retry', 'people-upload-permission',
   'people-midbody-permission', 'people-image-bookmark', 'people-source-cancel',
-  'people-quota', 'people-local-budget', 'people-file-unread', 'people-recovery',
+  'people-quota', 'people-local-budget', 'people-kept-full', 'people-unkept-open', 'people-file-unread', 'people-recovery',
   'people-relay-missing', 'people-relay-corrupt', 'people-unavailable',
   'people-retired-draft', 'people-copy-replacement', 'people-stale-preparation',
   'people-real-tunnel',
@@ -83,7 +83,7 @@ function auditManifest(manifest, profile) {
       'dropped-response-explicit-retry-once', 'held-evidence-confirmed-after-release',
       'ai-source-explicit-exact-mirrored', 'trace-explicit-one-dispatch', 'trace-second-explicit-dispatch',
       'native-trace-one-exact-multiline'];
-    if (profile !== 'owner-agent-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery');
+    if (profile !== 'owner-agent-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery', 'people-kept-full-guest-posted', 'people-kept-full-published', 'people-kept-full-history', 'people-kept-full-one-dispatch', 'people-unkept-open-bytes', 'people-unkept-open-note', 'people-unkept-open-absent', 'people-unkept-open-zero-agent');
     if (profile === 'corrective') required.push('people-stage-competition-consistent', 'people-stage-competition-draft', 'people-stage-competition-zero-agent', 'people-stage-competition-one-append', 'people-local-stage-review-target', 'people-local-stage-review-body-contained', 'people-local-stage-review-composer-contained', 'people-local-stage-review-exact', 'people-local-stage-review-server', 'people-local-stage-review-preserves', 'people-local-stage-review-zero-agent');
     if (profile === 'corrective') required.push('people-transactional-drafts-separate', 'people-transactional-drafts-stale-clear', 'people-transactional-drafts-legacy', 'people-transactional-drafts-zero-agent');
     if (profile === 'corrective') required.push('people-transactional-retirement-missing', 'people-transactional-retirement-bodyless', 'people-transactional-retirement-marker', 'people-transactional-retirement-preserves', 'people-transactional-retirement-zero-agent');
@@ -138,7 +138,7 @@ function auditManifest(manifest, profile) {
     if (profile !== 'owner-agent-attachments') {
       for (const name of people) {
         const label = name + '-' + mode;
-        const expected = name === 'people-files' ? [3, 3, 0] : name === 'people-source-cancel' ? [1, 1, 0] : [0, 0, 0];
+        const expected = name === 'people-files' ? [3, 3, 0] : name === 'people-source-cancel' ? [1, 1, 0] : name === 'people-kept-full' ? [1, 1, 0] : [0, 0, 0];
         window(manifest[label], label, 'before', 'after', ['owner', 'recipient'], {owner: expected}, true);
       }
       for (const [name, roles] of [['people-cross-channel', ['first', 'second', 'recipient']], ['legacy-reader', ['owner', 'legacy']]]) {

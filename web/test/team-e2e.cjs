@@ -1211,6 +1211,157 @@ async function peopleLocalBudget(mode,ownerSeat,readerSeat) {
   }
 }
 
+// Empty files fill the kept-file count while the byte budget stays open.
+function fillKeptRecords(seat, sub) {
+  const copy = path.join(seat.data, 'team-copies', sub.server, sub.owner, sub.chat, sub.generation);
+  const records = path.join(copy, 'people-records');
+  const copyStat = fs.lstatSync(copy);
+  assert.ok(copyStat.isDirectory() && !copyStat.isSymbolicLink() && (copyStat.mode & 0o777) === 0o700, 'owner copy directory');
+  let existing = false;
+  try {
+    const stat = fs.lstatSync(records);
+    assert.ok(stat.isDirectory() && !stat.isSymbolicLink(), 'people-records directory');
+    existing = true;
+  } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  if (!existing) fs.mkdirSync(records, {mode: 0o700});
+  fs.chmodSync(records, 0o700);
+  const expected = path.join(fs.realpathSync(seat.data), 'team-copies', sub.server, sub.owner, sub.chat, sub.generation, 'people-records');
+  assert.equal(fs.realpathSync(records), expected, 'filler stays in the owner kept-file directory');
+  const files = [];
+  try {
+    for (let i = 0; i < 2048; i++) {
+      const file = path.join(records, 'synthetic-kept-' + String(i).padStart(4, '0'));
+      const fd = fs.openSync(file, 'wx', 0o600);
+      fs.closeSync(fd);
+      files.push(file);
+    }
+  } catch (err) { removeKeptFiller(files); throw err; }
+  return {records, files};
+}
+function removeKeptFiller(files) {
+  for (const file of files) { try { fs.unlinkSync(file); } catch (err) { if (err.code !== 'ENOENT') throw err; } }
+}
+function listKeptFiles(dir) {
+  const out = [];
+  const walk = current => {
+    let entries;
+    try { entries = fs.readdirSync(current, {withFileTypes: true}); } catch (err) { if (err.code === 'ENOENT') return; throw err; }
+    for (const entry of entries) {
+      const child = path.join(current, entry.name);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) walk(child);
+      else out.push(child);
+    }
+  };
+  walk(dir);
+  return out;
+}
+async function ownerCopyReady(ownerSeat, sub) {
+  const copy = path.join(ownerSeat.data, 'team-copies', sub.server, sub.owner, sub.chat, sub.generation);
+  await until(async () => {
+    await ownerSeat.api('/api/team/subscriptions');
+    try { const stat = fs.lstatSync(copy); return stat.isDirectory() && !stat.isSymbolicLink(); } catch { return false; }
+  }, 40000, 'owner copy directory');
+}
+
+async function peopleKeptFull(mode, ownerSeat, readerSeat) {
+  const chat = await node(ownerSeat, 'codex', 'People kept full ' + mode, 'Synthetic kept cap setup');
+  await ownerSeat.api('/api/team/shares/' + chat.id, 'PUT', {server: ownerSeat.serverID, scope: 'all', members: [{seat: readerSeat.self, access: 'write'}]});
+  const share = await ownerSeat.api('/api/team/shares/' + chat.id);
+  const sub = await until(async () => (await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item => item.owner === ownerSeat.self && item.chat === share.uid && item.generation === share.generation && item.access === 'write' && item.people_copy_instance), 40000, 'kept cap subscription');
+  const key = [sub.server, sub.owner, sub.chat, sub.generation].join('/'), base = '/api/team/subscriptions/' + key;
+  await ownerCopyReady(ownerSeat, sub);
+  const kept = fillKeptRecords(ownerSeat, sub);
+  const owner = await pageFor(ownerSeat, mode, 'kept-full-owner-' + mode), reader = await pageFor(readerSeat, mode, 'kept-full-reader-' + mode);
+  try {
+    await open(owner, chat.id); await open(reader, 'team/' + key);
+    await reader.locator('#prompt[contenteditable=true]').waitFor({timeout: 30000});
+    await owner.locator('#destinationpeople[aria-pressed=true]').waitFor({timeout: 30000});
+    const before = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    const guestName = 'guest-over-cap.txt', guestBytes = Buffer.from('synthetic guest over cap ' + mode);
+    await reader.locator('#attadd').waitFor({state: 'visible', timeout: 30000});
+    await reader.locator('#attadd').click();
+    const chooser = reader.waitForEvent('filechooser');
+    await reader.locator('#attmenu [data-src=file]').click();
+    await (await chooser).setFiles({name: guestName, mimeType: 'text/plain', buffer: guestBytes});
+    await reader.locator('#attstage .stagechip.done[title="' + guestName + '"]').waitFor({timeout: 30000});
+    await reader.locator('#sendbtn').click();
+    const incoming = owner.locator('#msgs .gmsg').filter({hasText: guestName}).last();
+    await incoming.waitFor({timeout: 40000});
+    assertID('people-kept-full-guest-posted-' + mode, await incoming.locator('.attfile').count() === 1);
+    const caption = 'Synthetic kept cap draft ' + mode, ownerName = 'owner-outgoing.txt', bytes = Buffer.from('synthetic owner outgoing ' + mode);
+    await owner.locator('#prompt').fill(caption);
+    await owner.locator('#attfile').setInputFiles({name: ownerName, mimeType: 'text/plain', buffer: bytes});
+    await owner.locator('#attstage .stagechip.done[title="' + ownerName + '"]').waitFor({timeout: 30000});
+    const published = owner.waitForResponse(resp => resp.request().method() === 'POST' && new URL(resp.url()).pathname === base + '/comments', {timeout: 40000});
+    await owner.locator('#sendbtn').click();
+    const response = await published;
+    const returned = reader.locator('#msgs .gmsg').filter({hasText: caption}).last();
+    await returned.waitFor({timeout: 40000});
+    const saved = reader.waitForEvent('download');
+    await returned.getByText(ownerName, {exact: true}).click();
+    const got = await fs.promises.readFile(await (await saved).path());
+    assertID('people-kept-full-published-' + mode, response.status() === 200 && got.equals(bytes) && await returned.getByText(ownerName, {exact: true}).count() === 1);
+    const historyBefore = await ownerSeat.api('/api/nodes/' + chat.id + '/chat');
+    const prompt = 'Synthetic kept cap agent ' + mode;
+    await owner.locator('#destinationagent').click();
+    await owner.locator('#destinationagent[aria-pressed=true]').waitFor({timeout: 30000});
+    await owner.locator('#prompt').fill(prompt);
+    const request = owner.waitForRequest(req => req.method() === 'POST' && new URL(req.url()).pathname === '/api/nodes/' + chat.id + '/send');
+    await owner.locator('#sendbtn').click();
+    const sent = await request;
+    await until(() => counts(ownerSeat).accepted === before.owner.accepted + 1, 30000, 'kept cap explicit agent send');
+    const history = await until(async () => {
+      const body = await ownerSeat.api('/api/nodes/' + chat.id + '/chat');
+      return (body.turns || []).some(turn => turn.role === 'user' && turn.text === prompt) ? body : null;
+    }, 30000, 'kept cap session history');
+    const prior = (historyBefore.turns || []).map(turn => turn.uid), now = history.turns || [];
+    const after = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    assertID('people-kept-full-history-' + mode, now.length > prior.length && now.slice(0, prior.length).every((turn, index) => turn.uid === prior[index]) && now.some(turn => turn.role === 'user' && turn.text === prompt));
+    assertID('people-kept-full-one-dispatch-' + mode, sent.postDataJSON().text === prompt && after.owner.attempted === before.owner.attempted + 1 && after.owner.accepted === before.owner.accepted + 1 && after.owner.controls === before.owner.controls && JSON.stringify(after.recipient) === JSON.stringify(before.recipient));
+    await screenshot(owner, 'people-kept-full-owner-' + mode + '.png');
+    await screenshot(reader, 'people-kept-full-reader-' + mode + '.png');
+    manifest['people-kept-full-' + mode] = {before, after};
+  } finally { removeKeptFiller(kept.files); }
+}
+
+async function peopleUnkeptOpen(mode, ownerSeat, readerSeat) {
+  const chat = await node(ownerSeat, 'codex', 'People unkept open ' + mode, 'Synthetic unkept open setup');
+  await ownerSeat.api('/api/team/shares/' + chat.id, 'PUT', {server: ownerSeat.serverID, scope: 'all', members: [{seat: readerSeat.self, access: 'write'}]});
+  const share = await ownerSeat.api('/api/team/shares/' + chat.id);
+  const sub = await until(async () => (await readerSeat.api('/api/team/subscriptions')).subscriptions.find(item => item.owner === ownerSeat.self && item.chat === share.uid && item.generation === share.generation && item.access === 'write' && item.people_copy_instance), 40000, 'unkept open subscription');
+  await ownerCopyReady(ownerSeat, sub);
+  const kept = fillKeptRecords(ownerSeat, sub);
+  const owner = await pageFor(ownerSeat, mode, 'unkept-open-owner-' + mode), reader = await pageFor(readerSeat, mode, 'unkept-open-reader-' + mode);
+  try {
+    await open(owner, chat.id); await open(reader, 'team/' + keyOf(sub));
+    await reader.locator('#prompt[contenteditable=true]').waitFor({timeout: 30000});
+    const before = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    const name = 'unkept-open.txt', bytes = Buffer.from('synthetic unkept bytes ' + mode);
+    await reader.locator('#attadd').waitFor({state: 'visible', timeout: 30000});
+    await reader.locator('#attadd').click();
+    const chooser = reader.waitForEvent('filechooser');
+    await reader.locator('#attmenu [data-src=file]').click();
+    await (await chooser).setFiles({name, mimeType: 'text/plain', buffer: bytes});
+    await reader.locator('#attstage .stagechip.done[title="' + name + '"]').waitFor({timeout: 30000});
+    await reader.locator('#sendbtn').click();
+    const incoming = owner.locator('#msgs .gmsg').filter({hasText: name}).last();
+    const tile = incoming.locator('a.attfile', {hasText: 'Not kept locally'});
+    await tile.waitFor({timeout: 40000});
+    const saved = owner.waitForEvent('download');
+    await tile.click();
+    const got = await fs.promises.readFile(await (await saved).path());
+    const extra = listKeptFiles(kept.records).filter(file => !kept.files.includes(file));
+    const after = {owner: counts(ownerSeat), recipient: counts(readerSeat)};
+    assertID('people-unkept-open-bytes-' + mode, got.equals(bytes));
+    assertID('people-unkept-open-note-' + mode, (await incoming.innerText()).includes('Not kept locally'));
+    assertID('people-unkept-open-absent-' + mode, extra.length === 0);
+    assertID('people-unkept-open-zero-agent-' + mode, JSON.stringify(after.owner) === JSON.stringify(before.owner) && JSON.stringify(after.recipient) === JSON.stringify(before.recipient));
+    await screenshot(owner, 'people-unkept-open-' + mode + '.png');
+    manifest['people-unkept-open-' + mode] = {before, after};
+  } finally { removeKeptFiller(kept.files); }
+}
+function keyOf(sub) { return [sub.server, sub.owner, sub.chat, sub.generation].join('/'); }
+
 async function peopleQuota(mode,ownerSeat,readerSeat) {
   const chat=await node(ownerSeat,'codex','People quota '+mode,'Synthetic quota setup');
   const sharePath='/api/team/shares/'+chat.id;
@@ -1590,7 +1741,9 @@ async function peopleUncertainRetry(mode,ownerSeat,readerSeat) {
     await page.locator('#attstage details summary').getByText('Review unconfirmed People message').waitFor({timeout:30000});
     assertID('people-uncertain-accepted-server-'+mode,confirmedStatus===200&&bodies.length===1);
     await page.locator('#prompt').fill('Newer People draft '+mode);
+    await until(async()=>page.evaluate(async text=>{const db=await new Promise((resolve,reject)=>{const request=indexedDB.open('scimux-people-file-drafts',2);request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});try{const rows=await new Promise((resolve,reject)=>{const request=db.transaction('recovery','readonly').objectStore('recovery').getAll();request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});return rows.some(head=>head.kind==='head'&&!head.sealed&&rows.some(row=>row.kind==='draft'&&row.version===head.version&&row.text===text));}finally{db.close();}},'Newer People draft '+mode),30000,'durable newer People draft');
     await page.reload({waitUntil:'networkidle'});await page.locator('#attstage details summary').getByText('Review unconfirmed People message').waitFor({timeout:40000});
+    await until(async()=>(await page.locator('#prompt').innerText())==='Newer People draft '+mode,30000,'reloaded People draft');
     assertID('people-uncertain-reload-keeps-draft-'+mode,(await page.locator('#prompt').innerText())==='Newer People draft '+mode);
     await page.locator('#attstage details summary').getByText('Review unconfirmed People message').click();await page.locator('.people-retry').waitFor({timeout:30000});
     await page.locator('.people-retry').click();
@@ -2478,7 +2631,8 @@ async function conversationTrace(mode,ownerSeat,readerSeat) {
   await screenshot(owner,'trace-owner-'+mode+'.png');await screenshot(reader,'trace-reader-'+mode+'.png');
   await owner.locator('#destinationagent').click();await owner.locator('#attfile').setInputFiles({name:'synthetic-note.txt',mimeType:'text/plain',buffer:Buffer.from('synthetic attachment')});
   await owner.locator('#attstage .stagechip.done').waitFor({timeout:30000});await owner.locator('#destinationpeople').click();
-  assertID('trace-agent-attachment-hidden-people-'+mode,!(await owner.locator('#attstage').isVisible()));await owner.locator('#destinationagent').click();
+  await owner.locator('#attstage').waitFor({state:'hidden',timeout:30000});
+  assertID('trace-agent-attachment-hidden-people-'+mode,!(await owner.locator('#attstage').isVisible())&&!(await owner.locator('#attstage').innerText()).includes('synthetic-note.txt'));await owner.locator('#destinationagent').click();
   assertID('trace-agent-attachment-retained-toggle-'+mode,(await owner.locator('#attstage').innerText()).includes('synthetic-note.txt'));
   await owner.locator('#attstage .sx').click();
   await owner.emulateMedia({reducedMotion:'reduce'});
@@ -2734,6 +2888,8 @@ async function run() {
  if(selected==='people-files'){for(const mode of ['desktop','phone'])await peopleFiles(mode,a,r);return;}
  if(selected==='people-quota'){for(const mode of ['desktop','phone'])await peopleQuota(mode,a,r);return;}
  if(selected==='people-local-budget'){for(const mode of ['desktop','phone'])await peopleLocalBudget(mode,a,r);return;}
+ if(selected==='people-kept-full'){for(const mode of ['desktop','phone'])await peopleKeptFull(mode,a,r);return;}
+ if(selected==='people-unkept-open'){for(const mode of ['desktop','phone'])await peopleUnkeptOpen(mode,a,r);return;}
  if(selected==='people-file-unread'){for(const mode of ['desktop','phone'])await peopleFileUnread(mode,a,r);return;}
  if(selected==='people-attachment-recovery'){for(const mode of ['desktop','phone'])await peopleAttachmentRecovery(mode,a,r);return;}
  if(selected==='people-relay-blob-recovery'){for(const mode of ['desktop','phone'])for(const kind of ['missing','corrupt'])await peopleRelayBlobRecovery(mode,kind,a,r);return;}
@@ -3056,6 +3212,8 @@ async function run() {
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleSourceCancellation(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleQuota(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleLocalBudget(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleKeptFull(mode,a,r));
+ for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleUnkeptOpen(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleFileUnread(mode,a,r));
  for(const mode of ['desktop','phone'])await runCompletedCase(()=>peopleAttachmentRecovery(mode,a,r));
  for(const mode of ['desktop','phone'])for(const kind of ['missing','corrupt'])await runCompletedCase(()=>peopleRelayBlobRecovery(mode,kind,a,r));

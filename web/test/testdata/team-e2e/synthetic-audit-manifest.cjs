@@ -16,14 +16,14 @@ function synthetic(profile) {
   const intentional = ['native-trace-debug', 'native-trace', 'ai-source', 'held-evidence',
     'dropped-send', 'stage1-scanner', 'stage1-owner-files', 'no-selection'];
   const discussion = ['people-uncertain-retry', 'people-upload-permission', 'people-midbody-permission',
-    'people-image-bookmark', 'people-quota', 'people-local-budget', 'people-file-unread',
+    'people-image-bookmark', 'people-quota', 'people-local-budget', 'people-unkept-open', 'people-file-unread',
     'people-recovery', 'people-relay-missing', 'people-relay-corrupt', 'people-unavailable',
     'people-retired-draft', 'people-copy-replacement', 'people-stale-preparation', 'people-real-tunnel'];
   const local = ['owner-a', 'owner-b', 'recipient', 'observer', 'empty-desktop', 'empty-phone',
     'legacy-closed-desktop', 'legacy-closed-phone', 'no-selection'];
   for (const mode of ['desktop', 'phone']) {
     const required = ['early-native-visible-no-agent-dispatch', 'no-selection-explicit-send-only', 'stage1-scanner-explicit-dispatch-only', 'stage1-shared-owner-idle', 'stage1-discussion-zero-agent-dispatch', 'stage1-owner-file-delivered', 'stage2-fork-fresh-local', 'stage2-prompt-one-dispatch', 'dropped-response-explicit-retry-once', 'held-evidence-confirmed-after-release', 'ai-source-explicit-exact-mirrored', 'trace-explicit-one-dispatch', 'trace-second-explicit-dispatch', 'native-trace-one-exact-multiline'];
-    if (profile === 'people-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery');
+    if (profile === 'people-attachments') required.push('people-image-prepare-no-dispatch', 'people-quota-no-implicit-dispatch', 'people-copy-replacement-zero-agent-dispatch', 'people-files-no-implicit-dispatch', 'people-owner-prepare-no-dispatch', 'people-image-no-implicit-dispatch', 'people-retained-prepare-no-dispatch', 'people-stale-source-no-dispatch', 'people-retained-missing-no-dispatch', 'people-retired-review-no-dispatch', 'people-recovery-zero-agent-dispatch', 'people-relay-missing-zero-dispatch', 'people-relay-corrupt-zero-dispatch', 'people-cross-channel-zero-controls', 'people-real-tunnel-no-agent-dispatch', 'people-file-unread-no-agent-dispatch', 'people-local-budget-zero-agent', 'people-uncertain-no-agent-dispatch', 'people-held-upload-no-agent-dispatch', 'people-midbody-no-agent-dispatch', 'people-image-bookmark-no-agent-dispatch', 'legacy-reader-zero-implicit-dispatch', 'old-relay-no-blob-put', 'people-source-cancel-keeps-unrelated-file', 'people-retained-file-explicit-delivery', 'people-kept-full-guest-posted', 'people-kept-full-published', 'people-kept-full-history', 'people-kept-full-one-dispatch', 'people-unkept-open-bytes', 'people-unkept-open-note', 'people-unkept-open-absent', 'people-unkept-open-zero-agent');
     for (const id of required) m.assertions.push({id: id+'-'+mode, result: 'pass'});
     for (const value of ['false', 'true']) m.assertions.push({id: 'refusal-no-retry-'+mode+'-'+value, result: 'pass'});
     m['native-start-failure-'+mode] = {counters: z()};
@@ -43,6 +43,7 @@ function synthetic(profile) {
     if (profile === 'people-attachments') {
       for (const key of discussion) m[key+'-'+mode] = {before: {owner: z(), recipient: z()}, after: {owner: z(), recipient: z()}};
       m['people-files-'+mode] = {before: {owner: z(), recipient: z()}, after: {owner: counts(3), recipient: z()}};
+      m['people-kept-full-'+mode] = {before: {owner: z(), recipient: z()}, after: {owner: counts(1), recipient: z()}};
       m['people-source-cancel-'+mode] = {before: {owner: z(), recipient: z()}, after: {owner: counts(1), recipient: z()}};
       m['people-cross-channel-'+mode] = {before: {first: z(), second: z(), recipient: z()}, after: {first: z(), second: z(), recipient: z()}};
       m['legacy-reader-'+mode] = {before: {owner: z(), legacy: z()}, after: {owner: z(), legacy: z()}};
