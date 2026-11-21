@@ -16,6 +16,12 @@ func TestUnsupportedFailsBeforeLaunch(t *testing.T) {
 	}
 }
 
+func TestUnsupportedDescriptorSeal(t *testing.T) {
+	if DescriptorSealAvailable() == nil {
+		t.Fatal("unsupported build reported an available descriptor seal")
+	}
+}
+
 func TestUnsupportedClosesTransferredHandle(t *testing.T) {
 	reader, writer, err := os.Pipe()
 	if err != nil {

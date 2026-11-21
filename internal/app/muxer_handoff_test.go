@@ -737,6 +737,9 @@ func TestMuxerExecPreservesWorkerAndHasNoOwnershipGap(t *testing.T) {
 	if !testowned.RootSupported() || runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
 		t.Skip("requires Linux test supervisor")
 	}
+	if err := testowned.DescriptorSealAvailable(); err != nil {
+		t.Skipf("explicit-handle supervisor prerequisite unavailable: close_range: %v", err)
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
