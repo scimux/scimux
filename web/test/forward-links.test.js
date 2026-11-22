@@ -8,6 +8,7 @@ function memory(seed = {}){
     getItem: key => data.has(key) ? data.get(key) : null,
     setItem: (key, value) => data.set(key, String(value)),
     removeItem: key => data.delete(key),
+    keys: () => [...data.keys()],
   };
 }
 
@@ -114,45 +115,208 @@ test('an incomplete shared source cannot replace a pending durable source', () =
   assert.deepEqual(links.addPendingForward(storage,'dest',null),[source]);
 });
 
-test('draft identity retains retired and unattributed data without merging it into a new chat', () => {
- const storage=memory({'scimux-draft-owner:n1':'old','scimux-draft:n1':'old text','scimux-people-draft:n1':'old discussion','scimux-prompt-sources:n1':'[{"uid":"old"}]'});
- assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);
- assert.equal(storage.getItem('scimux-draft:n1'),null);assert.equal(storage.getItem('scimux-people-draft:n1'),'old discussion');
- const archived=JSON.parse(storage.getItem('scimux-retired-drafts:n1:old'));assert.equal(archived[0]['scimux-draft:'],'old text');assert.equal(archived[0]['scimux-people-draft:'],'old discussion');
- storage.setItem('scimux-draft:n1','new text');assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);assert.equal(storage.getItem('scimux-draft:n1'),'new text');
- const legacy=memory({'scimux-draft:n1':'unattributed'});assert.equal(links.bindDraftIdentity(legacy,'n1','fresh'),true);assert.equal(JSON.parse(legacy.getItem('scimux-retired-drafts:n1:unknown'))[0]['scimux-draft:'],'unattributed');
- assert.equal(links.bindDraftIdentity(legacy,'n1',''),true);
+test("bindDraftIdentity adopts slug values when no owner record exists", () => {
+  const storage = memory({
+    "scimux-draft:n1": "kept draft",
+    "scimux-prompt-sources:n1": '[{"uid":"kept"}]',
+    "scimux-sendto-pending:n1": '[{"node":"s"}]',
+  });
+  assert.equal(links.bindDraftIdentity(storage, "n1", "fresh"), true);
+  assert.equal(storage.getItem("scimux-draft:n1"), "kept draft");
+  assert.equal(storage.getItem("scimux-prompt-sources:n1"), '[{"uid":"kept"}]');
+  assert.equal(storage.getItem("scimux-sendto-pending:n1"), '[{"node":"s"}]');
+  assert.equal(storage.getItem("scimux-draft-owner:n1"), "fresh");
+  assert.equal(storage.getItem("scimux-retired-index:n1"), null);
 });
 
-test('draft identity fails closed when it cannot archive or read prior data', () => {
- const storage=memory({'scimux-draft-owner:n1':'old','scimux-draft:n1':'keep','scimux-retired-drafts:n1:old':'{}'});
- assert.equal(links.bindDraftIdentity(storage,'n1','new'),false);assert.equal(storage.getItem('scimux-draft:n1'),'keep');
- assert.equal(links.bindDraftIdentity({getItem(){throw Error('unavailable')}},'n1','new'),false);
+test("bindDraftIdentity drops every slug value when the owner record is a different chat", () => {
+  const storage = memory({
+    "scimux-draft-owner:n1": "old",
+    "scimux-draft:n1": "old text",
+    "scimux-people-draft:n1": "old discussion",
+    "scimux-prompt-sources:n1": '[{"uid":"old"}]',
+    "scimux-prompt-flights:n1": "[]",
+    "scimux-sendto-pending:n1": "[]",
+    "scimux-sendto-awaiting:n1": "[]",
+  });
+  assert.equal(links.bindDraftIdentity(storage, "n1", "new"), true);
+  for (const prefix of ["scimux-draft:", "scimux-people-draft:", "scimux-prompt-sources:", "scimux-prompt-flights:", "scimux-sendto-pending:", "scimux-sendto-awaiting:"]) {
+    assert.equal(storage.getItem(prefix + "n1"), null, prefix);
+  }
+  assert.equal(storage.getItem("scimux-draft-owner:n1"), "new");
+  assert.equal(storage.getItem("scimux-retired-index:n1"), null);
+  assert.equal(storage.getItem("scimux-retired-drafts:n1:old"), null);
+  assert.equal(storage.getItem("scimux-retired-drafts:n1:unknown"), null);
 });
 
-test('unattributed and retired drafts can be listed for explicit local review', () => {
- const storage=memory({'scimux-draft:n1':'legacy text','scimux-prompt-sources:n1':'[{"uid":"u","record":1}]'});
- assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);
- const entries=links.readRetiredDrafts(storage,'n1');
- assert.equal(entries.length,1);assert.equal(entries[0].owner,'unknown');
- assert.equal(entries[0].values['scimux-draft:'],'legacy text');
- assert.equal(JSON.parse(entries[0].values['scimux-prompt-sources:'])[0].uid,'u');
- assert.equal(links.archiveRetiredDraft(storage,'n1','old',{'scimux-draft:':'interrupted send','scimux-prompt-sources:':'[{"uid":"v","record":2}]'}),true);
- const added=links.readRetiredDrafts(storage,'n1').find(entry=>entry.owner==='old');
- assert.equal(added.values['scimux-draft:'],'interrupted send');
- assert.equal(JSON.parse(added.values['scimux-prompt-sources:'])[0].uid,'v');
+test("bindDraftIdentity restores the last unknown archive into absent live keys and then drops the archive", () => {
+  const storage = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-draft:n1": "already live",
+    "scimux-retired-index:n1": JSON.stringify(["unknown", "other"]),
+    "scimux-retired-drafts:n1:unknown": JSON.stringify([
+      {"scimux-draft:": "first draft"},
+      {
+        "scimux-draft:": "last draft",
+        "scimux-prompt-sources:": '[{"uid":"last"}]',
+        "scimux-sendto-pending:": '[{"node":"s"}]',
+        "scimux-prompt-flights:": 12,
+        "not-a-prefix": "skip",
+      },
+    ]),
+    "scimux-retired-drafts:n1:other": JSON.stringify([{"scimux-draft:": "known owner", "scimux-people-draft:": "neither"}]),
+  });
+  assert.equal(links.bindDraftIdentity(storage, "n1", "current"), true);
+  assert.equal(storage.getItem("scimux-prompt-sources:n1"), '[{"uid":"last"}]');
+  assert.equal(storage.getItem("scimux-sendto-pending:n1"), '[{"node":"s"}]');
+  assert.equal(storage.getItem("scimux-draft:n1"), "already live");
+  assert.equal(storage.getItem("scimux-prompt-flights:n1"), null);
+  assert.equal(storage.getItem("scimux-people-draft:n1"), null);
+  assert.equal(storage.getItem("not-a-prefixn1"), null);
+  assert.equal(storage.getItem("scimux-retired-index:n1"), null);
+  assert.equal(storage.getItem("scimux-retired-drafts:n1:unknown"), null);
+  assert.equal(storage.getItem("scimux-retired-drafts:n1:other"), null);
+  assert.equal(links.bindDraftIdentity(storage, "n1", "current"), true);
+  assert.equal(storage.getItem("scimux-prompt-sources:n1"), '[{"uid":"last"}]');
+
+  const adopted = memory({
+    "scimux-retired-index:n1": JSON.stringify(["unknown"]),
+    "scimux-retired-drafts:n1:unknown": JSON.stringify([{"scimux-draft:": "from archive"}]),
+  });
+  assert.equal(links.bindDraftIdentity(adopted, "n1", "fresh"), true);
+  assert.equal(adopted.getItem("scimux-draft:n1"), "from archive");
+  assert.equal(adopted.getItem("scimux-draft-owner:n1"), "fresh");
+  assert.equal(adopted.getItem("scimux-retired-index:n1"), null);
+
+  const dropped = memory({
+    "scimux-draft-owner:n1": "other",
+    "scimux-retired-index:n1": JSON.stringify(["unknown"]),
+    "scimux-retired-drafts:n1:unknown": JSON.stringify([{"scimux-draft:": "restored then dropped"}]),
+  });
+  assert.equal(links.bindDraftIdentity(dropped, "n1", "new"), true);
+  assert.equal(dropped.getItem("scimux-draft:n1"), null);
+  assert.equal(dropped.getItem("scimux-draft-owner:n1"), "new");
+  assert.equal(dropped.getItem("scimux-retired-index:n1"), null);
+  assert.equal(dropped.getItem("scimux-retired-drafts:n1:unknown"), null);
 });
 
-test('damaged recovery entries are ignored without hiding intact saved drafts', () => {
- const storage=memory({'scimux-retired-index:n1':'["bad","wrong","missing","good"]','scimux-retired-drafts:n1:bad':'not json','scimux-retired-drafts:n1:wrong':'{}','scimux-retired-drafts:n1:good':'[null,[],{"scimux-draft:":"safe"}]'});
- assert.deepEqual(links.readRetiredDrafts(storage,'n1'),[{owner:'good',values:{'scimux-draft:':'safe'}}]);
- storage.setItem('scimux-retired-index:n1','{}');assert.deepEqual(links.readRetiredDrafts(storage,'n1'),[]);
- assert.deepEqual(links.readRetiredDrafts({getItem(){throw Error('offline')}},'n1'),[]);
- assert.equal(links.archiveRetiredDraft(storage,'n1','good',{}),false);
- assert.equal(links.archiveRetiredDraft({getItem(){throw Error('offline')}},'n1','old',{}),false);
- storage.setItem('scimux-retired-index:n1','["good"]');
- assert.equal(links.archiveRetiredDraft(storage,'n1','good',{'scimux-draft:':'another'}),true);
- assert.deepEqual(links.readRetiredDrafts(storage,'n1').map(entry=>entry.values['scimux-draft:']),['safe','another']);
+test("bindDraftIdentity drops a known-owner archive without restoring it", () => {
+  const storage = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-retired-index:n1": JSON.stringify(["old"]),
+    "scimux-retired-drafts:n1:old": JSON.stringify([{"scimux-draft:": "do not restore", "scimux-people-draft:": "neither"}]),
+    "scimux-retired-flight:n1\0old": "leave this",
+    "scimux-retired-visible:n1\0old": "leave visible",
+  });
+  assert.equal(links.bindDraftIdentity(storage, "n1", "current"), true);
+  assert.equal(storage.getItem("scimux-draft:n1"), null);
+  assert.equal(storage.getItem("scimux-people-draft:n1"), null);
+  assert.equal(storage.getItem("scimux-retired-index:n1"), null);
+  assert.equal(storage.getItem("scimux-retired-drafts:n1:old"), null);
+  assert.equal(storage.getItem("scimux-retired-flight:n1\0old"), "leave this");
+  assert.equal(storage.getItem("scimux-retired-visible:n1\0old"), "leave visible");
+});
+
+test("bindDraftIdentity removes a damaged archive without throwing", () => {
+  const damaged = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-draft:n1": "live",
+    "scimux-retired-index:n1": "not json",
+    "scimux-retired-drafts:n1:bad": "not json either",
+  });
+  assert.equal(links.bindDraftIdentity(damaged, "n1", "current"), true);
+  assert.equal(damaged.getItem("scimux-draft:n1"), "live");
+  assert.equal(damaged.getItem("scimux-retired-index:n1"), null);
+  assert.equal(damaged.getItem("scimux-retired-drafts:n1:bad"), null);
+
+  const entry = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-retired-index:n1": JSON.stringify(["bad"]),
+    "scimux-retired-drafts:n1:bad": "{",
+  });
+  assert.equal(links.bindDraftIdentity(entry, "n1", "current"), true);
+  assert.equal(entry.getItem("scimux-retired-index:n1"), null);
+  assert.equal(entry.getItem("scimux-retired-drafts:n1:bad"), null);
+
+  const notArray = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-retired-index:n1": "{}",
+    "scimux-retired-drafts:n1:unknown": JSON.stringify([{"scimux-draft:": "nope"}]),
+  });
+  assert.equal(links.bindDraftIdentity(notArray, "n1", "current"), true);
+  assert.equal(notArray.getItem("scimux-draft:n1"), null);
+  assert.equal(notArray.getItem("scimux-retired-index:n1"), null);
+  assert.equal(notArray.getItem("scimux-retired-drafts:n1:unknown"), null);
+
+  const thrown = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-retired-index:n1": "not json",
+    "scimux-retired-drafts:n1:bad": "kept when keys fail",
+  });
+  thrown.keys = () => { throw new Error("no keys"); };
+  assert.equal(links.bindDraftIdentity(thrown, "n1", "current"), true);
+  assert.equal(thrown.getItem("scimux-retired-index:n1"), null);
+
+  const noList = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-retired-index:n1": "not json",
+    "scimux-retired-drafts:n1:bad": "unlisted",
+  });
+  noList.keys = () => null;
+  assert.equal(links.bindDraftIdentity(noList, "n1", "current"), true);
+  assert.equal(noList.getItem("scimux-retired-index:n1"), null);
+  assert.equal(noList.getItem("scimux-retired-drafts:n1:bad"), "unlisted");
+
+  const mixed = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-retired-index:n1": "not json",
+    "scimux-retired-drafts:n1:bad": "gone",
+    "other": "stay",
+  });
+  mixed.keys = () => [1, "scimux-retired-drafts:n1:bad", "other"];
+  assert.equal(links.bindDraftIdentity(mixed, "n1", "current"), true);
+  assert.equal(mixed.getItem("scimux-retired-drafts:n1:bad"), null);
+  assert.equal(mixed.getItem("other"), "stay");
+  assert.equal(mixed.getItem("scimux-retired-index:n1"), null);
+
+  const owners = memory({
+    "scimux-draft-owner:n1": "current",
+    "scimux-retired-index:n1": JSON.stringify(["old", 1, null]),
+    "scimux-retired-drafts:n1:old": JSON.stringify([{"scimux-draft:": "do not restore"}]),
+  });
+  assert.equal(links.bindDraftIdentity(owners, "n1", "current"), true);
+  assert.equal(owners.getItem("scimux-draft:n1"), null);
+  assert.equal(owners.getItem("scimux-retired-drafts:n1:old"), null);
+  assert.equal(owners.getItem("scimux-retired-index:n1"), null);
+
+  for (const raw of ["{}", "[]", "[null]", '["x"]', '[{"scimux-draft:":"earlier"},[]]', "not json"]) {
+    const storage = memory({
+      "scimux-draft-owner:n1": "current",
+      "scimux-retired-index:n1": JSON.stringify(["unknown"]),
+      "scimux-retired-drafts:n1:unknown": raw,
+    });
+    assert.equal(links.bindDraftIdentity(storage, "n1", "current"), true, raw);
+    assert.equal(storage.getItem("scimux-draft:n1"), null, raw);
+    assert.equal(storage.getItem("scimux-retired-index:n1"), null, raw);
+    assert.equal(storage.getItem("scimux-retired-drafts:n1:unknown"), null, raw);
+  }
+
+  const withoutKeys = {
+    getItem(key){ return key === "scimux-retired-index:n1" ? "not json" : key === "scimux-draft-owner:n1" ? "current" : null; },
+    setItem(){},
+    removeItem(){},
+  };
+  assert.equal(links.bindDraftIdentity(withoutKeys, "n1", "current"), true);
+
+  const absent = memory({"scimux-draft-owner:n1": "current", "scimux-draft:n1": "live"});
+  assert.equal(links.bindDraftIdentity(absent, "n1", "current"), true);
+  assert.equal(absent.getItem("scimux-draft:n1"), "live");
+});
+
+test("bindDraftIdentity fails closed when storage throws", () => {
+  assert.equal(links.bindDraftIdentity({getItem(){ throw new Error("unavailable"); }, setItem(){}, removeItem(){}}, "n1", "new"), false);
+  assert.equal(links.bindDraftIdentity({getItem(){ return null; }, setItem(){ throw new Error("full"); }, removeItem(){}}, "n1", "new"), false);
+  assert.equal(links.bindDraftIdentity({getItem(){ throw new Error("unavailable"); }}, "n1", ""), true);
 });
 
 test('asynchronous agent rejection restores only matching in-flight prompt sources', () => {
@@ -221,15 +385,4 @@ test('prompt preview is bounded and optional for older links', () => {
  assert.equal(Array.from(links.makePromptLink(source,'n',address,'🙂'.repeat(110)).preview).length,100);
 });
 
-test('rebound draft identity preserves the legacy People slot for explicit review',()=>{
- const storage=memory({'scimux-draft-owner:n1':'old','scimux-draft:n1':'old agent','scimux-people-draft:n1':'old people'});
- assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);
- assert.equal(storage.getItem('scimux-people-draft:n1'),'old people');assert.equal(storage.getItem('scimux-draft:n1'),null);
- const archived=JSON.parse(storage.getItem('scimux-retired-drafts:n1:old'))[0];assert.equal(archived['scimux-draft:'],'old agent');assert.equal(archived['scimux-people-draft:'],'old people');
-});
 
-test('repeated rebinds do not attribute a preserved legacy People draft to a later owner',()=>{
- const storage=memory({'scimux-draft-owner:n1':'old','scimux-people-draft:n1':'old people'});
- assert.equal(links.bindDraftIdentity(storage,'n1','new'),true);assert.equal(links.bindDraftIdentity(storage,'n1','later'),true);assert.equal(storage.getItem('scimux-people-draft:n1'),'old people');
- const newOwner=links.readRetiredDrafts(storage,'n1').filter(entry=>entry.owner==='new');assert.equal(newOwner.some(entry=>entry.values['scimux-people-draft:']==='old people'),false);
-});

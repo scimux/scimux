@@ -1108,12 +1108,25 @@ test('send-to does not combine a replacement chat draft with the retired chat dr
  assert.doesNotMatch(ctx.storage.getItem('scimux-draft:n2'),/retired text/);assert.match(ctx.storage.getItem('scimux-draft:n2'),/fresh quote/);
 });
 
-test('Send to preserves the old draft if its recovery archive is damaged', () => {
+test('Send to discards a different-owner draft when a retired entry is damaged', () => {
  const nodes={n2:{id:'n2',title:'Replacement',instance_id:'new'}};
  const ctx=createFeature({nodes,storageInit:{'scimux-draft-owner:n2':'old','scimux-draft:n2':'retired text','scimux-retired-drafts:n2:old':'{}'}});
  ctx.feature.openSendTo({text:'fresh quote',allowNew:false});
  const dest=el('button',{dataset:{fwd:'n2'}});dest.closest=s=>s==='[data-fwd]'?dest:null;ctx.roots.sendtoList.onclick({target:dest});
- assert.equal(ctx.storage.getItem('scimux-draft:n2'),'retired text');assert.match(ctx.effects.toast[0],/storage is unavailable/i);assert.deepEqual(ctx.effects.select,[]);
+ assert.equal(String(ctx.storage.getItem('scimux-draft:n2')).includes('retired text'), false);
+ assert.match(ctx.storage.getItem('scimux-draft:n2'), /fresh quote/);
+ assert.equal(ctx.effects.toast.length, 0);
+});
+
+test('Send to stops when draft storage throws', () => {
+ const nodes={n2:{id:'n2',title:'Replacement',instance_id:'new'}};
+ const ctx=createFeature({nodes,storageInit:{'scimux-draft:n2':'keep'}});
+ ctx.feature.openSendTo({text:'fresh quote',allowNew:false});
+ ctx.storage.getItem=()=>{ throw new Error('unavailable'); };
+ const dest=el('button',{dataset:{fwd:'n2'}});dest.closest=s=>s==='[data-fwd]'?dest:null;ctx.roots.sendtoList.onclick({target:dest});
+ assert.match(ctx.effects.toast[0], /storage is unavailable/i);
+ assert.deepEqual(ctx.effects.select, []);
+ assert.equal(ctx.storage._map['scimux-draft:n2'], 'keep');
 });
 
 /* ---------- manual create + reply cancel ---------- */

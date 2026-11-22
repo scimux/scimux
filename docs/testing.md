@@ -369,8 +369,8 @@ an explicitly sent owner prompt. `stage2-bookmark-pages` checks an exact jump
 across the shared comment page boundary with duplicate text. These scenarios
 also run as part of the complete default suite. The bounded
 `recreated-chat-isolation`, `bubble-selection`, and `draft-recovery` scenarios
-exercise reused local identities, pointer selection, and explicit review of
-older saved drafts on desktop and phone. `header-focus` checks Mine and sharer
+exercise reused local identities, pointer selection, and adoption of an
+older saved draft with no review panel, on desktop and phone. `header-focus` checks Mine and sharer
 disclosure focus during unread updates. `description-save-isolation`,
 `description-recreated-choice`, and `description-choice-order` exercise held
 save responses, reused destination IDs and competing held destination choices.
@@ -417,7 +417,7 @@ The manifest's assertion IDs map the principal requirements to real journeys:
 | Selection and owner discussion | `stage1-scanner`: `stage1-stale-active-response-isolated`, `stage1-shared-owner-active`; `stage1-unread`: `stage1-incoming-before-own-stays-unread`, `stage1-own-comment-no-unread` |
 | Owner files and one-send arm | `stage1-owner-files`: `stage1-owner-file-delivered`, `stage1-people-file-feedback`; `conversation-core`: `stage1-owner-send-disarms` |
 | People files and copy replacement | `people-files`: its file, preview and explicit-owner-send assertions; `people-copy-replacement`: its distinct identity, stale-upload, recovery and actionable-control assertions |
-| People file recovery and unread | `people-attachment-recovery`: its retry and download assertions; `people-retired-drafts` and `people-file-unread`: their saved-draft and unread assertions |
+| People file recovery and unread | `people-attachment-recovery`: its retry and download assertions; `people-retired-drafts` and `people-file-unread`: their file-download, no-drafts-panel, and unread assertions |
 | Uncertain People publication | `people-uncertain-retry`: its accepted-server, identical retry, newer-draft and no-agent-dispatch assertions |
 | Competing People publication and stage replacement | `people-stage-competition`: competing production requests, exactly one relay append, explicit retry, recreated stage, matching retained manifest and bytes, surviving draft and no agent dispatch on desktop and Chromium phone emulation |
 | People upload permission change | `people-upload-permission`: its empty-file feedback, held-before-admission upload denial, partial draft retention and no-agent-dispatch assertions |

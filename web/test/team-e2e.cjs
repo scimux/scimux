@@ -950,9 +950,9 @@ async function peopleRetiredDrafts(mode,ownerSeat,readerSeat) {
     try { await store.save(scope,'0123456789abcdef',new File(['synthetic retired bytes'],'retired-synthetic.txt',{type:'text/plain'})); } finally { store.destroy(); }
     localStorage.setItem(pendingKey,JSON.stringify({instance,request:{text:'Synthetic unconfirmed older message',anchor:0,key:'fedcba9876543210',attachments:['0123456789abcdef']}}));
   },{scope,pendingKey,instance:native.instance_id});
-  await page.reload({waitUntil:'networkidle'});await page.locator('#draftrecovery details summary').waitFor({timeout:40000});await page.locator('#draftrecovery details summary').click();await page.locator('#draftrecovery textarea').filter({hasText:'Synthetic unconfirmed older message'}).waitFor({timeout:40000});
+  await page.reload({waitUntil:'networkidle'});await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
   const review=page.locator('#draftrecovery a[download="retired-synthetic.txt"]');await review.waitFor({timeout:40000});
-  assertID('people-retired-pending-review-'+mode,/unconfirmed/i.test(await page.locator('#draftrecovery').innerText()));
+  assertID('people-retired-no-drafts-panel-'+mode,await page.locator('#draftrecovery details').count()===0);
   const downloadEvent=page.waitForEvent('download');await review.click();const download=await downloadEvent;
   assertID('people-retired-file-review-'+mode,(await fs.promises.readFile(await download.path(),'utf8'))==='synthetic retired bytes');
   assertID('people-retired-review-no-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(before.owner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(before.recipient));
@@ -2054,10 +2054,9 @@ async function draftRecovery(mode,seat) {
  const draft='Synthetic saved draft <review> '+mode;
  await page.evaluate(({id,text})=>{localStorage.removeItem('scimux-draft-owner:'+id);localStorage.setItem('scimux-draft:'+id,text)}, {id:chat.id,text:draft});
  const before=counts(seat);if(mode==='phone')await page.locator('#chatback').click();await open(page,chat.id);
- await page.locator('#draftrecovery summary').waitFor();
- assertID('recovery-does-not-prepare-'+mode,(await page.locator('#prompt').innerText())===''&&JSON.stringify(counts(seat))===JSON.stringify(before));
- await page.locator('#draftrecovery summary').click();const saved=page.locator('#draftrecovery textarea');
- assertID('recovery-explicit-review-'+mode,await saved.inputValue()===draft&&await saved.getAttribute('readonly')!==null);
+ await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+ assertID('recovery-adopted-'+mode,(await page.locator('#prompt').innerText())===draft);
+ assertID('recovery-no-panel-'+mode,await page.locator('#draftrecovery details').count()===0);
  assertID('recovery-no-agent-dispatch-'+mode,JSON.stringify(counts(seat))===JSON.stringify(before));
  await screenshot(page,'draft-recovery-'+mode+'.png');manifest['draft-recovery-'+mode]={before,after:counts(seat)};
 }

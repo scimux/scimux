@@ -103,56 +103,70 @@ export function createStorage(raw){
  * until the sent text appears as a real destination transcript turn. */
 export const PENDING_FORWARD_PREFIX = "scimux-sendto-pending:";
 
-// Index archived draft owners without putting any retired text into a live
-// composer. The contents remain local and are only exposed for review.
-export function readRetiredDrafts(storage, nodeId){
-  try {
-    const owners = JSON.parse(storage.getItem("scimux-retired-index:" + nodeId) || "[]");
-    if (!Array.isArray(owners)) return [];
-    return owners.flatMap(owner => {
-      try {
-        const values = JSON.parse(storage.getItem("scimux-retired-drafts:" + nodeId + ":" + owner) || "[]");
-        return Array.isArray(values) ? values.filter(item => item && typeof item === "object" && !Array.isArray(item)).map(item => ({owner, values:item})) : [];
-      } catch { return []; }
-    });
-  } catch { return []; }
+const draftSlugPrefixes = ["scimux-draft:", "scimux-people-draft:", "scimux-prompt-sources:", "scimux-prompt-flights:", "scimux-sendto-pending:", "scimux-sendto-awaiting:"];
+
+// One-time cleanup of a retired-draft archive. An "unknown" owner's last
+// string-valued prefix entry is copied into an absent live key. Every other
+// owner is dropped. Damaged JSON is removed and never thrown.
+function restoreUnknownDraft(storage, nodeId){
+  let parsed;
+  try { parsed = JSON.parse(storage.getItem("scimux-retired-drafts:" + nodeId + ":unknown")); }
+  catch { return; }
+  if (!Array.isArray(parsed) || !parsed.length) return;
+  const last = parsed[parsed.length - 1];
+  if (!last || typeof last !== "object" || Array.isArray(last)) return;
+  for (const prefix of draftSlugPrefixes) {
+    const value = last[prefix];
+    if (typeof value !== "string") continue;
+    const live = prefix + nodeId;
+    if (storage.getItem(live) !== null) continue;
+    storage.setItem(live, value);
+  }
 }
 
-export function archiveRetiredDraft(storage, nodeId, owner, values){
-  try {
-    const key = "scimux-retired-drafts:" + nodeId + ":" + owner;
-    const saved = JSON.parse(storage.getItem(key) || "[]");
-    if (!Array.isArray(saved)) return false;
-    const indexKey = "scimux-retired-index:" + nodeId;
-    const owners = JSON.parse(storage.getItem(indexKey) || "[]");
-    if (!Array.isArray(owners)) return false;
-    storage.setItem(key, JSON.stringify([...saved, values]));
-    if (!owners.includes(owner)) storage.setItem(indexKey, JSON.stringify([...owners, owner]));
-    return true;
-  } catch { return false; }
+function dropUnindexedRetiredDrafts(storage, nodeId){
+  if (typeof storage.keys !== "function") return;
+  let keys;
+  try { keys = storage.keys(); }
+  catch { return; }
+  if (!Array.isArray(keys)) return;
+  const prefix = "scimux-retired-drafts:" + nodeId + ":";
+  for (const key of keys) {
+    if (typeof key === "string" && key.startsWith(prefix)) storage.removeItem(key);
+  }
 }
 
-// Preserve slug-keyed data separately when its chat ownership is unknown or
-// retired. Archive first; a storage error leaves the original data intact.
+function clearRetiredDraftArchive(storage, nodeId){
+  const indexKey = "scimux-retired-index:" + nodeId;
+  const raw = storage.getItem(indexKey);
+  if (raw === null) return;
+  let owners = null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) owners = parsed;
+  } catch { /* damaged index */ }
+  if (owners) {
+    if (owners.includes("unknown")) restoreUnknownDraft(storage, nodeId);
+    for (const owner of owners) {
+      if (typeof owner !== "string") continue;
+      storage.removeItem("scimux-retired-drafts:" + nodeId + ":" + owner);
+    }
+  } else dropUnindexedRetiredDrafts(storage, nodeId);
+  storage.removeItem(indexKey);
+}
+
+// Slug-keyed drafts follow scimux-draft-owner. No owner adopts them. A
+// different owner drops them. Nothing is archived.
 export function bindDraftIdentity(storage, nodeId, instance){
   if (!instance) return true;
-  const ownerKey = "scimux-draft-owner:" + nodeId;
-  const prefixes = ["scimux-draft:", "scimux-people-draft:", "scimux-prompt-sources:", "scimux-prompt-flights:", "scimux-sendto-pending:", "scimux-sendto-awaiting:"];
   try {
-    const old = storage.getItem(ownerKey);
+    clearRetiredDraftArchive(storage, nodeId);
+    const old = storage.getItem("scimux-draft-owner:" + nodeId);
     if (old === instance) return true;
-    const values = {};
-    for (const prefix of prefixes) {
-      const value = storage.getItem(prefix + nodeId);
-      if (prefix === "scimux-people-draft:" && value !== null && readRetiredDrafts(storage, nodeId).some(entry => typeof entry.values[prefix] === "string")) continue;
-      if (value !== null) values[prefix] = value;
+    if (old !== null) {
+      for (const prefix of draftSlugPrefixes) storage.removeItem(prefix + nodeId);
     }
-    if (Object.keys(values).length) {
-      const owner = old || "unknown";
-      if (!archiveRetiredDraft(storage, nodeId, owner, values)) return false;
-      for (const prefix of prefixes) if (prefix !== "scimux-people-draft:") storage.removeItem(prefix + nodeId);
-    }
-    storage.setItem(ownerKey, instance);
+    storage.setItem("scimux-draft-owner:" + nodeId, instance);
     return true;
   } catch { return false; }
 }

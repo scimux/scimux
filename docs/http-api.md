@@ -1873,8 +1873,8 @@ changes and in-flight work. For a shared owner chat, Agent is a one-send arm:
 the composer returns to People when an Agent attempt is dispatched, while
 validation failures keep the selected destination and input for correction.
 An uncertain attempt remains unconfirmed; returning to People does not prove
-delivery. Retired drafts are offered for explicit local review when available
-and are never automatically inserted into a replacement instance.
+delivery. Retired drafts are discarded; they are never inserted into a
+replacement instance.
 
 `PUT /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/seen`
 takes `{"mirror":N}`, `{"comments":N}`, or both, with no unknown fields
