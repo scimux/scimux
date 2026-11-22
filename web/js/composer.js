@@ -116,33 +116,8 @@ import {
   readAwaitingForward,
   writeAwaitingForward,
   bindDraftIdentity,
-  archiveRetiredDraft,
-  readRetiredDrafts,
   addPromptSource, clearPromptSources, promptSourceKey, readPromptSources, writePromptSources, readPromptFlights, writePromptFlights,
 } from "./storage.js";
-
-export function retiredDraftReviewHTML(entries){
-  return entries.map(({owner, values}) => {
-    const fields = [["Agent draft", values["scimux-draft:"]], ["People draft", values["scimux-people-draft:"]]];
-    let flights = [];
-    try {
-      const parsed = JSON.parse(values["scimux-prompt-flights:"] || "[]");
-      if (Array.isArray(parsed)) flights = parsed.filter(item => item && typeof item === "object");
-    } catch { /* keep other intact drafts visible */ }
-    fields.push(...flights.map(flight => ["Pending Agent draft", flight.text]));
-    const text = fields.filter(([, value]) => typeof value === "string" && value).map(([label, value]) =>
-      `<label>${label}<textarea readonly>${escDefault(value)}</textarea></label>`).join("");
-    const source = values["scimux-prompt-sources:"] || values["scimux-sendto-pending:"] || flights.some(flight => flight.sources?.length)
-      ? '<p>Source references are retained with this saved draft.</p>' : "";
-    const attachments = values["scimux-attachments:"] ? '<p>File references are retained with this saved draft; files may no longer be available.</p>' : "";
-    const temporary = values["scimux-memory-only:"] ? '<p>Available only in this tab.</p>' : "";
-    const delivery = values["scimux-delivery-status:"] === "accepted" ? '<p>Accepted by the earlier chat; confirmation is unavailable here.</p>'
-      : values["scimux-delivery-status:"] === "unconfirmed" ? '<p>Delivery to the earlier chat is unconfirmed.</p>'
-      : values["scimux-delivery-status:"] === "not-dispatched" ? '<p>Not sent.</p>' : "";
-    const context = owner === "unknown" ? "Saved before chat identity could be verified." : "Saved from an earlier chat.";
-    return `<section><p>${context}</p>${temporary}${delivery}${text}${source}${attachments}</section>`;
-  }).join("");
-}
 
 /* ---------- public constants ---------- */
 
@@ -385,7 +360,6 @@ export function createComposerFeature(deps){
 
   /* per-node stage map — in-memory only; reload resets */
   const stage = {};
-  const retiredMemory = new Map();
   const fallbackIdentities = new WeakMap();
   let fallbackIdentity = 0;
   let stageKey = 0;
@@ -414,7 +388,7 @@ export function createComposerFeature(deps){
   const sendingDestinations = new Set();
   const recoveredPeopleFiles = new Set();
   const recoveringPeopleFiles = new Map();
-  let legacyPeopleReview = {identity:"", files:[], drafts:[], unavailable:false};
+  let legacyPeopleReview = {identity:"", files:[], unavailable:false};
   const clearedSourceText = new Map();
   const damagedSourceMetadata = new Set();
   const recoveredSourceFiles = new Set(), recoveringSourceFiles = new Set();
@@ -927,7 +901,7 @@ export function createComposerFeature(deps){
   }
   function clearLegacyPeopleReview(){
     for (const item of legacyPeopleReview.files) URLImpl.revokeObjectURL(item.url);
-    legacyPeopleReview = {identity:"", files:[], drafts:[], unavailable:false};
+    legacyPeopleReview = {identity:"", files:[], unavailable:false};
   }
   function restoreLegacyPeopleFiles(){
     const id = selId(), context = peopleContext(), identity = peopleStageIdentity(id, context), visit = destinationVisit;
@@ -949,46 +923,8 @@ export function createComposerFeature(deps){
     }).catch(() => { failedStore = true; return []; }).then(rows => {
       if (selId() !== id || destinationVisit !== visit || peopleStageIdentity(id) !== identity || legacyPeopleReview.identity !== identity) return;
       if (failedStore) legacyPeopleReview.unavailable = true;
-      const priorCopies = new Set();
       for (const row of rows) {
         legacyPeopleReview.files.push({name:row.file.name, url:URLImpl.createObjectURL(row.file)});
-        const marker = prefix + "\0copy:";
-        if (typeof row.scope === "string" && row.scope.startsWith(marker)) {
-          const copy = row.scope.slice(marker.length, marker.length + 32);
-          if (/^[0-9a-f]{32}$/.test(copy)) priorCopies.add(copy);
-        }
-      }
-      const native = context.owner ? (nodeById(id)?.instance_id || "") : "";
-      if (typeof storage.keys === "function") {
-        const keys = storage.keys();
-        if (!Array.isArray(keys)) legacyPeopleReview.unavailable = true;
-        else {
-          const draftPrefix = "scimux-people-draft:" + id + ":scope:";
-          const bindingPrefix = context.key + (context.binding ? "\0binding:" + context.binding : "") + "\0copy:";
-          const bindingSuffix = "\0" + (context.owner ? stageIdentity(id) : id);
-          const pendingPrefix = "scimux-people-file-pending:" + context.key + ":" + native + (context.binding ? ":" + context.binding : "") + ":copy:";
-          for (const key of keys) {
-            let copy = "";
-            if (key.startsWith(draftPrefix)) {
-              try {
-                const scope = decodeURIComponent(key.slice(draftPrefix.length));
-                if (scope.startsWith(bindingPrefix) && scope.endsWith(bindingSuffix)) copy = scope.slice(bindingPrefix.length, -bindingSuffix.length);
-              } catch { /* malformed unrelated key */ }
-            } else if (key.startsWith(pendingPrefix)) copy = key.slice(pendingPrefix.length);
-            if (/^[0-9a-f]{32}$/.test(copy) && copy !== context.copyInstance) priorCopies.add(copy);
-          }
-        }
-      }
-      for (const copy of priorCopies) {
-        const draft = storage.getItem(peopleDraftKey(id, {...context, copyInstance:copy}));
-        if (draft) legacyPeopleReview.drafts.push({owner:"unknown", values:{"scimux-people-draft:":draft}});
-        const pendingKey = "scimux-people-file-pending:" + context.key + ":" + native + (context.binding ? ":" + context.binding : "") + ":copy:" + copy;
-        const pending = storage.getItem(pendingKey);
-        if (pending) {
-          let text = "Saved pending message is unavailable.";
-          try { const parsed = JSON.parse(pending); if (typeof parsed?.request?.text === "string") text = parsed.request.text || "File-only People message"; } catch { /* retained for review */ }
-          legacyPeopleReview.drafts.push({owner:"unknown", values:{"scimux-people-draft:":text, "scimux-attachments:":"saved", "scimux-delivery-status:":"unconfirmed"}});
-        }
       }
       renderRecovery(id);
     }).catch(() => {
@@ -1001,27 +937,9 @@ export function createComposerFeature(deps){
   function currentComposerIdentity(){
     const id = selId();
     if (!id || id !== composerNode || !composerIdentity || stageIdentity(id) === composerIdentity) return true;
-    try {
-      const key = "scimux-retired-visible:" + composerIdentity;
-      const raw = storage.getItem(key);
-      let saved = [];
-      if (raw !== null) {
-        try { saved = JSON.parse(raw); } catch { saved = raw; }
-        if (!Array.isArray(saved)) saved = [saved];
-      }
-      storage.setItem(key, JSON.stringify([...saved, promptText()]));
-      if (!archiveRetiredDraft(storage, id, composerIdentity.split("\0")[1], {
-        [isPeople() ? "scimux-people-draft:" : "scimux-draft:"]: promptText(),
-      })) throw new Error("draft archive unavailable");
-    }
-    catch { alertFn("This chat was replaced. Copy the visible draft before continuing."); return false; }
     onSelect();
-    alertFn("This chat was replaced. Review the current draft before sending.");
+    alertFn("This chat was replaced. Your unsent draft was not carried over.");
     return false;
-  }
-  function peopleDraftKey(id, context = peopleContext()){
-    const binding = context?.attachments && context.binding ? peopleDraftBinding(id, context) : "";
-    return "scimux-people-draft:" + id + (binding ? ":scope:" + encodeURIComponent(binding) : "");
   }
   function peopleDraftBinding(id, context){
     if (!context?.key) return "";
@@ -1518,42 +1436,9 @@ export function createComposerFeature(deps){
 
   function renderRecovery(id){
     if (!roots.recovery) return;
-    const entries = id ? [...readRetiredDrafts(storage, id), ...(retiredMemory.get(id) || []), ...legacyPeopleReview.drafts] : [];
-    if (id && peopleContext()) {
-      const currentLegacy = storage.getItem(peopleDraftKey(id));
-      if (currentLegacy) entries.push({owner:"unknown", values:{"scimux-people-draft:":currentLegacy}});
-    }
-    if (id && peopleDraftKey(id) !== "scimux-people-draft:" + id) {
-      const legacy = storage.getItem("scimux-people-draft:" + id);
-      if (legacy) entries.push({owner:"unknown", values:{"scimux-people-draft:":legacy}});
-    }
-    const context = peopleContext();
-    if (id && context?.key) {
-      const legacyTextRetry = storage.getItem("scimux-comment-retry:" + context.key);
-      if (legacyTextRetry) {
-        let text = "Saved People retry is unavailable.";
-        try { const parsed = JSON.parse(legacyTextRetry); if (typeof parsed?.text === "string") text = parsed.text || "Empty People message"; } catch { /* preserve damaged legacy content for review */ }
-        entries.push({owner:"unknown", values:{"scimux-people-draft:":text, "scimux-delivery-status:":"unconfirmed"}});
-      }
-    }
-    if (id && context?.copyInstance) {
-      const priorKey = peopleDraftKey(id, {...context, copyInstance:""});
-      if (priorKey !== "scimux-people-draft:" + id) {
-        const prior = storage.getItem(priorKey);
-        if (prior) entries.push({owner:"unknown", values:{"scimux-people-draft:":prior}});
-      }
-      const native = context.owner ? (nodeById(id)?.instance_id || "") : "";
-      const pendingKey = "scimux-people-file-pending:" + context.key + ":" + native + (context.binding ? ":" + context.binding : "");
-      const pending = storage.getItem(pendingKey);
-      if (pending) {
-        let text = "Saved pending message is unavailable.";
-        try { const parsed = JSON.parse(pending); if (typeof parsed?.request?.text === "string") text = parsed.request.text || "File-only People message"; } catch { /* retained for review */ }
-        entries.push({owner:"unknown", values:{"scimux-people-draft:":text, "scimux-attachments:":"saved", "scimux-delivery-status:":"unconfirmed"}});
-      }
-    }
     const pendingSources = id && unresolvedSourceFiles(id, stageIdentity(id));
-    roots.recovery.hidden = !entries.length && !pendingSources && !legacyPeopleReview.files.length && !legacyPeopleReview.unavailable;
-    roots.recovery.innerHTML = (entries.length ? `<details><summary>Review saved drafts</summary>${retiredDraftReviewHTML(entries)}</details>` : "") +
+    roots.recovery.hidden = !pendingSources && !legacyPeopleReview.files.length && !legacyPeopleReview.unavailable;
+    roots.recovery.innerHTML =
       (pendingSources ? '<p role="status">Review saved source files before sending; recovery is pending or unavailable.</p>' : "") +
       (legacyPeopleReview.files.length ? '<p>Files saved from an earlier copy are available for review.</p>' + legacyPeopleReview.files.map(item => `<a href="${escDefault(item.url)}" download="${escDefault(item.name)}">Download ${escDefault(item.name)}</a>`).join("") : "") +
       (legacyPeopleReview.unavailable ? '<p role="status">Saved People files could not be reviewed.</p>' : "");
@@ -2051,26 +1936,7 @@ export function createComposerFeature(deps){
       writePromptFlights(storage, dest, readPromptFlights(storage, dest).filter(item => item.id !== flight.id));
       if (sourceSnapshot.length && typeof d.promptSourcesChanged === "function") d.promptSourcesChanged(dest);
     }
-    function retireFlight(status = "not-dispatched", trace = null){
-      try {
-        const key = "scimux-retired-flight:" + identity;
-        const prior = JSON.parse(storage.getItem(key) || "[]");
-        const saved = Array.isArray(prior) ? prior : [prior];
-        storage.setItem(key, JSON.stringify([...saved, {text, sources:sourceSnapshot, attachments:items.filter(item=>item.ref).map(item=>({name:item.name,ref:item.ref}))}]));
-      } catch { /* in-memory stage still holds the files */ }
-      const owner = identity.split("\0")[1];
-      const recovered = {
-        "scimux-draft:":text,
-        "scimux-prompt-sources:":JSON.stringify(sourceSnapshot),
-        "scimux-attachments:":JSON.stringify(items.filter(item=>item.ref).map(item=>({name:item.name,ref:item.ref}))),
-        "scimux-delivery-status:":status,
-        "scimux-delivery-trace:":JSON.stringify(trace),
-      };
-      if (!archiveRetiredDraft(storage, dest, owner, recovered)) {
-        const previous = retiredMemory.get(dest) || [];
-        retiredMemory.set(dest, [...previous, {owner, values:{...recovered, "scimux-memory-only:":true}}]);
-      }
-      if (selId() === dest) renderRecovery(dest);
+    function retireFlight(){
       writePromptFlights(storage, dest, readPromptFlights(storage, dest).filter(item => item.id !== flight.id));
       sendingDestinations.delete(identity);
     }
@@ -2082,8 +1948,7 @@ export function createComposerFeature(deps){
     }
     if (anyUploading(items)) await waitForUploads(items);
     if (stageIdentity(dest) !== identity) {
-      // Never restore an old flight into the replacement chat's draft. Keep
-      // a separate local recovery copy for the retired identity instead.
+      // The replacement chat does not receive this flight.
       retireFlight();
       return;
     }
@@ -2130,7 +1995,7 @@ export function createComposerFeature(deps){
           body: JSON.stringify({ text, attachments: refs, trace: true }),
         });
       }
-      if (stageIdentity(dest) !== identity) { retireFlight(res?.status === "unconfirmed" ? "unconfirmed" : "accepted", res?.trace || null); return; }
+      if (stageIdentity(dest) !== identity) { retireFlight(); return; }
       /* An unconfirmed outcome is not proof of delivery or non-delivery. */
       if (res && res.status === "unconfirmed") {
         restoreSources();
@@ -2186,7 +2051,7 @@ export function createComposerFeature(deps){
       if (typeof d.scheduleTick === "function") d.scheduleTick(400);
       else if (typeof d.tick === "function") setTimeoutFn(d.tick, 400);
     } catch (err) {
-      if (stageIdentity(dest) !== identity) { retireFlight("unconfirmed"); return; }
+      if (stageIdentity(dest) !== identity) { retireFlight(); return; }
       restoreSources();
       /* surface every failure, including 409 (unconfirmed / in flight / closed) */
       if (err) alertFn(err && err.message);

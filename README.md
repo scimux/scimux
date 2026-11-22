@@ -221,9 +221,8 @@ not send either draft.
 Choosing Agent arms one send: when a send attempt is dispatched, the composer
 returns to People. Pre-dispatch validation leaves the draft and Agent selection
 in place. Disarming does not confirm delivery; a failed or unconfirmed Agent
-send keeps its input for the owner to review before retrying. Drafts from a
-removed chat can be reviewed separately when available; they are not inserted
-into a replacement chat.
+send keeps its input for the owner to review before retrying. Drafts of a
+removed chat are discarded; they are never inserted into a replacement chat.
 
 All puts Mine first, with your own chats together, followed by a separate
 group for each sharer and server. Sharers with identical display names stay

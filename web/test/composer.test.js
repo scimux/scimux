@@ -31,7 +31,7 @@ import {
   createComposerFeature,
   isClaudeNativeForkCommand,
 } from "../js/composer.js";
-import { AWAITING_FORWARD_TTL_MS, readRetiredDrafts } from "../js/storage.js";
+import { AWAITING_FORWARD_TTL_MS } from "../js/storage.js";
 import * as composer from "../js/composer.js";
 import {createPeopleFileStore} from "../js/people-file-store.js";
 import {parsePeoplePendingSnapshot} from "../js/people-local-review.js";
@@ -293,6 +293,12 @@ function makeStorage(init = {}){
     keys(){ return [...map.keys()]; },
     _map: map,
   };
+}
+
+function assertNoSavedDraftPanel(root){
+  const html = root ? root.innerHTML : "";
+  assert.equal(html.includes("<details"), false);
+  assert.equal(html.includes("Review saved drafts"), false);
 }
 
 function renderedClassCount(html, token){
@@ -2194,24 +2200,26 @@ test('a recreated chat does not inherit either destination draft or pending sour
 test('same-selection replacement cannot send the retired visible draft', async () => {
  const ctx=makeFeature({nodes:[{id:'n1',instance_id:'old'}]});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('retired draft');ctx.roots.prompt.firstListener('input')();
  ctx.nodes.splice(0,1,{id:'n1',instance_id:'new'});await ctx.feature.sendPrompt();
- assert.equal(ctx.apiCalls.filter(c=>c.path.split('?')[0].endsWith('/send')).length,0);assert.doesNotMatch(ctx.feature.promptText(),/retired draft/);ctx.feature.destroy();
+ assert.equal(ctx.apiCalls.filter(c=>c.path.split('?')[0].endsWith('/send')).length,0);
+ assert.doesNotMatch(ctx.feature.promptText(),/retired draft/);
+ assert.match(ctx.alerts.join('\n'), /This chat was replaced\. Your unsent draft was not carried over\./);
+ assert.equal(ctx.storage.keys().some(key=>key.startsWith('scimux-retired-')), false);
+ ctx.feature.destroy();
 });
 
-test('a corrupt old archive blocks drafting operations without dropping visible text', async () => {
- const storage=makeStorage({'scimux-draft-owner:n1':'old','scimux-draft:n1':'saved','scimux-retired-drafts:n1:old':'{}'});
+test('a damaged legacy archive does not block drafting', async () => {
+ const storage=makeStorage({'scimux-draft-owner:n1':'old','scimux-draft:n1':'saved','scimux-retired-index:n1':'{}','scimux-retired-drafts:n1:old':'{}'});
  const ctx=makeFeature({storage,controls:true,nodes:[{id:'n1',instance_id:'new'}],deps:{peopleContext:()=>({key:'s/o/c/g',owner:true,writable:true}),canPreparePrompt:()=>true}});
- ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('copy me');
- ctx.feature.setDestination('agent');ctx.feature.setAttachAvail(true);ctx.feature.addFiles([{name:'a.txt',type:'text/plain'}]);
- assert.equal(ctx.feature.preparePrompt('source',{uid:'u',record:1}),false);ctx.roots.prompt.firstListener('input')();await ctx.feature.sendPrompt();
- assert.equal(ctx.feature.promptText(),'copy me');assert.equal(ctx.apiCalls.length,0);assert.match(ctx.alerts.join(' '),/storage is unavailable/i);ctx.feature.destroy();
-});
-
-test('a replacement cannot retire visible text when its recovery archive is damaged', async () => {
- const ctx=makeFeature({nodes:[{id:'n1',instance_id:'old'}]});ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('visible text');
- ctx.storage.setItem('scimux-retired-index:n1','{}');ctx.nodes.splice(0,1,{id:'n1',instance_id:'new'});
- await ctx.feature.sendPrompt();ctx.feature.addFiles([{name:'x.txt',type:'text/plain'}]);ctx.feature.setDestination('agent');
- assert.equal(ctx.feature.preparePrompt('source',{uid:'u',record:1}),false);ctx.roots.prompt.firstListener('input')();
- assert.equal(ctx.feature.promptText(),'visible text');assert.equal(ctx.apiCalls.length,0);assert.match(ctx.alerts.join(' '),/Copy the visible draft/);ctx.feature.destroy();
+ ctx.feature.bind();ctx.feature.onSelect();
+ assert.doesNotMatch(ctx.alerts.join(' '), /storage is unavailable/i);
+ ctx.feature.setPromptText('copy me');ctx.roots.prompt.firstListener('input')();
+ ctx.feature.setDestination('agent');
+ assert.equal(ctx.feature.preparePrompt('source',{uid:'u',record:1}), true);
+ await ctx.feature.sendPrompt();
+ assert.equal(ctx.apiCalls.filter(c=>c.path.split('?')[0].endsWith('/send')).length,1);
+ assert.equal(storage.getItem('scimux-retired-index:n1'), null);
+ assert.equal(storage.getItem('scimux-retired-drafts:n1:old'), null);
+ ctx.feature.destroy();
 });
 
 test('interrupt binds its request to the actual selected chat identity', async () => {
@@ -2296,22 +2304,29 @@ test('late failed send cannot restore an old draft into a recreated chat', async
  rejectSend(new Error('offline'));await pending;assert.equal(ctx.feature.promptText(),'new draft');ctx.feature.destroy();
 });
 
-test('an accepted send retired after replacement remains labelled accepted for review', async () => {
+test('a replaced accepted send is not archived or delivered to the replacement', async () => {
  let finish;const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'old'}],sendHandler:()=>new Promise(resolve=>{finish=resolve})});
  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('old accepted');const pending=ctx.feature.sendPrompt();
  ctx.nodes.splice(0);ctx.setSel('');ctx.feature.onSelect();ctx.nodes.push({id:'n1',instance_id:'new'});ctx.setSel('n1');ctx.feature.onSelect();
  finish({status:'acknowledged',trace:{uid:'u',record:1}});await pending;
- const saved=JSON.parse(ctx.storage.getItem('scimux-retired-drafts:n1:old')).find(item=>item['scimux-draft:']==='old accepted');
- assert.equal(saved['scimux-delivery-status:'],'accepted');assert.deepEqual(JSON.parse(saved['scimux-delivery-trace:']),{uid:'u',record:1});assert.match(ctx.roots.recovery.innerHTML,/accepted/i);ctx.feature.destroy();
+ assert.equal(ctx.storage.getItem('scimux-retired-drafts:n1:old'), null);
+ assert.equal(ctx.storage.getItem('scimux-retired-index:n1'), null);
+ assert.equal(ctx.feature.promptText(), '');
+ assert.equal(ctx.apiCalls.filter(c=>c.path.includes('chat_instance=new')).length, 0);
+ assertNoSavedDraftPanel(ctx.roots.recovery);
+ ctx.feature.destroy();
 });
 
-test('an uncertain retired send stays labelled unconfirmed', async () => {
+test('a replaced uncertain send is not archived or shown in the replacement', async () => {
  let finish;const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'old'}],sendHandler:()=>new Promise(resolve=>{finish=resolve})});
  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('uncertain');const pending=ctx.feature.sendPrompt();
  ctx.nodes.splice(0);ctx.setSel('');ctx.feature.onSelect();ctx.nodes.push({id:'n1',instance_id:'new'});ctx.setSel('n1');ctx.feature.onSelect();
  finish({status:'unconfirmed'});await pending;
- const saved=JSON.parse(ctx.storage.getItem('scimux-retired-drafts:n1:old')).find(item=>item['scimux-draft:']==='uncertain');
- assert.equal(saved['scimux-delivery-status:'],'unconfirmed');assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);ctx.feature.destroy();
+ assert.equal(ctx.storage.getItem('scimux-retired-drafts:n1:old'), null);
+ assert.equal(ctx.feature.promptText(), '');
+ assert.equal(ctx.apiCalls.filter(c=>c.path.includes('chat_instance=new')).length, 0);
+ assert.equal(ctx.roots.recovery.innerHTML.includes('uncertain'), false);
+ ctx.feature.destroy();
 });
 
 test('a retired upload wait does not block an explicit send in the replacement chat', async () => {
@@ -2322,8 +2337,9 @@ test('a retired upload wait does not block an explicit send in the replacement c
  assert.equal(ctx.apiCalls.filter(c=>c.path==='/api/nodes/n1/send?chat_instance=new').length,1);assert.equal(JSON.parse(ctx.apiCalls[0].opts.body).text,'new');
  finish({ok:true,json:async()=>({attachments:[{path:'old-ref'}]})});await new Promise(r=>setImmediate(r));ctx.timers.runIntervals();await pending;
  assert.equal(ctx.apiCalls.filter(c=>c.path==='/api/nodes/n1/send?chat_instance=new').length,1);
- const retired=JSON.parse(ctx.storage.getItem('scimux-retired-drafts:n1:old')).find(item=>item['scimux-draft:']==='old');
- assert.equal(retired['scimux-delivery-status:'],'not-dispatched');ctx.feature.destroy();
+ assert.equal(ctx.storage.getItem('scimux-retired-drafts:n1:old'), null);
+ assert.equal(ctx.feature.promptText().includes('old'), false);
+ ctx.feature.destroy();
 });
 
 test('an old People publication cannot clear an identical draft in a replacement chat', async () => {
@@ -2344,99 +2360,126 @@ test('an old People publication does not block a replacement chat publication', 
  await ctx.feature.sendPrompt();assert.deepEqual(sent,[['s/o/c/old','old'],['s/o/c/new','new']]);finish();await first;ctx.feature.destroy();
 });
 
-test('separate retired in-flight sends retain both texts and source associations', async () => {
+test('separate replaced in-flight sends are not archived or shown', async () => {
  const storage=makeStorage(), old={id:'n1',instance_id:'old'}, replacement={id:'n1',instance_id:'new'};
  let rejectA, rejectB;
- const a=makeFeature({storage,nodes:[old],sendHandler:()=>new Promise((_,reject)=>{rejectA=reject}),deps:{canPreparePrompt:()=>true}});
- const b=makeFeature({storage,nodes:[old],sendHandler:()=>new Promise((_,reject)=>{rejectB=reject}),deps:{canPreparePrompt:()=>true}});
+ const a=makeFeature({storage,recovery:true,nodes:[old],sendHandler:()=>new Promise((_,reject)=>{rejectA=reject}),deps:{canPreparePrompt:()=>true}});
+ const b=makeFeature({storage,recovery:true,nodes:[old],sendHandler:()=>new Promise((_,reject)=>{rejectB=reject}),deps:{canPreparePrompt:()=>true}});
  a.feature.bind();b.feature.bind();a.feature.onSelect();b.feature.onSelect();
  a.feature.preparePrompt('first',{uid:'a',record:1});const first=a.feature.sendPrompt();
  b.feature.preparePrompt('second',{uid:'b',record:2});const second=b.feature.sendPrompt();
  a.nodes.splice(0,1,replacement);b.nodes.splice(0,1,replacement);
+ a.feature.onSelect();b.feature.onSelect();
  rejectA(new Error('offline'));await first;rejectB(new Error('offline'));await second;
- const saved=JSON.parse(storage.getItem('scimux-retired-flight:n1\0old'));
- assert.deepEqual(saved.map(x=>x.text),['first','second']);
- assert.deepEqual(saved.map(x=>x.sources[0].uid),['a','b']);
- const review=JSON.parse(storage.getItem('scimux-retired-drafts:n1:old'));
- assert.deepEqual(review.map(x=>x['scimux-draft:']),['first','second']);
- assert.deepEqual(review.map(x=>JSON.parse(x['scimux-prompt-sources:'])[0].uid),['a','b']);
+ assert.equal(storage.getItem('scimux-retired-drafts:n1:old'), null);
+ assert.equal(storage.getItem('scimux-retired-index:n1'), null);
+ assert.equal(a.feature.promptText(), '');
+ assert.equal(b.feature.promptText(), '');
+ assert.equal(a.apiCalls.filter(c=>c.path.includes('chat_instance=new')).length, 0);
+ assert.equal(b.apiCalls.filter(c=>c.path.includes('chat_instance=new')).length, 0);
+ assertNoSavedDraftPanel(a.roots.recovery);
  a.feature.destroy();b.feature.destroy();
 });
 
-test('retired sends preserve a pre-existing older recovery record', async () => {
- let rejectSend;const storage=makeStorage({'scimux-retired-flight:n1\0old':JSON.stringify({text:'previous',sources:[],attachments:[]})});
- const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'old'}],sendHandler:()=>new Promise((_,reject)=>{rejectSend=reject})});
+test('a replaced send leaves a pre-existing flight record unchanged and creates no archive', async () => {
+ const original=JSON.stringify({text:'previous',sources:[],attachments:[]});
+ let rejectSend;const storage=makeStorage({'scimux-retired-flight:n1\0old':original});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'old'}],sendHandler:()=>new Promise((_,reject)=>{rejectSend=reject})});
  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('later');const pending=ctx.feature.sendPrompt();
- ctx.nodes.splice(0,1,{id:'n1',instance_id:'new'});rejectSend(new Error('offline'));await pending;
- assert.deepEqual(JSON.parse(storage.getItem('scimux-retired-flight:n1\0old')).map(item=>item.text),['previous','later']);ctx.feature.destroy();
+ ctx.nodes.splice(0,1,{id:'n1',instance_id:'new'});ctx.feature.onSelect();rejectSend(new Error('offline'));await pending;
+ assert.equal(storage.getItem('scimux-retired-flight:n1\0old'), original);
+ assert.equal(storage.getItem('scimux-retired-drafts:n1:old'), null);
+ assert.equal(ctx.feature.promptText(), '');
+ ctx.feature.destroy();
 });
 
-test('a damaged older flight record does not prevent recovery of a newer retired send', async () => {
+test('a damaged older flight record is left alone and does not archive the replacement', async () => {
  let rejectSend;const storage=makeStorage({'scimux-retired-flight:n1\0old':'damaged'});
- const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'old'}],sendHandler:()=>new Promise((_,reject)=>{rejectSend=reject})});
+ const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'old'}],sendHandler:()=>new Promise((_,reject)=>{rejectSend=reject})});
  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('recover this');const pending=ctx.feature.sendPrompt();
- ctx.nodes.splice(0,1,{id:'n1',instance_id:'new'});rejectSend(new Error('offline'));await pending;
- assert.equal(storage.getItem('scimux-retired-flight:n1\0old'),'damaged');
- assert.equal(JSON.parse(storage.getItem('scimux-retired-drafts:n1:old'))[0]['scimux-draft:'],'recover this');ctx.feature.destroy();
+ ctx.nodes.splice(0,1,{id:'n1',instance_id:'new'});ctx.feature.onSelect();rejectSend(new Error('offline'));await pending;
+ assert.equal(storage.getItem('scimux-retired-flight:n1\0old'), 'damaged');
+ assert.equal(storage.getItem('scimux-retired-drafts:n1:old'), null);
+ assert.equal(ctx.feature.promptText(), '');
+ assert.equal(ctx.roots.recovery.innerHTML.includes('recover this'), false);
+ ctx.feature.destroy();
 });
 
-test('a failed recovery archive leaves retired send text reviewable in the current tab', async () => {
+test('a damaged legacy archive does not show retired send text after replacement', async () => {
  let rejectSend;const storage=makeStorage(),ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'old'}],sendHandler:()=>new Promise((_,reject)=>{rejectSend=reject})});
  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('recover in memory');const pending=ctx.feature.sendPrompt();
  ctx.nodes.splice(0);ctx.setSel('');ctx.feature.onSelect();ctx.nodes.push({id:'n1',instance_id:'new'});ctx.setSel('n1');ctx.feature.onSelect();
  storage.setItem('scimux-retired-index:n1','{}');rejectSend(new Error('offline'));await pending;
- assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/recover in memory/);ctx.feature.destroy();
+ assert.equal(ctx.feature.promptText(), '');
+ assert.equal(ctx.roots.recovery.innerHTML.includes('recover in memory'), false);
+ assertNoSavedDraftPanel(ctx.roots.recovery);
+ ctx.feature.destroy();
 });
 
-test('replacement preserves visible drafts retired by two tabs separately', () => {
+test('replacement does not archive visible drafts retired by two tabs', () => {
  const storage=makeStorage(), old={id:'n1',instance_id:'old'}, replacement={id:'n1',instance_id:'new'};
  const a=makeFeature({storage,nodes:[old]}), b=makeFeature({storage,nodes:[old]});
  a.feature.bind();b.feature.bind();a.feature.onSelect();b.feature.onSelect();
  a.feature.setPromptText('first visible');b.feature.setPromptText('second visible');
  a.nodes.splice(0,1,replacement);b.nodes.splice(0,1,replacement);
  a.feature.reconcileIdentity();b.feature.reconcileIdentity();
- assert.deepEqual(JSON.parse(storage.getItem('scimux-retired-visible:n1\0old')),['first visible','second visible']);
- assert.deepEqual(JSON.parse(storage.getItem('scimux-retired-drafts:n1:old')).map(x=>x['scimux-draft:']),['first visible','second visible']);
+ assert.equal(storage.getItem('scimux-retired-visible:n1\0old'), null);
+ assert.equal(storage.getItem('scimux-retired-drafts:n1:old'), null);
+ assert.equal(a.feature.promptText(), '');
+ assert.equal(b.feature.promptText(), '');
+ assert.match(a.alerts.join('\n'), /This chat was replaced\. Your unsent draft was not carried over\./);
+ assert.match(b.alerts.join('\n'), /This chat was replaced\. Your unsent draft was not carried over\./);
  a.feature.destroy();b.feature.destroy();
 });
 
-test('a visible People draft is archived under its own destination on same-selection replacement', () => {
+test('a visible People draft is not archived or carried on same-selection replacement', () => {
  const ctx=makeFeature({controls:true,nodes:[{id:'n1',instance_id:'old'}],deps:{peopleContext:()=>({key:'s/o/c/g',owner:true,writable:true})}});
  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('people draft');ctx.nodes.splice(0,1,{id:'n1',instance_id:'new'});
- assert.equal(ctx.feature.reconcileIdentity(),false);
- const saved=JSON.parse(ctx.storage.getItem('scimux-retired-drafts:n1:old'));
- assert.ok(saved.some(value=>value['scimux-people-draft:']==='people draft'));assert.equal(ctx.feature.promptText(),'');ctx.feature.destroy();
+ assert.equal(ctx.feature.reconcileIdentity(), false);
+ assert.equal(ctx.storage.keys().some(key=>key.startsWith('scimux-retired-')), false);
+ assert.equal(ctx.feature.promptText(), '');
+ assert.match(ctx.alerts.join('\n'), /This chat was replaced\. Your unsent draft was not carried over\./);
+ ctx.feature.destroy();
 });
 
-test('retired draft review shows escaped text and retained source context without preparing a send', () => {
- const html=composer.retiredDraftReviewHTML([{owner:'unknown',values:{'scimux-draft:':'old <script>','scimux-people-draft:':'discussion','scimux-prompt-sources:':'[{"uid":"u","record":1}]'}}]);
- assert.match(html,/old &lt;script&gt;/);assert.match(html,/discussion/);
- assert.match(html,/source/i);assert.match(html,/readonly/);assert.doesNotMatch(html,/<script>/);
-});
-
-test('a never-dispatched retired send is clearly labelled in review', () => {
- const html=composer.retiredDraftReviewHTML([{owner:'old',values:{'scimux-draft:':'draft','scimux-delivery-status:':'not-dispatched'}}]);
- assert.match(html,/Not sent/);
-});
-
-test('recovery review exposes text captured in an in-flight prompt', () => {
- const html=composer.retiredDraftReviewHTML([{owner:'old',values:{'scimux-prompt-flights:':'[{"text":"waiting <prompt>","sources":[{"uid":"u","record":2}]}]'}}]);
- assert.match(html,/waiting &lt;prompt&gt;/);assert.match(html,/source/i);
-});
-
-test('damaged flight details do not hide the saved text or file-reference notice', () => {
- const values={'scimux-draft:':'text kept','scimux-prompt-flights:':'not json','scimux-attachments:':'[]'};
- const html=composer.retiredDraftReviewHTML([{owner:'old',values}]);
- assert.match(html,/text kept/);assert.match(html,/File references/);
- const malformed=composer.retiredDraftReviewHTML([{owner:'old',values:{'scimux-prompt-flights:':'{}'}}]);
- assert.doesNotMatch(malformed,/Pending Agent draft/);
-});
-
-test('an old unattributed draft is available for review without entering the replacement composer', () => {
- const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'new'}],drafts:{'scimux-draft:n1':'legacy words'}});
+test('a replaced chat refuses attach, destination changes, preparation, and typing', () => {
+ const ctx=makeFeature({nodes:[{id:'n1',instance_id:'a'}],deps:{canPreparePrompt:()=>true}});
  ctx.feature.bind();ctx.feature.onSelect();
- assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/legacy words/);
- assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+ const flip=()=>{ctx.nodes[0].instance_id=ctx.nodes[0].instance_id==='a'?'b':'a';};
+ flip();ctx.feature.addFiles([{name:'blocked.txt',type:'text/plain'}]);
+ flip();ctx.feature.setDestination('people');
+ flip();assert.equal(ctx.feature.preparePrompt('blocked',{uid:'u',record:1}), false);
+ flip();ctx.feature.setPromptText('typed');ctx.roots.prompt.firstListener('input')();
+ assert.equal(ctx.alerts.filter(text=>text==='This chat was replaced. Your unsent draft was not carried over.').length, 4);
+ assert.equal(ctx.apiCalls.length, 0);
+ ctx.feature.destroy();
+});
+
+test('draft storage failure keeps later composer actions closed', async () => {
+ const storage=makeStorage();
+ storage.getItem=()=>{throw new Error('unavailable');};
+ const ctx=makeFeature({storage,nodes:[{id:'n1',instance_id:'old'}],deps:{canPreparePrompt:()=>true}});
+ ctx.feature.bind();ctx.feature.onSelect();
+ assert.match(ctx.alerts.join('\n'), /storage is unavailable/i);
+ assert.equal(ctx.feature.preparePrompt('blocked',{uid:'u',record:1}), false);
+ ctx.feature.setDestination('agent');
+ ctx.feature.addFiles([{name:'blocked.txt',type:'text/plain'}]);
+ ctx.roots.prompt.firstListener('input')();
+ await ctx.feature.sendPrompt();
+ assert.equal(ctx.apiCalls.length, 0);
+ ctx.feature.destroy();
+});
+
+test('renderRecovery never offers a saved-draft panel and adopts an old archive draft', () => {
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'new'}],drafts:{
+  'scimux-retired-index:n1':'["unknown"]',
+  'scimux-retired-drafts:n1:unknown':JSON.stringify([{'scimux-draft:':'legacy words'}]),
+ }});
+ ctx.feature.bind();ctx.feature.onSelect();
+ assert.equal(ctx.feature.promptText(), 'legacy words');
+ assertNoSavedDraftPanel(ctx.roots.recovery);
+ assert.equal(ctx.apiCalls.length, 0);
+ ctx.feature.destroy();
 });
 
 test("People attachment capability stages files without changing destination or dispatching", async () => {
@@ -2870,13 +2913,14 @@ test("damaged source recovery metadata blocks an unrelated Agent send",async()=>
  assert.equal(ctx.apiCalls.filter(call=>call.path.split("?")[0].endsWith("/send")).length,0);assert.equal(ctx.roots.recovery.hidden,false);
 });
 
-test('legacy unbound People draft remains reviewable after capability binding appears',()=>{
+test('legacy unbound People draft is kept and is not listed',()=>{
  const storage=makeStorage({'scimux-people-draft:n1':'old discussion'});
  const ctx=makeFeature({storage,recovery:true,deps:{peopleContext:()=>({key:'s/o/c/g',binding:'a'.repeat(64),writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();
  assert.equal(ctx.feature.promptText(),'');
- assert.equal(ctx.roots.recovery.hidden,false);
- assert.match(ctx.roots.recovery.innerHTML,/old discussion/);
+ assert.equal(ctx.roots.recovery.hidden,true);
+ assertNoSavedDraftPanel(ctx.roots.recovery);
+ assert.equal(ctx.roots.recovery.innerHTML.includes('old discussion'), false);
  assert.equal(storage.getItem('scimux-people-draft:n1'),'old discussion');
  assert.equal(ctx.apiCalls.length,0);
 });
@@ -2890,20 +2934,20 @@ test('invalid cleared-source metadata blocks unrelated sends without discarding 
  }
 });
 
-test('a People draft saved before copy identities stays reviewable',()=>{
+test('a People draft saved before copy identities is kept and is not listed',()=>{
  const binding='a'.repeat(64),oldScope='s/o/c/g\0binding:'+binding+'\0n1\0owner-instance';
  const key='scimux-people-draft:n1:scope:'+encodeURIComponent(oldScope),storage=makeStorage({[key]:'older scoped discussion'});
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();
- assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/older scoped discussion/);assert.equal(storage.getItem(key),'older scoped discussion');assert.equal(ctx.apiCalls.length,0);
+ assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('older scoped discussion'), false);assert.equal(storage.getItem(key),'older scoped discussion');assert.equal(ctx.apiCalls.length,0);
 });
 
-test('an unresolved People publication from before copy identities stays reviewable',()=>{
+test('an unresolved People publication from before copy identities is kept and is not listed',()=>{
  const binding='a'.repeat(64),key='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding;
  const pending={instance:'owner-instance',request:{text:'unconfirmed older publication',anchor:0,key:'0123456789abcdef',attachments:['fedcba9876543210']}};
  const storage=makeStorage({[key]:JSON.stringify(pending)});
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
- ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed older publication/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),JSON.stringify(pending));assert.equal(ctx.apiCalls.length,0);
+ ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('unconfirmed older publication'), false);assert.equal(storage.getItem(key),JSON.stringify(pending));assert.equal(ctx.apiCalls.length,0);
 });
 
 test('a staged People file from before copy identities remains reviewable without upload',async()=>{
@@ -2945,10 +2989,10 @@ test('an earlier copy pending publication is reviewable without replay',async()=
  const storage=makeStorage({[key]:JSON.stringify(pending)}),store={list:async()=>[],listRetired:async()=>[{scope:prefix+'\0copy:'+oldCopy+'\0'+owner,id:'fedcba9876543210',file:{name:'earlier.txt',type:'text/plain',size:1}}]};
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:store,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- assert.match(ctx.roots.recovery.innerHTML,/earlier pending text/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),JSON.stringify(pending));assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+ assert.match(ctx.roots.recovery.innerHTML,/Download earlier\.txt/);assert.equal(ctx.roots.recovery.innerHTML.includes('earlier pending text'), false);assert.equal(ctx.roots.recovery.innerHTML.includes('unconfirmed'), false);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(storage.getItem(key),JSON.stringify(pending));assert.equal(ctx.fetchCalls.length,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });
 
-test('an earlier copy text draft and unconfirmed publication remain reviewable without file rows',async()=>{
+test('an earlier copy text draft and unconfirmed publication are kept and are not listed',async()=>{
  const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),owner='n1\0owner-instance';
  const draftKey='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+binding+'\0copy:'+oldCopy+'\0'+owner);
  const pendingKey='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding+':copy:'+oldCopy;
@@ -2956,24 +3000,34 @@ test('an earlier copy text draft and unconfirmed publication remain reviewable w
  const storage=makeStorage({[draftKey]:'old text draft',[pendingKey]:pending});
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- assert.equal(ctx.feature.promptText(),'');assert.match(ctx.roots.recovery.innerHTML,/old text draft/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed prior message/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);
+ assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('old text draft'), false);assert.equal(ctx.roots.recovery.innerHTML.includes('unconfirmed prior message'), false);
  assert.equal(storage.getItem(draftKey),'old text draft');assert.equal(storage.getItem(pendingKey),pending);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });
 
-test('an earlier copy text draft remains reviewable when file storage is unavailable',async()=>{
+test('an earlier copy text draft is not listed when file storage is unavailable',async()=>{
  const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),owner='n1\0owner-instance';
  const key='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+binding+'\0copy:'+oldCopy+'\0'+owner),storage=makeStorage({[key]:'saved discussion without file store'});
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:null,peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- assert.match(ctx.roots.recovery.innerHTML,/saved discussion without file store/);assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(storage.getItem(key),'saved discussion without file store');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+ assert.equal(ctx.roots.recovery.innerHTML.includes('saved discussion without file store'), false);assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(storage.getItem(key),'saved discussion without file store');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });
 
-test('an earlier copy text draft remains reviewable when file storage read fails',async()=>{
+test('a retired file list that cannot be read reports that files could not be reviewed', async () => {
+ const binding='a'.repeat(64), copyInstance='b'.repeat(32);
+ const ctx=makeFeature({recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>null},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
+ assert.match(ctx.roots.recovery.innerHTML, /could not be reviewed/);
+ assertNoSavedDraftPanel(ctx.roots.recovery);
+ assert.equal(ctx.apiCalls.length, 0);
+ ctx.feature.destroy();
+});
+
+test('an earlier copy text draft is not listed when file storage read fails',async()=>{
  const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),owner='n1\0owner-instance';
  const key='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+binding+'\0copy:'+oldCopy+'\0'+owner),storage=makeStorage({[key]:'saved discussion after storage error'});
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>{throw Error('synthetic unavailable')}},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- assert.match(ctx.roots.recovery.innerHTML,/saved discussion after storage error/);assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(storage.getItem(key),'saved discussion after storage error');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+ assert.equal(ctx.roots.recovery.innerHTML.includes('saved discussion after storage error'), false);assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(storage.getItem(key),'saved discussion after storage error');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });
 
 test('a late retired-file storage failure cannot change a newer chat recovery view',async()=>{
@@ -2983,18 +3037,18 @@ test('a late retired-file storage failure cannot change a newer chat recovery vi
  reject(Error('synthetic unavailable'));await new Promise(resolve=>setImmediate(resolve));assert.doesNotMatch(ctx.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });
 
-test('a damaged earlier pending message stays stored and is labelled unavailable',async()=>{
+test('a damaged earlier pending message stays stored and is not listed',async()=>{
  const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),key='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding+':copy:'+oldCopy;
  const storage=makeStorage({[key]:'{damaged'}),ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
- ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));assert.match(ctx.roots.recovery.innerHTML,/unavailable/i);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),'{damaged');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+ ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('unavailable'), false);assert.equal(storage.getItem(key),'{damaged');assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });
 
-test('a retired file-only pending message remains reviewable without replay',async()=>{
+test('a retired file-only pending message is kept and is not listed',async()=>{
  const binding='a'.repeat(64),oldCopy='c'.repeat(32),copyInstance='b'.repeat(32),key='scimux-people-file-pending:s/o/c/g:owner-instance:'+binding+':copy:'+oldCopy;
  const pending=JSON.stringify({instance:'owner-instance',copyInstance:oldCopy,request:{text:'',attachments:['0123456789abcdef']}}),storage=makeStorage({[key]:pending});
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance,writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('new draft');await new Promise(resolve=>setImmediate(resolve));
- assert.match(ctx.roots.recovery.innerHTML,/File-only People message/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),pending);assert.equal(ctx.feature.promptText(),'new draft');assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+ assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('File-only People message'), false);assert.equal(storage.getItem(key),pending);assert.equal(ctx.feature.promptText(),'new draft');assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
 });
 
 test('recipient reload offers an earlier copy pending message for review without replay',async()=>{
@@ -3002,7 +3056,7 @@ test('recipient reload offers an earlier copy pending message for review without
  const pending=JSON.stringify({instance:'',copyInstance:old,request:{text:'saved recipient caption',attachments:['0123456789abcdef']}}),storage=makeStorage({[key]:pending});
  const ctx=makeFeature({sel:'team/s/o/c/g',nodes:[],storage,recovery:true,deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding,copyInstance:current,writable:true,owner:false,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- const assertRetained=()=>{assert.match(ctx.roots.recovery.innerHTML,/saved recipient caption/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),pending);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0)};
+ const assertRetained=()=>{assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('saved recipient caption'), false);assert.equal(storage.getItem(key),pending);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0)};
  assertRetained();ctx.feature.contextChanged();await new Promise(resolve=>setImmediate(resolve));assertRetained();ctx.feature.destroy();
 });
 
@@ -3011,7 +3065,7 @@ test('recipient can review an earlier pending copy when the server binding is un
  const pending=JSON.stringify({instance:'',copyInstance:old,request:{text:'saved offline caption',attachments:[]}}),storage=makeStorage({[key]:pending});
  const ctx=makeFeature({sel:'team/s/o/c/g',nodes:[],storage,recovery:true,deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',copyInstance:current,writable:false,owner:false,attachments:false})}});
  ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- assert.match(ctx.roots.recovery.innerHTML,/saved offline caption/);assert.match(ctx.roots.recovery.innerHTML,/unconfirmed/i);assert.equal(storage.getItem(key),pending);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+ assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('saved offline caption'), false);assert.equal(storage.getItem(key),pending);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
 });
 
 test('unchanged People context refresh preserves retired-file review without reloading it',async()=>{
@@ -3048,10 +3102,10 @@ test('retired People recovery reports a failed draft enumeration without dispatc
  const storage=makeStorage();storage.keys=()=>{throw Error('synthetic enumeration failure')};
  const ctx=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps:{peopleFileStore:{list:async()=>[],listRetired:async()=>[]},peopleContext:()=>({key:'s/o/c/g',binding:'a'.repeat(64),copyInstance:'b'.repeat(32),writable:true,owner:true,attachments:true})}});
  ctx.feature.bind();ctx.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- assert.match(ctx.roots.recovery.innerHTML,/could not be reviewed/i);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
+ assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('could not be reviewed'), false);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);ctx.feature.destroy();
 });
 
-test('retired draft discovery refuses unrelated bindings and reports unavailable enumeration',async()=>{
+test('retired draft discovery refuses unrelated bindings and ignores a missing key list',async()=>{
  const binding='a'.repeat(64),other='d'.repeat(64),old='c'.repeat(32),current='b'.repeat(32),owner='n1\0owner-instance';
  const key='scimux-people-draft:n1:scope:'+encodeURIComponent('s/o/c/g\0binding:'+other+'\0copy:'+old+'\0'+owner);
  const storage=makeStorage({[key]:'other server private draft','scimux-people-draft:n1:scope:%bad':'damaged'});
@@ -3062,16 +3116,16 @@ test('retired draft discovery refuses unrelated bindings and reports unavailable
  storage.keys=()=>null;
  const retry=makeFeature({storage,recovery:true,nodes:[{id:'n1',instance_id:'owner-instance'}],deps});
  retry.feature.bind();retry.feature.onSelect();await new Promise(resolve=>setImmediate(resolve));
- assert.match(retry.roots.recovery.innerHTML,/could not be reviewed/);assert.equal(retry.apiCalls.length,0);retry.feature.destroy();
+ assert.equal(retry.roots.recovery.hidden,true);assertNoSavedDraftPanel(retry.roots.recovery);assert.equal(retry.roots.recovery.innerHTML.includes('could not be reviewed'), false);assert.equal(retry.apiCalls.length,0);retry.feature.destroy();
 });
 
-test('legacy People draft appears for review when capability arrives without replacing newer bound editing',()=>{
+test('legacy People draft stays stored when capability arrives without replacing newer bound editing',()=>{
  let binding='';
  const storage=makeStorage({'scimux-people-draft:n1':'older <draft>'});
  const ctx=makeFeature({storage,recovery:true,deps:{peopleContext:()=>({key:'s/o/c/g',binding,writable:true,owner:true,attachments:!!binding})}});
- ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.feature.promptText(),'');assert.match(ctx.roots.recovery.innerHTML,/older &lt;draft&gt;/);
+ ctx.feature.bind();ctx.feature.onSelect();assert.equal(ctx.feature.promptText(),'');assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('older'), false);
  binding='a'.repeat(64);ctx.feature.contextChanged();assert.equal(ctx.feature.promptText(),'');
- assert.equal(ctx.roots.recovery.hidden,false);assert.match(ctx.roots.recovery.innerHTML,/older &lt;draft&gt;/);
+ assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);
  ctx.feature.setPromptText('newer');ctx.roots.prompt.firstListener('input')();
  assert.equal(storage.getItem('scimux-people-draft:n1'),'older <draft>');assert.equal(ctx.feature.promptText(),'newer');
 });
@@ -4485,10 +4539,10 @@ test('multiple durable People draft heads stay separate and reviewable',async()=
  try{ctx.feature.bind();ctx.feature.onSelect();await localReviewTick();assert.equal(ctx.feature.promptText(),'');assert.match(ctx.roots.attstage.innerHTML,/first synthetic draft/);assert.match(ctx.roots.attstage.innerHTML,/second synthetic draft/);assert.equal(recovery.filter(row=>row.kind==='head').length,2);assert.equal(ctx.apiCalls.length,0);}finally{ctx.feature.destroy();}
 });
 
-test('a preserved current-binding legacy People caption appears only in saved-draft review',async()=>{
+test('a preserved current-binding legacy People caption stays stored and is not listed',async()=>{
  const copyInstance='1'.repeat(32),key=localReviewKey,binding=`${key}\0binding:current\0copy:${copyInstance}\0team/${key}`,draftKey='scimux-people-draft:team/'+key+':scope:'+encodeURIComponent(binding),legacy='legacy synthetic caption';
  const ctx=makeFeature({sel:'team/'+key,nodes:[],recovery:true,drafts:{[draftKey]:legacy},deps:{peopleContext:()=>({key,copyInstance,binding:'current',owner:false,writable:true,attachments:true})}});
- try{ctx.feature.bind();ctx.feature.onSelect();await localReviewTick();assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.storage.getItem(draftKey),legacy);assert.match(ctx.roots.recovery.innerHTML,/legacy synthetic caption/);assert.equal(ctx.apiCalls.length,0);}finally{ctx.feature.destroy();}
+ try{ctx.feature.bind();ctx.feature.onSelect();await localReviewTick();assert.equal(ctx.feature.promptText(),'');assert.equal(ctx.storage.getItem(draftKey),legacy);assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('legacy synthetic caption'), false);assert.equal(ctx.apiCalls.length,0);}finally{ctx.feature.destroy();}
 });
 
 test('confirmed text-only People send clears its exact durable draft version',async()=>{
@@ -4560,9 +4614,9 @@ test('late text-only People completion preserves newer same-text durable editing
  try{ctx.feature.bind();ctx.feature.onSelect();ctx.feature.setPromptText('same');ctx.roots.prompt.firstListener('input')();await f.waitDraft(1);const flight=ctx.feature.sendPrompt();await f.waitSend(1);assert.equal(typeof release,'function');ctx.feature.setPromptText('same');ctx.roots.prompt.firstListener('input')();await f.waitDraft(2);release({seq:7});await flight;await localReviewTick();assert.equal(ctx.feature.promptText(),'same');const state=await f.actual.listPeopleRecovery(scope);assert.equal(state.heads.length,1);assert.equal(state.heads[0].text,'same');assert.equal(f.sends.length,1);assert.equal(ctx.apiCalls.length,0);}finally{ctx.feature.destroy();}
 });
 
-test('a legacy text-only People retry remains visible for review without dispatch',async()=>{
+test('a legacy text-only People retry stays stored and is not listed',async()=>{
  const key=localReviewKey,slot='scimux-comment-retry:'+key,value=JSON.stringify({text:'legacy text retry',anchor:0,key:'2'.repeat(16)}),ctx=makeFeature({sel:'team/'+key,nodes:[],recovery:true,drafts:{[slot]:value},deps:{peopleContext:()=>({key,copyInstance:'1'.repeat(32),binding:'current',owner:false,writable:true,attachments:false})}});
- try{ctx.feature.bind();ctx.feature.onSelect();await localReviewTick();assert.equal(ctx.storage.getItem(slot),value);assert.match(ctx.roots.recovery.innerHTML,/legacy text retry/);assert.equal(ctx.apiCalls.length,0);}finally{ctx.feature.destroy();}
+ try{ctx.feature.bind();ctx.feature.onSelect();await localReviewTick();assert.equal(ctx.storage.getItem(slot),value);assert.equal(ctx.roots.recovery.hidden,true);assertNoSavedDraftPanel(ctx.roots.recovery);assert.equal(ctx.roots.recovery.innerHTML.includes('legacy text retry'), false);assert.equal(ctx.apiCalls.length,0);}finally{ctx.feature.destroy();}
 });
 
 test('text-only People composer supplies its durable draft to publication admission',async()=>{
@@ -5014,12 +5068,12 @@ for(const field of ['server','owner','chat','generation','copyInstance','binding
   ctx.feature.contextChanged();ctx.feature.onSelect();await localReviewTick();
   if(field!=='native'){ctx.feature.setDestination('agent');assert.equal(ctx.feature.destination(),'people','a recipient cannot acquire Agent controls');}
   ctx.feature.setPromptText('replacement view input');ctx.roots.prompt.firstListener('input')();await localReviewTick();
-  const before=structuredClone(f.recovery()),files=JSON.stringify(f.files()),view={text:ctx.feature.promptText(),destination:ctx.feature.destination(),stage:ctx.roots.attstage.innerHTML,hidden:ctx.roots.attstage.hidden,alerts:[...ctx.alerts],source:ctx.storage.getItem(sourceKey),retired:readRetiredDrafts(ctx.storage,'n1'),legacy:ctx.storage.getItem('synthetic-legacy-text')};
-  assert.equal(view.text,'replacement view input');if(field==='native'){assert.notEqual(view.source,source);assert.ok(readRetiredDrafts(ctx.storage,'n1').some(item=>item.owner==='native'&&item.values['scimux-prompt-sources:']===source));}else assert.equal(view.source,source);assert.equal(view.legacy,'unchanged');assert.equal(files,originalFiles);for(const oldRow of originalRows)assert.deepEqual(before.find(row=>row.key===oldRow.key),oldRow,'old heads and drafts remain exact');
+  const before=structuredClone(f.recovery()),files=JSON.stringify(f.files()),view={text:ctx.feature.promptText(),destination:ctx.feature.destination(),stage:ctx.roots.attstage.innerHTML,hidden:ctx.roots.attstage.hidden,alerts:[...ctx.alerts],source:ctx.storage.getItem(sourceKey),retired:ctx.storage.getItem('scimux-retired-index:n1'),legacy:ctx.storage.getItem('synthetic-legacy-text')};
+  assert.equal(view.text,'replacement view input');if(field==='native'){assert.equal(view.source,null);assert.equal(view.retired,null);}else assert.equal(view.source,source);assert.equal(view.legacy,'unchanged');assert.equal(files,originalFiles);for(const oldRow of originalRows)assert.deepEqual(before.find(row=>row.key===oldRow.key),oldRow,'old heads and drafts remain exact');
   if(order==='before Store entry')assert.deepEqual(before.find(row=>row.publication===publication),original);
   else assert.deepEqual(before.find(row=>row.publication===publication),decision);
   release();await localReviewTick();
-  assert.deepEqual(f.recovery(),before,'the old callback cannot alter any durable row after replacement');assert.equal(JSON.stringify(f.files()),files);assert.equal(ctx.feature.promptText(),view.text);assert.equal(ctx.feature.destination(),view.destination);assert.equal(ctx.roots.attstage.innerHTML,view.stage);assert.equal(ctx.roots.attstage.hidden,view.hidden);assert.deepEqual(ctx.alerts,view.alerts);assert.equal(ctx.storage.getItem(sourceKey),view.source);assert.deepEqual(readRetiredDrafts(ctx.storage,'n1'),view.retired);assert.equal(ctx.storage.getItem('synthetic-legacy-text'),view.legacy);assert.equal(f.sendEntries(),0);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);
+  assert.deepEqual(f.recovery(),before,'the old callback cannot alter any durable row after replacement');assert.equal(JSON.stringify(f.files()),files);assert.equal(ctx.feature.promptText(),view.text);assert.equal(ctx.feature.destination(),view.destination);assert.equal(ctx.roots.attstage.innerHTML,view.stage);assert.equal(ctx.roots.attstage.hidden,view.hidden);assert.deepEqual(ctx.alerts,view.alerts);assert.equal(ctx.storage.getItem(sourceKey),view.source);assert.equal(ctx.storage.getItem('scimux-retired-index:n1'),view.retired);assert.equal(ctx.storage.getItem('synthetic-legacy-text'),view.legacy);assert.equal(f.sendEntries(),0);assert.equal(ctx.apiCalls.length,0);assert.equal(ctx.fetchCalls.length,0);
  }finally{release();ctx.feature.destroy();}
 });
 

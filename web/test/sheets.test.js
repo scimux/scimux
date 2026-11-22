@@ -2119,7 +2119,9 @@ test("LI-C3: an undelivered launch prompt is never echoed as delivered", async (
 });
 
 test('a created chat is not created again when draft identity binding fails', async () => {
- const ctx=createFeature({storageInit:{'scimux-draft-owner:n1':'old','scimux-draft:n1':'old draft','scimux-retired-drafts:n1:old':'{}'}});
+ const storage=makeStorage();
+ storage.getItem=key=>key==='scimux-lastdir'?null:(()=>{ throw new Error('unavailable'); })();
+ const ctx=createFeature({storage});
  let creates=0;
  ctx.setApi(async (path,opts)=>{
   if(path==='/api/nodes' && opts.method==='POST'){creates++;return {id:'n1',instance_id:'new',initial_delivery:'not_sent'};}
