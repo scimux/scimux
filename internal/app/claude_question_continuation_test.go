@@ -453,7 +453,7 @@ func TestStandingClaudeAskFor(t *testing.T) {
 	})
 	t.Run("other session", func(t *testing.T) {
 		perm := filepath.Join(t.TempDir(), "perm")
-		contAskAt(t, perm, "ask-1", "AskUserQuestion", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", now)
+		contAskAt(t, perm, "ask-1", "AskUserQuestion", hookSIDSuccessor, now)
 		falseRow(t, perm, hookSIDOwn)
 	})
 	t.Run("answered", func(t *testing.T) {
