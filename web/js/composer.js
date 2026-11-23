@@ -41,7 +41,7 @@
  *   - POST /api/nodes/:id/attachments       multipart FormData files
  *
  * Events owned after one idempotent bind():
- *   - #prompt input / paste / keydown / beforeinput
+ *   - #prompt input / paste / keydown / beforeinput / compositionstart / compositionend
  *   - #sendbtn click
  *   - #attadd click (menu open/place/close)
  *   - #attmenu click (image/file source)
@@ -288,6 +288,270 @@ export function stageRowHTML(items, deps = {}){
   return list.map(it => stageChipHTML(it, deps)).join("");
 }
 
+/* People composer emoji. The caret token only; paste and restoration stay literal. */
+const PEOPLE_SHORTCODE_EMOJI = [
+  [":stuck_out_tongue:", "😛"],
+  [":white_check_mark:", "✅"],
+  [":thumbsdown:", "👎"],
+  [":frowning:", "☹️"],
+  [":thumbsup:", "👍"],
+  [":laughing:", "😆"],
+  [":rocket:", "🚀"],
+  [":smile:", "😄"],
+  [":heart:", "❤️"],
+  [":wink:", "😉"],
+  [":grin:", "😁"],
+  [":eyes:", "👀"],
+  [":tada:", "🎉"],
+  [":sob:", "😭"],
+  [":+1:", "👍"],
+  [":-1:", "👎"],
+];
+const PEOPLE_EMOTICON_EMOJI = [
+  [":-)", "😄"],
+  [":-D", "😁"],
+  [";-)", "😉"],
+  [":-(", "☹️"],
+  [":-P", "😛"],
+  [":)", "😄"],
+  [":D", "😁"],
+  [";)", "😉"],
+  [":(", "☹️"],
+  [":P", "😛"],
+  ["<3", "❤️"],
+];
+
+function openingFence(line){
+  const match = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return "";
+  if (match[2][0] === "`" && match[3].includes("`")) return "";
+  return match[2];
+}
+
+function closingFence(line, marker){
+  const match = /^( {0,3})(`{3,}|~{3,})[ \t]*$/.exec(line);
+  if (!match) return false;
+  return match[2][0] === marker[0] && match[2].length >= marker.length;
+}
+
+function peopleEmojiProtected(text, index){
+  const lines = String(text).split("\n");
+  let fence = "";
+  let code = 0;
+  let pos = 0;
+  let result = false;
+  let seen = false;
+  for (let i = 0; i < lines.length; i++){
+    if (seen) continue;
+    const line = lines[i];
+    const end = pos + line.length;
+    const here = index < end;
+    if (fence){
+      if (closingFence(line, fence)){
+        fence = "";
+        code = 0;
+      }
+      if (here){ result = true; seen = true; }
+    } else {
+      const marker = code === 0 ? openingFence(line) : "";
+      if (marker){
+        fence = marker;
+        code = 0;
+        if (here){ result = true; seen = true; }
+      } else {
+        let escaped = false;
+        let j = 0;
+        while (j < line.length){
+          if (pos + j === index){
+            result = code !== 0;
+            seen = true;
+            break;
+          }
+          const ch = line[j];
+          if (escaped){
+            escaped = false;
+            j++;
+            continue;
+          }
+          /* mdInline keeps backslashes literal inside a span, so only an
+             outside backslash can stop a backtick from being a delimiter. */
+          if (ch === "\\" && code === 0){
+            escaped = true;
+            j++;
+            continue;
+          }
+          if (ch === "`"){
+            let run = 1;
+            while (j + run < line.length && line[j + run] === "`") run++;
+            if (code){
+              if (run === code) code = 0;
+            } else code = run;
+            j += run;
+            continue;
+          }
+          j++;
+        }
+      }
+    }
+    pos = end + 1;
+  }
+  return result;
+}
+
+/** Replacement for the token that ends at caret, before trigger is inserted. */
+export function peopleEmojiReplacement(text, caret, trigger){
+  const src = String(text ?? "");
+  if (!Number.isInteger(caret) || caret < 0 || caret > src.length) return null;
+  if (trigger !== ":" && trigger !== " " && trigger !== "Enter") return null;
+  const table = trigger === ":" ? PEOPLE_SHORTCODE_EMOJI : PEOPLE_EMOTICON_EMOJI;
+  for (let i = 0; i < table.length; i++){
+    const code = table[i][0];
+    const emoji = table[i][1];
+    const body = trigger === ":" ? code.slice(0, -1) : code;
+    if (body.length > caret || src.slice(caret - body.length, caret) !== body) continue;
+    const start = caret - body.length;
+    if (start > 0 && !/\s/.test(src[start - 1])) continue;
+    if (peopleEmojiProtected(src, start)) return null;
+    return { start, end: caret, text: trigger === " " ? emoji + " " : emoji };
+  }
+  return null;
+}
+
+/** Plain-text map of a contenteditable prompt. Offsets match promptText(). */
+export function peoplePromptMap(root){
+  if (!root) return null;
+  const chars = [];
+  const walk = (node) => {
+    const children = node.childNodes ? Array.prototype.slice.call(node.childNodes) : [];
+    for (let i = 0; i < children.length; i++){
+      const child = children[i];
+      if (child.nodeType === 3){
+        const value = child.textContent;
+        for (let j = 0; j < value.length; j++) chars.push({ node: child, offset: j, ch: value[j] });
+      } else if (child.nodeName === "BR"){
+        chars.push({ node: child, offset: 0, ch: "\n", parent: node, index: i });
+      } else {
+        if (chars.length && chars[chars.length - 1].ch !== "\n") chars.push({ node, offset: i, ch: "\n" });
+        walk(child);
+      }
+    }
+  };
+  walk(root);
+  let raw = "";
+  for (let i = 0; i < chars.length; i++) raw += chars[i].ch;
+  const text = normalizePromptText(raw);
+  const childList = (node) => node && node.childNodes ? Array.prototype.slice.call(node.childNodes) : [];
+  const hosts = (element, target) => {
+    const kids = childList(element);
+    for (let i = 0; i < kids.length; i++){
+      if (kids[i] === target || hosts(kids[i], target)) return true;
+    }
+    return false;
+  };
+  const contentEnd = (node) => {
+    let end = null;
+    for (let i = 0; i < chars.length; i++){
+      if (chars[i].node === node || hosts(node, chars[i].node)) end = i + 1;
+    }
+    return end;
+  };
+  /* Plain offset of a caret on an element, before childOffset or after the last child. */
+  const boundaryIndex = (element, childOffset) => {
+    const kids = childList(element);
+    if (childOffset > kids.length) return null;
+    if (childOffset === kids.length) return contentEnd(element);
+    const child = kids[childOffset];
+    for (let i = 0; i < chars.length; i++){
+      if (chars[i].node === child) return i;
+    }
+    for (let i = 0; i < chars.length; i++){
+      if (chars[i].node === element && chars[i].offset === childOffset) return i;
+    }
+    if (child.nodeType !== 3){
+      for (let i = 0; i < chars.length; i++){
+        if (hosts(child, chars[i].node)) return i;
+      }
+    }
+    for (let k = childOffset - 1; k >= 0; k--){
+      const end = contentEnd(kids[k]);
+      if (end != null) return end;
+    }
+    return chars.length ? 0 : null;
+  };
+  const point = (index) => {
+    if (!Number.isInteger(index) || index < 0 || index > chars.length) return null;
+    if (!chars.length) return { node: root, offset: 0 };
+    if (index < chars.length){
+      const current = chars[index];
+      /* The caret at the end of a text node shares the break's plain offset.
+         Selecting there stays on the text node so the break is not part of the token. */
+      if (current.node.nodeType !== 3 && index > 0 && chars[index - 1].node.nodeType === 3){
+        const prev = chars[index - 1];
+        return { node: prev.node, offset: prev.offset + 1 };
+      }
+      return { node: current.node, offset: current.offset };
+    }
+    const last = chars[chars.length - 1];
+    if (last.node.nodeType === 3) return { node: last.node, offset: last.offset + 1 };
+    if (last.node.nodeName === "BR") return { node: last.parent, offset: last.index + 1 };
+    return { node: childList(last.node)[last.offset], offset: 0 };
+  };
+  return {
+    text,
+    raw,
+    offsetOf(node, offset){
+      if (!node || !Number.isInteger(offset) || offset < 0) return null;
+      for (let i = 0; i <= chars.length; i++){
+        const at = point(i);
+        if (at.node === node && at.offset === offset) return i;
+      }
+      if (node.nodeType === 3){
+        const value = String(node.textContent || "");
+        if (offset > value.length) return null;
+        for (let i = 0; i < chars.length; i++){
+          if (chars[i].node === node) return i - chars[i].offset + offset;
+        }
+        if (value) return null;
+        const parent = node.parentNode;
+        if (!parent) return null;
+        const at = childList(parent).indexOf(node);
+        return at < 0 ? null : boundaryIndex(parent, at);
+      }
+      if (node.nodeName === "BR"){
+        if (offset !== 0) return null;
+        for (let i = 0; i < chars.length; i++) if (chars[i].node === node) return i;
+        return null;
+      }
+      if (node.nodeType !== 1) return null;
+      return boundaryIndex(node, offset);
+    },
+    range(start, end){
+      const a = point(start);
+      const b = point(end);
+      if (!a || !b) return null;
+      return { start: a, end: b };
+    },
+  };
+}
+
+/* insertHTML text. The People emoji table has none of these; the escape keeps
+   the trailing-break command a single literal payload. */
+function plainHtml(text){
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* A trailing break insertText would drop. A break with anything after it is
+   the line the caret is still on, so the replacement must leave it alone. */
+function breakAfter(point){
+  const node = point.node;
+  if (point.offset !== node.textContent.length) return null;
+  const kids = Array.prototype.slice.call(node.parentNode.childNodes);
+  const at = kids.indexOf(node);
+  const next = kids[at + 1];
+  if (!next || next.nodeName !== "BR" || kids[at + 2]) return null;
+  return next;
+}
+
 /* ---------- factory ---------- */
 
 /**
@@ -394,6 +658,9 @@ export function createComposerFeature(deps){
   const recoveredSourceFiles = new Set(), recoveringSourceFiles = new Set();
   const preparationControllers = new Set();
   const cleanups = [];
+  let applyingPromptEdit = 0;
+  let composing = false;
+  let confirmEnter = false;
   /* dynamic remove buttons rebound on each renderStage */
   let stageRemoveCleanups = [];
   let localReview = null;
@@ -2121,6 +2388,50 @@ export function createComposerFeature(deps){
     }
   }
 
+  function onCompositionStart(){
+    composing = true;
+    confirmEnter = false;
+  }
+
+  function onCompositionEnd(){
+    composing = false;
+    confirmEnter = true;
+    setTimeoutFn(() => { confirmEnter = false; }, 0);
+  }
+
+  function applyPeopleEmoji(trigger, preventDefault){
+    if (composing || !isPeople()) return;
+    if (typeof doc.execCommand !== "function") return;
+    const map = peoplePromptMap(prompt);
+    if (map.text !== promptText()) return;
+    const sel = doc.getSelection();
+    const range = sel.getRangeAt(0);
+    if (!range.collapsed) return;
+    const edit = peopleEmojiReplacement(map.text, map.offsetOf(range.startContainer, range.startOffset), trigger);
+    if (!edit) return;
+    const points = map.range(edit.start, edit.end);
+    const next = doc.createRange();
+    /* insertText drops a trailing <br> and nothing else. Put that break back
+       in the same command. An internal break stays where it is, caret in front. */
+    const trailing = breakAfter(points.end);
+    next.setStart(points.start.node, points.start.offset);
+    if (trailing){
+      const kids = Array.prototype.slice.call(trailing.parentNode.childNodes);
+      next.setEnd(trailing.parentNode, kids.indexOf(trailing) + 1);
+    } else next.setEnd(points.end.node, points.end.offset);
+    sel.removeAllRanges();
+    sel.addRange(next);
+    applyingPromptEdit++;
+    try {
+      doc.execCommand(
+        trailing ? "insertHTML" : "insertText",
+        false,
+        trailing ? plainHtml(edit.text) + "<br>" : edit.text,
+      );
+    } finally { applyingPromptEdit--; }
+    if (preventDefault) preventDefault();
+  }
+
   function onPromptPaste(e){
     const files = e.clipboardData && e.clipboardData.files;
     if (files && files.length){
@@ -2133,11 +2444,20 @@ export function createComposerFeature(deps){
       : null;
     if (text == null) return;
     e.preventDefault();
-    if (doc && typeof doc.execCommand === "function")
-      doc.execCommand("insertText", false, text);
+    if (doc && typeof doc.execCommand === "function"){
+      applyingPromptEdit++;
+      try { doc.execCommand("insertText", false, text); }
+      finally { applyingPromptEdit--; }
+    }
   }
 
   function onPromptKeydown(e){
+    if (e.isComposing || e.keyCode === 229) return;
+    if (confirmEnter){
+      confirmEnter = false;
+      if (e.key === "Enter") return;
+    }
+    if (e.key === "Enter") applyPeopleEmoji("Enter");
     if (shouldSendOnEnter({
       key: e.key,
       shiftKey: e.shiftKey,
@@ -2152,13 +2472,21 @@ export function createComposerFeature(deps){
   }
 
   function onPromptBeforeInput(e){
-    if (e.inputType !== "insertFromDrop") return;
+    if (applyingPromptEdit) return;
+    if (e.inputType !== "insertFromDrop") {
+      if (e.inputType === "insertText" && !e.isComposing && (e.data === ":" || e.data === " "))
+        applyPeopleEmoji(e.data, () => e.preventDefault());
+      return;
+    }
     e.preventDefault();
     const text = e.dataTransfer && e.dataTransfer.getData
       ? e.dataTransfer.getData("text/plain")
       : "";
-    if (text && doc && typeof doc.execCommand === "function")
-      doc.execCommand("insertText", false, text);
+    if (text && doc && typeof doc.execCommand === "function"){
+      applyingPromptEdit++;
+      try { doc.execCommand("insertText", false, text); }
+      finally { applyingPromptEdit--; }
+    }
   }
 
   function onSendClick(){
@@ -2270,6 +2598,8 @@ export function createComposerFeature(deps){
     listen(prompt, "paste", onPromptPaste);
     listen(prompt, "keydown", onPromptKeydown);
     listen(prompt, "beforeinput", onPromptBeforeInput);
+    listen(prompt, "compositionstart", onCompositionStart);
+    listen(prompt, "compositionend", onCompositionEnd);
     listen(sendbtn, "click", onSendClick);
     listen(attadd, "click", onAttAddClick);
     listen(attmenu, "click", onAttMenuClick);
