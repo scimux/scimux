@@ -271,8 +271,15 @@ helper deadline. An emitted cancellation keeps only a minimal fence — action, 
 and turn generation — so settlement still works after the payload is gone,
 including across a worker restart. That fence is not hook stdout and is not
 replayed. The helper
-deadline for these two tools is 150 seconds inside a 180-second hook
-registration, and the app stops accepting decisions at 135 seconds. The
+deadline for these two tools, on a bundle minted with
+`interaction_long_wait`, is 4 hours inside a 4 hour 30 second hook
+registration, and the app stops accepting decisions 15 seconds before the
+helper deadline. A bundle minted before this change has no
+`interaction_long_wait` capability and keeps 150 seconds, 180 seconds and
+135 seconds. A card is withdrawn when its own request is marked answered,
+by the exact tool-call join or by a turn boundary, and never on growth or
+the notice TTL alone. Raw payloads still go at the helper deadline, which
+is now up to 4 hours. The
 ordinary 5-second auxiliary permission deadline is unchanged. The timeout is a
 field in the settings document before serialization, never a JSON byte patch.
 Immutable capability manifests are cached with file-identity checks; enabled
@@ -325,6 +332,13 @@ structurally proven.
   (missing, retired or mismatched → 409, never typed into Claude's prompt).
   Notifications are fenced by the accepted-turn nonce so a closed turn's
   notice cannot mint an epoch for the next one.
+- A multi-part AskUserQuestion is one dialog with one Notification. A key
+  on its epoch, while that question's ask still stands, replaces the epoch
+  with a continued successor that has a fresh id, so the answered id is
+  stale (409). A continued epoch is shown only while the visible pane
+  corroborates a dialog: a validated numbered menu, or the cancel anchor
+  without the working footer. It retires with its ask, like any epoch.
+  Every other tool keeps one-key retirement.
 - Keys and labels come only from a structurally validated current AX menu or
   another exact source; invented Yes / "don't ask again" / No rows are never
   shown. A standing ask's tool hint classifies `AskUserQuestion` and

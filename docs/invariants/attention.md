@@ -44,6 +44,11 @@ node never raises inspect from quietness, AX, owing or transcript faults.
   footer is the inverse, suppression-only hint: it may suppress neutral
   `inspect`, but never feeds liveness, creates attention, retires a hook
   notice or overrides a classified dialog.
+- The stale-transcript judgment is suspended for an owned Claude node
+  while a hook ask stands. Claude flushes the asking turn's assistant
+  records only after the answer, so growth in that window is not a
+  transcript fault. A waiting question or approval outranks
+  `claude_transcript_fault` in the chat reason.
 - Claude's explicit interrupted-message record is a completed turn boundary
   even though Claude writes it with role `user`; it clears Owing/pending and
   releases the next-prompt gate.
@@ -51,7 +56,8 @@ node never raises inspect from quietness, AX, owing or transcript faults.
   source of kind `question` while its phase is pending or claimed, including
   while an auto-approve lease is armed. The owning worker releases it after
   the helper deadline, so a dead helper does not leave the question in
-  attention. It does not change mechanical
+  attention. It is also released when its request is marked answered
+  elsewhere. It does not change mechanical
   liveness, does not authorize pane-text attention, and does not apply to
   legacy or unsupported sessions. Those keep the existing policy.
   Stopping or failing hooks are not required to clear it.
