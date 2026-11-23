@@ -355,6 +355,8 @@ func retireAskedByToolEvidence(perm string, seen []toolEvidence, now time.Time) 
 			if os.Remove(f.path) == nil {
 				used[i] = true
 				retired++
+				name := filepath.Base(f.path)
+				markClaudeRequestAnswered(perm, name[:len(name)-len(filepath.Ext(name))])
 			}
 			break
 		}

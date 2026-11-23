@@ -108,13 +108,35 @@ func interactionWaitBudget(requested time.Duration) time.Duration {
 // budget is passed through. A long-wait bundle waits four hours. Every other
 // bundle keeps the 150 s deadline.
 func interactionWaitBudgetFor(bundle string, requested time.Duration) time.Duration {
-	return interactionWaitBudget(requested)
+	budget := interactionWaitBudget(requested)
+	if budget != interactionHelperDeadline {
+		return budget
+	}
+	if caps, ok := interactionReadCapabilities(bundle); ok && caps.InteractionLongWait >= 1 {
+		return interactionLongWait
+	}
+	return budget
 }
 
 // withdrawAnsweredClaudeInteraction writes an expired marker for the active
 // card when that card is pending or claimed and its own request is already
 // answered. It returns false, and changes nothing, in every other case.
 func withdrawAnsweredClaudeInteraction(bundle string, now time.Time) bool {
+	id, ok := readInteractionActive(bundle)
+	if !ok {
+		return false
+	}
+	phase := claudeInteractionPhase(bundle, id, now)
+	if phase != "pending" && phase != "claimed" {
+		return false
+	}
+	if !claudeRequestAnswered(filepath.Join(bundle, "perm"), id) {
+		return false
+	}
+	path, err := interactionChild(bundle, "expired", id)
+	if err == nil && exclWrite(path, []byte("withdrawn")) == nil {
+		return true
+	}
 	return false
 }
 
@@ -174,7 +196,7 @@ func maybeServeClaudeInteraction(dir string, ev claudePermissionEvent, id string
 	if !bundleSupportsInteraction(dir) || !claudeQuestionTools[ev.ToolName] {
 		return false, nil
 	}
-	return serveClaudeInteraction(dir, ev, id, stdout, interactionWaitBudget(deadline), every, time.Now, time.Sleep)
+	return serveClaudeInteraction(dir, ev, id, stdout, interactionWaitBudgetFor(dir, deadline), every, time.Now, time.Sleep)
 }
 
 func serveClaudeInteraction(dir string, ev claudePermissionEvent, id string, stdout io.Writer, budget, every time.Duration, now func() time.Time, sleep func(time.Duration)) (bool, error) {

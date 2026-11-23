@@ -271,6 +271,11 @@ func (a *app) poll() {
 			// A structured question or plan is a human decision even while a
 			// permission dialog is also visible and even while a lease is armed.
 			// It overrides dialog attention. It does not change pane liveness.
+			if claudeSup == claudeSupStrict {
+				if b := a.claudeHookBundle(n); b != "" && bundleSupportsInteraction(b) {
+					withdrawAnsweredClaudeInteraction(b, time.Now())
+				}
+			}
 			if claudeSup == claudeSupStrict && a.claudeInteractionNeedsAttention(n) {
 				attn, freshAttn = "question", true
 			}

@@ -262,7 +262,7 @@ func writeClaudeHookBundle(ops hookOps, root, hookID string, addDirs []string) (
 	// that the hooks can still run at all (claudeBundleExecUsable).
 	// Every new bundle supports structured questions and plans. Existing
 	// bundles retain the capabilities proved by their original executable.
-	capsDoc := claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Interaction: 1, Exec: execPath}
+	capsDoc := claudeHookCapabilities{Permission: 1, Asked: 1, Stop: 1, Notify: 1, Compact: 1, Elicitation: 1, Interaction: 1, InteractionLongWait: 1, Exec: execPath}
 	for _, sub := range claudeInteractionSubdirs {
 		p := filepath.Join(dir, sub)
 		if err := ops.MkdirAll(p, 0o700); err != nil {
@@ -368,7 +368,7 @@ func claudeHookSettingsJSON(execPath, hookDir string, addDirs ...string) ([]byte
 			},
 		},
 	}
-	permissionHook := map[string]any{"type": "command", "command": permCmd, "timeout": interactionHookTimeoutSec}
+	permissionHook := map[string]any{"type": "command", "command": permCmd, "timeout": interactionLongHookTimeoutSec}
 	doc := map[string]any{
 		"hooks": map[string]any{
 			"SessionStart":      entry(cmd),

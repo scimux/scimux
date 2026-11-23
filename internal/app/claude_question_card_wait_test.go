@@ -373,6 +373,10 @@ func TestToolEvidenceJoinMarksAskAnswered(t *testing.T) {
 	if claudeRequestAnswered(perm, old) {
 		t.Fatal("growth retirement must not mark the ask answered")
 	}
+	// No notices: the pre-existing empty return, covered because this function changed.
+	if retireAskedByToolEvidence(filepath.Join(t.TempDir(), "none"), []toolEvidence{{Tool: "AskUserQuestion", Digest: "cont-" + id, At: at}}, at) != 0 {
+		t.Fatal("no notices means nothing to mark")
+	}
 }
 
 func TestTurnBoundaryWithdrawsCard(t *testing.T) {
