@@ -8,6 +8,7 @@ import { bubbleActionsHTML } from '../js/chat.js';
 import { createBubbleActionController } from '../js/menu.js';
 import { createPeopleFileStore, createIndexedDBPeopleDriver } from "../js/people-file-store.js";
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
+import { harnessTermsHTML } from "../js/harness.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
 const list = (subscriptions = [], servers = [], truncated = false) => ({ subscriptions: subscriptions.map(view => ({ ...view })), servers, truncated });
@@ -98,7 +99,9 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
   let time = 0, invalidations = 0, selected = "";
   const elements = new Map();
   const doc = { activeElement: null, querySelector: selector => elements.get(selector) || null };
-  for (const id of ["cardlist", "cardtabs", "chattitle", "chatmission", "gueststate", "msgs", "guestmore", "guestnote", "guestremove"]) {
+  const ids = ["cardlist", "cardtabs", "chattitle", "chatmission", "gueststate", "msgs", "guestmore", "guestnote", "guestremove"];
+  if (!extra.omitChatHead) ids.push("chathead");
+  for (const id of ids) {
     const listeners = new Map();
     const el = { id, innerHTML: "", textContent: "", value: "", disabled: false, hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
       addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
@@ -106,7 +109,70 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
       querySelector() { return null; }, querySelectorAll() { return []; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
     elements.set("#" + id, el);
   }
+  if (!extra.omitChatHead) {
+    const head = elements.get("#chathead");
+    head.children = [];
+    head.appendChild = function(child) { this.children.push(child); child.parentNode = this; return child; };
+    head.querySelector = function(sel) {
+      const cls = sel.startsWith(".") ? sel.slice(1) : "";
+      const walk = node => {
+        if (cls && String(node.className || "").split(/\s+/).includes(cls)) return node;
+        for (const child of node.children || []) {
+          const found = walk(child);
+          if (found) return found;
+        }
+        return null;
+      };
+      return walk(this);
+    };
+    doc.createElement = tag => {
+      const node = {
+        tagName: String(tag).toUpperCase(), className: "", textContent: "", open: false, children: [], parentNode: null,
+        appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+        remove() {
+          const parent = this.parentNode;
+          if (parent?.children) {
+            const index = parent.children.indexOf(this);
+            if (index >= 0) parent.children.splice(index, 1);
+          }
+          this.parentNode = null;
+        },
+      };
+      if (extra.disclosureAssigns) {
+        let html = "";
+        Object.defineProperty(node, "innerHTML", {
+          get() { return html; },
+          set(value) { html = value; extra.disclosureAssigns.push("disclosure"); },
+        });
+      } else node.innerHTML = "";
+      return node;
+    };
+  }
   const body = elements.get("#msgs");
+  Object.defineProperty(body, "firstElementChild", { get() {
+    const html = this.innerHTML || "";
+    if (!html) return null;
+    if (!html.startsWith('<div class="sharing-notice"')) return { parentNode: this, classList: { contains() { return false; } }, innerHTML: "" };
+    return {
+      parentNode: this,
+      classList: { contains(name) { return name === "sharing-notice"; } },
+      get innerHTML() {
+        const current = body.innerHTML || "";
+        const open = current.indexOf(">");
+        const end = current.indexOf("</div>");
+        const inner = open < 0 || end < 0 ? "" : current.slice(open + 1, end);
+        return extra.reserializeQuotes ? inner.replace(/&quot;/g, '"') : inner;
+      },
+      set innerHTML(value) {
+        const current = body.innerHTML || "";
+        const open = current.indexOf(">");
+        const end = current.indexOf("</div>");
+        if (open < 0 || end < 0) return;
+        if (extra.noticeAssigns) extra.noticeAssigns.push("notice");
+        body.innerHTML = current.slice(0, open + 1) + value + current.slice(end);
+      },
+    };
+  } });
   Object.defineProperty(body, "children", { get() {
     const pieces = this.innerHTML.split(/(?=<div class="(?:turn |previewtrunc|bubactions))/).filter(Boolean);
     return pieces.map((piece, index) => {
@@ -3561,4 +3627,382 @@ test('guest rejects prior text retirement when opaque colon native owner is repl
   x.setNative('replacement:native');assert.equal(x.localNodes().find(node=>node.id===x.selectedNode()).instance_id,'replacement:native');const before=structuredClone(x.recovery()),files=JSON.stringify(x.files()),legacy=x.values.get('synthetic-legacy'),requests=x.requests();
   await assert.doesNotReject(()=>f.feature.refreshRetainedPeopleRecovery(copy));const retained=f.feature.readRetainedPeopleTextPending(copy);assert.equal(retained.unavailable,false);assert.ok(!retained.entries.some(row=>row.publication===x.row.publication));const writes=x.writes();await assert.rejects(()=>f.feature.retirePeopleText(reviewed,{current:()=>true}),/identity|current|cancel|unavailable|review/i);assert.equal(x.writes(),writes);assert.deepEqual(x.recovery(),before);assert.equal(JSON.stringify(x.files()),files);assert.equal(x.values.get('synthetic-legacy'),legacy);assert.equal(x.requests(),requests);assert.deepEqual(x.posts,[]);
  }finally{f.feature.destroy();}
+});
+
+function noticeSlice(html) {
+  const end = String(html).indexOf("</div>");
+  return end < 0 ? "" : String(html).slice(0, end + 6);
+}
+function noticeCount(html) {
+  return (String(html).match(/class="sharing-notice"/g) || []).length;
+}
+function termsHref(agent) {
+  return (harnessTermsHTML(agent).match(/href="([^"]+)"/) || [])[1] || "";
+}
+function assertOneNotice(html) {
+  assert.equal(noticeCount(html), 1);
+  assert.ok(html.startsWith('<div class="sharing-notice"'), html.slice(0, 80));
+  const notice = noticeSlice(html);
+  assert.equal(notice.includes("data-seq"), false);
+  assert.equal(notice.includes("data-cseq"), false);
+  assert.equal(notice.includes("data-anchor"), false);
+  assert.equal(notice.includes("data-gact"), false);
+  assert.equal(notice.includes('class="bubble"'), false);
+  assert.doesNotMatch(notice, /supported by|endorsed by|complies with/i);
+  return notice;
+}
+async function openGuest(f, id) {
+  f.feature.tick();
+  await f.feature.settled();
+  if (id) f.open(id); else f.open();
+  await f.feature.settled();
+}
+
+test("sharing notice known grok read and write", async () => {
+  for (const access of ["read", "write"]) {
+    const read = deferred();
+    const calls = [];
+    const view = { ...base, access, owner_name: "Ada" };
+    const f = nativeViewFixture(async (path, opts) => {
+      calls.push({ path, method: opts?.method || "GET", body: opts?.body || "" });
+      if (path === "/api/team/subscriptions") return list([view]);
+      if (path.endsWith("/seen")) return "";
+      return read.promise;
+    });
+    f.feature.tick(); await f.feature.settled();
+    f.open();
+    const loading = f.get("msgs").innerHTML;
+    const during = assertOneNotice(loading);
+    assert.match(loading, /Loading…/);
+    assert.match(during, /Shared by Ada · Includes AI-generated responses/);
+    assert.match(during, /Terms depend on the configured provider\./);
+    assert.equal(f.get("chathead").children.length, 1);
+    assert.equal(f.get("chathead").querySelector(".sharing-disclosure").open, false);
+    assert.equal(f.get("chathead").querySelector(".sharing-disclosure").children[0].textContent, "Sharing notice");
+    read.resolve(readAnswer([{ t: "assistant", seq: 1, text: "synthetic answer", agent: "grok", time: "2026-01-01T00:00:00Z" }], 1, false, view));
+    await f.feature.settled();
+    const html = f.get("msgs").innerHTML;
+    const notice = assertOneNotice(html);
+    assert.match(notice, /Shared by Ada · Created with Grok \(xAI\)/);
+    assert.match(notice, new RegExp('href="' + termsHref("grok").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + '"'));
+    assert.match(notice, /target="_blank"/);
+    assert.match(notice, /rel="noopener"/);
+    assert.match(notice, />provider terms<\/a>/);
+    assert.match(notice, /AI responses may be inaccurate\. Verify before relying on them\. Preserve attribution and respect applicable rights and /);
+    assert.match(notice, /Only Ada can send to the agent\./);
+    assert.doesNotMatch(notice, /Terms depend on the configured provider/);
+    assert.match(html, /grok · agent/);
+    assert.ok(html.indexOf("sharing-notice") < html.indexOf("data-seq"));
+    assert.equal(f.get("chathead").querySelector(".sharing-notice-copy").innerHTML, notice);
+    assert.ok(calls.every(call => call.path.startsWith("/api/team/subscriptions")));
+    assert.ok(calls.every(call => !String(call.body).includes("Created with") && !String(call.body).includes("sharing-notice")));
+    f.feature.destroy();
+  }
+});
+
+test("sharing notice lists evidenced agents in order", async () => {
+  const entries = [
+    { t: "user", seq: 2, text: "question" },
+    { t: "assistant", seq: 8, text: "muse answer", agent: "muse" },
+    { t: "assistant", seq: 4, text: "grok answer", agent: "grok" },
+    { t: "assistant", seq: 6, text: "grok again", agent: "grok" },
+    { t: "assistant", seq: 5, text: "cursor answer", agent: "cursor" },
+    { t: "assistant", seq: 1, text: "claude answer", agent: "claude" },
+    { t: "assistant", seq: 3, text: "codex answer", agent: "codex" },
+    { t: "assistant", seq: 7, text: "blank", agent: "" },
+    { t: "assistant", seq: 9, text: "numeric", agent: 4 },
+    { t: "start", seq: 10, scope: "all" },
+  ];
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer(entries, 10), async () => commentsAnswer([{ seq: 1, anchor: 1, author: "a", text: "not an agent", agent: "claude" }], 1));
+  await openGuest(f);
+  const notice = assertOneNotice(f.get("msgs").innerHTML);
+  assert.match(notice, /Created with Claude \(Anthropic\), Codex \(OpenAI\), Grok \(xAI\), Cursor \(Anysphere\), and Muse \(Meta\)/);
+  for (const agent of ["claude", "codex", "grok", "cursor", "muse"]) {
+    assert.match(notice, new RegExp('href="' + termsHref(agent).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + '"'));
+  }
+  assert.match(notice, /provider terms \(<a [^>]*>Anthropic<\/a>, <a [^>]*>OpenAI<\/a>, <a [^>]*>xAI<\/a>, <a [^>]*>Anysphere<\/a>, <a [^>]*>Meta<\/a>\)/);
+  assert.doesNotMatch(notice, /Terms depend on the configured provider/);
+  assert.match(f.get("msgs").innerHTML, /claude · agent/);
+  assert.match(f.get("msgs").innerHTML, /grok · agent/);
+  assert.doesNotMatch(notice, /Created with Claude \(Anthropic\), Codex \(OpenAI\), Grok \(xAI\), Cursor \(Anysphere\), and Muse \(Meta\).*Created with/);
+  const pair = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer([
+    { t: "assistant", seq: 3, text: "later", agent: "grok" },
+    { t: "assistant", seq: 1, text: "earlier", agent: "claude" },
+  ], 3));
+  await openGuest(pair);
+  assert.match(assertOneNotice(pair.get("msgs").innerHTML), /Created with Claude \(Anthropic\) and Grok \(xAI\)/);
+  pair.feature.destroy();
+  f.feature.destroy();
+});
+
+test("sharing notice omits unknown vendors and escapes", async () => {
+  const owner = 'Ada <img src=x onerror=alert(1)> "q"';
+  const hostile = "<script>agent</script>";
+  const view = { ...base, access: "write", owner_name: owner };
+  const entries = [
+    { t: "assistant", seq: 1, text: "pi answer", agent: "pi" },
+    { t: "assistant", seq: 2, text: "open answer", agent: "opencode" },
+    { t: "assistant", seq: 3, text: "vibe answer", agent: "vibe" },
+    { t: "assistant", seq: 4, text: "dsh answer", agent: "dsh" },
+    { t: "assistant", seq: 5, text: "hostile", agent: hostile },
+    { t: "assistant", seq: 6, text: "known", agent: "grok" },
+  ];
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view]) : readAnswer(entries, 6, false, view));
+  await openGuest(f);
+  const notice = assertOneNotice(f.get("msgs").innerHTML);
+  assert.match(notice, /Created with pi, opencode, Mistral Vibe, dsh, &lt;script&gt;agent&lt;\/script&gt;, and Grok \(xAI\)/);
+  assert.match(notice, /Shared by Ada &lt;img src=x onerror=alert\(1\)&gt; &quot;q&quot;/);
+  assert.match(notice, /Only Ada &lt;img src=x onerror=alert\(1\)&gt; &quot;q&quot; can send to the agent\./);
+  assert.doesNotMatch(notice, /<script>|<img /);
+  assert.match(notice, /Terms depend on the configured provider\./);
+  assert.match(notice, new RegExp('href="' + termsHref("grok").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + '"'));
+  assert.doesNotMatch(notice, /deepseek|cdn\.deepseek/i);
+  assert.doesNotMatch(notice, /\(Anthropic\)|\(OpenAI\)|\(Anysphere\)|\(Meta\)|\(DeepSeek\)/);
+  assert.match(f.get("msgs").innerHTML, /pi · agent/);
+  assert.match(f.get("msgs").innerHTML, /dsh · agent/);
+  f.feature.destroy();
+});
+
+test("sharing notice fallback for empty ended and offline copies", async () => {
+  const cases = [
+    { view: { ...base, access: "read" }, entries: [], text: /Nothing has been shared yet/ },
+    { view: { ...base, access: "write" }, entries: [{ t: "user", seq: 1, text: "only a person" }], text: /only a person/ },
+    { view: { ...base, state: "ended", access: "read" }, entries: [{ t: "assistant", seq: 1, text: "saved", agent: "grok" }], text: /Created with Grok \(xAI\)/ },
+    { view: { ...base, state: "live", delivery: "offline", access: "write" }, entries: [{ t: "assistant", seq: 1, text: "saved", agent: "claude" }], text: /Created with Claude \(Anthropic\)/ },
+  ];
+  for (const item of cases) {
+    const f = nativeViewFixture(async path => {
+      if (path === "/api/team/subscriptions") return list([item.view]);
+      if (path.endsWith("/seen")) return "";
+      return readAnswer(item.entries, item.entries.length, false, item.view);
+    }, undefined, undefined, { omitChatHead: item.view.state === "ended" });
+    await openGuest(f);
+    const notice = assertOneNotice(f.get("msgs").innerHTML);
+    assert.match(f.get("msgs").innerHTML, item.text);
+    if (!item.entries.some(entry => entry.t === "assistant" && entry.agent)) {
+      assert.match(notice, /Includes AI-generated responses/);
+      assert.match(notice, /Terms depend on the configured provider\./);
+      assert.doesNotMatch(notice, /Created with|href=/);
+    }
+    if (item.view.state === "ended") {
+      assert.equal(f.doc.querySelector("#chathead"), null);
+      assert.equal(f.get("gueststate").textContent, "Sharing ended · saved copy");
+    }
+    if (item.view.delivery === "offline") assert.match(f.get("gueststate").textContent, /offline, showing the saved copy/);
+    f.feature.destroy();
+  }
+});
+
+test("sharing notice lifecycle rename switch jump and disclosure", async () => {
+  let people = { "s/o": "Ada" };
+  let mirrorPage = 0;
+  const view = { ...base, access: "read", owner_name: "Server Ada" };
+  const other = { ...base, chat: "b", owner: "p", access: "write", owner_name: "Bea <script>" };
+  const f = nativeViewFixture(async path => {
+    if (path === "/api/team/subscriptions") return list([view, other]);
+    if (path.endsWith("/seen")) return "";
+    if (path.includes("/b/g")) return readAnswer([{ t: "assistant", seq: 1, text: "other", agent: "claude" }], 1, false, other);
+    mirrorPage++;
+    if (mirrorPage === 1) return readAnswer([{ t: "user", seq: 1, text: "hello" }, { t: "assistant", seq: 3, text: "third", agent: "grok" }], 3, true, view);
+    if (mirrorPage <= 40) return readAnswer([], 3, true, view);
+    return readAnswer([{ t: "assistant", seq: 2, text: "second", agent: "claude" }], 3, false, view);
+  }, undefined, undefined, { people: () => people });
+  await openGuest(f);
+  let notice = assertOneNotice(f.get("msgs").innerHTML);
+  assert.match(notice, /Shared by Ada · Created with Grok \(xAI\)/);
+  assert.match(f.get("msgs").innerHTML, /grok · agent/);
+  const top = f.get("msgs").scrollTop;
+  f.get("guestmore").listeners.get("click")({ target: f.get("guestmore") });
+  await f.feature.settled();
+  notice = assertOneNotice(f.get("msgs").innerHTML);
+  assert.match(notice, /Created with Claude \(Anthropic\) and Grok \(xAI\)/);
+  assert.match(f.get("msgs").innerHTML, /grok · agent/);
+  assert.equal((f.get("msgs").innerHTML.match(/grok · agent/g) || []).length, 1);
+  assert.equal(f.get("msgs").scrollTop, top);
+  assert.ok(f.get("msgs").innerHTML.indexOf('data-seq="2"') < f.get("msgs").innerHTML.indexOf('data-seq="3"'));
+  people = { "s/o": "Bea <b>" };
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  notice = assertOneNotice(f.get("msgs").innerHTML);
+  assert.match(notice, /Shared by Bea &lt;b&gt;/);
+  assert.doesNotMatch(notice, /Shared by Ada|Server Ada|<b>/);
+  assert.equal(f.get("chathead").children.length, 1);
+  assert.equal(f.get("chathead").querySelector(".sharing-notice-copy").innerHTML, notice);
+  f.setTime(10000); f.feature.tick(); await f.feature.settled();
+  assert.equal(noticeCount(f.get("msgs").innerHTML), 1);
+  const scrolls = [];
+  f.get("msgs").querySelector = selector => {
+    scrolls.push(selector);
+    return selector === '[data-seq="2"]' ? { scrollIntoView() { scrolls.push("scrolled:" + selector); }, classList: { add() {}, remove() {} } } : null;
+  };
+  assert.equal(f.feature.jumpToSource({ server: "s", owner: "o", chat: "c", generation: "g", log: "mirror", seq: 2 }), true);
+  await f.feature.settled();
+  assert.ok(scrolls.includes('[data-seq="2"]'));
+  assert.equal(noticeCount(f.get("msgs").innerHTML), 1);
+  assert.ok(f.get("msgs").innerHTML.startsWith('<div class="sharing-notice"'));
+  f.open("team/" + guestKey(other)); await f.feature.settled();
+  notice = assertOneNotice(f.get("msgs").innerHTML);
+  assert.match(notice, /Shared by Bea &lt;script&gt;/);
+  assert.match(notice, /Created with Claude \(Anthropic\)/);
+  assert.doesNotMatch(notice, /Created with Grok|Ada/);
+  assert.equal(f.get("chathead").children.length, 1);
+  f.navigate();
+  assert.equal(f.get("msgs").innerHTML, "");
+  assert.equal(f.get("chathead").querySelector(".sharing-disclosure"), null);
+  f.open(); await f.feature.settled();
+  assert.equal(noticeCount(f.get("msgs").innerHTML), 1);
+  assert.equal(f.get("chathead").children.length, 1);
+  f.feature.destroy();
+  assert.equal(f.get("chathead").querySelector(".sharing-disclosure"), null);
+});
+
+test("sharing notice is not a turn and does not affect actions or sends", async () => {
+  const sends = [];
+  const seen = [];
+  const view = { ...base, access: "write", unread: true, mirror_last: 1, seen_mirror: 0 };
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    if (path.endsWith("/seen")) { seen.push(opts?.body || ""); return ""; }
+    return readAnswer([{ t: "assistant", seq: 1, text: "synthetic answer", agent: "grok" }], 1, false, view);
+  }, undefined, undefined, { bookmarks: () => [], uiMutate() {}, openSendTo: value => sends.push(value) });
+  await openGuest(f);
+  const before = f.get("msgs").scrollTop;
+  const notice = assertOneNotice(f.get("msgs").innerHTML);
+  assert.doesNotMatch(notice, /tabindex|bubwhen|data-bmarker/);
+  const target = { dataset: {}, closest() { return null; } };
+  let prevented = false;
+  const keydown = f.get("msgs").listeners.get("keydown");
+  keydown({ key: "Enter", target, preventDefault() { prevented = true; } });
+  keydown({ key: " ", target, preventDefault() { prevented = true; } });
+  f.click("msgs", target);
+  assert.equal(prevented, false);
+  assert.equal(sends.length, 0);
+  assert.doesNotMatch(f.get("msgs").innerHTML, /data-gact|bubactions/);
+  assert.equal(f.get("msgs").scrollTop, before);
+  assert.equal(seen.length, 1);
+  assert.deepEqual(JSON.parse(seen[0]), { mirror: 1 });
+  assert.doesNotMatch(seen[0], /Created with|sharing-notice|Grok/);
+  const bubble = sharedActionBubble(1);
+  f.click("msgs", bubble.bubble);
+  assert.match(bubble.turn.rowHTML, /data-gact="bookmark"/);
+  assert.equal(noticeCount(f.get("msgs").innerHTML), 1);
+  f.feature.destroy();
+});
+
+test("sharing notice stays off the owner subscription", async () => {
+  const owned = { ...base, access: "owner", local_node: "n1" };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([owned]) : readAnswer([{ t: "assistant", seq: 1, text: "owned", agent: "grok" }], 1, false, owned), undefined, undefined, { selectedNode: () => "n1", selectedUID: () => "c" });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  assert.equal(f.get("msgs").innerHTML, "");
+  assert.equal(f.get("chathead").querySelector(".sharing-disclosure"), null);
+  f.feature.destroy();
+});
+
+test("sharing notice keeps its dom across unchanged polls", async () => {
+  const view = { ...base, owner_name: 'Ada "Q"' };
+  let people = {};
+  let mode = "open";
+  const assigns = [];
+  const f = nativeViewFixture(async path => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    if (path.endsWith("/seen")) return "";
+    if (mode === "claude") return readAnswer([{ t: "assistant", seq: 2, text: "later", agent: "claude" }], 2, false, view);
+    if (mode === "open") return readAnswer([{ t: "assistant", seq: 1, text: "answer", agent: "grok" }], 1, false, view);
+    return readAnswer([], 1, false, view);
+  }, undefined, undefined, { people: () => people, reserializeQuotes: true, noticeAssigns: assigns, disclosureAssigns: assigns });
+  await openGuest(f);
+  const shown = f.get("msgs").firstElementChild.innerHTML;
+  assert.match(shown, /Ada "Q"/);
+  assert.doesNotMatch(shown, /&quot;/);
+  assert.match(f.get("msgs").innerHTML, /Shared by Ada &quot;Q&quot;/);
+  const disclosure = f.get("chathead").querySelector(".sharing-disclosure");
+  const copy = f.get("chathead").querySelector(".sharing-notice-copy");
+  const counts = () => [assigns.filter(item => item === "notice").length, assigns.filter(item => item === "disclosure").length];
+  mode = "steady";
+  const afterOpen = counts();
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(counts(), afterOpen, "poll rewrote the sharing notice");
+  f.setTime(10000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(counts(), afterOpen, "refreshPeople rewrote the sharing notice");
+  assert.equal(f.get("chathead").querySelector(".sharing-disclosure"), disclosure);
+  assert.equal(f.get("chathead").querySelector(".sharing-notice-copy"), copy);
+  assert.equal(noticeCount(f.get("msgs").innerHTML), 1);
+  people = { "s/o": 'Bea "R"' };
+  const beforeRename = counts();
+  f.setTime(15000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(counts().map((value, index) => value - beforeRename[index]), [1, 1]);
+  assert.match(f.get("msgs").innerHTML, /Shared by Bea &quot;R&quot;/);
+  assert.match(copy.innerHTML, /Shared by Bea &quot;R&quot;/);
+  assert.equal(noticeCount(f.get("msgs").innerHTML), 1);
+  mode = "claude";
+  const beforeAgent = counts();
+  f.setTime(20000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(counts().map((value, index) => value - beforeAgent[index]), [1, 1]);
+  assert.match(assertOneNotice(f.get("msgs").innerHTML), /Created with Grok \(xAI\) and Claude \(Anthropic\)/);
+  assert.match(copy.innerHTML, /Created with Grok \(xAI\) and Claude \(Anthropic\)/);
+  assert.equal(f.get("chathead").querySelector(".sharing-notice-copy"), copy);
+  f.feature.destroy();
+});
+
+test("sharing notice preserves viewport only when its text changes", async () => {
+  let people = { "s/o": "Ada" };
+  let mode = "open";
+  const order = [];
+  const real = createBubbleActionController();
+  const bubbleController = {
+    ...real,
+    captureViewport(body, opts) {
+      order.push({ op: "capture", anchor: opts.anchor ?? null });
+      return real.captureViewport(body, opts);
+    },
+    restoreViewport(snapshot, opts) {
+      order.push({ op: "restore", anchor: opts.anchor ?? null, follow: opts.follow });
+      return real.restoreViewport(snapshot, opts);
+    },
+  };
+  const view = { ...base, owner_name: "Server Ada" };
+  const f = nativeViewFixture(async path => {
+    if (path === "/api/team/subscriptions") return list([view]);
+    if (path.endsWith("/seen")) return "";
+    if (mode === "open") return readAnswer([{ t: "user", seq: 1, text: "hello" }, { t: "assistant", seq: 2, text: "answer", agent: "grok" }], 2, false, view);
+    return readAnswer([], 2, false, view);
+  }, undefined, undefined, { people: () => people, noticeAssigns: order, bubbleController });
+  await openGuest(f);
+  assert.match(f.get("msgs").firstElementChild.innerHTML, /Shared by Ada/);
+  order.length = 0;
+  mode = "steady";
+  f.setTime(5000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(order, []);
+  f.get("msgs").scrollTop = 800;
+  people = { "s/o": "Bea" };
+  f.setTime(10000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(order, [
+    { op: "capture", anchor: null },
+    "notice",
+    { op: "restore", anchor: null, follow: false },
+  ]);
+  assert.equal(f.get("msgs").scrollTop, 800);
+  order.length = 0;
+  const bubble = sharedRenameBubble(1, f);
+  f.click("msgs", bubble.bubble);
+  assert.deepEqual(order, []);
+  people = { "s/o": "Cara" };
+  f.setTime(15000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(order, [
+    { op: "capture", anchor: null },
+    "notice",
+    { op: "restore", anchor: null, follow: false },
+  ]);
+  order.length = 0;
+  sharedNameAction(f, "rename");
+  assert.ok(bubble.turn.nextElementSibling.querySelector("[data-grename]"));
+  people = { "s/o": "Dora" };
+  f.setTime(20000); f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(order, [
+    { op: "capture", anchor: bubble.turn },
+    "notice",
+    { op: "restore", anchor: bubble.turn, follow: false },
+  ]);
+  assert.equal(f.get("msgs").scrollTop, 800);
+  f.feature.destroy();
 });

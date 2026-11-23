@@ -111,6 +111,33 @@ export function harnessTermsHTML(agent){
   return "";
 }
 
+/* Vendors named only when the harness has exactly one provider. dsh has a
+ * DeepSeek terms anchor and also routes to other providers, so naming
+ * DeepSeek here would report the default as the provider of a saved chat. */
+const FIXED_PROVIDER_VENDOR = Object.freeze({
+  claude: "Anthropic",
+  codex: "OpenAI",
+  grok: "xAI",
+  cursor: "Anysphere",
+  muse: "Meta",
+});
+
+function singleProviderAgent(agent) {
+  return Object.prototype.hasOwnProperty.call(HARNESS_TERMS, agent) && agent !== "dsh";
+}
+
+export function fixedProviderVendor(agent) {
+  if (!singleProviderAgent(agent)) return "";
+  return FIXED_PROVIDER_VENDOR[agent];
+}
+
+/* Reuse the literal HARNESS_TERMS anchor and replace only its label. The href
+ * stays the constant the audit already trusts; it is not built from a variable. */
+export function sharingTermsAnchor(agent, label) {
+  if (!singleProviderAgent(agent)) return "";
+  return HARNESS_TERMS[agent].replace(/>[\s\S]*<\/a>$/, ">" + esc(label) + "</a>");
+}
+
 /**
  * One row's state and the sentence under it.
  *

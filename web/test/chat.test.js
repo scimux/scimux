@@ -9481,6 +9481,16 @@ test('destroy continues cleanup when a long-press disposer throws', () => {
  ctx.feature.bind();assert.doesNotThrow(()=>ctx.feature.destroy());assert.equal(called,2);
 });
 
+test("ordinary chat render shows no recipient sharing notice", async () => {
+  const ctx = makeFeature();
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /sharing-notice|sharing-disclosure/);
+  assert.equal(ctx.roots.chathead.querySelector(".sharing-disclosure"), null);
+  assert.doesNotMatch(ctx.roots.chatmission.textContent || "", /Shared by|Created with/);
+  ctx.feature.destroy();
+});
+
 test('common chat file retry is scoped to the active visit and never dispatches an agent',async()=>{
  let release,clicked=0,replaced=0;const document={createElement:()=>({click(){clicked++}}),querySelector:()=>null};
  const ctx=makeFeature({sel:'team/s/o/c/g',deps:{document,retryAsset:()=>new Promise(resolve=>{release=resolve})}});ctx.feature.bind();

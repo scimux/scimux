@@ -1,5 +1,7 @@
 /* Shared subscription list and read-only guest view. */
 import { esc, md, stripAssetRefs, bubbleTitle, bubbleSpeaker } from "./format.js";
+import { fixedProviderVendor, sharingTermsAnchor } from "./harness.js";
+import { usageAgentDisplayName } from "./usage.js";
 import { pinnedOrder } from "./map-model.js";
 import { promptSourceKey } from "./storage.js";
 import { peoplePendingStorageKey, parsePeoplePendingSnapshot } from "./people-local-review.js";
@@ -23,6 +25,58 @@ export function guestName(server, seat, serverName, people = {}) {
   const local = people?.[server + "/" + seat];
   if (typeof local === "string" && local) return local;
   return serverName || "Unknown person";
+}
+
+function evidencedAgents(entries) {
+  const rows = [];
+  for (const entry of entries) {
+    if (entry.t !== "assistant" || typeof entry.agent !== "string" || !entry.agent) continue;
+    rows.push(entry);
+  }
+  rows.sort((a, b) => a.seq - b.seq);
+  const seen = new Set();
+  const agents = [];
+  for (const entry of rows) {
+    if (seen.has(entry.agent)) continue;
+    seen.add(entry.agent);
+    agents.push(entry.agent);
+  }
+  return agents;
+}
+
+function joinAgents(parts) {
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return parts[0] + " and " + parts[1];
+  return parts.slice(0, -1).join(", ") + ", and " + parts[parts.length - 1];
+}
+
+/* Presentation only. Callers pass mirror entries already read; this does not
+ * fetch, and the result is not a turn. */
+export function sharingNoticeHTML(owner, entries) {
+  const agents = evidencedAgents(entries);
+  const parts = [];
+  const linked = [];
+  let unspecified = agents.length === 0;
+  for (const agent of agents) {
+    const vendor = fixedProviderVendor(agent);
+    const name = esc(usageAgentDisplayName(agent));
+    if (!vendor) {
+      unspecified = true;
+      parts.push(name);
+    } else {
+      parts.push(name + " (" + esc(vendor) + ")");
+      linked.push({ agent, vendor });
+    }
+  }
+  const lead = agents.length
+    ? "Shared by " + esc(owner) + " · Created with " + joinAgents(parts)
+    : "Shared by " + esc(owner) + " · Includes AI-generated responses";
+  let terms = "provider terms";
+  if (linked.length === 1) terms = sharingTermsAnchor(linked[0].agent, "provider terms");
+  else if (linked.length > 1) terms = "provider terms (" + linked.map(item => sharingTermsAnchor(item.agent, item.vendor)).join(", ") + ")";
+  const caveat = unspecified ? " Terms depend on the configured provider." : "";
+  const who = esc(owner);
+  return `<div class="sharing-notice" role="note"><p class="sharing-notice-lead">${lead}</p><p class="sharing-notice-body">AI responses may be inaccurate. Verify before relying on them. Preserve attribution and respect applicable rights and ${terms}. Only ${who} can send to the agent.${caveat}</p></div>`;
 }
 
 export function guestCapture(entry, view, names, people = {}) {
@@ -135,6 +189,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   let ownerShare = null;
   let readGeneration = 0;
   let knownPeople = {};
+  let disclosure = null;
+  let disclosureCopy = null;
+  let noticeHTML = "";
+  let disclosureHTML = "";
   const classificationJobs = new Map();
   const classificationQueue = [];
   const classificationProgress = new Map();
@@ -326,12 +384,70 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     tick();
   }
   const $ = id => doc.querySelector("#" + id);
+  function mirrorEntries(current) {
+    const rows = [];
+    for (const [key, entry] of current.entries) {
+      if (key.startsWith("mirror/")) rows.push(entry);
+    }
+    return rows;
+  }
+  function noticeAnchor(current) {
+    const row = current.row;
+    return row?.renaming ? row.turn : null;
+  }
+  function syncDisclosure(html) {
+    const head = $("chathead");
+    if (!head) return;
+    if (!disclosure) {
+      disclosure = doc.createElement("details");
+      disclosure.className = "sharing-disclosure";
+      const summary = doc.createElement("summary");
+      summary.textContent = "Sharing notice";
+      disclosure.appendChild(summary);
+      disclosureCopy = doc.createElement("div");
+      disclosureCopy.className = "sharing-notice-copy";
+      disclosure.appendChild(disclosureCopy);
+      head.appendChild(disclosure);
+      disclosureCopy.innerHTML = html;
+      disclosureHTML = html;
+      return;
+    }
+    if (html === disclosureHTML) return;
+    disclosureCopy.innerHTML = html;
+    disclosureHTML = html;
+  }
+  function clearDisclosure() {
+    noticeHTML = "";
+    disclosureHTML = "";
+    if (!disclosure) return;
+    disclosure.remove();
+    disclosure = null;
+    disclosureCopy = null;
+  }
+  /* Replace only the notice node once it exists, and only when its text
+     changed. Assigning #msgs.innerHTML would drop the reader's scroll position. */
+  function syncNotice(current) {
+    const body = $("msgs");
+    const html = sharingNoticeHTML(guestName(current.view.server, current.view.owner, current.view.owner_name, knownPeople), mirrorEntries(current));
+    const first = body.firstElementChild;
+    if (!(first && first.classList.contains("sharing-notice"))) {
+      body.innerHTML = html + body.innerHTML;
+    } else if (html !== noticeHTML) {
+      const anchor = noticeAnchor(current);
+      const snapshot = bubbleController.captureViewport(body, { anchor });
+      first.innerHTML = html.slice(html.indexOf(">") + 1, html.lastIndexOf("</div>"));
+      bubbleController.restoreViewport(snapshot, { anchor: noticeAnchor(current), follow: false });
+    }
+    noticeHTML = html;
+    syncDisclosure(html);
+  }
   function refreshPeople() {
     const next = { ...people() };
     const changed = JSON.stringify(next) !== JSON.stringify(knownPeople);
     knownPeople = next;
     if (open) {
       header(open.view);
+      syncNotice(open);
       for (const node of $("msgs").querySelectorAll("[data-seat]")) {
         let serverName = open.names[node.dataset.seat];
         if (node.dataset.prompt !== undefined) serverName = open.view.owner_name;
@@ -361,6 +477,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     open = { key, view, visit:bubbleController.captureVisit(), next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), markerHTML:new Map(), row: null, lastRead: 0, busy: false, failed: false, empty: false, removing: false, removeNote: false };
     header(view);
     $("msgs").innerHTML = '<div class="previewtrunc">Loading…</div>';
+    syncNotice(open);
     $("guestnote").textContent = "";
     $("guestremove").disabled = false;
     $("guestmore").hidden = true;
@@ -372,6 +489,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     open = null;
     readGeneration++;
     $("msgs").innerHTML = "";
+    clearDisclosure();
     invalidateCards();
   }
   function keydown(event) {
@@ -479,7 +597,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (!current.removeNote) {
           $("guestnote").textContent = "";
         }
-        if (current.first) { body.innerHTML = ""; current.first = false; }
+        if (current.first) { body.innerHTML = ""; current.first = false; syncNotice(current); }
         for (const entry of result.entries) {
           current.entries.set("mirror/" + entry.seq, entry);
           const capture = guestCapture(entry, result.view, current.names, knownPeople);
@@ -487,7 +605,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
           if (capture) current.markerHTML.set("mirror/" + entry.seq, markers);
           const rendered = guestEntryHTML(entry, result.view.owner_name, result.view.server, result.view.owner, knownPeople, result.view.access, markers);
           if (rendered) {
-            if (current.empty) { body.innerHTML = ""; current.empty = false; }
+            if (current.empty) { body.innerHTML = ""; current.empty = false; syncNotice(current); }
             insertUpdate(rendered, [entry.seq, 0, 0]);
             hasEntries = true;
           }
@@ -507,7 +625,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         Object.assign(current.names, result.names);
         if (refreshPeople()) invalidateCards();
         for (const message of result.entries) {
-          if (current.empty) { body.innerHTML = ""; current.empty = false; }
+          if (current.empty) { body.innerHTML = ""; current.empty = false; syncNotice(current); }
           const capture = guestCapture(message, current.view, current.names, knownPeople);
           const markers = capture ? panel.sharedMarkers?.(capture.team) || "" : "";
           if (capture) current.markerHTML.set("comments/" + message.seq, markers);
@@ -520,10 +638,12 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (current.jump && moreComments && current.cnext <= previous) { moreComments = false; break; }
         if (!moreComments) break;
       }
+      syncNotice(current);
       if (first && !current.row?.renaming) {
         if (!hasEntries) {
           body.innerHTML = '<div class="previewtrunc">Nothing has been shared yet.</div>';
           current.empty = true;
+          syncNotice(current);
         }
         let selector = "";
         for (const element of body.children) {
@@ -766,6 +886,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (open !== current) return;
     open = null;
     readGeneration++;
+    clearDisclosure();
     panel.removed();
   }
   function panelKeydown(event) {
@@ -787,6 +908,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       $("guestremove").removeEventListener("click", removeClick);
     }
     open = null; owner = null; ownerShare = null; ownerCopies.clear(); actionOwner = null;
+    clearDisclosure();
     readGeneration++;
     bound = false;
     destroyed = true;

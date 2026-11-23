@@ -211,6 +211,8 @@ your People comments and Agent prompts have distinct labels. A recipient can use
 the header action to leave a shared chat and remove its local copy after
 confirmation; the owner’s chat remains intact.
 
+When someone opens a chat shared with them, scimux shows a sharing notice above the conversation and in a collapsible Sharing notice in the chat header. It names the person who shared the chat and, when the saved copy includes them, the agents that produced responses, with links to those providers' terms. The notice is scimux's own label: it is not a message in the chat, and only the owner can send to the agent.
+
 When People file support is available from both the app and relay, writable
 participants can attach files to a discussion, including a message without
 text. People files must be non-empty and at most 4 MiB each, with at most
