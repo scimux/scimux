@@ -254,7 +254,7 @@ test("pinnedLiveCount only counts ids present in nodes", () => {
 });
 
 /* ---------- tabs HTML / counts / empty / adopt / fold ---------- */
-test("cardTabsHTML: All/Pinned/Archived order and clear-scope ARIA", () => {
+test("cardTabsHTML: All/Pinned/Shared/Archived order and clear-scope ARIA", () => {
   const noPin = cardTabsHTML({
     cardTab: "current", laneFilter: "", laneColor: "", laneName: "",
     currentCount: 3, archivedCount: 1, pinnedCount: 0,
@@ -276,6 +276,13 @@ test("cardTabsHTML: All/Pinned/Archived order and clear-scope ARIA", () => {
   assert.match(withPin, /data-clear-scope/);
   assert.match(withPin, /aria-label="show all activities"/);
   assert.match(withPin, /Road \(2\)/);
+
+  const withShared = cardTabsHTML({
+    cardTab: "current", laneFilter: "", currentCount: 2, archivedCount: 1, pinnedCount: 1,
+    extra: '<button data-tab="shared">Shared with me</button>',
+  });
+  assert.deepEqual([...withShared.matchAll(/data-tab="([^"]+)"/g)].map(m => m[1]),
+    ["current", "pinned", "shared", "archived"]);
 });
 
 test("cardTabCount mirrors visible membership for badges", () => {
@@ -1923,10 +1930,13 @@ const nativeShared = (tabHTML = () => '<button data-tab="shared">Shared with me<
   return {tabHTML, activities:()=>[view], groups:()=>[{key:"s/o",label:"Owner",items:[view]}], mineUnread:()=>false, selected:()=>"", open() {}};
 };
 
-test("cardTabsHTML appends an optional shared tab", () => {
+test("cardTabsHTML inserts an optional shared tab before Archived", () => {
   const args = { cardTab: "current", laneFilter: "", currentCount: 0, archivedCount: 0, pinnedCount: 0 };
   const base = cardTabsHTML(args);
-  assert.equal(cardTabsHTML({ ...args, extra: '<button data-tab="shared">Shared with me</button>' }), base + '<button data-tab="shared">Shared with me</button>');
+  const shared = '<button data-tab="shared">Shared with me</button>';
+  const at = base.indexOf('<button data-tab="archived"');
+  assert.ok(at > 0);
+  assert.equal(cardTabsHTML({ ...args, extra: shared }), base.slice(0, at) + shared + base.slice(at));
 });
 
 test("empty shared tab preserves existing tab and list HTML", () => {
@@ -1950,7 +1960,7 @@ test("empty shared tab preserves existing tab and list HTML", () => {
 test("shared cards use native groups and retain the attention title", () => {
   const f = sharedCardsFixture(nativeShared(), "shared", [{id:"n",attention:"approval"}]);
   f.feature.render(); assert.match(f.list.innerHTML, /card-team\/s\/o\/c\/g/);
-  assert.match(f.tabs.innerHTML, /Archived.*data-tab="shared"/); assert.equal(f.doc.title,"(1) scimux");
+  assert.match(f.tabs.innerHTML, /data-tab="shared".*Archived/); assert.equal(f.doc.title,"(1) scimux");
   const html = f.list.innerHTML; f.feature.render(); assert.equal(f.list.innerHTML,html);
 });
 

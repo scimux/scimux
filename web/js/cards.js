@@ -312,7 +312,8 @@ export function cardTabsHTML({
   const pc = pinnedCount || 0;
   return `<button data-tab="current" class="${cardTab === "current" ? "on" : ""}" aria-pressed="${cardTab === "current"}">${scope}</button>` +
     (pc ? `<button data-tab="pinned" class="${cardTab === "pinned" ? "on" : ""}" aria-pressed="${cardTab === "pinned"}">Pinned (${pc})</button>` : "") +
-    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}" aria-pressed="${cardTab === "archived"}">Archived (${archivedCount})</button>` + extra;
+    extra +
+    `<button data-tab="archived" class="${cardTab === "archived" ? "on" : ""}" aria-pressed="${cardTab === "archived"}">Archived (${archivedCount})</button>`;
 }
 
 /* Drag end: persist DOM order, then append any off-screen survivors. */
