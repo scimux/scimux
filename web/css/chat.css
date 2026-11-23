@@ -723,3 +723,25 @@ body.cards-open #msgs { overflow: hidden; }
   color: var(--work); background: var(--th-bg); font-weight: 700;
 }
 #convtools .destination button:focus-visible { outline: 2px solid var(--work); outline-offset: -2px; }
+
+/* Recipient sharing notice. Not a turn: it sits above the transcript and again
+   in the header so a chat opened mid-scroll can still reach the same text. */
+.sharing-notice {
+  align-self: stretch; box-sizing: border-box; width: 100%; max-width: 100%;
+  padding: 10px 14px; border: 1px solid var(--hairline); border-left: 3px solid var(--work);
+  border-radius: 16px; background: var(--surface); color: var(--dim);
+  font-size: 13px; line-height: 1.45; overflow-wrap: anywhere;
+}
+.sharing-notice p { margin: 0 0 6px; }
+.sharing-notice p:last-child { margin: 0; }
+.sharing-notice a { color: var(--work); }
+#chathead .sharing-disclosure { margin: 0; color: var(--dim); font-size: 13px; line-height: 1.45; }
+#chathead .sharing-disclosure summary {
+  min-height: 44px; padding: 12px 0; cursor: pointer;
+  font-weight: 600; color: var(--dim);
+}
+#chathead .sharing-disclosure summary:focus-visible { outline: 2px solid var(--work); outline-offset: 2px; }
+@media (max-width: 520px) {
+  .sharing-notice { font-size: 14px; padding: 8px 12px; }
+  #chathead .sharing-disclosure { font-size: 14px; }
+}

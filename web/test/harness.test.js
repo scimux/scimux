@@ -7,7 +7,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
-  harnessState, harnessRowsHTML, harnessCheckNote,
+  harnessState, harnessRowsHTML, harnessCheckNote, harnessTermsHTML,
+  fixedProviderVendor, sharingTermsAnchor,
   museConsentNote, computerSettingOn, createSettingsController,
   openAttachmentSettings, applyExternalAttachmentChange,
   createScimuxUpdateCheck, runUpdateChecks,
@@ -1061,4 +1062,32 @@ test("provider privacy links accompany terms in the burger menu", () => {
     assert.match(html, /Terms and privacy depend on your configured model provider/);
     assert.doesNotMatch(html, /href=/);
   }
+});
+
+test("sharing notice vendors stay tied to the single-provider terms anchors", () => {
+  const vendors = { claude: "Anthropic", codex: "OpenAI", grok: "xAI", cursor: "Anysphere", muse: "Meta" };
+  const agents = ["claude", "codex", "grok", "cursor", "muse", "dsh", "pi", "opencode", "vibe", "nope"];
+  for (const agent of agents) {
+    const terms = harnessTermsHTML(agent);
+    const href = (terms.match(/href="(https:[^"]+)"/) || [])[1] || "";
+    const vendor = fixedProviderVendor(agent);
+    assert.equal(vendor !== "", Boolean(href) && agent !== "dsh");
+    assert.equal(vendor, vendors[agent] || "");
+    const anchor = sharingTermsAnchor(agent, "provider terms");
+    const hostile = sharingTermsAnchor(agent, '<x "y">');
+    if (vendor) {
+      assert.equal(anchor.includes('href="' + href + '"'), true);
+      assert.equal(anchor.includes(">provider terms</a>"), true);
+      assert.equal(anchor.includes('target="_blank"'), true);
+      assert.equal(anchor.includes('rel="noopener"'), true);
+      assert.equal(hostile.includes(">&lt;x &quot;y&quot;&gt;</a>"), true);
+      assert.equal(hostile.includes(href), true);
+      assert.equal(anchor.includes(">Terms of "), false);
+    } else {
+      assert.equal(anchor, "");
+      assert.equal(hostile, "");
+    }
+  }
+  assert.equal(sharingTermsAnchor("dsh", "DeepSeek"), "");
+  assert.equal(fixedProviderVendor("dsh"), "");
 });
