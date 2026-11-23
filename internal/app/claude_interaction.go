@@ -42,21 +42,23 @@ import (
 )
 
 const (
-	interactionFeedbackMax     = 4096
-	interactionFreeTextMax     = 4096
-	interactionRenderedMax     = 48 * 1024
-	interactionPostMax         = 32 * 1024
-	interactionQuestionTextMax = 2048
-	interactionOptionLabelMax  = 512
-	interactionOptionDescMax   = 2048
-	interactionHeaderMax       = 80
-	interactionPreviewMax      = 2048
-	interactionPlanTextMax     = 32 * 1024
-	interactionHookTimeoutSec  = 180
-	interactionHelperDeadline  = 150 * time.Second
-	interactionRejectMargin    = 15 * time.Second
-	interactionAnswerWindow    = interactionHelperDeadline - interactionRejectMargin
-	interactionMultiJoin       = ", "
+	interactionFeedbackMax        = 4096
+	interactionFreeTextMax        = 4096
+	interactionRenderedMax        = 48 * 1024
+	interactionPostMax            = 32 * 1024
+	interactionQuestionTextMax    = 2048
+	interactionOptionLabelMax     = 512
+	interactionOptionDescMax      = 2048
+	interactionHeaderMax          = 80
+	interactionPreviewMax         = 2048
+	interactionPlanTextMax        = 32 * 1024
+	interactionHookTimeoutSec     = 180
+	interactionHelperDeadline     = 150 * time.Second
+	interactionLongWait           = 4 * time.Hour
+	interactionLongHookTimeoutSec = 4*60*60 + 30
+	interactionRejectMargin       = 15 * time.Second
+	interactionAnswerWindow       = interactionHelperDeadline - interactionRejectMargin
+	interactionMultiJoin          = ", "
 )
 
 const (

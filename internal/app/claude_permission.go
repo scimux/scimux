@@ -487,6 +487,9 @@ type claudeHookCapabilities struct {
 	// Interaction is present on every new bundle. An absent member identifies
 	// an older bundle whose helper does not support structured replies.
 	Interaction int `json:"interaction,omitempty"`
+	// InteractionLongWait is 1 on a bundle minted with the four-hour question
+	// wait. Absence means a bundle minted with the 150 s wait.
+	InteractionLongWait int `json:"interaction_long_wait,omitempty"`
 }
 
 func readClaudeHookCapabilities(bundle string) (claudeHookCapabilities, bool) {

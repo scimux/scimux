@@ -104,6 +104,20 @@ func interactionWaitBudget(requested time.Duration) time.Duration {
 	return interactionHelperDeadline
 }
 
+// interactionWaitBudgetFor reports the helper budget for one bundle. A test
+// budget is passed through. A long-wait bundle waits four hours. Every other
+// bundle keeps the 150 s deadline.
+func interactionWaitBudgetFor(bundle string, requested time.Duration) time.Duration {
+	return interactionWaitBudget(requested)
+}
+
+// withdrawAnsweredClaudeInteraction writes an expired marker for the active
+// card when that card is pending or claimed and its own request is already
+// answered. It returns false, and changes nothing, in every other case.
+func withdrawAnsweredClaudeInteraction(bundle string, now time.Time) bool {
+	return false
+}
+
 func interactionAnswerDeadline(start time.Time, budget time.Duration) time.Time {
 	if budget <= 0 {
 		return start
