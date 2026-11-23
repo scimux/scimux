@@ -255,7 +255,12 @@ pi, opencode, and custom dsh providers, consult the provider you configured.
 Starting a Muse Contributor chat or fork requires acknowledging its data-use
 notice: Meta may retain content and use it for training, and confidential,
 sensitive, or personal information must not be submitted. Contributor models
-are never the automatic default.
+are never the automatic default. For Coding Harness Subscriptions, however,
+Meta's account setting determines the data-use terms: Contributor Services
+are the default regardless of model selection. Selecting a Standard model
+alone does not disable training. scimux's model-based acknowledgment does
+not verify or change that account setting. See the
+[privacy policy](PRIVACY.md#muse-contributor-data-use).
 
 scimux is independent and is not affiliated with or endorsed by Anthropic,
 OpenAI, xAI, Meta, Anysphere, DeepSeek, or the pi and opencode projects. Their

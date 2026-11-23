@@ -42,6 +42,18 @@ Sending content from one chat to another can disclose it to a different
 provider. Information already present in a working directory may also
 be accessed by an agent.
 
+When you enable team sharing, scimux sends the shared conversation and
+associated metadata to your selected team server for delivery to authorized
+participants. Team discussions can also include human messages and supported
+file attachments. Anyone with read access can copy and redistribute the
+content they receive. The server and participants may retain copies; ending
+sharing does not erase previously received content.
+
+Team sharing grants no control over the owner's agent. Human comments are
+not automatically sent to it. If the owner explicitly sends shared content
+to their agent, that content may be processed by the agent's configured
+providers under their terms and privacy policies.
+
 scimux does not read agent credential files or provide vendor login.
 You install and authenticate the agent tools yourself.
 
@@ -53,23 +65,29 @@ to train, fine-tune, or distill models.
 Your providers' processing and training practices depend on their
 terms, your plan, and settings.
 
-## Muse Contributor models
+## Muse Contributor data use
 
-Meta may retain content submitted to Muse Contributor models and use
-it for model training.
+Meta may retain content submitted to Contributor Services and use it for
+model training. For Coding Harness Subscriptions, Contributor Services are
+the default regardless of the selected model. To use Standard Services,
+change the applicable setting in your Meta account. The change applies
+only to future submissions; selecting a Standard model alone does not
+disable training.
 
-Do not use Contributor models with confidential, sensitive, or personal
+Do not use Contributor Services with confidential, sensitive, or personal
 information. This includes prompts, files, and tool results the agent
 can read. Acknowledging the notice does not make prohibited submissions
 permissible.
 
-Choose a Standard model if your content must not be used for training.
-Standard models remain subject to Meta's processing and retention terms.
+Outside Coding Harness Subscriptions, Meta's model designations determine
+whether Standard or Contributor terms apply. Standard Services remain
+subject to Meta's processing and retention terms.
 
-scimux does not automatically select Contributor models. Starting a
-Contributor chat or fork requires acknowledging its data-use notice.
-This acknowledgment is separate from the setting that permits Muse's
-quota-consuming approval judge.
+scimux does not automatically select models designated as Contributor.
+Starting a chat or fork with such a model requires acknowledging its
+data-use notice. This model-based check does not verify or change your
+Meta account's subscription data-use setting. The acknowledgment is also
+separate from the setting that permits Muse's quota-consuming approval judge.
 
 See Meta's terms:
 https://dev.meta.ai/legal/terms-of-service
