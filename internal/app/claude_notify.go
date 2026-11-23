@@ -84,11 +84,32 @@ func markClaudeRequestAnswered(perm, id string) {
 // label from a standing ask at mint time — never a request identity,
 // never a deletion target.
 type claudeVisibleEpoch struct {
-	Epoch    string `json:"epoch"`
-	Session  string `json:"session,omitempty"`
-	At       string `json:"at,omitempty"`
-	Title    string `json:"title,omitempty"`
-	HintTool string `json:"hint_tool,omitempty"`
+	Epoch     string `json:"epoch"`
+	Session   string `json:"session,omitempty"`
+	At        string `json:"at,omitempty"`
+	Title     string `json:"title,omitempty"`
+	HintTool  string `json:"hint_tool,omitempty"`
+	Continued bool   `json:"continued,omitempty"`
+}
+
+// claudeContinuedEpochID mints the id of a continued visible-dialog epoch.
+// Test seam: tests replace it to force an id error.
+var claudeContinuedEpochID = newClaudeDialogEpoch
+
+// standingClaudeAskFor reports whether perm still holds an unanswered notice
+// for tool in session. It uses the same filters as newestStandingAsk: a safe
+// id, not already answered, and a session that matches or is empty on either
+// side. It does not change which notice newestStandingAsk returns.
+func standingClaudeAskFor(perm, session, tool string, now time.Time) bool {
+	return false
+}
+
+// continueClaudeVisibleEpoch writes a successor of cur and returns it. The
+// successor keeps Session, Title and HintTool, takes a fresh epoch id, sets
+// At to now in UTC, and sets Continued. On an id error or a write error it
+// returns false and leaves the current file alone.
+func continueClaudeVisibleEpoch(perm string, cur claudeVisibleEpoch, now time.Time) (claudeVisibleEpoch, bool) {
+	return claudeVisibleEpoch{}, false
 }
 
 type claudeTurnClosed struct {

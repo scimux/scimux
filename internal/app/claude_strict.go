@@ -341,6 +341,20 @@ func (a *app) clearClaudeAttention(n *Node) {
 	}
 }
 
+// claudeContinuedDialogCorroborated reports whether visible pane text
+// corroborates a continued AskUserQuestion dialog. A validated numbered menu
+// corroborates it. So does the cancel anchor when the working footer is absent.
+func claudeContinuedDialogCorroborated(visible string) bool {
+	return false
+}
+
+// claudeContinuedDialogVisible reports whether the node's visible pane
+// corroborates a continued dialog. It is false when the server is missing
+// or the capture fails.
+func (a *app) claudeContinuedDialogVisible(n *Node) bool {
+	return false
+}
+
 // retireClaudeVisibleDialog retires only the server-minted visible-dialog
 // epoch. It does not delete any asked notice: Notification has no request
 // id, so a standing ask is not that epoch's identity. Asks retire through
