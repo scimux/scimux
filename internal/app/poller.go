@@ -181,6 +181,7 @@ func (a *app) poll() {
 		// is up — which the pane-geometry backstops cannot know and must not
 		// contradict.
 		askAttn, askCapable := a.claudeAskState(n)
+		claudeAskStanding := askAttn != ""
 		claudeDlg := a.claudeVisibleDialog(n)
 		a.mu.Lock()
 		claudeSup := a.claudeSupervisionOf(n)
@@ -254,7 +255,7 @@ func (a *app) poll() {
 				if quietTl != nil {
 					quietTl.Poll()
 					off, prog := quietTl.Progress()
-					a.noteChatProgress(n.ID, off, prog, prev == "active")
+					a.noteChatProgress(n.ID, off, prog, prev == "active" && !claudeAskStanding)
 					refreshClaudeDlg(quietTl)
 				}
 			} else if state == "active" {

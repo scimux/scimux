@@ -1107,6 +1107,10 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 		reason = "claude_launch_error"
 	case agent == "claude" && sup == claudeSupStarting:
 		reason = "claude_starting"
+	case agent == "claude" && attn == "question":
+		reason = "waiting_question"
+	case agent == "claude" && attn == "approval":
+		reason = "waiting_approval"
 	case agent == "claude" && (tl != nil && tl.Unparseable() || stale):
 		reason = "claude_transcript_fault"
 	case live == "active":
