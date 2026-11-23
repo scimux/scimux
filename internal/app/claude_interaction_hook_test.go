@@ -168,7 +168,7 @@ func TestClaudeInteractionHookBundlesAlwaysSupportInteractions(t *testing.T) {
 				}
 			}
 			raw := mustRead(t, settings)
-			if !bytes.Contains(raw, []byte(`"timeout":180`)) || bytes.Contains(raw, []byte("PreToolUse")) {
+			if !bytes.Contains(raw, []byte(`"timeout":14430`)) || bytes.Contains(raw, []byte("PreToolUse")) {
 				t.Fatalf("unexpected hook registration: %s", raw)
 			}
 		})
@@ -252,7 +252,7 @@ func TestClaudeInteractionHookCapableBundle(t *testing.T) {
 		t.Fatalf("settings: %s", settings)
 	}
 	perm := doc.Hooks["PermissionRequest"]
-	if len(perm) != 1 || len(perm[0].Hooks) != 1 || perm[0].Hooks[0].Timeout != interactionHookTimeoutSec {
+	if len(perm) != 1 || len(perm[0].Hooks) != 1 || perm[0].Hooks[0].Timeout != interactionLongHookTimeoutSec {
 		t.Fatalf("permission timeout = %+v", perm)
 	}
 	if doc.Hooks["Stop"][0].Hooks[0].Timeout != 0 {

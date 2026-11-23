@@ -236,7 +236,7 @@ func TestSixthTimeoutIsPresentInSettingsBuilder(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Hooks["PermissionRequest"][0].Hooks[0].Timeout != 180 {
+	if doc.Hooks["PermissionRequest"][0].Hooks[0].Timeout != interactionLongHookTimeoutSec {
 		t.Fatal("settings builder omitted interaction timeout")
 	}
 	for name, entries := range doc.Hooks {
