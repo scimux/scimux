@@ -345,20 +345,31 @@ func (a *app) clearClaudeAttention(n *Node) {
 // corroborates a continued AskUserQuestion dialog. A validated numbered menu
 // corroborates it. So does the cancel anchor when the working footer is absent.
 func claudeContinuedDialogCorroborated(visible string) bool {
-	return false
+	if _, ok := dialoghint.NumberedOptions(visible); ok {
+		return true
+	}
+	return dialoghint.HasCancelAnchor(visible) && !dialoghint.HasInterruptAnchor(visible)
 }
 
 // claudeContinuedDialogVisible reports whether the node's visible pane
 // corroborates a continued dialog. It is false when the server is missing
 // or the capture fails.
 func (a *app) claudeContinuedDialogVisible(n *Node) bool {
-	return false
+	if a.server == nil {
+		return false
+	}
+	visible, err := a.server.Session(n.ID).CaptureVisible()
+	if err != nil {
+		return false
+	}
+	return claudeContinuedDialogCorroborated(visible)
 }
 
-// retireClaudeVisibleDialog retires only the server-minted visible-dialog
-// epoch. It does not delete any asked notice: Notification has no request
-// id, so a standing ask is not that epoch's identity. Asks retire through
-// matching transcript/tool evidence or an explicit turn boundary.
+// retireClaudeVisibleDialog retires the server-minted visible-dialog epoch
+// named by the caller. A multi-part AskUserQuestion whose ask still stands
+// is continued: the epoch is replaced by a successor and this returns true
+// without clearing it. Any other current epoch is cleared. It does not
+// delete an asked notice. It returns false when that epoch is not current.
 func (a *app) retireClaudeVisibleDialog(n *Node, epoch string) bool {
 	if n == nil || epoch == "" {
 		return false
@@ -366,8 +377,10 @@ func (a *app) retireClaudeVisibleDialog(n *Node, epoch string) bool {
 	a.mu.Lock()
 	capable := a.claudeSupervisionOf(n) == claudeSupStrict
 	bundle := ""
+	sid := ""
 	if capable {
 		bundle = a.claudePermBundleLocked(n.ID)
+		sid = n.SessionID
 	}
 	a.mu.Unlock()
 	if bundle == "" {
@@ -377,6 +390,11 @@ func (a *app) retireClaudeVisibleDialog(n *Node, epoch string) bool {
 	cur, ok := readClaudeVisibleEpoch(perm)
 	if !ok || cur.Epoch != epoch {
 		return false
+	}
+	if cur.HintTool == "AskUserQuestion" && standingClaudeAskFor(perm, sid, "AskUserQuestion", time.Now()) {
+		if _, ok := continueClaudeVisibleEpoch(perm, cur, time.Now()); ok {
+			return true
+		}
 	}
 	clearClaudeVisibleEpoch(perm)
 	return true
@@ -439,6 +457,12 @@ func (a *app) claudeVisibleDialog(n *Node) claudeVisibleDialog {
 	perm := filepath.Join(bundle, "perm")
 	ep, ok := liveClaudeVisibleEpoch(perm, sid)
 	if !ok || ep.Epoch == "" {
+		return empty
+	}
+	// A continued epoch is the next part of one AskUserQuestion. It stays
+	// on disk while its ask stands, and it is shown only while the pane
+	// still corroborates the dialog.
+	if ep.Continued && !a.claudeContinuedDialogVisible(n) {
 		return empty
 	}
 	// Standing ask tool is the classifier. A generic Notification title

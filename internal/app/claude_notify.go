@@ -101,6 +101,18 @@ var claudeContinuedEpochID = newClaudeDialogEpoch
 // id, not already answered, and a session that matches or is empty on either
 // side. It does not change which notice newestStandingAsk returns.
 func standingClaudeAskFor(perm, session, tool string, now time.Time) bool {
+	for _, f := range readClaudeAskedFiles(perm, now) {
+		id := strings.TrimSuffix(filepath.Base(f.path), ".json")
+		if !safePathComponent(id) || claudeRequestAnswered(perm, id) {
+			continue
+		}
+		if session != "" && f.note.Session != "" && f.note.Session != session {
+			continue
+		}
+		if f.note.Tool == tool {
+			return true
+		}
+	}
 	return false
 }
 
@@ -109,7 +121,18 @@ func standingClaudeAskFor(perm, session, tool string, now time.Time) bool {
 // At to now in UTC, and sets Continued. On an id error or a write error it
 // returns false and leaves the current file alone.
 func continueClaudeVisibleEpoch(perm string, cur claudeVisibleEpoch, now time.Time) (claudeVisibleEpoch, bool) {
-	return claudeVisibleEpoch{}, false
+	id, err := claudeContinuedEpochID()
+	if err != nil {
+		return claudeVisibleEpoch{}, false
+	}
+	next := cur
+	next.Epoch = id
+	next.At = now.UTC().Format(time.RFC3339Nano)
+	next.Continued = true
+	if err := writeClaudePermFile(claudeVisibleEpochPath(perm), next); err != nil {
+		return claudeVisibleEpoch{}, false
+	}
+	return next, true
 }
 
 type claudeTurnClosed struct {
