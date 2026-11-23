@@ -585,3 +585,106 @@ func TestClaudeContinuedDialogVisibleNeedsServer(t *testing.T) {
 		t.Fatal("a visible numbered dialog must corroborate a continued epoch")
 	}
 }
+
+const (
+	contUserLine = `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"pick a colour"}}`
+	contMetaLine = `{"type":"user","timestamp":"2026-01-01T00:00:01Z","isMeta":true,"message":{"role":"user","content":"local note"}}`
+)
+
+// contGrowWithoutAgent appends a user prompt and a meta record, then polls
+// the active→quiet edge. prog does not move. An ask, when requested, is
+// stamped after the transcript times so the tick still sees it.
+func contGrowWithoutAgent(t *testing.T, withAsk bool) (*app, *Node) {
+	t.Helper()
+	f := &fakeTmux{list: []string{"n1"}, alive: map[string]bool{"n1": true}, capture: contWorking}
+	a := newTestApp(t, f)
+	n, bundle := seedPermClaudeWithTranscript(t, a, "n1", hookSIDOwn, contUserLine)
+	a.mu.Lock()
+	a.prevCap[n.ID] = contWorking
+	a.lastChg[n.ID] = time.Now().Add(-paneQuietAfter - time.Second)
+	a.live[n.ID] = "quiet"
+	a.mu.Unlock()
+	a.poll()
+	appendLines(t, n.Transcript, contUserLine, contMetaLine)
+	if withAsk {
+		contAsk(t, filepath.Join(bundle, "perm"), "ask-colour", "AskUserQuestion", hookSIDOwn)
+	}
+	a.mu.Lock()
+	a.live[n.ID] = "active"
+	a.mu.Unlock()
+	a.poll()
+	return a, n
+}
+
+func TestClaudeStandingAskSuspendsStaleJudgment(t *testing.T) {
+	a, n := contGrowWithoutAgent(t, true)
+	if a.staleChat[n.ID] {
+		t.Fatal("a standing AskUserQuestion must suspend the stale-transcript judgment")
+	}
+	if reason, _ := chatBody(t, a, n.ID)["reason"].(string); reason == "claude_transcript_fault" {
+		t.Fatal("a standing AskUserQuestion must not be reported as a transcript fault")
+	}
+}
+
+func TestClaudeStaleJudgmentWithoutAskStillFaults(t *testing.T) {
+	a, n := contGrowWithoutAgent(t, false)
+	if !a.staleChat[n.ID] {
+		t.Fatal("growth without an ask must mark the transcript stale")
+	}
+	reason, _ := chatBody(t, a, n.ID)["reason"].(string)
+	if reason != "claude_transcript_fault" {
+		t.Fatalf("reason = %q, want claude_transcript_fault", reason)
+	}
+}
+
+func contForcedStaleReason(t *testing.T, hint, askTool string) string {
+	t.Helper()
+	f, a, n, perm := contClaude(t)
+	contPane(f, contFirstPart, "")
+	if hint != "" {
+		contAsk(t, perm, "ask-1", askTool, hookSIDOwn)
+		if err := writeClaudePermFile(claudeVisibleEpochPath(perm), map[string]any{
+			"epoch": "epoch-wait", "session": hookSIDOwn, "hint_tool": hint,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.poll()
+	a.mu.Lock()
+	a.staleChat[n.ID] = true
+	a.mu.Unlock()
+	reason, _ := chatBody(t, a, n.ID)["reason"].(string)
+	return reason
+}
+
+func TestClaudeWaitingReasonOutranksTranscriptFault(t *testing.T) {
+	t.Run("question", func(t *testing.T) {
+		if got := contForcedStaleReason(t, "AskUserQuestion", "AskUserQuestion"); got != "waiting_question" {
+			t.Fatalf("question epoch reason = %q, want waiting_question; an asked dialog is not a transcript fault", got)
+		}
+	})
+	t.Run("approval", func(t *testing.T) {
+		if got := contForcedStaleReason(t, "Bash", "Bash"); got != "waiting_approval" {
+			t.Fatalf("approval epoch reason = %q, want waiting_approval; an asked dialog is not a transcript fault", got)
+		}
+	})
+	t.Run("no epoch", func(t *testing.T) {
+		if got := contForcedStaleReason(t, "", ""); got != "claude_transcript_fault" {
+			t.Fatalf("reason = %q, want claude_transcript_fault", got)
+		}
+	})
+}
+
+func TestNonClaudeReasonPrecedenceUnchanged(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	n := tmuxFallbackNode("pi1", "")
+	a.nodes = append(a.nodes, n)
+	a.byID[n.ID] = n
+	a.mu.Lock()
+	a.live[n.ID] = "active"
+	a.attn[n.ID] = "question"
+	a.mu.Unlock()
+	if reason, _ := chatBody(t, a, n.ID)["reason"].(string); reason != "pane_active" {
+		t.Fatalf("pi reason = %q, want pane_active", reason)
+	}
+}
