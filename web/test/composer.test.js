@@ -417,8 +417,74 @@ function makeFeature(overrides = {}){
     execCommandCalls: [],
     execCommand(cmd, _a, text){
       this.execCommandCalls.push({ cmd, text });
-      if (cmd === "insertText" && roots.prompt) {
-        roots.prompt.textContent = (roots.prompt.textContent || "") + (text || "");
+      if ((cmd === "insertText" || cmd === "insertHTML") && roots.prompt) {
+        if (!this._reentry) {
+          this._reentry = true;
+          const before = roots.prompt.firstListener && roots.prompt.firstListener("beforeinput");
+          if (before) before({ inputType: "insertText", data: text, isComposing: false, preventDefault(){} });
+          this._reentry = false;
+        }
+        const sel = typeof this.getSelection === "function" ? this.getSelection() : null;
+        const range = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+        const node = range && range.startContainer;
+        if (cmd === "insertHTML" && node && node.nodeType === 3 && node.parentNode && node.parentNode.childNodes) {
+          const html = String(text || "");
+          const keepBreak = html.endsWith("<br>");
+          const plain = html.slice(0, keepBreak ? html.length - 4 : html.length)
+            .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+          const parent = node.parentNode;
+          const kids = Array.prototype.slice.call(parent.childNodes);
+          const startAt = kids.indexOf(node);
+          const endAt = range.endContainer === parent ? range.endOffset : startAt + 1;
+          const written = {
+            nodeType: 3, nodeName: "#text", parentNode: parent,
+            textContent: node.textContent.slice(0, range.startOffset) + plain,
+          };
+          const replacement = [written];
+          if (keepBreak) replacement.push({ nodeType: 1, nodeName: "BR", parentNode: parent });
+          parent.childNodes = kids.slice(0, startAt).concat(replacement, kids.slice(Math.max(endAt, startAt + 1)));
+          const mapped = composer.peoplePromptMap && composer.peoplePromptMap(roots.prompt);
+          roots.prompt.textContent = mapped ? mapped.raw : written.textContent;
+          /* Chromium leaves the caret after the inserted HTML, so a reinserted
+             <br> puts later typing on the next line. */
+          const br = keepBreak ? parent.childNodes[startAt + 1] : null;
+          const brAt = br ? parent.childNodes.indexOf(br) : -1;
+          const after = brAt >= 0 ? parent.childNodes[brAt + 1] : null;
+          if (after && after.nodeType === 3) {
+            range.setStart(after, 0);
+            range.setEnd(after, 0);
+          } else if (brAt >= 0) {
+            range.setStart(parent, brAt + 1);
+            range.setEnd(parent, brAt + 1);
+          } else {
+            range.setStart(written, written.textContent.length);
+            range.setEnd(written, written.textContent.length);
+          }
+        } else if (node && node.nodeType === 3 && range.endContainer === node && typeof node.textContent === "string") {
+          const value = node.textContent;
+          const next = value.slice(0, range.startOffset) + (text || "") + value.slice(range.endOffset);
+          const parent = node.parentNode;
+          const kids = parent && parent.childNodes ? parent.childNodes : null;
+          const at = kids ? kids.indexOf(node) : -1;
+          const follower = at >= 0 ? kids[at + 1] : null;
+          /* Chromium drops a trailing <br> when insertText ends at the text node.
+             A break with content after it stays, caret still in front of it. */
+          if (range.endOffset === value.length && follower && follower.nodeName === "BR" && !kids[at + 2]) kids.splice(at + 1, 1);
+          node.textContent = next;
+          const caret = range.startOffset + String(text || "").length;
+          range.setStart(node, caret);
+          range.setEnd(node, caret);
+          const mapped = composer.peoplePromptMap && composer.peoplePromptMap(roots.prompt);
+          roots.prompt.textContent = mapped ? mapped.raw : next;
+        } else {
+          roots.prompt.textContent = (roots.prompt.textContent || "") + (text || "");
+        }
+        if (!this._inputting) {
+          this._inputting = true;
+          const input = roots.prompt.firstListener && roots.prompt.firstListener("input");
+          if (input) input({ inputType: "insertText", data: text, isComposing: false });
+          this._inputting = false;
+        }
       }
       return true;
     },
@@ -433,6 +499,20 @@ function makeFeature(overrides = {}){
   doc.removeEventListener = (...a) => docTarget.removeEventListener(...a);
   doc.listenerCount = t => docTarget.listenerCount(t);
   doc.firstListener = t => docTarget.firstListener(t);
+  const selection = {
+    ranges: [],
+    get rangeCount(){ return this.ranges.length; },
+    getRangeAt(i){ return this.ranges[i]; },
+    removeAllRanges(){ this.ranges.length = 0; },
+    addRange(r){ this.ranges.push(r); },
+  };
+  doc.getSelection = () => selection;
+  doc.createRange = () => ({
+    startContainer: null, startOffset: 0, endContainer: null, endOffset: 0,
+    get collapsed(){ return this.startContainer === this.endContainer && this.startOffset === this.endOffset; },
+    setStart(node, offset){ this.startContainer = node; this.startOffset = offset; },
+    setEnd(node, offset){ this.endContainer = node; this.endOffset = offset; },
+  });
 
   const FormDataMock = function FormDataMock(){
     this.parts = [];
@@ -858,6 +938,13 @@ test("beforeinput insertFromDrop forces plain text", () => {
   });
   assert.equal(prevented, true);
   assert.equal(ctx.doc.execCommandCalls[0].text, "dropped");
+  prevented = false;
+  ctx.roots.prompt.firstListener("beforeinput")({
+    inputType: "insertFromDrop",
+    preventDefault(){ prevented = true; },
+  });
+  assert.equal(prevented, true);
+  assert.equal(ctx.doc.execCommandCalls.length, 1);
   // other input types ignored
   prevented = false;
   ctx.roots.prompt.firstListener("beforeinput")({
@@ -5517,4 +5604,721 @@ test('late exact pending discard records legacy retirement without changing eith
     assert.equal(calls.filter(call => call.method === 'DELETE').length, 1);
     assert.equal(ctx.apiCalls.length, 0);
   } finally { if (releaseDelete && !deleted) releaseDelete(); ctx.feature.destroy(); }
+});
+
+/* ---------- People emoji conversion ---------- */
+
+const PEOPLE_EMOJI_MAPPINGS = [
+  [":)", " ", "😄"],
+  [":-)", " ", "😄"],
+  [":smile:", ":", "😄"],
+  [":D", " ", "😁"],
+  [":-D", " ", "😁"],
+  [":grin:", ":", "😁"],
+  [";)", " ", "😉"],
+  [";-)", " ", "😉"],
+  [":wink:", ":", "😉"],
+  [":(", " ", "☹️"],
+  [":-(", " ", "☹️"],
+  [":frowning:", ":", "☹️"],
+  [":P", " ", "😛"],
+  [":-P", " ", "😛"],
+  [":stuck_out_tongue:", ":", "😛"],
+  ["<3", " ", "❤️"],
+  [":heart:", ":", "❤️"],
+  [":+1:", ":", "👍"],
+  [":thumbsup:", ":", "👍"],
+  [":-1:", ":", "👎"],
+  [":thumbsdown:", ":", "👎"],
+  [":laughing:", ":", "😆"],
+  [":sob:", ":", "😭"],
+  [":tada:", ":", "🎉"],
+  [":rocket:", ":", "🚀"],
+  [":eyes:", ":", "👀"],
+  [":white_check_mark:", ":", "✅"],
+];
+
+function peopleEmojiCtx({ owner = false, sendPeople } = {}) {
+  const context = { key: "s/o/c/g", writable: true, owner };
+  const ctx = makeFeature({
+    sel: owner ? "n1" : "team/s/o/c/g",
+    nodes: owner ? [{ id: "n1", instance_id: "owner-instance" }] : [],
+    deps: { peopleContext: () => context, sendPeople },
+  });
+  ctx.feature.bind();
+  ctx.feature.onSelect();
+  ctx.peopleContext = context;
+  return ctx;
+}
+
+function placePeopleCaret(ctx, text, caret, { node } = {}) {
+  const prompt = ctx.roots.prompt;
+  prompt.nodeType = 1;
+  prompt.nodeName = "DIV";
+  const textNode = node || { nodeType: 3, nodeName: "#text", textContent: text, parentNode: prompt };
+  if (!node) prompt.childNodes = text ? [textNode] : [];
+  prompt.textContent = text;
+  const range = ctx.doc.createRange();
+  const target = text ? textNode : prompt;
+  range.setStart(target, caret);
+  range.setEnd(target, caret);
+  const sel = ctx.doc.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  return textNode;
+}
+
+function typePeopleTrigger(ctx, data, extra = {}) {
+  let prevented = false;
+  ctx.roots.prompt.firstListener("beforeinput")({
+    inputType: "insertText",
+    data,
+    isComposing: false,
+    preventDefault(){ prevented = true; },
+    ...extra,
+  });
+  return prevented;
+}
+
+function flushPeople() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+function peopleCaret(ctx) {
+  const sel = ctx.doc.getSelection();
+  const range = sel.rangeCount ? sel.getRangeAt(0) : null;
+  return range && {
+    node: range.startContainer,
+    offset: range.startOffset,
+    collapsed: range.collapsed,
+    text: ctx.roots.prompt.textContent,
+  };
+}
+
+test("peopleEmojiReplacement and peoplePromptMap convert only the fixed People mappings", () => {
+  assert.equal(typeof composer.peopleEmojiReplacement, "function");
+  assert.equal(typeof composer.peoplePromptMap, "function");
+  for (const [token, trigger, emoji] of PEOPLE_EMOJI_MAPPINGS) {
+    const typed = trigger === ":" ? token.slice(0, -1) : token;
+    const edit = composer.peopleEmojiReplacement(typed, typed.length, trigger);
+    assert.deepEqual(edit, {
+      start: 0,
+      end: typed.length,
+      text: trigger === " " ? emoji + " " : emoji,
+    });
+    assert.equal(composer.peopleEmojiReplacement("pre " + typed, ("pre " + typed).length, trigger).text, edit.text);
+  }
+  assert.deepEqual([..."☹️"].map(ch => ch.codePointAt(0)), [0x2639, 0xfe0f]);
+  assert.deepEqual([..."❤️"].map(ch => ch.codePointAt(0)), [0x2764, 0xfe0f]);
+  assert.equal(composer.peopleEmojiReplacement(":smile", 6, ":").text, "😄");
+  assert.equal(composer.peopleEmojiReplacement(":)", 2, "Enter").text, "😄");
+  assert.equal(composer.peopleEmojiReplacement(null, 0, ":"), null);
+  assert.equal(composer.peopleEmojiReplacement(":", 1.5, ":"), null);
+  assert.equal(composer.peopleEmojiReplacement(":", -1, ":"), null);
+  assert.equal(composer.peopleEmojiReplacement(":", 4, ":"), null);
+  assert.equal(composer.peopleEmojiReplacement(":)", 2, "x"), null);
+  assert.equal(composer.peopleEmojiReplacement(":smile:", 7, ":"), null);
+  assert.equal(composer.peopleEmojiReplacement("foo:)", 5, " "), null);
+  assert.equal(composer.peopleEmojiReplacement("(:)", 3, " "), null);
+  assert.equal(composer.peopleEmojiReplacement(":p", 2, " "), null);
+  assert.equal(composer.peopleEmojiReplacement(":d", 2, " "), null);
+  assert.equal(composer.peopleEmojiReplacement(":Smile", 6, ":"), null);
+  assert.equal(composer.peopleEmojiReplacement(":smi", 4, ":"), null);
+  assert.equal(composer.peopleEmojiReplacement("::smile", 7, ":"), null);
+});
+
+test("People emoji protection keeps code, fences, escapes and URL tokens literal", () => {
+  const keep = [
+    ["` :)", " ", "inline code"],
+    ["`still :smile", ":", "unclosed inline code"],
+    ["```\n:)", "Enter", "fenced code"],
+    ["```\n:smile", ":", "unclosed fence"],
+    ["```:)", "Enter", "fence opener line"],
+    ["``` :)", " ", "token on a fence line"],
+    ["~~~\n:)", " ", "tilde fence"],
+    ["```\ncode\n``` x\n:)", " ", "unclosed fence after a decorated closer"],
+    ["````\n```\n:)", "Enter", "short fence closer"],
+    ["```\n~~~\n:)", " ", "mismatched fence closer"],
+    ["https://example.com/:)", " ", "url"],
+    ["www.example.com/:smile", ":", "www url"],
+    ["foo:smile", ":", "substring"],
+    ["\\:)", " ", "escaped emoticon"],
+    ["\\\\:smile", ":", "escaped shortcode"],
+    [":)\nmore", " ", "earlier emoticon is not rescanned"],
+  ];
+  const convert = [
+    ["`code` :)", " ", "😄 "],
+    ["```\ncode\n```\n:)", "Enter", "😄"],
+    ["~~~\ncode\n~~~\n:)", " ", "😄 "],
+    ["```\ncode\n````\n:)", "Enter", "😄"],
+    ["```\ncode\n```  \n:)", " ", "😄 "],
+    ["   ```\ncode\n```\n:)", "Enter", "😄"],
+    ["```a`b\n```x\n:)", " ", "😄 "],
+    ["\\` :smile", ":", "😄"],
+    ["\\` :)", " ", "😄 "],
+    ["`a \\` :-)", " ", "😄 "],
+    ["https://example.com/ :smile", ":", "😄"],
+    ["http://example.com\n:)", "Enter", "😄"],
+    ["say :)", " ", "😄 "],
+    ["`a`\n:D", "Enter", "😁"],
+    ["    ```\n:\n```\n:)", " ", "😄 "],
+  ];
+  for (const [text, trigger, label] of keep) {
+    assert.equal(composer.peopleEmojiReplacement(text, text.length, trigger), null, label);
+  }
+  for (const [text, trigger, emoji] of convert) {
+    const edit = composer.peopleEmojiReplacement(text, text.length, trigger);
+    assert.equal(edit && edit.text, emoji, text);
+  }
+  assert.equal(composer.peopleEmojiReplacement("```js\n:)\n```\n:D", 7, " "), null);
+  assert.equal(composer.peopleEmojiReplacement("```js\n:)\n```\n:D", "```js\n:)\n```\n:D".length, "Enter").text, "😁");
+  assert.equal(composer.peopleEmojiReplacement("hi :)\n```", 5, " ").text, "😄 ");
+  const coded = "`a \\` b ` :-) x `";
+  const codedCaret = coded.indexOf(":-)") + ":-)".length;
+  assert.equal(composer.peopleEmojiReplacement(coded, codedCaret, " "), null);
+});
+
+test("peoplePromptMap addresses text, breaks and blocks", () => {
+  assert.equal(composer.peoplePromptMap(null), null);
+  const empty = { nodeType: 1, nodeName: "DIV", childNodes: [] };
+  const emptyMap = composer.peoplePromptMap(empty);
+  assert.equal(emptyMap.text, "");
+  assert.equal(emptyMap.raw, "");
+  assert.equal(emptyMap.offsetOf(empty, 0), 0);
+  assert.deepEqual(emptyMap.range(0, 0), { start: { node: empty, offset: 0 }, end: { node: empty, offset: 0 } });
+  assert.equal(emptyMap.offsetOf(empty, 1), null);
+  assert.equal(emptyMap.range(-1, 0), null);
+
+  const text = { nodeType: 3, nodeName: "#text", textContent: "a\u00a0b" };
+  const simple = { nodeType: 1, nodeName: "DIV", childNodes: [text] };
+  text.parentNode = simple;
+  const simpleMap = composer.peoplePromptMap(simple);
+  assert.equal(simpleMap.raw, "a\u00a0b");
+  assert.equal(simpleMap.text, "a b");
+  assert.equal(simpleMap.offsetOf(text, 3), 3);
+  assert.deepEqual(simpleMap.range(1, 3).end, { node: text, offset: 3 });
+
+  const left = { nodeType: 3, nodeName: "#text", textContent: "ab" };
+  const br = { nodeType: 1, nodeName: "BR" };
+  const right = { nodeType: 3, nodeName: "#text", textContent: "cd" };
+  const broken = { nodeType: 1, nodeName: "DIV", childNodes: [left, br, right] };
+  left.parentNode = br.parentNode = right.parentNode = broken;
+  const brokenMap = composer.peoplePromptMap(broken);
+  assert.equal(brokenMap.raw, "ab\ncd");
+  assert.equal(brokenMap.offsetOf(right, 0), 3);
+  assert.equal(brokenMap.offsetOf(broken, 2), 3);
+  assert.equal(brokenMap.offsetOf(left, 2), 2);
+  assert.equal(brokenMap.offsetOf(br, 0), 2);
+  assert.equal(brokenMap.offsetOf(broken, 3), 5);
+  assert.deepEqual(brokenMap.range(0, 2).end, { node: left, offset: 2 });
+  const orphanText = { nodeType: 3, nodeName: "#text", textContent: "z" };
+  const orphan = { nodeType: 1, nodeName: "BR" };
+  const orphanHost = { nodeType: 1, nodeName: "DIV", childNodes: [orphanText, orphan] };
+  orphanText.parentNode = orphanHost;
+  const orphanMap = composer.peoplePromptMap(orphanHost);
+  assert.equal(orphanMap.offsetOf(orphanText, 1), 1);
+  assert.equal(orphanMap.offsetOf(orphan, 0), 1);
+  assert.equal(orphanMap.offsetOf(orphanHost, 2), 2);
+  assert.deepEqual(orphanMap.range(0, 2), {
+    start: { node: orphanText, offset: 0 },
+    end: { node: orphanHost, offset: 2 },
+  });
+  assert.equal(orphanMap.offsetOf(orphan, 1), null);
+  assert.equal(orphanMap.offsetOf({ nodeType: 3, textContent: "z" }, 1), null);
+  assert.equal(orphanMap.offsetOf(null, 0), null);
+  const blank = { nodeType: 3, nodeName: "#text", textContent: "" };
+  const mixedText = { nodeType: 3, nodeName: "#text", textContent: "a" };
+  const mixed = { nodeType: 1, nodeName: "DIV", childNodes: [mixedText, blank] };
+  mixedText.parentNode = blank.parentNode = mixed;
+  const mixedMap = composer.peoplePromptMap(mixed);
+  assert.equal(mixedMap.offsetOf(mixed, 1), 1);
+  assert.equal(mixedMap.offsetOf(blank, 0), 1);
+  assert.equal(mixedMap.offsetOf(mixedText, 1), 1);
+
+  const first = { nodeType: 1, nodeName: "DIV", childNodes: [{ nodeType: 3, nodeName: "#text", textContent: "ab" }] };
+  const second = { nodeType: 1, nodeName: "P", childNodes: [{ nodeType: 3, nodeName: "#text", textContent: "cd" }] };
+  const third = { nodeType: 1, nodeName: "DIV", childNodes: [] };
+  first.childNodes[0].parentNode = first;
+  second.childNodes[0].parentNode = second;
+  const blocks = { nodeType: 1, nodeName: "DIV", childNodes: [first, second, third] };
+  first.parentNode = second.parentNode = third.parentNode = blocks;
+  const blocksMap = composer.peoplePromptMap(blocks);
+  assert.equal(blocksMap.raw, "ab\ncd\n");
+  assert.equal(blocksMap.offsetOf(blocks, 0), 0);
+  assert.equal(blocksMap.offsetOf(blocks, 1), 2);
+  assert.equal(blocksMap.offsetOf(first, 1), 2);
+  assert.equal(blocksMap.offsetOf(blocks, 3), 6);
+  assert.equal(blocksMap.offsetOf(third, 0), 6);
+  const spaced = { nodeType: 1, nodeName: "DIV", childNodes: [
+    { nodeType: 1, nodeName: "DIV", childNodes: [{ nodeType: 3, nodeName: "#text", textContent: "a\n" }] },
+    { nodeType: 1, nodeName: "DIV", childNodes: [{ nodeType: 3, nodeName: "#text", textContent: "b" }] },
+  ] };
+  spaced.childNodes[0].childNodes[0].parentNode = spaced.childNodes[0];
+  spaced.childNodes[1].childNodes[0].parentNode = spaced.childNodes[1];
+  assert.equal(composer.peoplePromptMap(spaced).raw, "a\nb");
+
+  const head = { nodeType: 3, nodeName: "#text", textContent: "hi :)" };
+  const tail = { nodeType: 1, nodeName: "BR" };
+  const ended = { nodeType: 1, nodeName: "DIV", childNodes: [head, tail] };
+  head.parentNode = tail.parentNode = ended;
+  const endedMap = composer.peoplePromptMap(ended);
+  assert.equal(endedMap.text, "hi :)\n");
+  assert.equal(endedMap.offsetOf(head, 5), 5);
+  assert.equal(endedMap.offsetOf(ended, 1), 5);
+  assert.equal(endedMap.offsetOf(ended, 2), 6);
+  assert.equal(endedMap.offsetOf(tail, 0), 5);
+  assert.deepEqual(endedMap.range(3, 5), {
+    start: { node: head, offset: 3 },
+    end: { node: head, offset: 5 },
+  });
+  const clearedBr = { nodeType: 1, nodeName: "BR" };
+  const cleared = { nodeType: 1, nodeName: "DIV", childNodes: [clearedBr] };
+  clearedBr.parentNode = cleared;
+  const clearedMap = composer.peoplePromptMap(cleared);
+  assert.equal(clearedMap.offsetOf(cleared, 0), 0);
+  assert.equal(clearedMap.offsetOf(cleared, 1), 1);
+  assert.equal(clearedMap.offsetOf(clearedBr, 0), 0);
+  const siblingA = { nodeType: 3, nodeName: "#text", textContent: "ab" };
+  const siblingB = { nodeType: 3, nodeName: "#text", textContent: "cd" };
+  const siblings = { nodeType: 1, nodeName: "DIV", childNodes: [siblingA, siblingB] };
+  const siblingMap = composer.peoplePromptMap(siblings);
+  assert.equal(siblingMap.offsetOf(siblingA, 2), 2);
+  assert.equal(siblingMap.offsetOf(siblings, 1), 2);
+  assert.equal(siblingMap.offsetOf(siblings, 2), 4);
+
+  assert.equal(simpleMap.offsetOf(text, 1.5), null);
+  assert.equal(simpleMap.offsetOf(text, -1), null);
+  assert.equal(simpleMap.offsetOf(text, 99), null);
+  assert.equal(simpleMap.offsetOf(simple, 5), null);
+  assert.equal(simpleMap.range(0, 1.5), null);
+  assert.equal(simpleMap.range(0, 99), null);
+  assert.equal(simpleMap.offsetOf({ nodeType: 3, textContent: "" }, 0), null);
+  assert.equal(simpleMap.offsetOf({ nodeType: 3, textContent: "", parentNode: simple }, 0), null);
+  assert.equal(simpleMap.offsetOf({ nodeType: 1, nodeName: "BR" }, 0), null);
+  assert.equal(simpleMap.offsetOf({ nodeType: 8, nodeName: "#comment" }, 0), null);
+
+  const breakA = { nodeType: 1, nodeName: "BR" };
+  const breakB = { nodeType: 1, nodeName: "BR" };
+  const breakHost = { nodeType: 1, nodeName: "DIV", childNodes: [breakA, breakB] };
+  breakA.parentNode = breakB.parentNode = breakHost;
+  const breakMap = composer.peoplePromptMap(breakHost);
+  assert.equal(breakMap.raw, "\n\n");
+  assert.equal(breakMap.offsetOf(breakB, 0), 1);
+  assert.deepEqual(breakMap.range(0, 2).end, { node: breakHost, offset: 2 });
+
+  const leadEmpty = { nodeType: 1, nodeName: "DIV", childNodes: [] };
+  const leadText = { nodeType: 3, nodeName: "#text", textContent: "b" };
+  const leadHost = { nodeType: 1, nodeName: "DIV", childNodes: [leadEmpty, leadText] };
+  leadEmpty.parentNode = leadText.parentNode = leadHost;
+  const leadMap = composer.peoplePromptMap(leadHost);
+  assert.equal(leadMap.offsetOf(leadHost, 0), 0);
+  assert.equal(leadMap.offsetOf(leadEmpty, 0), null);
+  assert.equal(leadMap.offsetOf(leadText, 1), 1);
+
+  const onlyBlank = { nodeType: 3, nodeName: "#text", textContent: "" };
+  const blankHost = { nodeType: 1, nodeName: "DIV", childNodes: [onlyBlank] };
+  onlyBlank.parentNode = blankHost;
+  const blankMap = composer.peoplePromptMap(blankHost);
+  assert.equal(blankMap.offsetOf(blankHost, 0), 0);
+  assert.equal(blankMap.offsetOf(onlyBlank, 0), null);
+
+  const gapText = { nodeType: 3, nodeName: "#text", textContent: "a" };
+  const gapEmpty = { nodeType: 1, nodeName: "DIV", childNodes: [] };
+  const gapBlank = { nodeType: 3, nodeName: "#text", textContent: "" };
+  const gapHost = { nodeType: 1, nodeName: "DIV", childNodes: [gapText, gapEmpty, gapBlank] };
+  gapText.parentNode = gapEmpty.parentNode = gapBlank.parentNode = gapHost;
+  const gapMap = composer.peoplePromptMap(gapHost);
+  assert.equal(gapMap.offsetOf(gapHost, 2), 1);
+
+  const spacedMap = composer.peoplePromptMap(spaced);
+  assert.equal(spacedMap.offsetOf(spaced, 1), 2);
+});
+
+test("People composers convert every mapping at the caret and save that draft", async () => {
+  for (const owner of [false, true]) {
+    const ctx = peopleEmojiCtx({ owner });
+    for (const [token, trigger, emoji] of PEOPLE_EMOJI_MAPPINGS) {
+      const typed = trigger === ":" ? token.slice(0, -1) : token;
+      const calls = ctx.doc.execCommandCalls.length;
+      placePeopleCaret(ctx, "pre " + typed + " post", ("pre " + typed).length);
+      assert.equal(typePeopleTrigger(ctx, trigger), true);
+      const visible = trigger === " " ? emoji + " " : emoji;
+      assert.equal(ctx.feature.promptText(), "pre " + visible + " post");
+      const caret = peopleCaret(ctx);
+      assert.equal(caret.collapsed, true);
+      assert.equal(caret.offset, ("pre " + visible).length);
+      assert.equal(ctx.doc.execCommandCalls.length, calls + 1);
+      assert.equal(ctx.doc.execCommandCalls.at(-1).text, visible);
+    }
+    if (!owner) await assertPeopleDrafts(ctx, "people\0s/o/c/g\0", ["pre ✅ post"]);
+    ctx.feature.destroy();
+  }
+});
+
+function pressPeopleEnter(ctx, extra = {}) {
+  let prevented = false;
+  ctx.roots.prompt.firstListener("keydown")({
+    key: "Enter", shiftKey: false, altKey: false, metaKey: false, ctrlKey: false,
+    preventDefault(){ prevented = true; },
+    ...extra,
+  });
+  return prevented;
+}
+
+test("People emoji Enter converts before send and newline, including a mid-draft caret", async () => {
+  const sent = [];
+  const ctx = peopleEmojiCtx({ owner: true, sendPeople: (_key, text) => { sent.push(text); return { seq: 1 }; } });
+  placePeopleCaret(ctx, "hi :)", 5);
+  assert.equal(pressPeopleEnter(ctx), true);
+  assert.equal(ctx.feature.promptText(), "hi 😄");
+  await flushPeople();
+  assert.deepEqual(sent, ["hi 😄"]);
+  assert.equal(ctx.feature.promptText(), "");
+
+  placePeopleCaret(ctx, "aa :) bb", 5);
+  assert.equal(pressPeopleEnter(ctx, { shiftKey: true }), false);
+  assert.equal(ctx.feature.promptText(), "aa 😄 bb");
+  assert.equal(peopleCaret(ctx).offset, 5);
+  await assertPeopleDrafts(ctx, "people\0s/o/c/g\0n1\0owner-instance", ["aa 😄 bb"]);
+  assert.deepEqual(sent, ["hi 😄"]);
+
+  const phone = peopleEmojiCtx({ sendPeople: () => { throw new Error("phone must not send"); } });
+  phone.feature.destroy();
+  const touch = makeFeature({
+    sel: "team/s/o/c/g",
+    isPhoneTouch: true,
+    deps: { peopleContext: () => ({ key: "s/o/c/g", writable: true }), sendPeople: () => { throw new Error("phone must not send"); } },
+  });
+  touch.feature.bind(); touch.feature.onSelect();
+  placePeopleCaret(touch, "<3", 2);
+  assert.equal(pressPeopleEnter(touch), false);
+  assert.equal(touch.feature.promptText(), "❤️");
+  touch.feature.destroy();
+  ctx.feature.destroy();
+});
+
+function placePeopleFragment(ctx, children, caretNode, caretOffset, plain) {
+  const prompt = ctx.roots.prompt;
+  prompt.nodeType = 1;
+  prompt.nodeName = "DIV";
+  prompt.childNodes = children;
+  for (const child of children) child.parentNode = prompt;
+  prompt.textContent = plain;
+  const range = ctx.doc.createRange();
+  range.setStart(caretNode, caretOffset);
+  range.setEnd(caretNode, caretOffset);
+  const sel = ctx.doc.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+test("People Enter sends a draft ending in a break, and a cleared editor accepts ':'", async () => {
+  const sent = [];
+  const ctx = peopleEmojiCtx({ owner: true, sendPeople: (_key, text) => { sent.push(text); return { seq: 1 }; } });
+  const line = { nodeType: 3, nodeName: "#text", textContent: "hi :)" };
+  const br = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [line, br], line, 5, "hi :)\n");
+  assert.equal(pressPeopleEnter(ctx), true);
+  assert.equal(ctx.doc.execCommandCalls.at(-1).cmd, "insertHTML");
+  assert.equal(ctx.feature.promptText(), "hi 😄\n");
+  await flushPeople();
+  assert.deepEqual(sent, ["hi 😄\n"]);
+
+  const line2 = { nodeType: 3, nodeName: "#text", textContent: "yo :)" };
+  const br2 = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [line2, br2], ctx.roots.prompt, 1, "yo :)\n");
+  assert.equal(pressPeopleEnter(ctx), true);
+  assert.equal(ctx.feature.promptText(), "yo 😄\n");
+  await flushPeople();
+  assert.deepEqual(sent, ["hi 😄\n", "yo 😄\n"]);
+
+  const line3 = { nodeType: 3, nodeName: "#text", textContent: "hello" };
+  const br3 = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [line3, br3], ctx.roots.prompt, 2, "hello\n");
+  assert.equal(pressPeopleEnter(ctx), true);
+  assert.equal(ctx.feature.promptText(), "hello\n");
+  await flushPeople();
+  assert.deepEqual(sent, ["hi 😄\n", "yo 😄\n", "hello\n"]);
+
+  const foreign = { nodeType: 3, nodeName: "#text", textContent: "hi :)", parentNode: null };
+  const line4 = { nodeType: 3, nodeName: "#text", textContent: "hi :)" };
+  const br4 = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [line4, br4], foreign, 5, "hi :)\n");
+  assert.equal(pressPeopleEnter(ctx), true);
+  assert.equal(ctx.feature.promptText(), "hi :)\n");
+  await flushPeople();
+  assert.deepEqual(sent, ["hi 😄\n", "yo 😄\n", "hello\n", "hi :)\n"]);
+
+  const bare = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [bare], ctx.roots.prompt, 0, "\n");
+  assert.equal(typePeopleTrigger(ctx, ":"), false);
+  assert.equal(ctx.feature.promptText(), "\n");
+  placePeopleFragment(ctx, [bare], bare, 0, "\n");
+  assert.equal(typePeopleTrigger(ctx, ":"), false);
+  assert.equal(ctx.feature.promptText(), "\n");
+  placePeopleFragment(ctx, [bare], ctx.roots.prompt, 1, "\n");
+  assert.equal(typePeopleTrigger(ctx, ":"), false);
+  assert.equal(ctx.feature.promptText(), "\n");
+  ctx.feature.destroy();
+});
+
+test("People Space keeps an existing trailing break in the draft", async () => {
+  const ctx = peopleEmojiCtx();
+  const line = { nodeType: 3, nodeName: "#text", textContent: ":-)" };
+  const br = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [line, br], line, 3, ":-)\n");
+  assert.equal(typePeopleTrigger(ctx, " "), true);
+  assert.equal(ctx.doc.execCommandCalls.at(-1).cmd, "insertHTML");
+  assert.equal(ctx.doc.execCommandCalls.at(-1).text, "😄 <br>");
+  assert.equal(ctx.feature.promptText(), "😄 \n");
+  assert.equal(ctx.roots.prompt.childNodes.some(child => child.nodeName === "BR"), true);
+  await assertPeopleDrafts(ctx, "people\0s/o/c/g\0", ["😄 \n"]);
+
+  const prefixed = { nodeType: 3, nodeName: "#text", textContent: "say :-)" };
+  const prefixedBreak = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [prefixed, prefixedBreak], prefixed, 7, "say :-)\n");
+  assert.equal(typePeopleTrigger(ctx, " "), true);
+  assert.equal(ctx.feature.promptText(), "say 😄 \n");
+  assert.equal(ctx.roots.prompt.childNodes.some(child => child.nodeName === "BR"), true);
+  await assertPeopleDrafts(ctx, "people\0s/o/c/g\0", ["say 😄 \n"]);
+
+  const token = { nodeType: 3, nodeName: "#text", textContent: ":-)" };
+  const block = { nodeType: 1, nodeName: "DIV", childNodes: [] };
+  placePeopleFragment(ctx, [token, block], token, 3, ":-)\n");
+  assert.equal(typePeopleTrigger(ctx, " "), true);
+  assert.equal(ctx.doc.execCommandCalls.at(-1).cmd, "insertText");
+  assert.equal(ctx.doc.execCommandCalls.at(-1).text, "😄 ");
+  assert.equal(ctx.feature.promptText(), "😄 \n");
+  assert.equal(ctx.roots.prompt.childNodes[1], block);
+
+  const plain = { nodeType: 3, nodeName: "#text", textContent: "hello" };
+  const plainBreak = { nodeType: 1, nodeName: "BR" };
+  placePeopleFragment(ctx, [plain, plainBreak], plain, 5, "hello\n");
+  assert.equal(typePeopleTrigger(ctx, " "), false);
+  assert.equal(ctx.feature.promptText(), "hello\n");
+  assert.equal(ctx.roots.prompt.childNodes[1], plainBreak);
+  ctx.feature.destroy();
+});
+
+test("People Space before an internal break keeps the caret on that line", async () => {
+  const ctx = peopleEmojiCtx();
+  const line = { nodeType: 3, nodeName: "#text", textContent: ":-)" };
+  const br = { nodeType: 1, nodeName: "BR" };
+  const rest = { nodeType: 3, nodeName: "#text", textContent: "next" };
+  placePeopleFragment(ctx, [line, br, rest], line, 3, ":-)\nnext");
+  assert.equal(typePeopleTrigger(ctx, " "), true);
+  assert.equal(ctx.doc.execCommandCalls.at(-1).cmd, "insertText");
+  const caret = peopleCaret(ctx);
+  assert.equal(caret.node, line);
+  assert.equal(caret.offset, "😄 ".length);
+  for (const ch of "more") {
+    assert.equal(typePeopleTrigger(ctx, ch), false);
+    ctx.doc.execCommand("insertText", false, ch);
+  }
+  assert.equal(ctx.feature.promptText(), "😄 more\nnext");
+  assert.equal(line.textContent, "😄 more");
+  assert.equal(ctx.roots.prompt.childNodes[1], br);
+  assert.equal(rest.textContent, "next");
+  await assertPeopleDrafts(ctx, "people\0s/o/c/g\0", ["😄 more\nnext"]);
+  ctx.feature.destroy();
+});
+
+test("agent drafts, paste, drop, restoration and programmatic text stay literal", async () => {
+  const ctx = peopleEmojiCtx({ owner: true, sendPeople: () => ({ seq: 1 }) });
+  ctx.feature.setDestination("agent");
+  placePeopleCaret(ctx, ":smile", 6);
+  assert.equal(typePeopleTrigger(ctx, ":"), false);
+  assert.equal(ctx.feature.promptText(), ":smile");
+  ctx.roots.prompt.textContent = ":smile:";
+  ctx.roots.prompt.firstListener("input")();
+  assert.equal(ctx.feature.promptText(), ":smile:");
+  assert.equal(ctx.storage.getItem("scimux-draft:n1"), ":smile:");
+
+  ctx.feature.setDestination("people");
+  ctx.feature.setPromptText(":smile:");
+  ctx.roots.prompt.firstListener("input")();
+  assert.equal(ctx.feature.promptText(), ":smile:");
+  await assertPeopleDrafts(ctx, "people\0s/o/c/g\0n1\0owner-instance", [":smile:"]);
+  const restored = makeFeature({
+    nodes: [{ id: "n1", instance_id: "owner-instance" }],
+    deps: {
+      peopleContext: () => ({ key: "s/o/c/g", writable: true, owner: true }),
+      peopleFileStore: ctx.recoveryStore,
+      sendPeople: () => ({ seq: 1 }),
+    },
+  });
+  restored.feature.bind(); restored.feature.onSelect();
+  await new Promise(r => setImmediate(r));
+  assert.equal(restored.feature.promptText(), ":smile:");
+
+  placePeopleCaret(ctx, ":smile", 6);
+  let pasted = false;
+  ctx.roots.prompt.firstListener("paste")({
+    clipboardData: { files: [], getData: () => ":" },
+    preventDefault(){ pasted = true; },
+  });
+  assert.equal(pasted, true);
+  assert.equal(ctx.feature.promptText(), ":smile:");
+  ctx.roots.prompt.firstListener("beforeinput")({
+    inputType: "insertFromDrop",
+    dataTransfer: { getData: () => ":)" },
+    preventDefault(){},
+  });
+  assert.equal(ctx.feature.promptText().endsWith(":)"), true);
+  assert.equal(ctx.feature.promptText().includes("😄"), false);
+  restored.feature.destroy();
+  ctx.feature.destroy();
+});
+
+test("People emoji conversion preserves surrounding text, selections, unicode and switches destinations", async () => {
+  const sent = [];
+  const ctx = peopleEmojiCtx({ owner: true, sendPeople: (_k, text) => { sent.push(text); if (sent.length === 1) throw new Error("offline"); return { seq: 2 }; } });
+  placePeopleCaret(ctx, "a\u00a0:smile", 8);
+  assert.equal(typePeopleTrigger(ctx, ":"), true);
+  assert.equal(ctx.roots.prompt.childNodes[0].textContent, "a\u00a0😄");
+  assert.equal(ctx.feature.promptText(), "a 😄");
+
+  placePeopleCaret(ctx, "😄 :smile", "😄 :smile".length);
+  typePeopleTrigger(ctx, ":");
+  assert.equal(ctx.feature.promptText(), "😄 😄");
+  const family = "👨‍👩‍👧‍👦 :heart";
+  placePeopleCaret(ctx, family, family.length);
+  typePeopleTrigger(ctx, ":");
+  assert.equal(ctx.feature.promptText(), "👨‍👩‍👧‍👦 ❤️");
+
+  placePeopleCaret(ctx, ":smile:", 7);
+  const sel = ctx.doc.getSelection();
+  const range = sel.getRangeAt(0);
+  range.setStart(range.startContainer, 0);
+  range.setEnd(range.startContainer, 7);
+  assert.equal(typePeopleTrigger(ctx, ":"), false);
+  assert.equal(ctx.feature.promptText(), ":smile:");
+
+  placePeopleCaret(ctx, "say :)", 6);
+  assert.equal(pressPeopleEnter(ctx), true);
+  await flushPeople();
+  assert.equal(sent[0], "say 😄");
+  assert.equal(ctx.feature.promptText(), "say 😄");
+
+  ctx.feature.setDestination("agent");
+  placePeopleCaret(ctx, ":)", 2);
+  assert.equal(typePeopleTrigger(ctx, " "), false);
+  ctx.roots.prompt.textContent = ":) ";
+  ctx.roots.prompt.firstListener("input")();
+  assert.equal(ctx.storage.getItem("scimux-draft:n1"), ":) ");
+  ctx.feature.setDestination("people");
+  assert.equal(ctx.feature.promptText(), "say 😄");
+  await ctx.feature.sendPrompt();
+  assert.deepEqual(sent, ["say 😄", "say 😄"]);
+  ctx.feature.setDestination("agent");
+  assert.equal(ctx.feature.promptText(), ":) ");
+  ctx.feature.destroy();
+});
+
+test("People emoji ignores IME composition and does not send the confirming Enter", async () => {
+  const sent = [];
+  const ctx = peopleEmojiCtx({ sendPeople: (_k, text) => { sent.push(text); return { seq: 3 }; } });
+  placePeopleCaret(ctx, ":)", 2);
+  ctx.roots.prompt.firstListener("compositionstart")();
+  assert.equal(typePeopleTrigger(ctx, ":", { isComposing: true }), false);
+  assert.equal(typePeopleTrigger(ctx, " "), false);
+  assert.equal(pressPeopleEnter(ctx, { isComposing: true }), false);
+  assert.equal(pressPeopleEnter(ctx, { keyCode: 229 }), false);
+  assert.equal(ctx.feature.promptText(), ":)");
+  assert.deepEqual(sent, []);
+  ctx.roots.prompt.firstListener("compositionend")();
+  assert.equal(pressPeopleEnter(ctx), false);
+  assert.deepEqual(sent, []);
+  assert.equal(ctx.feature.promptText(), ":)");
+  ctx.timers.runTimeouts(0);
+  assert.equal(pressPeopleEnter(ctx), true);
+  await flushPeople();
+  assert.deepEqual(sent, ["😄"]);
+  ctx.roots.prompt.firstListener("compositionstart")();
+  ctx.roots.prompt.firstListener("compositionend")();
+  pressPeopleEnter(ctx, { key: "a" });
+  ctx.timers.runTimeouts(0);
+  placePeopleCaret(ctx, "yo :D", 5);
+  assert.equal(pressPeopleEnter(ctx, { ctrlKey: true }), false);
+  assert.equal(ctx.feature.promptText(), "yo 😁");
+  assert.equal(sent.length, 1);
+  ctx.feature.destroy();
+});
+
+test("People emoji handler leaves protected, pasted and unmatched typing in place", () => {
+  const ctx = peopleEmojiCtx();
+  const samples = [
+    ["` :)", " "],
+    ["```\n:smile", ":"],
+    ["https://example.com/:)", " "],
+    ["\\:)", " "],
+    ["foo:)", " "],
+    [":)", "x"],
+  ];
+  for (const [text, data] of samples) {
+    placePeopleCaret(ctx, text, text.length);
+    assert.equal(typePeopleTrigger(ctx, data), false, text);
+    assert.equal(ctx.feature.promptText(), text);
+  }
+  const coded = "`a \\` b ` :-) x `";
+  placePeopleCaret(ctx, coded, coded.indexOf(":-)") + ":-)".length);
+  assert.equal(typePeopleTrigger(ctx, " "), false, coded);
+  assert.equal(ctx.feature.promptText(), coded);
+  placePeopleCaret(ctx, ":)", 2);
+  ctx.roots.prompt.firstListener("beforeinput")({
+    inputType: "insertCompositionText",
+    data: " ",
+    preventDefault(){ throw new Error("composition text must not be replaced"); },
+  });
+  ctx.roots.prompt.firstListener("beforeinput")({
+    inputType: "insertParagraph",
+    data: null,
+    preventDefault(){ throw new Error("paragraph input must not be replaced"); },
+  });
+  assert.equal(ctx.feature.promptText(), ":)");
+  const bare = makeFeature();
+  bare.feature.bind();
+  bare.roots.prompt.textContent = ":)";
+  let prevented = false;
+  bare.roots.prompt.firstListener("beforeinput")({
+    inputType: "insertText", data: " ", preventDefault(){ prevented = true; },
+  });
+  assert.equal(prevented, false);
+  bare.feature.destroy();
+  ctx.feature.destroy();
+});
+
+test("People emoji conversion skips an unmapped caret and a document that cannot edit", () => {
+  const ctx = peopleEmojiCtx();
+  ctx.roots.prompt.textContent = ":smile";
+  assert.equal(typePeopleTrigger(ctx, ":"), false);
+  assert.equal(ctx.feature.promptText(), ":smile");
+  const foreign = { nodeType: 3, textContent: ":smile", parentNode: null };
+  const range = ctx.doc.createRange();
+  range.setStart(foreign, 6);
+  range.setEnd(foreign, 6);
+  ctx.doc.getSelection().removeAllRanges();
+  ctx.doc.getSelection().addRange(range);
+  ctx.roots.prompt.textContent = ":smile";
+  assert.equal(typePeopleTrigger(ctx, ":"), false);
+  ctx.feature.destroy();
+
+  const doc = {
+    execCommandCalls: [],
+    addEventListener(){}, removeEventListener(){},
+    createRange(){ return { setStart(){}, setEnd(){} }; },
+    getSelection(){ return { rangeCount: 1, getRangeAt(){ return { collapsed: true, startContainer: null, startOffset: 0 }; }, removeAllRanges(){}, addRange(){} }; },
+  };
+  const blocked = makeFeature({
+    sel: "team/s/o/c/g",
+    deps: { document: doc, peopleContext: () => ({ key: "s/o/c/g", writable: true }) },
+  });
+  blocked.feature.bind(); blocked.feature.onSelect();
+  blocked.roots.prompt.textContent = ":)";
+  let prevented = false;
+  blocked.roots.prompt.firstListener("beforeinput")({
+    inputType: "insertText", data: " ", preventDefault(){ prevented = true; },
+  });
+  assert.equal(prevented, false);
+  blocked.feature.destroy();
 });
