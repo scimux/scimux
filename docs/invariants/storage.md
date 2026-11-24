@@ -43,13 +43,11 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   each server this seat has joined. Only the muxer reads and writes it, and
   a write happens only from an explicit join, forget, or changing this seat's own name on a server.
   A damaged file is never overwritten.
-  The team gate is on when the environment variable is `1` or the settings
-  file switch is true. With the gate off it is neither read nor written,
-  except that an outbox round already running is allowed to finish.
+  It is untouched until a server is joined.
 - **Shared chats name a server and who may read them.** `team-shares.json`
   holds each share's server, scope, members, and delivery cursor.
   It holds no chat content and no token. Only the muxer reads and writes
-  it. With the gate off it is neither read nor written.
+  it. It is untouched until a share exists.
   The sharing UI selects people without a permission dropdown. Newly invited
   members receive `write` (view and comment). Keep the underlying `read` and
   `write` permissions and their enforcement; saving unrelated membership
@@ -97,7 +95,7 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
 - **Guest subscription state is metadata.** `team-subs.json` holds the identities,
   names, access, state and mirror and comment counters and read positions, with no chat content
   or token. Removing a shared chat deletes its subscription entry. Only the
-  muxer writes it; with the team gate off it is neither read nor written.
+  muxer writes it; it is untouched until a subscription exists.
   An owner subscription may retain its local node and exact share-start
   segment/record frontier, without message content. The node is exposed only
   after verifying its current session-log UID against the subscription.
@@ -106,15 +104,15 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   last-known names per server and seat for retained comment authors, without
   chat content or tokens. Current roster names take precedence. Removing the
   last subscription for a server removes its names. A damaged file is never
-  overwritten, and with the team gate off it is neither read nor written.
+  overwritten; it is untouched until a subscription exists.
 - **Guest copies are retained received history.** `team-copies/` holds received
   mirror and `comments.jsonl` entries, including for this seat's own shared chats,
   unchanged and append-only, including after
   sharing ends. Removing a shared chat deletes its copy, and a cut-off last
   line is removed during repair. Copies count toward total storage usage and
   belong to no node.
-  They are never sent anywhere or logged; with the team gate off they are
-  neither read nor written.
+  They are never sent anywhere or logged; they are untouched until a
+  subscription exists.
 - **Local People inventory is read-only.** Inventory checks the exact persisted
   copy identity under copy and serialized budget locks, plus the current local
   installation for pending authors. It does not establish a missing identity,

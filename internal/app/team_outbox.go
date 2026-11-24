@@ -953,19 +953,8 @@ func (a *app) copySharedChats() {
 	box.kick()
 }
 
-// teamComponents reads the live gate before serializing installation.
+// teamComponents returns the muxer's installed sharing components.
 func (a *app) teamComponents() (http.Handler, *shareOutbox) {
-	if !a.teamSettingsGate {
-		return a.teamHandler, a.shareOutbox
-	}
-	if !a.settings().teamEnabled() {
-		return nil, nil
-	}
-	a.teamInstallMu.Lock()
-	defer a.teamInstallMu.Unlock()
-	if a.teamHandler == nil {
-		installShareOutbox(a, a.teamDataDir, time.Now)
-	}
 	return a.teamHandler, a.shareOutbox
 }
 
@@ -975,7 +964,6 @@ func installShareOutbox(a *app, dataDir string, now func() time.Time) {
 	client := newTeamClient()
 	h := newTeamHandler(dataDir, now, client)
 	th := h.(*teamHandler)
-	th.peopleEnabled = func() bool { return !a.teamSettingsGate || a.settings().teamEnabled() }
 	th.ownerInstance = func(nodeID, instance string) bool {
 		a.mu.Lock()
 		defer a.mu.Unlock()

@@ -52,10 +52,6 @@ type settings struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
-func (s settings) teamEnabled() bool {
-	return string(s.Extra["experimental_feature_team"]) == "true"
-}
-
 func (s *settings) UnmarshalJSON(b []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {

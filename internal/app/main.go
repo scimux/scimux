@@ -195,7 +195,6 @@ func Run() {
 		Stderr:             os.Stderr,
 		Home:               home,
 		ExperimentalRemote: experimentalRemoteEnabled(os.Getenv),
-		ExperimentalTeam:   experimentalTeamEnabled(os.Getenv),
 		Config: remote.Config{
 			Stdin:  os.Stdin,
 			Stdout: os.Stdout,

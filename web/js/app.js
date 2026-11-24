@@ -2010,17 +2010,10 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
     $("#m_hnote").textContent = note;
     $("#m_hnote").hidden = !note;
   }
-  let teamSettingOn = false;
   const settingsCtl = createSettingsController({
     read: async () => {
       const state = await api("/api/settings");
       if (window[APP_SLOT] !== instance) return state;
-      const enabled = state.experimental_feature_team === true;
-      if (enabled && !teamSettingOn) {
-        if (sel && nodeById(sel)) shareFeature.select(sel);
-        guestFeature.refresh();
-      }
-      teamSettingOn = enabled;
       return state;
     },
     write: body => api("/api/settings", { method: "PUT", body: JSON.stringify(body) }),

@@ -30,14 +30,6 @@ func experimentalRemoteEnabled(getenv func(string) string) bool {
 	return getenv != nil && getenv(experimentalRemoteEnv) == "1"
 }
 
-const experimentalTeamEnv = "SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM"
-
-// experimentalTeamEnabled reports whether the team routes are on. Only the
-// exact value 1 enables them. A nil reader is off.
-func experimentalTeamEnabled(getenv func(string) string) bool {
-	return getenv != nil && getenv(experimentalTeamEnv) == "1"
-}
-
 // Command is the injectable startup seam for remote-aware scimux (S5).
 // Tests call Run; they must not spawn the scimux binary or os.Exit.
 type Command struct {
@@ -52,9 +44,6 @@ type Command struct {
 	// command makes the default fail closed and keeps tests independent of the
 	// agent's own environment.
 	ExperimentalRemote bool
-	// ExperimentalTeam is set only by the public process entry point after
-	// reading experimentalTeamEnv. The default is off.
-	ExperimentalTeam bool
 
 	Config remote.Config
 
@@ -241,12 +230,7 @@ func (c *Command) Run(ctx context.Context) (runErr error) {
 	}
 	c.application = a
 	if c.muxerOnly {
-		if c.ExperimentalTeam {
-			installShareOutbox(c.application, c.Config.DataDir, time.Now)
-		} else {
-			a.teamSettingsGate = true
-			a.teamDataDir = c.Config.DataDir
-		}
+		installShareOutbox(c.application, c.Config.DataDir, time.Now)
 	}
 	policy, err := newRequestPolicy(*addr, trustedHosts)
 	if err != nil {
