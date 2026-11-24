@@ -314,41 +314,6 @@ func assertNoSubsFile(t *testing.T, dir string) {
 	}
 }
 
-func TestSubListGateOffDoesNothing(t *testing.T) {
-	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		hits++
-	}))
-	t.Cleanup(srv.Close)
-	orig := newTeamClient
-	t.Cleanup(func() { newTeamClient = orig })
-	newTeamClient = func() *team.Client {
-		c := orig()
-		c.Transport = srv.Client().Transport
-		return c
-	}
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	h, err := newCoreMux(cmd.application)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, method := range []string{http.MethodGet, http.MethodPut} {
-		unknown := recordedText(h, method, "/api/not-a-route")
-		got := recordedText(h, method, "/api/team/subscriptions")
-		if got != unknown {
-			t.Fatalf("%s subscriptions\n%s\nwant the unknown-route response\n%s", method, got, unknown)
-		}
-	}
-	assertNoTeamFile(t, data)
-	assertNoSubsFile(t, data)
-	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("copies stat = %v", err)
-	}
-	if hits != 0 {
-		t.Fatalf("gate off contacted a server %d times", hits)
-	}
-}
-
 func TestSubListOtherMethodsDoNothing(t *testing.T) {
 	h, dir := testTeamSurface(t, team.NewClient())
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
@@ -1891,7 +1856,7 @@ func TestSubReadReplacedGenerationSaveFailure(t *testing.T) {
 }
 
 func TestSubSeenRequiresCSRF(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	seedSub(t, data, baseSub())
 	core, err := newCoreMux(cmd.application)
 	if err != nil {
@@ -2707,7 +2672,7 @@ func TestSubRemoveRejectsUnknownAndMalformedIdentities(t *testing.T) {
 }
 
 func TestSubRemoveRequiresCSRF(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	seedSub(t, data, baseSub())
 	core, err := newCoreMux(cmd.application)
 	if err != nil {
@@ -2893,22 +2858,6 @@ func TestSubRemoveNetworkCallsHoldNoHandlerLock(t *testing.T) {
 	}
 	if earlyAuth.Load() {
 		t.Error("hello carried authorization")
-	}
-}
-
-func TestSubRemoveGateOffDoesNothing(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	core, err := newCoreMux(cmd.application)
-	if err != nil {
-		t.Fatal("cannot create core mux")
-	}
-	if got, want := recordedText(core, http.MethodDelete, subReadPath()), recordedText(core, http.MethodDelete, "/api/not-a-route"); got != want {
-		t.Error("gate-off route did not match the unknown route")
-	}
-	assertNoTeamFile(t, data)
-	assertNoSubsFile(t, data)
-	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
-		t.Error("gate-off route touched copies")
 	}
 }
 
@@ -3709,7 +3658,7 @@ func TestSubCommentPostValidationAndInactive(t *testing.T) {
 }
 
 func TestSubCommentPostRequiresCSRF(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	s := baseSub()
 	s.Access = "write"
 	seedSub(t, data, s)
@@ -4075,27 +4024,6 @@ func TestSubCommentsRosterRefusesChangedServer(t *testing.T) {
 | comments_last missing || seen_comments missing | TestSubsVersionTwoNeedsBothValidCounters: each missing field |
 | access != read && != write && != owner | TestSubsRoundTripKeepsFieldsAndMode: read and write; TestSubsVersionTwoAndLegacyMigration: owner |
 */
-
-func TestSubCommentsGateOffDoesNothing(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	core, err := newCoreMux(cmd.application)
-	if err != nil {
-		t.Fatal("cannot create core mux")
-	}
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		if got, want := recordedText(core, method, subReadPath()+"/comments"), recordedText(core, method, "/api/not-a-route"); got != want {
-			t.Error("gate-off comment route differs from unknown route")
-		}
-	}
-	assertNoTeamFile(t, data)
-	assertNoSubsFile(t, data)
-	if _, err := os.Stat(filepath.Join(data, "team-people.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("gate-off route touched people storage")
-	}
-	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
-		t.Error("gate-off comment route touched copies")
-	}
-}
 
 func TestSubCommentsReadMirrorErrorCases(t *testing.T) {
 	t.Run("gap is refused", func(t *testing.T) {

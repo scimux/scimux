@@ -195,7 +195,7 @@ func TestLocalStageRemovalFailsClosed(t *testing.T) {
 }
 
 func TestLocalStageRemovalWebSecurity(t *testing.T) {
-	cmd, dir, _, _ := startTeamCommand(t, true, true)
+	cmd, dir, _, _ := startTeamCommand(t, true)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {

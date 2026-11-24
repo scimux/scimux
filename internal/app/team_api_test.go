@@ -28,39 +28,17 @@ const (
 	teamCode     = "SECRET-JOIN-CODE"
 )
 
-func TestExperimentalTeamGateIsExactAndFailClosed(t *testing.T) {
-	for _, tc := range []struct {
-		value string
-		want  bool
-	}{
-		{"", false},
-		{"0", false},
-		{"true", false},
-		{"01", false},
-		{"1", true},
-	} {
-		got := experimentalTeamEnabled(func(string) string { return tc.value })
-		if got != tc.want {
-			t.Errorf("value %q: enabled = %v, want %v", tc.value, got, tc.want)
-		}
-	}
-	if experimentalTeamEnabled(nil) {
-		t.Fatal("nil environment reader enabled the team gate")
-	}
-}
-
-func startTeamCommand(t *testing.T, teamOn, muxer bool) (*Command, string, *bytes.Buffer, *bytes.Buffer) {
+func startTeamCommand(t *testing.T, muxer bool) (*Command, string, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	data := t.TempDir()
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	cmd := &Command{
-		Args:             []string{"scimux", "-addr", "127.0.0.1:0", "-data", data},
-		Home:             t.TempDir(),
-		Stdout:           stdout,
-		Stderr:           stderr,
-		ExperimentalTeam: teamOn,
-		muxerOnly:        muxer,
+		Args:      []string{"scimux", "-addr", "127.0.0.1:0", "-data", data},
+		Home:      t.TempDir(),
+		Stdout:    stdout,
+		Stderr:    stderr,
+		muxerOnly: muxer,
 	}
 	if err := cmd.Run(context.Background()); err != nil {
 		t.Fatal(err)
@@ -93,18 +71,8 @@ func dumpRecorder(rec *httptest.ResponseRecorder) string {
 	return b.String()
 }
 
-func TestTeamGateOffMatchesUnknownRoute(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	h, err := newCoreMux(cmd.application)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertTeamPathsMatchUnknown(t, h)
-	assertNoTeamFile(t, data)
-}
-
 func TestTeamGateOnOutsideTheMuxerMatchesUnknownRoute(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, true, false)
+	cmd, data, _, _ := startTeamCommand(t, false)
 	assertTeamPathsMatchUnknown(t, cmd.Handler())
 	assertNoTeamFile(t, data)
 	if cmd.application == nil || cmd.application.teamHandler != nil {
@@ -115,12 +83,11 @@ func TestTeamGateOnOutsideTheMuxerMatchesUnknownRoute(t *testing.T) {
 		t.Run(arg, func(t *testing.T) {
 			dir := t.TempDir()
 			cmd := &Command{
-				Args:             []string{"scimux", arg, "-data", dir},
-				Home:             t.TempDir(),
-				Stdout:           io.Discard,
-				Stderr:           io.Discard,
-				ExperimentalTeam: true,
-				muxerOnly:        true,
+				Args:      []string{"scimux", arg, "-data", dir},
+				Home:      t.TempDir(),
+				Stdout:    io.Discard,
+				Stderr:    io.Discard,
+				muxerOnly: true,
 			}
 			if err := cmd.Run(context.Background()); err != nil {
 				t.Fatal(err)
@@ -180,7 +147,7 @@ func TestTeamMuxerStartupMakesNoConnection(t *testing.T) {
 		c.Transport = srv.Client().Transport
 		return c
 	}
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	if cmd.application == nil || cmd.application.teamHandler == nil {
 		t.Fatal("muxer did not install the team handler")
 	}
@@ -743,7 +710,7 @@ func TestTeamTokenStaysOutOfTheCommand(t *testing.T) {
 		c.Transport = srv.Client().Transport
 		return c
 	}
-	cmd, data, stdout, stderr := startTeamCommand(t, true, true)
+	cmd, data, stdout, stderr := startTeamCommand(t, true)
 	if cmd.application == nil || cmd.application.teamHandler == nil {
 		t.Fatal("muxer did not install the team handler")
 	}
@@ -1030,7 +997,6 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, needle := range []string{
-		"SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM",
 		"GET /api/team/servers",
 		"POST /api/team/servers",
 		"DELETE /api/team/servers/{id}",
@@ -1058,6 +1024,26 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 			t.Errorf("docs/http-api.md missing %q", needle)
 		}
 	}
+	for _, file := range []string{"README.md", "docs/http-api.md", "docs/invariants/storage.md"} {
+		raw, err := os.ReadFile(filepath.Join(root, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM", "experimental_feature_team", "team gate"} {
+			if strings.Contains(string(raw), forbidden) {
+				t.Errorf("%s contains %q", file, forbidden)
+			}
+		}
+		if file == "README.md" {
+			if strings.Contains(string(raw), "Experimental team sharing") {
+				t.Error("experimental wording remains")
+			}
+			sentence := "It is a single-user supervisor for agents running on your machine: invite colleagues to watch a chat live and weigh in, but your agent takes orders from you alone."
+			if !strings.Contains(strings.Join(strings.Fields(string(raw)), " "), sentence) {
+				t.Error("README missing Non-goals sentence")
+			}
+		}
+	}
 	storage, err := os.ReadFile(filepath.Join(root, "docs", "invariants", "storage.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -1068,7 +1054,6 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 		"Only the muxer reads and writes it",
 		"explicit join, forget, or changing",
 		"damaged file is never overwritten",
-		"gate off it is neither read nor written",
 	} {
 		if !strings.Contains(string(storage), needle) {
 			t.Errorf("docs/invariants/storage.md missing %q", needle)
@@ -1085,7 +1070,7 @@ func TestTeamRoutesShareTheSettingsBoundary(t *testing.T) {
 		c.Transport = srv.Client().Transport
 		return c
 	}
-	cmd, _, _, _ := startTeamCommand(t, true, true)
+	cmd, _, _, _ := startTeamCommand(t, true)
 	if cmd.application == nil || cmd.application.teamHandler == nil {
 		t.Fatal("muxer did not install the team handler")
 	}
@@ -1125,7 +1110,7 @@ func TestTeamRoutesShareTheSettingsBoundary(t *testing.T) {
 
 func TestTeamCoreMuxLeavesOtherRoutesAlone(t *testing.T) {
 	h, _ := testTeamSurface(t, team.NewClient())
-	cmd, _, _, _ := startTeamCommand(t, true, true)
+	cmd, _, _, _ := startTeamCommand(t, true)
 	cmd.application.teamHandler = h
 	core, err := newCoreMux(cmd.application)
 	if err != nil {
@@ -1760,7 +1745,7 @@ func TestTeamStatusAndLeaveShareTheSettingsBoundary(t *testing.T) {
 		c.Transport = srv.Client().Transport
 		return c
 	}
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	if cmd.application == nil || cmd.application.teamHandler == nil {
 		t.Fatal("muxer did not install the team handler")
 	}
@@ -2151,7 +2136,7 @@ func TestTeamRenameSeatDoesNotHoldFileLockAcrossCalls(t *testing.T) {
 }
 
 func TestTeamRenameSeatRequiresCSRF(t *testing.T) {
-	cmd, _, _, _ := startTeamCommand(t, true, true)
+	cmd, _, _, _ := startTeamCommand(t, true)
 	core, err := newCoreMux(cmd.application)
 	if err != nil {
 		t.Fatal(err)
@@ -2214,175 +2199,74 @@ func TestTeamRenameSeatRejectsOtherMethods(t *testing.T) {
 	}
 }
 
-func TestTeamSettingLiveMuxer(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	a := cmd.application
-	h, err := newCoreMux(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	set := func(on bool) {
-		t.Helper()
-		if err := os.WriteFile(a.settingsPath, []byte(fmt.Sprintf(`{"experimental_feature_team":%t}`, on)), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	get := func() int {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/team/servers", nil))
-		return rec.Code
-	}
-	assertTeamPathsMatchUnknown(t, h)
-	a.copySharedChats()
-	assertNoTeamFile(t, data)
-	set(true)
-	if got := get(); got != 200 {
-		t.Fatalf("file on: %d", got)
-	}
-	firstHandler, firstOutbox := a.teamHandler, a.shareOutbox
-	if firstHandler == nil || firstOutbox == nil {
-		t.Fatal("missing installation")
-	}
-	file := filepath.Join(data, team.SharesFile)
-	original := []byte("[]\n")
-	if err := os.WriteFile(file, original, 0600); err != nil {
-		t.Fatal(err)
-	}
-	set(false)
-	assertTeamPathsMatchUnknown(t, h)
-	firstOutbox.mu.Lock()
-	done := make(chan struct{})
-	go func() { a.copySharedChats(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		firstOutbox.mu.Unlock()
-		t.Fatal("off poll kicked outbox")
-	}
-	firstOutbox.mu.Unlock()
-	if got, err := os.ReadFile(file); err != nil || !bytes.Equal(got, original) {
-		t.Fatalf("team file changed: %q %v", got, err)
-	}
-	set(true)
-	if got := get(); got != 200 {
-		t.Fatalf("file on again: %d", got)
-	}
-	if a.teamHandler != firstHandler || a.shareOutbox != firstOutbox {
-		t.Fatal("installation replaced")
-	}
-	firstOutbox.mu.Lock()
-	done = make(chan struct{})
-	go func() { a.copySharedChats(); close(done) }()
-	select {
-	case <-done:
-		firstOutbox.mu.Unlock()
-		t.Fatal("on poll did not kick outbox")
-	case <-time.After(50 * time.Millisecond):
-	}
-	firstOutbox.mu.Unlock()
-	<-done
-	set(false)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/settings", strings.NewReader(`{"experimental_feature_team":true}`)))
-	if rec.Code != 200 || get() != 200 {
-		t.Fatalf("PUT on: %d", rec.Code)
-	}
-}
-
-func TestTeamSettingOutsideMuxer(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, false, false)
-	if err := os.WriteFile(filepath.Join(data, "settings.json"), []byte(`{"experimental_feature_team":true}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	assertTeamPathsMatchUnknown(t, cmd.Handler())
-	cmd.application.copySharedChats()
-	if cmd.application.teamHandler != nil || cmd.application.shareOutbox != nil {
-		t.Fatal("non-muxer installed team")
-	}
-	assertNoTeamFile(t, data)
-	for _, arg := range []string{webChildCmd, sessionWorkerCmd} {
-		t.Run(arg, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"experimental_feature_team":true}`), 0600); err != nil {
+func TestTeamAlwaysAvailableWithoutJoin(t *testing.T) {
+	for _, body := range []string{"", `{"experimental_feature_team":false}`, `{"experimental_feature_team":null}`, `{"experimental_feature_team":"true"}`, `{`} {
+		t.Run(body, func(t *testing.T) {
+			data := t.TempDir()
+			if body != "" {
+				if err := os.WriteFile(filepath.Join(data, "settings.json"), []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := &Command{Args: []string{"scimux", "-addr", "127.0.0.1:0", "-data", data}, Home: t.TempDir(), Stdout: io.Discard, Stderr: io.Discard, muxerOnly: true}
+			if err := cmd.Run(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			c := &Command{Args: []string{"scimux", arg, "-data", dir}, Home: t.TempDir(), Stdout: io.Discard, Stderr: io.Discard, muxerOnly: true}
-			if err := c.Run(context.Background()); err != nil {
+			t.Cleanup(cmd.closeListener)
+			t.Cleanup(cmd.closeOwnership)
+			h, err := newCoreMux(cmd.application)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if c.application != nil {
-				t.Fatal("child built an application")
+			for _, path := range []string{"/api/team/servers", "/api/team/subscriptions"} {
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+				if rec.Code != 200 {
+					t.Fatalf("%s: %d", path, rec.Code)
+				}
+				if path == "/api/team/servers" && strings.TrimSpace(rec.Body.String()) != `{"servers":[]}` {
+					t.Fatal(rec.Body.String())
+				}
 			}
-			assertNoTeamFile(t, dir)
+			if cmd.application.teamHandler == nil || cmd.application.shareOutbox == nil {
+				t.Fatal("team components not installed")
+			}
+			cmd.application.copySharedChats()
+			assertNoTeamFile(t, data)
 		})
 	}
 }
 
-func TestTeamSettingConcurrentInstall(t *testing.T) {
-	cmd, _, _, _ := startTeamCommand(t, false, true)
-	a := cmd.application
-	h, err := newCoreMux(a)
+func TestTeamAlwaysAvailableDuringSettingsWrites(t *testing.T) {
+	cmd, _, _, _ := startTeamCommand(t, true)
+	h, err := newCoreMux(cmd.application)
 	if err != nil {
 		t.Fatal(err)
 	}
-	orig := newTeamClient
-	var mu sync.Mutex
-	installs := 0
-	newTeamClient = func() *team.Client { mu.Lock(); installs++; mu.Unlock(); return orig() }
-	defer func() { newTeamClient = orig }()
-	if err := a.saveSettings(settings{Extra: map[string]json.RawMessage{"experimental_feature_team": []byte("true")}}); err != nil {
-		t.Fatal(err)
-	}
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 3; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			for j := 0; j < 30; j++ {
-				if i == 0 {
+			for j := 0; j < 20; j++ {
+				switch i {
+				case 0:
 					rec := httptest.NewRecorder()
-					a.handleSettingsPut(rec, httptest.NewRequest("PUT", "/api/settings", strings.NewReader(fmt.Sprintf(`{"experimental_feature_team":%t}`, j%2 == 0))))
-				} else if i%2 == 0 {
-					a.copySharedChats()
-				} else {
-					h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/team/servers", nil))
+					h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/team/servers", nil))
+					if rec.Code != 200 {
+						t.Errorf("GET status %d", rec.Code)
+					}
+				case 1:
+					cmd.application.copySharedChats()
+				case 2:
+					rec := httptest.NewRecorder()
+					cmd.application.handleSettingsPut(rec, httptest.NewRequest("PUT", "/api/settings", strings.NewReader(`{"claude_usage_checks":false}`)))
+					if rec.Code != 200 {
+						t.Errorf("PUT status %d", rec.Code)
+					}
 				}
 			}
 		}(i)
 	}
 	wg.Wait()
-	if err := a.saveSettings(settings{Extra: map[string]json.RawMessage{"experimental_feature_team": []byte("true")}}); err != nil {
-		t.Fatal(err)
-	}
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/team/servers", nil))
-	mu.Lock()
-	got := installs
-	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("installations = %d", got)
-	}
-}
-
-func TestTeamSettingPollInstallsAndEnvironmentOverrides(t *testing.T) {
-	cmd, _, _, _ := startTeamCommand(t, false, true)
-	if err := os.WriteFile(cmd.application.settingsPath, []byte(`{"experimental_feature_team":true}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	cmd.application.copySharedChats()
-	if cmd.application.teamHandler == nil || cmd.application.shareOutbox == nil {
-		t.Fatal("poll did not install")
-	}
-	env, _, _, _ := startTeamCommand(t, true, true)
-	if err := os.WriteFile(env.application.settingsPath, []byte(`{"experimental_feature_team":false}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	h, err := newCoreMux(env.application)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/team/servers", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("environment override: %d", rec.Code)
-	}
 }
