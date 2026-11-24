@@ -2270,3 +2270,10 @@ func TestTeamAlwaysAvailableDuringSettingsWrites(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestNilCommandRunFails(t *testing.T) {
+	var cmd *Command
+	if err := cmd.Run(context.Background()); err == nil {
+		t.Fatal("nil command succeeded")
+	}
+}
