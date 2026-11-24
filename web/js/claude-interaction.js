@@ -104,7 +104,7 @@ function addText(doc, parent, className, text){
 }
 
 function actionable(view){
-  return !!view && (view.phase === "pending" || view.phase === "claimed" || view.phase === "native");
+  return !!view && (view.phase === "pending" || view.phase === "claimed" || view.phase === "native" || view.phase === "manual");
 }
 
 export function interactionCardVisible(view){
@@ -310,7 +310,7 @@ export function createClaudeInteractionCard(deps){
         answers: [{ question_id: choice.question_id, option_ids: [choice.option_id] }],
       } };
     }
-    if (kind === "cancel" && view.phase === "native"){
+    if (kind === "cancel" && (view.phase === "native" || view.phase === "manual")){
       if (!view.dialog_id) return { error: "The current dialog is not matched safely." };
       return { body: { request_id: view.request_id, action: "cancel", dialog_id: view.dialog_id } };
     }
@@ -485,10 +485,24 @@ export function createClaudeInteractionCard(deps){
         const block = make(doc, "fieldset", "ci-q");
         if (question.header) addText(doc, block, "ci-header", question.header);
         addText(doc, block, "ci-text", question.text || "");
+        for (const choice of (view.native_choices || [])){
+          if (choice.question_id !== question.id) continue;
+          const button = make(doc, "button", "ci-native-choice");
+          button.type = "button";
+          button.textContent = choice.label || "Choose option";
+          listen(button, "click", () => submit("native", choice));
+          block.appendChild(button);
+        }
         host.appendChild(block);
       }
-      addText(doc, host, "ci-text", "The current native dialog controls are enabled. Use them to answer this question; scimux will prevent a second send.");
+      if (!view.native_choices || view.native_choices.length === 0){
+        addText(doc, host, "ci-text", "The current native dialog could not be matched safely. Refresh terminal controls to try again.");
+      } else {
+        addText(doc, host, "ci-text", "Choose an option for the current native dialog. scimux checks its dialog epoch before sending.");
+      }
       const actions = make(doc, "div", "ci-actions");
+      if (view.native_choices && view.native_choices.length > 0)
+        actions.appendChild(actionButton("ci-cancel", "Cancel question", "cancel"));
       actions.appendChild(actionButton("ci-terminal", "Refresh terminal controls", "terminal"));
       host.appendChild(actions);
     } else if (view.phase === "recorded"){
@@ -562,9 +576,10 @@ export function createClaudeInteractionCard(deps){
       current = null;
       return;
     }
-    const enteringNative = !!(current && current.nodeId === nodeId &&
-      current.requestId === view.request_id && current.phase !== "native" && view.phase === "native");
-    if (enteringNative && holdId === view.request_id){
+    const enteringNativeControls = !!(current && current.nodeId === nodeId &&
+      current.requestId === view.request_id && current.phase !== view.phase &&
+      (view.phase === "native" || view.phase === "manual"));
+    if (enteringNativeControls && holdId === view.request_id){
       holdId = "";
       setStatus("");
     }

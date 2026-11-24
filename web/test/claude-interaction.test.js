@@ -597,6 +597,65 @@ test("an expired standing question stays visible and sends one native choice", a
   assert.equal(ambiguous.parent.querySelectorAll(".ci-native-choice").length, 0);
 });
 
+test("manual terminal handoff keeps epoch-bound native answer controls visible", async () => {
+  const choices = [{ question_id: "q1", option_id: "q1o2", label: "Beta" }];
+  const native = {
+    ...radioQuestion(), phase: "native", native_keys: true, dialog_id: "epoch-manual",
+    native_choices: choices,
+  };
+  const mounted = mountCard(native);
+  mounted.parent.querySelector(".ci-terminal").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(mounted.posts[0].body, { request_id: "req-letter", action: "terminal" });
+
+  const view = {
+    ...native, phase: "manual",
+    questions: [...native.questions, {
+      id: "q2", text: "Pick several", multi: true,
+      options: [{ id: "q2o1", label: "Red", description: "warm" }],
+    }],
+    native_choices: [{ question_id: "q1", option_id: "q1o2", label: "Beta" }],
+  };
+  mounted.card.update(mounted.parent, view, { nodeId: "c1" });
+  mounted.card.update(mounted.parent, view, { nodeId: "c1" });
+  const buttons = mounted.parent.querySelectorAll(".ci-native-choice");
+  assert.equal(buttons.length, 1);
+  assert.equal(buttons[0].textContent, "Beta");
+  assert.equal(buttons[0].disabled, false);
+  assert.match(mounted.parent.querySelectorAll(".ci-text").map(n => n.textContent).join(" "), /checks its dialog epoch/i);
+  buttons[0].click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(mounted.posts[1].body, {
+    request_id: "req-letter", action: "native", dialog_id: "epoch-manual",
+    answers: [{ question_id: "q1", option_ids: ["q1o2"] }],
+  });
+});
+
+test("manual controls bind cancellation to the dialog epoch and fail closed when unmatched", async () => {
+  const view = {
+    ...radioQuestion(), phase: "manual", native_keys: true, dialog_id: "epoch-manual",
+    native_choices: [{ question_id: "q1", option_id: "q1o1", label: "Alpha" }],
+  };
+  const cancel = mountCard(view);
+  cancel.parent.querySelector(".ci-cancel").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(cancel.posts[0].body, {
+    request_id: "req-letter", action: "cancel", dialog_id: "epoch-manual",
+  });
+
+  const unmatched = mountCard({ ...view, native_choices: [], block: "menu_mismatch" });
+  assert.equal(unmatched.parent.querySelectorAll(".ci-native-choice").length, 0);
+  assert.equal(unmatched.parent.querySelector(".ci-cancel"), null);
+  assert.match(unmatched.parent.querySelectorAll(".ci-text").map(n => n.textContent).join(" "), /could not be matched safely/);
+  unmatched.parent.querySelector(".ci-terminal").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(unmatched.posts[0].body, { request_id: "req-letter", action: "terminal" });
+});
+
 test("native handoff and a missing interaction keep the native key path", async () => {
   const standing = {
     ...radioQuestion(), phase: "native", native_keys: true, dialog_id: "epoch-1",

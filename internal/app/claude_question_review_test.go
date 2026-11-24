@@ -23,6 +23,67 @@ func TestReviewStandardNativeQuestionRows(t *testing.T) {
 	}
 }
 
+func TestReviewNativeQuestionRowsIncludeDescriptions(t *testing.T) {
+	model := mustClassify(t, "AskUserQuestion", letterQuestionRaw())
+	st := standingFromModel(claudeInteractionRequest{ID: "review-description"}, model)
+	if paneMatchesStandingOptions(nil, nil) || paneMatchesStandingOptions(st.Questions[0].Options, []string{"Alpha — first"}) {
+		t.Fatal("short described menu matched")
+	}
+	if paneMatchesStandingOptions([]claudeStandingOption{{Label: ""}, {Label: "Beta"}}, []string{"", "Beta"}) {
+		t.Fatal("empty described label matched")
+	}
+	if !paneMatchesStandingOptions(st.Questions[0].Options, []string{"Alpha — first", "Beta — second"}) ||
+		!paneMatchesStandingOptions(st.Questions[0].Options, []string{"Alpha — first", "Beta — second", "Other"}) {
+		t.Fatal("described menu without all native suffix rows did not match")
+	}
+	if !paneMatchesQuestion([]string{"Alpha", "Beta"}, []string{"Alpha", "Beta", "Other", "Chat about this"}) {
+		t.Fatal("legacy native-menu suffix grammar regressed")
+	}
+	opts := []PermOption{
+		{Key: "1", Name: "Alpha — first"},
+		{Key: "2", Name: "Beta — second"},
+		{Key: "3", Name: "Other"},
+		{Key: "4", Name: "Chat about this"},
+	}
+	_, choices, block := matchStandingMenu(st.Questions, opts)
+	if block != "" || len(choices) != 2 || choices[0].Key != "1" || choices[1].Key != "2" {
+		t.Fatalf("described AX menu rejected: block=%q choices=%+v", block, choices)
+	}
+	if !standingPaneQuestionMatches(st.Questions, "Question: Letter\n> Pick a letter?\n1. Alpha — first\n2. Beta — second\n3. Other\n4. Chat about this") {
+		t.Fatal("described AX rows did not match the retained question")
+	}
+	wrongDescription := []PermOption{
+		{Key: "1", Name: "Alpha — stale"},
+		{Key: "2", Name: "Beta — second"},
+		{Key: "3", Name: "Other"},
+	}
+	if _, choices, block := matchStandingMenu(st.Questions, wrongDescription); block == "" || len(choices) != 0 {
+		t.Fatalf("stale description accepted: block=%q choices=%+v", block, choices)
+	}
+}
+
+func TestReviewManualProjectionRetainsEpochBoundChoices(t *testing.T) {
+	a, tmux, n, bundle, epoch := setupStandingQuestion(t, "review-manual-view", "", nil)
+	st, ok := readStandingQuestion(bundle, "req-letter")
+	if !ok {
+		t.Fatal("standing question missing")
+	}
+	st.Manual = true
+	st.ManualEpoch = epoch
+	if err := writeClaudePermFile(filepath.Join(bundle, "perm", "interact", "standing", "req-letter.json"), st); err != nil {
+		t.Fatal(err)
+	}
+	view, ok := a.projectStandingQuestion(n, st)
+	if !ok || view.Phase != "manual" || view.DialogID != epoch || len(view.NativeChoices) != 2 {
+		t.Fatalf("manual view lost its epoch-bound choices: ok=%v view=%+v", ok, view)
+	}
+	tmux.capture = "Different question\n\n  1. Alpha\n  2. Beta\n  3. Other\n\nEnter selection [1-3], or Escape to cancel:"
+	view, ok = a.projectStandingQuestion(n, st)
+	if !ok || view.Phase != "manual" || view.Block != "menu_mismatch" || len(view.NativeChoices) != 0 {
+		t.Fatalf("manual view exposed choices for a stale prompt: ok=%v view=%+v", ok, view)
+	}
+}
+
 func TestReviewNativeQuestionHeader(t *testing.T) {
 	model := mustClassify(t, "AskUserQuestion", letterQuestionRaw())
 	st := standingFromModel(claudeInteractionRequest{ID: "review"}, model)

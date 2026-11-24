@@ -366,6 +366,32 @@ func paneMatchesQuestion(labels, pane []string) bool {
 	return len(trailing) == 2 && trailing[0] == "Other" && trailing[1] == "Chat about this"
 }
 
+func standingOptionMatches(option claudeStandingOption, name string) bool {
+	if option.Label == name {
+		return true
+	}
+	return option.Description != "" && name == option.Label+" — "+option.Description
+}
+
+func paneMatchesStandingOptions(options []claudeStandingOption, pane []string) bool {
+	if len(options) < 2 || len(pane) < len(options) {
+		return false
+	}
+	for i, option := range options {
+		if option.Label == "" || !standingOptionMatches(option, pane[i]) {
+			return false
+		}
+	}
+	trailing := pane[len(options):]
+	if len(trailing) == 0 {
+		return true
+	}
+	if len(trailing) == 1 {
+		return trailing[0] == "Other"
+	}
+	return len(trailing) == 2 && trailing[0] == "Other" && trailing[1] == "Chat about this"
+}
+
 // matchStandingMenu resolves one single-select question onto the current
 // menu. Zero matches, several matches, and identical option lists are
 // menu_mismatch. Every question multi-select is multi. An empty menu is
@@ -395,11 +421,7 @@ func matchStandingMenu(questions []claudeStandingQuestionItem, opts []PermOption
 		if question.Multi || len(question.Options) == 0 {
 			continue
 		}
-		labels := make([]string, len(question.Options))
-		for i, option := range question.Options {
-			labels[i] = option.Label
-		}
-		if paneMatchesQuestion(labels, pane) {
+		if paneMatchesStandingOptions(question.Options, pane) {
 			matched = append(matched, question)
 		}
 	}
@@ -410,7 +432,7 @@ func matchStandingMenu(questions []claudeStandingQuestionItem, opts []PermOption
 	choices := make([]sessionworker.InteractionNativeChoice, 0, len(question.Options))
 	seenLabels := make(map[string]bool, len(question.Options))
 	for i, option := range question.Options {
-		if i >= len(opts) || opts[i].Name != option.Label || option.ID == "" || option.Label == "" || seenLabels[option.Label] {
+		if i >= len(opts) || !standingOptionMatches(option, opts[i].Name) || option.ID == "" || option.Label == "" || seenLabels[option.Label] {
 			return "", nil, "menu_mismatch"
 		}
 		seenLabels[option.Label] = true
@@ -437,14 +459,11 @@ func standingMenuMatchesLabels(questions []claudeStandingQuestionItem, opts []Pe
 			!(len(extra) == 2 && extra[0].Name == "Other" && extra[1].Name == "Chat about this") {
 			continue
 		}
-		matches := true
-		for i, option := range question.Options {
-			if option.Label == "" || opts[i].Name != option.Label {
-				matches = false
-				break
-			}
+		pane := make([]string, len(opts))
+		for i, option := range opts {
+			pane[i] = option.Name
 		}
-		if matches {
+		if paneMatchesStandingOptions(question.Options, pane) {
 			return true
 		}
 	}
@@ -509,7 +528,18 @@ func (a *app) projectStandingQuestion(n *Node, st claudeStandingQuestion) (sessi
 	if st.Manual && dlg.DialogID != "" && st.ManualEpoch == dlg.DialogID {
 		view.Phase = "manual"
 		view.NativeKeys = true
-		view.Block = "handed_off"
+		visible := ""
+		if a.server != nil {
+			visible, _ = a.server.Session(n.ID).CaptureVisible()
+		}
+		_, choices, block := matchStandingMenu(st.Questions, a.claudeDialogOptions(n, dlg))
+		if block == "" && !standingPaneQuestionMatches(st.Questions, visible) {
+			block = "menu_mismatch"
+		}
+		view.Block = block
+		if view.Block == "" {
+			view.NativeChoices = choices
+		}
 		return view, true
 	}
 	view.Phase = "native"
@@ -542,11 +572,7 @@ func standingPaneQuestionMatches(questions []claudeStandingQuestionItem, pane st
 		if question.Multi || question.Text == "" || len(question.Options) == 0 {
 			continue
 		}
-		labels := make([]string, len(question.Options))
-		for i, option := range question.Options {
-			labels[i] = option.Label
-		}
-		if paneMatchesQuestion(labels, paneLines(pane)) {
+		if paneMatchesStandingOptions(question.Options, paneLines(pane)) {
 			if matched != nil {
 				return false
 			}
