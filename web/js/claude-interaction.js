@@ -40,6 +40,14 @@ export function interactionSignature(view){
     plan: view.plan || "",
     modes: (Array.isArray(view.modes) ? view.modes : []).map(m => ({ id: m.id, label: m.label })),
     delivery: view.delivery || "",
+    dialog_id: view.dialog_id || "",
+    native_choices: (Array.isArray(view.native_choices) ? view.native_choices : []).map(c => ({
+      question_id: c.question_id,
+      option_id: c.option_id,
+      label: c.label,
+    })),
+    block: view.block || "",
+    status: view.status || "",
   });
 }
 
@@ -96,7 +104,14 @@ function addText(doc, parent, className, text){
 }
 
 function actionable(view){
-  return !!view && (view.phase === "pending" || view.phase === "claimed");
+  return !!view && (view.phase === "pending" || view.phase === "claimed" || view.phase === "native");
+}
+
+export function interactionCardVisible(view){
+  return !!view && !!view.request_id && (
+    view.native_keys === false ||
+    ["native", "sent", "unconfirmed", "ambiguous", "manual", "recorded"].includes(view.phase)
+  );
 }
 
 export function createClaudeInteractionCard(deps){
@@ -240,7 +255,9 @@ export function createClaudeInteractionCard(deps){
 
   function setBusy(busy){
     const locked = !!busy || holdId === viewRef.request_id || !actionable(viewRef);
-    for (const button of host.querySelectorAll(".ci-action")) button.disabled = locked;
+    for (const button of host.querySelectorAll(".ci-action"))
+      button.disabled = button.classList.contains("ci-terminal") ? !!busy : locked;
+    for (const button of host.querySelectorAll(".ci-native-choice")) button.disabled = locked;
   }
 
   function selectedMode(){
@@ -283,7 +300,20 @@ export function createClaudeInteractionCard(deps){
     return { body: { request_id: view.request_id, action, feedback: text } };
   }
 
-  function build(kind, view){
+  function build(kind, view, choice){
+    if (kind === "native"){
+      if (!choice || !view.dialog_id) return { error: "The current dialog is not matched safely." };
+      return { body: {
+        request_id: view.request_id,
+        action: "native",
+        dialog_id: view.dialog_id,
+        answers: [{ question_id: choice.question_id, option_ids: [choice.option_id] }],
+      } };
+    }
+    if (kind === "cancel" && view.phase === "native"){
+      if (!view.dialog_id) return { error: "The current dialog is not matched safely." };
+      return { body: { request_id: view.request_id, action: "cancel", dialog_id: view.dialog_id } };
+    }
     if (kind === "answer") return answerBody(view);
     if (kind === "discuss") return feedbackBody(view, "discuss");
     if (kind === "request_changes") return feedbackBody(view, "request_changes");
@@ -308,13 +338,13 @@ export function createClaudeInteractionCard(deps){
     inflight = false;
   }
 
-  async function submit(kind){
+  async function submit(kind, choice){
     const view = viewRef;
     const nodeId = current && current.nodeId;
     if (inflight || !view || !current) return;
-    if (holdId === view.request_id) return;
+    if (holdId === view.request_id && kind !== "terminal") return;
     if (kind !== "terminal" && !actionable(view)) return;
-    const built = build(kind, view);
+    const built = build(kind, view, choice);
     if (!built.body){
       setStatus(built.error);
       return;
@@ -419,7 +449,65 @@ export function createClaudeInteractionCard(deps){
     host = make(doc, "div", "ci-card");
     parent.appendChild(host);
     const questions = Array.isArray(view.questions) ? view.questions : [];
-    if (view.tool === "ExitPlanMode"){
+    if (view.phase === "ambiguous"){
+      for (const question of questions){
+        const block = make(doc, "fieldset", "ci-q");
+        if (question.header) addText(doc, block, "ci-header", question.header);
+        addText(doc, block, "ci-text", question.text || "");
+        host.appendChild(block);
+      }
+      addText(doc, host, "ci-text", "More than one standing question is active. Nothing was sent; review the terminal to identify the current dialog.");
+    } else if (view.phase === "native"){
+      for (const question of questions){
+        const block = make(doc, "fieldset", "ci-q");
+        if (question.header) addText(doc, block, "ci-header", question.header);
+        addText(doc, block, "ci-text", question.text || "");
+        for (const choice of (view.native_choices || [])){
+          if (choice.question_id !== question.id) continue;
+          const button = make(doc, "button", "ci-native-choice");
+          button.type = "button";
+          button.textContent = choice.label || "Choose option";
+          listen(button, "click", () => submit("native", choice));
+          block.appendChild(button);
+        }
+        host.appendChild(block);
+      }
+      if (!view.native_choices || view.native_choices.length === 0){
+        addText(doc, host, "ci-text", "The visible dialog could not be matched safely to a single answer. Use the terminal to review it.");
+      }
+      addText(doc, host, "ci-status", view.block ? `Native answer unavailable: ${view.block.replaceAll("_", " ")}.` : "Answer is sent only after you choose an option.");
+      const actions = make(doc, "div", "ci-actions");
+      actions.appendChild(actionButton("ci-cancel", "Cancel question", "cancel"));
+      actions.appendChild(actionButton("ci-terminal", "Use terminal", "terminal"));
+      host.appendChild(actions);
+    } else if (view.phase === "manual"){
+      for (const question of questions){
+        const block = make(doc, "fieldset", "ci-q");
+        if (question.header) addText(doc, block, "ci-header", question.header);
+        addText(doc, block, "ci-text", question.text || "");
+        host.appendChild(block);
+      }
+      addText(doc, host, "ci-text", "The current native dialog controls are enabled. Use them to answer this question; scimux will prevent a second send.");
+      const actions = make(doc, "div", "ci-actions");
+      actions.appendChild(actionButton("ci-terminal", "Refresh terminal controls", "terminal"));
+      host.appendChild(actions);
+    } else if (view.phase === "recorded"){
+      for (const question of questions) paintQuestion(question);
+      addText(doc, host, "ci-text", "A structured answer is recorded. Waiting for Claude; scimux will not send another answer.");
+      const actions = make(doc, "div", "ci-actions");
+      actions.appendChild(actionButton("ci-answer", "Answer", "answer"));
+      actions.appendChild(actionButton("ci-discuss", "Discuss", "discuss"));
+      actions.appendChild(actionButton("ci-cancel", "Cancel", "cancel"));
+      actions.appendChild(actionButton("ci-terminal", "Use terminal", "terminal"));
+      host.appendChild(actions);
+    } else if (view.phase === "sent" || view.phase === "unconfirmed"){
+      addText(doc, host, "ci-text", view.phase === "sent"
+        ? "A key was sent to the matched native dialog. Claude has not confirmed the answer."
+        : "Delivery is uncertain. scimux will not replay this answer. Check the terminal before continuing.");
+      const actions = make(doc, "div", "ci-actions");
+      actions.appendChild(actionButton("ci-terminal", "Use terminal", "terminal"));
+      host.appendChild(actions);
+    } else if (view.tool === "ExitPlanMode"){
       addText(doc, host, "ci-plan", view.plan || "");
       const modes = Array.isArray(view.modes) ? view.modes : [];
       for (const mode of modes){
@@ -467,12 +555,18 @@ export function createClaudeInteractionCard(deps){
 
   function update(parent, view, meta){
     const nodeId = meta && meta.nodeId ? meta.nodeId : "";
-    if (!parent || !doc || !view || !view.request_id || view.native_keys !== false){
+    if (!parent || !doc || !interactionCardVisible(view)){
       if (current) invalidateFlight();
       unmount();
       viewRef = null;
       current = null;
       return;
+    }
+    const enteringNative = !!(current && current.nodeId === nodeId &&
+      current.requestId === view.request_id && current.phase !== "native" && view.phase === "native");
+    if (enteringNative && holdId === view.request_id){
+      holdId = "";
+      setStatus("");
     }
     const same = !!(draft && current && current.nodeId === nodeId && current.requestId === view.request_id);
     if (!same){
@@ -480,7 +574,7 @@ export function createClaudeInteractionCard(deps){
       draft = null;
       if (holdId !== view.request_id) setStatus("");
     }
-    current = { nodeId, requestId: view.request_id };
+    current = { nodeId, requestId: view.request_id, phase: view.phase };
     viewRef = view;
     paint(parent, view);
     if (draft) applyDraft();

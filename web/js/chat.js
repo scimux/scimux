@@ -95,6 +95,7 @@ import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
 import {
   interactionSignature,
   interactionBlocksNativeKeys,
+  interactionCardVisible,
   manualDecisionRowHTML,
   createClaudeInteractionCard,
 } from "./claude-interaction.js";
@@ -2832,7 +2833,7 @@ export function createChatFeature(deps){
     };
     if (keyrow){
       const interactionView = data.claude_interaction || null;
-      if (interactionBlocksNativeKeys(interactionView)){
+      if (interactionCardVisible(interactionView)){
         interactionCard.capture();
         keyrow.innerHTML = "";
         interactionCard.update(keyrow, interactionView, { nodeId: n.id });

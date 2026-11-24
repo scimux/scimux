@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"time"
 
 	"github.com/scimux/scimux/internal/sessionlog"
 	"github.com/scimux/scimux/internal/sessionworker"
@@ -35,7 +34,12 @@ func interactionNativeKeys(phase string) bool {
 }
 
 func interactionNeedsAttention(phase string) bool {
-	return phase == "pending" || phase == "claimed"
+	switch phase {
+	case "pending", "claimed", "recorded", "native", "sent", "unconfirmed", "ambiguous", "manual":
+		return true
+	default:
+		return false
+	}
 }
 
 // claudeInteractionView is the browser projection of the one active manual
@@ -50,9 +54,13 @@ func (a *app) claudeInteractionView(n *Node) (sessionworker.InteractionView, boo
 	if bundle == "" || !bundleSupportsInteraction(bundle) {
 		return zero, false
 	}
+	standing, _ := standingQuestionsForSession(bundle, n.SessionID)
+	if len(standing) > 1 {
+		return a.claudeStandingInteractionView(n, bundle)
+	}
 	id, ok := readInteractionActive(bundle)
 	if !ok {
-		return zero, false
+		return a.claudeStandingInteractionView(n, bundle)
 	}
 	rec, err := readInteractionRequest(bundle, id)
 	if err != nil {
@@ -62,7 +70,18 @@ func (a *app) claudeInteractionView(n *Node) (sessionworker.InteractionView, boo
 	if err != nil || model.Native {
 		return zero, false
 	}
-	phase := claudeInteractionPhase(bundle, id, time.Now())
+	stood := standingOrZero(bundle, id)
+	if stood.ID == id && (stood.Status == standingExternal || stood.Status == standingInvalidated) {
+		if projected, projectedOK := a.projectStandingQuestion(n, stood); projectedOK {
+			return projected, true
+		}
+	}
+	phase := claudeInteractionPhase(bundle, id, interactionNow())
+	if phase == "expired" && rec.Tool == "AskUserQuestion" {
+		if stood, stoodOK := a.projectStandingQuestion(n, standingOrZero(bundle, id)); stoodOK && stood.RequestID == id {
+			return stood, true
+		}
+	}
 	view := sessionworker.InteractionView{
 		RequestID:   id,
 		Phase:       phase,
@@ -141,6 +160,34 @@ func (h *claudeSessionHarness) SubmitClaudeInteraction(_ context.Context, action
 		caller.Turn = turn.Turn
 		caller.TurnGen = turn.Gen
 	}
+	if action.Action == "native" || standingNativeCancel(bundle, action) {
+		result, err := h.deliverStandingNative(n, bundle, caller, action, func(ev sessionlog.Event) error {
+			if h.app.sessionsDir == "" {
+				return errors.New("session log unavailable")
+			}
+			return (&sessionlog.Writer{Path: h.app.sessionLogPath(n.ID)}).Append(ev)
+		})
+		if err != nil {
+			return sessionworker.InteractionResult{}, classifyHarnessInteractionErr(err)
+		}
+		return result, nil
+	}
+	if action.Action == "terminal" {
+		if standing, ok := readStandingQuestion(bundle, action.RequestID); ok && standing.Status == standingOutstanding {
+			if !standingHelperCanDeliver(bundle, standing.ID) {
+				result, err := h.handoffStandingQuestion(n, bundle, caller, action, func(ev sessionlog.Event) error {
+					if h.app.sessionsDir == "" {
+						return errors.New("session log unavailable")
+					}
+					return (&sessionlog.Writer{Path: h.app.sessionLogPath(n.ID)}).Append(ev)
+				})
+				if err != nil {
+					return sessionworker.InteractionResult{}, classifyHarnessInteractionErr(err)
+				}
+				return result, nil
+			}
+		}
+	}
 	reply := claudeInteractionReply{Action: action.Action, Feedback: action.Feedback, Mode: action.Mode}
 	for _, answer := range action.Answers {
 		reply.Answers = append(reply.Answers, claudeInteractionAnswer{
@@ -149,12 +196,20 @@ func (h *claudeSessionHarness) SubmitClaudeInteraction(_ context.Context, action
 			FreeText:   answer.FreeText,
 		})
 	}
-	receipt, err := submitClaudeInteractionClock(bundle, caller, action.RequestID, reply, time.Now, func(ev sessionlog.Event) error {
+	receipt, err := submitClaudeInteractionClock(bundle, caller, action.RequestID, reply, interactionNow, func(ev sessionlog.Event) error {
 		if h.app.sessionsDir == "" {
 			return errors.New("session log unavailable")
 		}
 		return (&sessionlog.Writer{Path: h.app.sessionLogPath(n.ID)}).Append(ev)
 	})
+	if err == nil && action.Action == "terminal" {
+		if standing, ok := readStandingQuestion(bundle, action.RequestID); ok && standing.Status == standingOutstanding {
+			epoch := h.app.claudeVisibleDialog(n).DialogID
+			if markErr := markStandingManual(bundle, standing.ID, epoch); markErr != nil {
+				return sessionworker.InteractionResult{}, classifyHarnessInteractionErr(fmt.Errorf("%w: handoff state", errInteractionIO))
+			}
+		}
+	}
 	if err != nil {
 		return sessionworker.InteractionResult{}, classifyHarnessInteractionErr(err)
 	}

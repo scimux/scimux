@@ -261,6 +261,7 @@ func tombstoneClaudeAskedForSession(perm, session string) {
 		markClaudeRequestAnswered(perm, id)
 		_ = os.Remove(f.path)
 	}
+	invalidateStandingSession(perm, session, "session")
 }
 
 // RunClaudeNotifyHook is the hidden helper body. Notification is fire-and-

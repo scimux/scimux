@@ -83,12 +83,17 @@ the optional owner, reports the interaction unsupported. New muxers reconnect
 to old workers and do not enable the feature by rewriting an active bundle.
 The bundle's minted capability, not the current process environment, decides
 an already launched chat. Optional state may carry one current interaction.
-The worker remains the only session-log writer. The owning worker retires
-stale interaction state on startup and on each poll after the helper deadline,
-or as soon as a marked helper's waiter lock is released. A replacement may do
-the same without a second PID owner claim. Raw payloads and claims are removed. An emitted
+The worker remains the only session-log writer. An outstanding
+`AskUserQuestion` remains projected after the helper deadline, while the
+owning worker retires its raw payload and claims. Matching transcript evidence
+or a session lifecycle boundary settles the standing question. A replacement
+may recover this state without a second PID owner claim. An emitted
 cancellation keeps a minimal turn fence so settlement can still run; that
-fence is not replayed. The replay fence and the append-only audit remain.
+fence is not replayed. Native/manual answer delivery persists an unconfirmed
+no-replay fence before the key is sent and binds handed-off controls to the
+validated dialog epoch. Fresh notifications, terminal handoffs, and uncertain
+SendKeys outcomes cannot authorize a second key. The replay fence and the
+append-only audit remain.
 The audit records intent before publication, followed by a correlated
 outcome with source `application` if post-audit validation or publication fails.
 Only fixed context and delivery status are stored in `outcome`, linked by

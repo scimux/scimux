@@ -805,14 +805,30 @@ the answer.
 ### `POST /api/nodes/{id}/claude-interaction`
 
 Body: `{"request_id","action"}` plus the fields that action uses. `action`
-is `answer`, `discuss`, `approve`, `request_changes`, `cancel`, or
-`terminal`. `answer` carries `answers` of `{question_id, option_ids,
+is `answer`, `discuss`, `approve`, `request_changes`, `cancel`, `terminal`, or
+`native`. `answer` carries `answers` of `{question_id, option_ids,
 free_text}`. `discuss` and `request_changes` carry non-empty `feedback`.
 `approve` may carry `mode` of exactly `restore`, `default`, or
 `acceptEdits`. The server looks up question text, option labels, and plan
 text from the hook request it already holds. The body cannot replace that
 request, supply hook JSON, a filesystem path, or any `updatedPermissions`
 document.
+
+`native` carries the current `dialog_id` and one server-issued
+`question_id`/`option_ids` selection. The server resolves its key from the
+current visible dialog; clients never submit key numbers. It is available only
+after structured answering expires and only for one visible single-select
+question whose exact prompt text and labels match, including the native AX
+header, quote prefix, and recognized trailing `Other`/`Chat about this` rows.
+Multi-select and free-text answers require the terminal. The visible
+notification epoch is not an exact Claude request identity. `terminal` can
+hand an expired standing question to the existing native controls after
+validating the current question, menu, and dialog epoch; it records the
+handoff, sends no key, and keeps the question visible and in attention. Those
+controls are bound to that epoch. A manual or native key is fenced as
+unconfirmed before send; a fresh notification cannot replay it. The question
+card reports manual handoff, recorded structured answers, sent keys, and
+uncertain delivery as distinct non-retryable states.
 
 `202` means the owning worker durably recorded the decision (`status:
 accepted`, `delivery: recorded`, `emitted: false`). It does not mean Claude
@@ -850,6 +866,13 @@ and plans are never auto-approved, including while a lease is armed.
 
 The current chat snapshot may include `claude_interaction` (`request_id`,
 `phase`, `tool`, questions or plan text, mode choices, `native_keys`).
+An outstanding question may use phases `native`, `manual`, `recorded`, `sent`,
+or `unconfirmed` after the helper expires. Native choices include
+server-resolved question and option ids; `sent` and `unconfirmed` are not
+retryable and do not assert Claude consumed a key. `manual` means the current
+dialog was handed to the existing controls. The question remains visible and
+in attention until transcript evidence or a session lifecycle event settles
+it.
 `GET …/chat?history=1` does not.
 
 ### `POST /api/nodes/{id}/auto-approve`

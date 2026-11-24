@@ -10,6 +10,7 @@ import { createChatFeature, buildChatSignature, decisionsHash, decisionRowHTML }
 import {
   interactionSignature,
   interactionBlocksNativeKeys,
+  interactionCardVisible,
   manualDecisionRowHTML,
   createClaudeInteractionCard,
 } from "../js/claude-interaction.js";
@@ -553,7 +554,61 @@ test("a structured question replaces native keys and escapes question text", asy
   feature.destroy();
 });
 
+test("an expired standing question stays visible and sends one native choice", async () => {
+  const view = {
+    ...radioQuestion(), phase: "native", native_keys: true, dialog_id: "epoch-1",
+    native_choices: [{ question_id: "q1", option_id: "q1o2", label: "Beta" }],
+  };
+  assert.equal(interactionCardVisible(view), true);
+  const mounted = mountCard(view);
+  const buttons = mounted.parent.querySelectorAll(".ci-native-choice");
+  assert.equal(buttons.length, 1);
+  assert.equal(buttons[0].textContent, "Beta");
+  buttons[0].click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(mounted.posts[0].body, {
+    request_id: "req-letter", action: "native", dialog_id: "epoch-1",
+    answers: [{ question_id: "q1", option_ids: ["q1o2"] }],
+  });
+  const cancel = mountCard(view);
+  cancel.parent.querySelector(".ci-cancel").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(cancel.posts[0].body, {
+    request_id: "req-letter", action: "cancel", dialog_id: "epoch-1",
+  });
+  const handoff = mountCard(view);
+  handoff.parent.querySelector(".ci-terminal").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(handoff.posts[0].body, { request_id: "req-letter", action: "terminal" });
+
+  const blocked = mountCard({ ...view, native_choices: [], block: "menu_mismatch" });
+  assert.equal(blocked.parent.querySelectorAll(".ci-native-choice").length, 0);
+  assert.match(blocked.parent.querySelectorAll(".ci-text").map(n => n.textContent).join(" "), /could not be matched safely/);
+  assert.equal(interactionCardVisible({ ...view, phase: "unconfirmed" }), true);
+  const ambiguous = mountCard({
+    ...view, phase: "ambiguous", native_choices: [], block: "multiple_questions",
+    questions: [{ id: "a", text: "First?" }, { id: "b", text: "Second?" }],
+  });
+  assert.equal(ambiguous.parent.querySelectorAll(".ci-q").length, 2);
+  assert.match(ambiguous.parent.querySelectorAll(".ci-text").map(n => n.textContent).join(" "), /More than one standing question/);
+  assert.equal(ambiguous.parent.querySelectorAll(".ci-native-choice").length, 0);
+});
+
 test("native handoff and a missing interaction keep the native key path", async () => {
+  const standing = {
+    ...radioQuestion(), phase: "native", native_keys: true, dialog_id: "epoch-1",
+    native_choices: [{ question_id: "q1", option_id: "q1o1", label: "Alpha" }],
+  };
+  const persistent = makeFeature({ chatPayload: basePayload(standing) });
+  persistent.feature.bind();
+  await persistent.feature.render();
+  assert.equal(persistent.roots.keyrow.querySelectorAll(".ci-native-choice").length, 1);
+  assert.doesNotMatch(persistent.roots.keyrow.innerHTML, /data-key/);
+  persistent.feature.destroy();
+
   const handed = radioQuestion();
   handed.native_keys = true;
   handed.phase = "handoff";
@@ -799,6 +854,13 @@ test("duplicate clicks, 409, expiry, and connection errors stay distinct", async
   assert.match(stale.parent.querySelector(".ci-status").textContent, /stale interaction/);
   stale.parent.querySelector(".ci-answer").click();
   assert.equal(stale.posts.length, 1);
+  stale.card.update(stale.parent, {
+    ...radioQuestion(), phase: "native", native_keys: true, dialog_id: "epoch-2",
+    native_choices: [{ question_id: "q1", option_id: "q1o1", label: "Alpha" }],
+  }, { nodeId: "c1" });
+  const lateChoice = stale.parent.querySelector(".ci-native-choice");
+  assert.ok(lateChoice);
+  assert.equal(lateChoice.disabled, false, "a stale structured rejection must not lock the later native window");
 
   const expired = radioQuestion();
   expired.phase = "expired";
@@ -817,6 +879,23 @@ test("duplicate clicks, 409, expiry, and connection errors stay distinct", async
   assert.match(down.parent.querySelector(".ci-status").textContent, /connection reset/);
   assert.equal(down.parent.querySelector(".ci-feedback").value, "still here");
   assert.equal(down.parent.querySelector(".ci-discuss").disabled, false);
+});
+
+test("terminal handoff remains functional after a native answer submission", async () => {
+  const view = {
+    ...radioQuestion(), phase: "native", native_keys: true, dialog_id: "epoch-review",
+    native_choices: [{ question_id: "q1", option_id: "q1o1", label: "Alpha" }],
+  };
+  const box = mountCard(view);
+  box.parent.querySelector(".ci-native-choice").click();
+  await settled();
+  box.card.update(box.parent, { ...view, phase: "sent", native_choices: [] }, { nodeId: "c1" });
+  const terminal = box.parent.querySelector(".ci-terminal");
+  assert.equal(terminal.disabled, false);
+  terminal.click();
+  await settled();
+  assert.equal(box.posts.length, 2, "enabled terminal button silently ignored the click");
+  assert.equal(box.posts[1].body.action, "terminal");
 });
 
 test("recorded and unsupported views do not offer a second structured answer", () => {
