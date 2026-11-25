@@ -1384,6 +1384,9 @@ The muxer always serves these routes; the web child and session workers never
 do. Serving them creates no file and contacts no team server until a server is
 joined.
 
+An open browser refreshes the Sharing controls after a server is joined and
+retries temporary unavailability without a reload or a chat switch.
+
 The token a team server returns is a credential. It is stored in
 `team.json` and never leaves the server process: no response, log line, or
 error text contains it.

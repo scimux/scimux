@@ -19,8 +19,8 @@ import (
 
 const maxTeamJoinBody = 4 << 10
 
-// teamHandler serves the experimental team routes. mu is held only around
-// reads and writes of the server file.
+// teamHandler serves team routes in the muxer. Other processes do not install
+// it. mu is held only around reads and writes of the server file.
 type teamHandler struct {
 	dataDir string
 	now     func() time.Time
