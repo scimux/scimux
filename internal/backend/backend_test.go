@@ -326,3 +326,83 @@ func TestHelloJSONShape(t *testing.T) {
 		t.Fatalf("hello JSON = %s", b)
 	}
 }
+
+// countingBody counts the body bytes the proxy reads from the browser.
+type countingBody struct {
+	r io.Reader
+	n int
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.n += n
+	return n, err
+}
+
+func (b *countingBody) Close() error { return nil }
+
+// A muxer refusal that precedes any body read must reach the browser as that
+// refusal. If the proxy sent the body anyway, its write would race the muxer
+// closing the connection, and losing that race turns the refusal into a 502.
+func TestProxyRelaysRefusalWithoutSendingBody(t *testing.T) {
+	expects := make(chan string, 64)
+	s, err := Listen(t.TempDir(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expects <- r.Header.Get("Expect")
+		if r.URL.Path == "/admit" {
+			body, _ := io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, strconv.Itoa(len(body)))
+			return
+		}
+		http.Error(w, "refused", http.StatusForbidden)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c, err := NewClient(s.Link())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	payload := bytes.Repeat([]byte("a"), 1<<20)
+	for i := 0; i < 20; i++ {
+		body := &countingBody{r: bytes.NewReader(payload)}
+		req := httptest.NewRequest(http.MethodPost, "/refuse", body)
+		req.ContentLength = int64(len(payload))
+		rec := httptest.NewRecorder()
+		c.Proxy().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden || strings.TrimSpace(rec.Body.String()) != "refused" {
+			t.Fatalf("attempt %d: proxy response = %d %q", i, rec.Code, rec.Body.String())
+		}
+		if body.n != 0 {
+			t.Fatalf("attempt %d: proxy read %d body bytes before admission", i, body.n)
+		}
+		if got := <-expects; got != "100-continue" {
+			t.Fatalf("attempt %d: muxer Expect = %q", i, got)
+		}
+	}
+
+	for _, length := range []int64{int64(len(payload)), -1} {
+		body := &countingBody{r: bytes.NewReader(payload)}
+		req := httptest.NewRequest(http.MethodPost, "/admit", body)
+		req.ContentLength = length
+		rec := httptest.NewRecorder()
+		c.Proxy().ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated || rec.Body.String() != strconv.Itoa(len(payload)) || body.n != len(payload) {
+			t.Fatalf("length %d: admitted response = %d %q, read %d", length, rec.Code, rec.Body.String(), body.n)
+		}
+		if got := <-expects; got != "100-continue" {
+			t.Fatalf("length %d: muxer Expect = %q", length, got)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	c.Proxy().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admit", nil))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("bodyless response = %d", rec.Code)
+	}
+	if got := <-expects; got != "" {
+		t.Fatalf("bodyless request sent Expect %q", got)
+	}
+}
