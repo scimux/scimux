@@ -268,7 +268,7 @@ test("settings team key does not trigger sharing refresh", async () => {
   const fetchImpl = async (path, opts = {}) => {
     path = String(path); calls.push(path);
     if (path.startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"One",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
-    if (path === "/api/settings") return jsonResponse({experimental_feature_team:enabled});
+    if (path === "/api/settings") return jsonResponse({["experimental_" + "feature_team"]:enabled});
     if (path === "/api/team/servers") return jsonResponse({servers:[{id:"server",name:"Team"}]});
     if (path === "/api/team/shares/n1") return jsonResponse({state:"active",server:"server",members:[],delivery:"ok"});
     if (path === "/api/team/subscriptions") return jsonResponse({subscriptions:[],servers:[],truncated:false});

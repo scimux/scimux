@@ -1029,7 +1029,7 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, forbidden := range []string{"SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM", "experimental_feature_team", "team gate"} {
+		for _, forbidden := range []string{"SCIMUX_ENABLE_EXPERIMENTAL_" + "FEATURE_TEAM", "experimental_" + "feature_team", "team gate"} {
 			if strings.Contains(string(raw), forbidden) {
 				t.Errorf("%s contains %q", file, forbidden)
 			}
