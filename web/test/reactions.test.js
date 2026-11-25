@@ -94,6 +94,7 @@ test("chips expose counts and personal participation; entry UI uses fixed trigge
   assert.match(controls, /aria-label="React with emoji\."/);
   assert.match(controls, /title="React with emoji"/);
   assert.match(controls, /aria-hidden="true"/);
+  assert.doesNotMatch(controls, /reaction-divider|│/, "a hidden reaction entry leaves no separator in the bubble");
   assert.ok(controls.indexOf("🎉") < controls.indexOf("🤔") && controls.indexOf("🤔") < controls.indexOf("😂"));
   assert.match(controls, /thumbs_up/);
   assert.equal(reactionChipsHTML(null), "");
