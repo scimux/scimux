@@ -9,10 +9,6 @@ import (
 )
 
 func (h *teamHandler) localPeoplePublicationState(w http.ResponseWriter, r *http.Request, id team.CopyID, key string) {
-	if !h.peopleFilesEnabled() {
-		writeTeamError(w, http.StatusConflict, "not_active")
-		return
-	}
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil || len(query) != 1 || len(query["copy_instance"]) != 1 {
 		writeTeamError(w, http.StatusBadRequest, "invalid_state_query")
@@ -28,7 +24,7 @@ func (h *teamHandler) localPeoplePublicationState(w http.ResponseWriter, r *http
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.peopleFilesEnabled() || !peopleCopyCurrentLocked(r) {
+	if !peopleCopyCurrentLocked(r) {
 		writeTeamError(w, http.StatusConflict, "copy_changed")
 		return
 	}

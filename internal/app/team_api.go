@@ -51,8 +51,6 @@ type teamHandler struct {
 	copyRemovalEpoch map[team.CopyID]*peopleCopyRemovalEpoch
 	// ownerInstance checks the current native node through the owning app.
 	ownerInstance func(nodeID, instance string) bool
-	// peopleEnabled checks the live feature gate for in-flight file work.
-	peopleEnabled func() bool
 	// Stage storage defaults to the managed team store; tests may inject failures.
 	stageRead func(string, team.CopyID, string) (team.PeopleStage, error)
 	stageSave func(string, team.CopyID, team.PeopleStage) error

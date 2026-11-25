@@ -14,10 +14,6 @@ import (
 // discardPeoplePending performs local maintenance only. The revision is a
 // concurrency precondition for the immutable pending value, not a credential.
 func (h *teamHandler) discardPeoplePending(w http.ResponseWriter, r *http.Request, id team.CopyID, key string) {
-	if !h.peopleFilesEnabled() {
-		writeTeamError(w, http.StatusConflict, "not_active")
-		return
-	}
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil || len(query["revision"]) != 1 || !subHex(query.Get("revision"), 64) {
 		writeTeamError(w, http.StatusConflict, "revision_required")
@@ -28,7 +24,7 @@ func (h *teamHandler) discardPeoplePending(w http.ResponseWriter, r *http.Reques
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.peopleFilesEnabled() || !peopleCopyCurrentLocked(r) {
+	if !peopleCopyCurrentLocked(r) {
 		writeTeamError(w, http.StatusConflict, "copy_changed")
 		return
 	}

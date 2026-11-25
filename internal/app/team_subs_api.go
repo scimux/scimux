@@ -358,7 +358,7 @@ func (h *teamHandler) askChannels(ctx context.Context, entry team.Entry) subOutc
 
 func (h *teamHandler) askSeats(ctx context.Context, entry team.Entry) seatOutcome {
 	h.mu.Lock()
-	if !h.peopleFilesEnabled() || !h.serverCurrentLocked(entry) {
+	if !h.serverCurrentLocked(entry) {
 		h.mu.Unlock()
 		return seatOutcome{id: entry.ID, entry: entry, err: team.ErrUnreachable}
 	}
@@ -376,9 +376,6 @@ func (h *teamHandler) askSeats(ctx context.Context, entry team.Entry) seatOutcom
 func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Time) []team.Entry {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.peopleFilesEnabled() {
-		return nil
-	}
 	entries, subs, err := h.loadSubState()
 	if err != nil {
 		return nil
@@ -416,9 +413,6 @@ func (h *teamHandler) planSeats(inst string, outcomes []subOutcome, now time.Tim
 func (h *teamHandler) commitSubs(inst string, outcomes []subOutcome, seats []seatOutcome, now time.Time) (subListResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.peopleFilesEnabled() {
-		return subListResponse{}, errors.New("team disabled")
-	}
 	entries, subs, err := h.loadSubState()
 	if err != nil {
 		return subListResponse{}, err
@@ -724,7 +718,7 @@ func entryMap(entries []team.Entry) map[string]team.Entry {
 }
 
 func (h *teamHandler) subscriptionView(subs []team.Subscription, entries []team.Entry, truncated bool) subListResponse {
-	peopleReady := h.peopleCapabilitiesReady && h.peopleFilesEnabled()
+	peopleReady := h.peopleCapabilitiesReady
 	views := make([]subscriptionView, 0, len(subs))
 	for i, sub := range subs {
 		var localOrder *int
@@ -851,7 +845,7 @@ func (h *teamHandler) lookupSubscription(id team.CopyID) (team.Subscription, tea
 func (h *teamHandler) endSubscription(r *http.Request, id team.CopyID, server team.Entry, whole bool) (bool, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+	if !peopleCopyCurrentLocked(r) {
 		return false, nil
 	}
 	entries, subs, err := h.loadSubState()
@@ -890,7 +884,7 @@ func (h *teamHandler) endSubscription(r *http.Request, id team.CopyID, server te
 
 // subscriptionReadCurrentLocked checks the original read authority at its local write boundary.
 func (h *teamHandler) subscriptionReadCurrentLocked(r *http.Request, id team.CopyID, original team.Subscription, server team.Entry) (bool, error) {
-	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+	if !peopleCopyCurrentLocked(r) {
 		return false, nil
 	}
 	entries, subs, err := h.loadSubState()
@@ -1111,10 +1105,6 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	if !h.peopleFilesEnabled() {
-		writeTeamError(w, http.StatusConflict, "not_active")
-		return
-	}
 	_, _, stillFound, _, err := h.lookupSubscription(id)
 	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
@@ -1136,7 +1126,7 @@ func (h *teamHandler) readSubscriptionLog(w http.ResponseWriter, r *http.Request
 	}
 	var out subscriptionReadResponse
 	out.View.subscriptionView = subscriptionView{Server: sub.Server, ServerName: sub.ServerName, Owner: sub.Owner, OwnerName: sub.OwnerName, Chat: sub.Chat, Generation: sub.Generation, Title: sub.Title, Access: sub.Access, State: sub.State, MirrorLast: sub.MirrorLast, SeenMirror: sub.SeenMirror, CommentsLast: sub.CommentsLast, SeenComments: sub.SeenComments, Unread: subUnread(sub), FirstSeen: sub.FirstSeen, LocalNode: h.localOwnerNode(sub), LocalFrontier: h.localOwnerFrontier(sub)}
-	if h.peopleCapabilitiesReady && h.peopleFilesEnabled() {
+	if h.peopleCapabilitiesReady {
 		out.View.PeopleCopyInstance, _ = team.ReadPeopleCopyInstance(h.dataDir, id)
 	}
 	out.View.Delivery = delivery
@@ -1396,7 +1386,7 @@ func (h *teamHandler) seeSubscription(w http.ResponseWriter, r *http.Request, id
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+	if !peopleCopyCurrentLocked(r) {
 		writeTeamError(w, http.StatusConflict, "copy_changed")
 		return
 	}
@@ -1507,7 +1497,7 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !peopleCopyCurrentLocked(r) || !h.peopleFilesEnabled() {
+	if !peopleCopyCurrentLocked(r) {
 		writeTeamError(w, http.StatusConflict, "copy_changed")
 		return
 	}
@@ -1708,7 +1698,7 @@ func (h *teamHandler) serverCurrentLocked(server team.Entry) bool {
 func (h *teamHandler) storeRosterCurrent(ctx context.Context, server team.Entry, seats []team.Seat) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if ctx.Err() != nil || !h.peopleFilesEnabled() || !h.serverCurrentLocked(server) {
+	if ctx.Err() != nil || !h.serverCurrentLocked(server) {
 		return
 	}
 	if _, ok := ctx.Value(peopleCopyOperationKey{}).(*peopleCopyOperation); ok && !peopleCopyContextCurrentLocked(ctx) {
@@ -1747,7 +1737,7 @@ func (h *teamHandler) rememberUnnamed(id string, ask *subAsk, seat string) {
 
 func (h *teamHandler) commentNames(ctx context.Context, id string, server team.Entry, joined bool, inst string, entries []map[string]any) map[string]string {
 	h.mu.Lock()
-	if ctx.Err() != nil || !h.peopleFilesEnabled() || (joined && !h.serverCurrentLocked(server)) {
+	if ctx.Err() != nil || (joined && !h.serverCurrentLocked(server)) {
 		h.mu.Unlock()
 		return map[string]string{}
 	}
@@ -1782,7 +1772,7 @@ func (h *teamHandler) commentNames(ctx context.Context, id string, server team.E
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if ctx.Err() != nil || !h.peopleFilesEnabled() || (joined && !h.serverCurrentLocked(server)) {
+	if ctx.Err() != nil || (joined && !h.serverCurrentLocked(server)) {
 		return map[string]string{}
 	}
 	if _, ok := ctx.Value(peopleCopyOperationKey{}).(*peopleCopyOperation); ok && !peopleCopyContextCurrentLocked(ctx) {
