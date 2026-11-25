@@ -2322,3 +2322,45 @@ func TestPeopleCompletionRejectsUnverifiedOwner(t *testing.T) {
 		t.Fatalf("handled=%v status=%d body=%s", handled, rec.Code, rec.Body.String())
 	}
 }
+
+func TestPeopleFetchRejectsRetiredCopyAfterBlobResponse(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "read", 0))}
+	payload := []byte("synthetic file")
+	sum := sha256.Sum256(payload)
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	var h *teamHandler
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hello" {
+			w.Header().Set("Scimux-Blob-Generation", "1")
+			script.ServeHTTP(w, r)
+			return
+		}
+		if strings.Contains(r.URL.Path, "/blobs/") {
+			h.mu.Lock()
+			h.copyRemovalEpoch[id].epoch++
+			h.mu.Unlock()
+			_, _ = w.Write(payload)
+			return
+		}
+		script.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	handler, dir := testTeamSurface(t, clientFor(srv))
+	h = handler.(*teamHandler)
+	joinLab(t, dir, teamServerID, srv.URL)
+	readSubList(t, handler)
+	attachmentID := "0123456789abcdef"
+	body, _ := json.Marshal(map[string]any{"v": 1, "t": "comment", "text": peopleAttachmentNotice, "anchor": 0, "content_text": "", "people_attachments_version": 1, "people_attachments": []peopleAttachmentDescriptor{{ID: attachmentID, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(payload)), Name: "synthetic.txt", MIME: "text/plain"}}})
+	record := team.MirrorRecord{Seq: 1, Key: "c/1111111111111111", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: body}
+	if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation + "/attachments/1/" + attachmentID
+	rec := doTeam(handler, http.MethodGet, peopleTestURL(t, dir, path), "")
+	if rec.Code == http.StatusOK {
+		t.Fatal("retired copy served fetched bytes")
+	}
+	if _, err := team.ReadPeoplePublished(dir, id, 1, attachmentID); err == nil {
+		t.Fatal("retired copy retained fetched bytes")
+	}
+}
