@@ -20,6 +20,25 @@ import (
 	"github.com/scimux/scimux/internal/team"
 )
 
+// heldUploadBody pauses immediately before the multipart body's last byte,
+// after the request captured its copy lifetime but before local admission.
+type heldUploadBody struct {
+	data    *bytes.Reader
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *heldUploadBody) Read(p []byte) (int, error) {
+	if r.data.Len() == 1 {
+		r.once.Do(func() { close(r.entered); <-r.release })
+	}
+	if r.data.Len() > 1 && len(p) >= r.data.Len() {
+		p = p[:r.data.Len()-1]
+	}
+	return r.data.Read(p)
+}
+
 func TestIndependentRemovedCopyCannotBeResurrectedByUpload(t *testing.T) {
 	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "write", 0))}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,14 +54,6 @@ func TestIndependentRemovedCopyCannotBeResurrectedByUpload(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	var calls atomic.Int32
-	h.(*teamHandler).peopleEnabled = func() bool {
-		if calls.Add(1) == 2 {
-			close(entered)
-			<-release
-		}
-		return true
-	}
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	part, err := form.CreateFormFile("files", "synthetic.txt")
@@ -56,7 +67,7 @@ func TestIndependentRemovedCopyCannotBeResurrectedByUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
-	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id=0123456789abcdef"), &body)
+	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id=0123456789abcdef"), &heldUploadBody{data: bytes.NewReader(body.Bytes()), entered: entered, release: release})
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -108,18 +119,6 @@ func TestPeopleUploadRechecksSharingAtLocalAdmission(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var released sync.Once
 	t.Cleanup(func() { released.Do(func() { close(release) }) })
-	var calls atomic.Int32
-	var enabled atomic.Bool
-	enabled.Store(true)
-	h.peopleEnabled = func() bool {
-		if calls.Add(1) == 2 {
-			before := enabled.Load()
-			close(entered)
-			<-release
-			return before
-		}
-		return enabled.Load()
-	}
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	part, err := form.CreateFormFile("files", "synthetic.txt")
@@ -133,7 +132,7 @@ func TestPeopleUploadRechecksSharingAtLocalAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
-	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id=0123456789abcdef"), &body)
+	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id=0123456789abcdef"), &heldUploadBody{data: bytes.NewReader(body.Bytes()), entered: entered, release: release})
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -143,7 +142,16 @@ func TestPeopleUploadRechecksSharingAtLocalAdmission(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("final admission not reached")
 	}
-	enabled.Store(false)
+	h.mu.Lock()
+	subs, err := team.LoadSubs(dir)
+	if err == nil {
+		subs[0].State = "ended"
+		err = team.SaveSubs(dir, subs)
+	}
+	h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 	released.Do(func() { close(release) })
 	select {
 	case <-done:
@@ -151,11 +159,11 @@ func TestPeopleUploadRechecksSharingAtLocalAdmission(t *testing.T) {
 		t.Fatal("upload did not finish")
 	}
 	if rec.Code != http.StatusConflict || !bytes.Contains(rec.Body.Bytes(), []byte("not_active")) || puts.Load() != 0 {
-		t.Fatalf("disabled admission status=%d PUTs=%d body=%s", rec.Code, puts.Load(), rec.Body.String())
+		t.Fatalf("ended subscription admission status=%d PUTs=%d body=%s", rec.Code, puts.Load(), rec.Body.String())
 	}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	if _, err := team.ReadPeopleStage(dir, id, "0123456789abcdef"); err == nil {
-		t.Fatal("disabled upload created a stage")
+		t.Fatal("ended subscription upload created a stage")
 	}
 }
 
@@ -177,17 +185,16 @@ func TestPeopleUploadPreservesStageWhenSharingStopsBeforeRelayPut(t *testing.T) 
 	readSubList(t, handler)
 	h := handler.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var held, enabled atomic.Bool
-	enabled.Store(true)
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if _, err := team.ReadPeopleStage(dir, id, "0123456789abcdef"); err == nil && held.CompareAndSwap(false, true) {
-			close(entered)
-			<-release
+	h.stageSave = func(dataDir string, copyID team.CopyID, stage team.PeopleStage) error {
+		if err := team.SavePeopleStage(dataDir, copyID, stage); err != nil {
+			return err
 		}
-		return enabled.Load()
+		subs, err := team.LoadSubs(dataDir)
+		if err != nil {
+			return err
+		}
+		subs[0].State = "ended"
+		return team.SaveSubs(dataDir, subs)
 	}
 	data := []byte("synthetic staged bytes")
 	var body bytes.Buffer
@@ -206,22 +213,9 @@ func TestPeopleUploadPreservesStageWhenSharingStopsBeforeRelayPut(t *testing.T) 
 	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id=0123456789abcdef"), &body)
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() { defer close(done); handler.ServeHTTP(rec, req) }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("staged upload did not reach relay precheck")
-	}
-	enabled.Store(false)
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("upload did not finish")
-	}
+	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusConflict || !bytes.Contains(rec.Body.Bytes(), []byte("not_active")) || puts.Load() != 0 {
-		t.Fatalf("disabled precheck status=%d PUTs=%d body=%s", rec.Code, puts.Load(), rec.Body.String())
+		t.Fatalf("ended subscription precheck status=%d PUTs=%d body=%s", rec.Code, puts.Load(), rec.Body.String())
 	}
 	stage, err := team.ReadPeopleStage(dir, id, "0123456789abcdef")
 	if err != nil || !bytes.Equal(stage.Data, data) {
@@ -324,52 +318,10 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedCopyStage(t *testing.T) {
 	if err := team.SavePeopleStage(dir, id, makeStage("old bytes")); err != nil {
 		t.Fatal(err)
 	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	var gateCalls atomic.Int32
-	h.peopleEnabled = func() bool {
-		if n := gateCalls.Add(1); n <= 2 {
-			if n == 1 {
-				close(entered)
-			}
-			<-release
-		}
-		return true
-	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
 	oldPath := peopleTestURL(t, dir, base+"/attachments/stage/0123456789abcdef") + "&revision=" + localStageRevision(makeStage("old bytes"))
-	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, oldPath, nil))
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("old stage removal did not reach authorization")
-	}
-	second := httptest.NewRecorder()
-	secondDone := make(chan struct{})
-	go func() {
-		defer close(secondDone)
-		h.ServeHTTP(second, httptest.NewRequest(http.MethodDelete, oldPath, nil))
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		h.mu.Lock()
-		state := h.copyRemovalEpoch[id]
-		ready := state != nil && state.active == 2
-		h.mu.Unlock()
-		if ready {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("second old stage removal did not enter lifecycle")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	firstReq, firstFinish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, oldPath, nil), id, "0123456789abcdef")
+	secondReq, secondFinish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, oldPath, nil), id, "0123456789abcdef")
 	removed := doTeam(h, http.MethodDelete, base, "")
 	if removed.Code != http.StatusNoContent {
 		t.Fatalf("remove copy: %d %s", removed.Code, removed.Body.String())
@@ -380,17 +332,11 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedCopyStage(t *testing.T) {
 	if err := team.SavePeopleStage(dir, id, makeStage("replacement bytes")); err != nil {
 		t.Fatal(err)
 	}
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("old stage removal did not finish")
-	}
-	select {
-	case <-secondDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("second old stage removal did not finish")
-	}
+	rec, second := httptest.NewRecorder(), httptest.NewRecorder()
+	h.removePeopleStage(rec, firstReq, id, "0123456789abcdef")
+	h.removePeopleStage(second, secondReq, id, "0123456789abcdef")
+	firstFinish()
+	secondFinish()
 	if rec.Code == http.StatusNoContent || second.Code == http.StatusNoContent {
 		t.Fatalf("stale removals claimed success: first=%d second=%d", rec.Code, second.Code)
 	}
@@ -442,20 +388,8 @@ func TestPeopleLocalStageRemovalSurvivesPermissionLoss(t *testing.T) {
 		relayCalls.Add(1)
 		return nil, errors.New("unexpected network")
 	})
-	entered, release := make(chan struct{}), make(chan struct{})
-	var enteredOnce atomic.Bool
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if enteredOnce.CompareAndSwap(false, true) {
-			close(entered)
-			<-release
-		}
-		return true
-	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
 	rec := httptest.NewRecorder()
-	done := make(chan struct{})
 	app := newTestApp(t, &fakeTmux{})
 	app.teamHandler = h
 	proc := &stubProc{hasSession: true, live: "idle"}
@@ -463,20 +397,9 @@ func TestPeopleLocalStageRemovalSurvivesPermissionLoss(t *testing.T) {
 	node := &Node{ID: "synthetic", Agent: "codex", Transport: "codex"}
 	app.nodes = append(app.nodes, node)
 	app.byID[node.ID] = node
-	core, err := newCoreMux(app)
-	if err != nil {
-		t.Fatal(err)
-	}
 	path := base + "/attachments/stage/" + stage.ID + "?copy_instance=" + instance + "&revision=" + revision
-	go func() {
-		defer close(done)
-		core.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stage removal did not reach authorization")
-	}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, path, nil), id, stage.ID)
+	defer finish()
 	subs[0].Access = "read"
 	h.mu.Lock()
 	err = team.SaveSubs(dir, subs)
@@ -484,12 +407,7 @@ func TestPeopleLocalStageRemovalSurvivesPermissionLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stage removal did not finish")
-	}
+	h.removePeopleStage(rec, req, id, stage.ID)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("local removal: %d %s", rec.Code, rec.Body.String())
 	}
@@ -537,29 +455,10 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedStageInSameCopy(t *testing.T)
 	if err := team.SavePeopleStage(dir, id, makeStage("old bytes")); err != nil {
 		t.Fatal(err)
 	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if calls.Add(1) == 1 {
-			close(entered)
-			<-release
-		}
-		return true
-	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen + "/attachments/stage/0123456789abcdef"
 	oldPath := peopleTestURL(t, dir, base) + "&revision=" + localStageRevision(makeStage("old bytes"))
-	rec, done := httptest.NewRecorder(), make(chan struct{})
-	go func() {
-		defer close(done)
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, oldPath, nil))
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("old stage removal did not reach authorization")
-	}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, oldPath, nil), id, "0123456789abcdef")
+	defer finish()
 	removed := doTeam(h, http.MethodDelete, oldPath, "")
 	if removed.Code != http.StatusNoContent {
 		t.Fatalf("current stage removal: %d %s", removed.Code, removed.Body.String())
@@ -567,12 +466,8 @@ func TestPeopleOldStageRemovalCannotDeleteRecreatedStageInSameCopy(t *testing.T)
 	if err := team.SavePeopleStage(dir, id, makeStage("replacement bytes")); err != nil {
 		t.Fatal(err)
 	}
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("old stage removal did not finish")
-	}
+	rec := httptest.NewRecorder()
+	h.removePeopleStage(rec, req, id, "0123456789abcdef")
 	stage, err := team.ReadPeopleStage(dir, id, "0123456789abcdef")
 	if err != nil || string(stage.Data) != "replacement bytes" || rec.Code == http.StatusNoContent {
 		t.Fatalf("old removal affected replacement stage: status=%d err=%v", rec.Code, err)
@@ -598,14 +493,6 @@ func TestPeopleRemovedRecreatedCopyCannotReceiveStaleUpload(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	var calls atomic.Int32
-	h.(*teamHandler).peopleEnabled = func() bool {
-		if calls.Add(1) == 2 {
-			close(entered)
-			<-release
-		}
-		return true
-	}
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	part, err := form.CreateFormFile("files", "synthetic.txt")
@@ -619,7 +506,7 @@ func TestPeopleRemovedRecreatedCopyCannotReceiveStaleUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
-	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id=0123456789abcdef"), &body)
+	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id=0123456789abcdef"), &heldUploadBody{data: bytes.NewReader(body.Bytes()), entered: entered, release: release})
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -679,16 +566,8 @@ func TestPeopleRemovedStageCannotBeResurrectedByOldUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if calls.Add(1) == 2 {
-			close(entered)
-			<-release
-		}
-		return true
-	}
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	part, err := form.CreateFormFile("files", "synthetic.txt")
@@ -698,7 +577,7 @@ func TestPeopleRemovedStageCannotBeResurrectedByOldUpload(t *testing.T) {
 	_, _ = part.Write(data)
 	_ = form.Close()
 	base := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen
-	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id="+stage.ID), &body)
+	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base+"/attachments?stage_id="+stage.ID), &heldUploadBody{data: bytes.NewReader(body.Bytes()), entered: entered, release: release})
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	rec, done := httptest.NewRecorder(), make(chan struct{})
 	go func() { defer close(done); h.ServeHTTP(rec, req) }()

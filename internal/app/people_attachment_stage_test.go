@@ -537,7 +537,7 @@ func TestPeopleCommentRetentionRefusesBadPagesAndRetiredOperations(t *testing.T)
 }
 
 func TestPeoplePublicationAdmissionRejectsDisabledIdentityAndRelayFailure(t *testing.T) {
-	for _, mode := range []string{"read only", "disabled", "relay unavailable"} {
+	for _, mode := range []string{"read only", "relay unavailable"} {
 		t.Run(mode, func(t *testing.T) {
 			var calls atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -553,9 +553,6 @@ func TestPeoplePublicationAdmissionRejectsDisabledIdentityAndRelayFailure(t *tes
 			sub.Access = "write"
 			if mode == "read only" {
 				sub.Access = "read"
-			}
-			if mode == "disabled" {
-				h.peopleEnabled = func() bool { return false }
 			}
 			seedSub(t, dir, sub)
 			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
@@ -673,68 +670,6 @@ func TestPeopleAttachmentReadRejectsUnavailableStateBeforeFileAccess(t *testing.
 				t.Fatal("rejected read retained bytes")
 			}
 		})
-	}
-}
-
-func TestPeopleCompletionRequiresCurrentFeatureAndOwnerAuthority(t *testing.T) {
-	for _, mode := range []string{"disabled", "unverified owner"} {
-		t.Run(mode, func(t *testing.T) {
-			handler, dir := testTeamSurface(t, team.NewClient())
-			h := handler.(*teamHandler)
-			server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
-			seedTeam(t, dir, server)
-			sub := baseSub()
-			if mode == "disabled" {
-				sub.Access = "read"
-				h.peopleEnabled = func() bool { return false }
-			} else {
-				sub.Access = "owner"
-			}
-			seedSub(t, dir, sub)
-			id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
-			req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, "/", nil), id, "")
-			defer finish()
-			rec := httptest.NewRecorder()
-			if handled := h.tryPeopleCompletion(rec, req, id, sub, server, "synthetic", 0, "0123456789abcdef", []string{"fedcba9876543210"}); !handled || rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "identity_unavailable") {
-				t.Fatalf("%s completion: handled=%v status=%d body=%s", mode, handled, rec.Code, rec.Body.String())
-			}
-			if _, err := team.ReadPeopleCompletion(dir, id, "0123456789abcdef"); !errors.Is(err, team.ErrPeopleStageMissing) {
-				t.Fatalf("%s created a completion: %v", mode, err)
-			}
-		})
-	}
-}
-
-func TestPeopleCachedAttachmentDoesNotServeAfterSharingDisabled(t *testing.T) {
-	handler, dir := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
-	seedTeam(t, dir, server)
-	sub := baseSub()
-	seedSub(t, dir, sub)
-	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	instance, err := team.EnsurePeopleCopyInstance(dir, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data := []byte("synthetic retained bytes")
-	sum := sha256.Sum256(data)
-	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
-	if err := team.SavePeoplePublished(dir, id, 1, stage); err != nil {
-		t.Fatal(err)
-	}
-	checks := 0
-	h.peopleEnabled = func() bool { checks++; return checks == 1 }
-	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, "/?copy_instance="+instance, nil), id, "")
-	defer finish()
-	rec := httptest.NewRecorder()
-	h.readPeopleAttachment(rec, req, id, 1, stage.ID)
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || bytes.Contains(rec.Body.Bytes(), data) {
-		t.Fatalf("disabled read status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	retained, err := team.ReadPeoplePublished(dir, id, 1, stage.ID)
-	if err != nil || !bytes.Equal(retained.Data, data) {
-		t.Fatalf("disabled read changed retained bytes: %v", err)
 	}
 }
 
@@ -869,25 +804,9 @@ func TestPeopleStageRemovalRechecksChangedLocalStage(t *testing.T) {
 	if err := team.SavePeopleStage(dir, id, stage); err != nil {
 		t.Fatal(err)
 	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if calls.Add(1) == 2 {
-			close(entered)
-			<-release
-		}
-		return true
-	}
 	path := subReadPath() + "/attachments/stage/" + stage.ID + "?copy_instance=" + instance + "&revision=" + localStageRevision(stage)
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodDelete, path, "") }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stage removal did not reach recheck")
-	}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, path, nil), id, stage.ID)
+	defer finish()
 	if err := team.DeletePeopleStage(dir, id, stage.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -898,14 +817,10 @@ func TestPeopleStageRemovalRechecksChangedLocalStage(t *testing.T) {
 	if err := team.SavePeopleStage(dir, id, replacement); err != nil {
 		t.Fatal(err)
 	}
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "stage_conflict") {
-			t.Fatalf("removal status=%d body=%s", rec.Code, rec.Body.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("stage removal did not finish")
+	rec := httptest.NewRecorder()
+	h.removePeopleStage(rec, req, id, stage.ID)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "stage_conflict") {
+		t.Fatalf("removal status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	got, err := team.ReadPeopleStage(dir, id, stage.ID)
 	if err != nil || !bytes.Equal(got.Data, replacement.Data) {
@@ -937,40 +852,19 @@ func TestPeopleConcurrentStageRemovalsKeepIndependentIdentities(t *testing.T) {
 	if err := team.SavePeopleStage(dir, id, other); err != nil {
 		t.Fatal(err)
 	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var held atomic.Bool
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if held.CompareAndSwap(false, true) {
-			close(entered)
-			<-release
-		}
-		return true
-	}
 	path := subReadPath() + "/attachments/stage/"
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		done <- doTeam(h, http.MethodDelete, path+stage.ID+"?copy_instance="+instance+"&revision="+localStageRevision(stage), "")
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("first removal not admitted")
-	}
+	firstPath := path + stage.ID + "?copy_instance=" + instance + "&revision=" + localStageRevision(stage)
+	firstReq, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, firstPath, nil), id, stage.ID)
 	second := doTeam(h, http.MethodDelete, path+other.ID+"?copy_instance="+instance+"&revision="+localStageRevision(other), "")
 	if second.Code != http.StatusNoContent {
 		t.Fatalf("second removal status=%d", second.Code)
 	}
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case first := <-done:
-		if first.Code != http.StatusNoContent {
-			t.Fatalf("first removal status=%d", first.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("first removal did not finish")
+	first := httptest.NewRecorder()
+	h.removePeopleStage(first, firstReq, id, stage.ID)
+	if first.Code != http.StatusNoContent {
+		t.Fatalf("first removal status=%d", first.Code)
 	}
+	finish()
 	for _, stageID := range []string{stage.ID, other.ID} {
 		if _, err := team.ReadPeopleStage(dir, id, stageID); err == nil {
 			t.Fatalf("stage %s remains", stageID)
@@ -1170,12 +1064,6 @@ func TestPeopleCapabilitiesRequireVerifiedRelayAndExplicitLocalReadiness(t *test
 	if response.People.Version != 1 || response.People.MaxFile != 4194304 || len(response.Servers) != 1 || response.Servers[0].People != "supported" || len(response.Servers[0].Binding) != 64 {
 		t.Fatalf("verified capability unavailable: status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	h.(*teamHandler).peopleEnabled = func() bool { return false }
-	rec = doTeam(h, http.MethodGet, "/api/team/subscriptions", "")
-	if strings.Contains(rec.Body.String(), "people_attachments") {
-		t.Fatal("disabled feature advertised attachments")
-	}
-	h.(*teamHandler).peopleEnabled = func() bool { return true }
 	entries, err := team.Load(dir)
 	if err != nil || len(entries) != 1 {
 		t.Fatal("missing synthetic server")
@@ -2305,42 +2193,5 @@ func TestPeopleOwnerNativeUUIDInstanceCanStage(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || puts != 1 {
 		t.Fatalf("valid native UUID was refused: status=%d puts=%d body=%s", rec.Code, puts, rec.Body.String())
-	}
-}
-
-func TestPeopleDisabledFeatureDoesNotFetchNewBytes(t *testing.T) {
-	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "read", 0))}
-	gets := 0
-	payload := []byte("x")
-	sum := sha256.Sum256(payload)
-	hash := hex.EncodeToString(sum[:])
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/hello" {
-			w.Header().Set("Scimux-Blob-Generation", "1")
-			script.ServeHTTP(w, r)
-			return
-		}
-		if strings.Contains(r.URL.Path, "/blobs/") {
-			gets++
-			_, _ = w.Write(payload)
-			return
-		}
-		script.ServeHTTP(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	h, dir := testTeamSurface(t, clientFor(srv))
-	joinLab(t, dir, teamServerID, srv.URL)
-	readSubList(t, h)
-	asTeamHandler(t, h).peopleEnabled = func() bool { return false }
-	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	attachmentID := "0123456789abcdef"
-	body, _ := json.Marshal(map[string]any{"v": 1, "t": "comment", "text": peopleAttachmentNotice, "anchor": 0, "content_text": "", "people_attachments_version": 1, "people_attachments": []any{map[string]any{"id": attachmentID, "sha256": hash, "size": 1, "name": "synthetic.txt", "mime": "text/plain"}}})
-	if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{{Seq: 1, Key: "c/1111111111111111", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: body}}); err != nil {
-		t.Fatal(err)
-	}
-	path := "/api/team/subscriptions/" + teamServerID + "/" + subOwner + "/" + subChat + "/" + subGen + "/attachments/1/" + attachmentID
-	rec := doTeam(h, http.MethodGet, peopleTestURL(t, dir, path), "")
-	if rec.Code == http.StatusOK || gets != 0 {
-		t.Fatalf("disabled feature status=%d GETs=%d", rec.Code, gets)
 	}
 }

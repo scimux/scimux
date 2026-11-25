@@ -14,10 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/scimux/scimux/internal/team"
 )
@@ -329,78 +327,6 @@ func TestPeoplePublicationUnconfirmedAppendKeepsFrozenRetry(t *testing.T) {
 	}
 }
 
-func TestPeoplePublicationKeepsFrozenStateWhenSharingStopsBeforeUpload(t *testing.T) {
-	var writes atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/hello" {
-			w.Header().Set("Scimux-Blob-Generation", "1")
-			fmt.Fprint(w, helloJSON(teamServerID, "Synthetic relay"))
-			return
-		}
-		if r.Method == http.MethodPut || r.Method == http.MethodPost {
-			writes.Add(1)
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	handler, dir := testTeamSurface(t, clientFor(srv))
-	h := handler.(*teamHandler)
-	server := labEntry(teamServerID, srv.URL, teamToken)
-	seedTeam(t, dir, server)
-	sub := baseSub()
-	sub.Access = "write"
-	seedSub(t, dir, sub)
-	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
-	data := []byte("synthetic staged bytes")
-	sum := sha256.Sum256(data)
-	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
-	if err := team.SavePeopleStage(dir, id, stage); err != nil {
-		t.Fatal(err)
-	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var enabled, held atomic.Bool
-	enabled.Store(true)
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if _, err := team.ReadPeoplePending(dir, id, "fedcba9876543210"); err == nil && held.CompareAndSwap(false, true) {
-			close(entered)
-			<-release
-		}
-		return enabled.Load()
-	}
-	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, "/", nil), id, "")
-	defer finish()
-	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.postPeopleFileComment(rec, req, id, sub, server, "synthetic caption", 0, "fedcba9876543210", []string{stage.ID})
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("frozen publication not reached")
-	}
-	enabled.Store(false)
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("publication did not finish")
-	}
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || writes.Load() != 0 {
-		t.Fatalf("disabled publication status=%d writes=%d body=%s", rec.Code, writes.Load(), rec.Body.String())
-	}
-	pending, err := team.ReadPeoplePending(dir, id, "fedcba9876543210")
-	if err != nil || !bytes.Contains(pending.Body, []byte("synthetic caption")) || len(pending.StageIDs) != 1 || pending.StageIDs[0] != stage.ID {
-		t.Fatalf("frozen state lost: %v", err)
-	}
-	if err := team.DeletePeopleStage(dir, id, stage.ID); err == nil {
-		t.Fatal("disabled publication released its stage pin")
-	}
-}
-
 func TestPeoplePublicationDoesNotFreezeAfterSharingStopsAtAdmission(t *testing.T) {
 	var writes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -429,46 +355,30 @@ func TestPeoplePublicationDoesNotFreezeAfterSharingStopsAtAdmission(t *testing.T
 	if err := team.SavePeopleStage(dir, id, stage); err != nil {
 		t.Fatal(err)
 	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var enabled atomic.Bool
-	enabled.Store(true)
-	var calls atomic.Int32
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if calls.Add(1) == 2 {
-			before := enabled.Load()
-			close(entered)
-			<-release
-			return before
+	h.stageRead = func(dataDir string, copyID team.CopyID, stageID string) (team.PeopleStage, error) {
+		saved, err := team.ReadPeopleStage(dataDir, copyID, stageID)
+		if err != nil {
+			return saved, err
 		}
-		return enabled.Load()
+		subs, err := team.LoadSubs(dataDir)
+		if err != nil {
+			return saved, err
+		}
+		subs[0].State = "ended"
+		if err := team.SaveSubs(dataDir, subs); err != nil {
+			return saved, err
+		}
+		return saved, nil
 	}
 	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, "/", nil), id, "")
 	defer finish()
 	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.postPeopleFileComment(rec, req, id, sub, server, "synthetic caption", 0, "fedcba9876543210", []string{stage.ID})
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("admission boundary not reached")
-	}
-	enabled.Store(false)
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("publication did not finish")
-	}
+	h.postPeopleFileComment(rec, req, id, sub, server, "synthetic caption", 0, "fedcba9876543210", []string{stage.ID})
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || writes.Load() != 0 {
-		t.Fatalf("disabled admission status=%d writes=%d body=%s", rec.Code, writes.Load(), rec.Body.String())
+		t.Fatalf("ended subscription admission status=%d writes=%d body=%s", rec.Code, writes.Load(), rec.Body.String())
 	}
 	if _, err := team.ReadPeoplePending(dir, id, "fedcba9876543210"); err == nil {
-		t.Fatal("disabled admission froze a publication")
+		t.Fatal("ended subscription admission froze a publication")
 	}
 	got, err := team.ReadPeopleStage(dir, id, stage.ID)
 	if err != nil || !bytes.Equal(got.Data, data) {

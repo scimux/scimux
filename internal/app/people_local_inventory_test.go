@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -161,18 +160,12 @@ func TestLocalInventoryNeedsNoLiveAuthority(t *testing.T) {
 
 func TestLocalInventoryRefusesUnavailableState(t *testing.T) {
 	h, dir := testTeamSurface(t, nil)
-	handler := h.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation + "/local?copy_instance=" + instance
-	handler.peopleEnabled = func() bool { return false }
-	if rec := doTeam(h, http.MethodGet, path, ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") {
-		t.Fatalf("disabled: %d %s", rec.Code, rec.Body.String())
-	}
-	handler.peopleEnabled = nil
 	installation := filepath.Join(dir, identity.InstallationFile)
 	if err := os.Rename(installation, installation+".saved"); err != nil {
 		t.Fatal(err)
@@ -182,21 +175,6 @@ func TestLocalInventoryRefusesUnavailableState(t *testing.T) {
 	}
 	if err := os.Rename(installation+".saved", installation); err != nil {
 		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	calls := 0
-	handler.peopleEnabled = func() bool {
-		calls++
-		if calls == 2 {
-			cancel()
-		}
-		return true
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
-	handler.peopleEnabled = nil
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
-		t.Fatalf("cancelled: %d %s", rec.Code, rec.Body.String())
 	}
 	stageDir := filepath.Join(dir, team.CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "people-stages")
 	if err := os.Mkdir(stageDir, 0700); err != nil {
@@ -215,7 +193,6 @@ func TestLocalInventoryQueryCompoundOutcomes(t *testing.T) {
 	client := team.NewClient()
 	client.Transport = teamRoundTrip(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("unexpected network") })
 	h, dir := testTeamSurface(t, client)
-	handler := h.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {
@@ -248,15 +225,6 @@ func TestLocalInventoryQueryCompoundOutcomes(t *testing.T) {
 			}
 		})
 	}
-	t.Run("second_gate", func(t *testing.T) {
-		decisions := 0
-		handler.peopleEnabled = func() bool { decisions++; return decisions == 1 }
-		defer func() { handler.peopleEnabled = nil }()
-		rec := doTeam(h, http.MethodGet, base+"?copy_instance="+instance, "")
-		if decisions != 2 || rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
-			t.Fatalf("gate decisions=%d response=%d %s", decisions, rec.Code, rec.Body.String())
-		}
-	})
 	if calls != 0 {
 		t.Fatalf("unexpected relay calls: %d", calls)
 	}

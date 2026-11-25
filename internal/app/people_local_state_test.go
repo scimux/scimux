@@ -2,14 +2,12 @@ package app
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -193,7 +191,6 @@ func TestLocalPublicationStateQueryAndMissing(t *testing.T) {
 		return nil, errors.New("unexpected synthetic relay call")
 	})
 	h, dir := testTeamSurface(t, client)
-	handler := h.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {
@@ -227,11 +224,6 @@ func TestLocalPublicationStateQueryAndMissing(t *testing.T) {
 	if rec := doTeam(h, http.MethodPost, path, ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("method: %d", rec.Code)
 	}
-	handler.peopleEnabled = func() bool { return false }
-	if rec := doTeam(h, http.MethodGet, path, ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") {
-		t.Fatalf("disabled: %d %s", rec.Code, rec.Body.String())
-	}
-	handler.peopleEnabled = nil
 	if calls != 0 {
 		t.Fatalf("relay calls: %d", calls)
 	}
@@ -293,7 +285,6 @@ func TestLocalPublicationStateNeedsNoLiveAuthority(t *testing.T) {
 
 func TestLocalPublicationStateRefusesUnavailableIdentityAndMidflightGate(t *testing.T) {
 	h, dir := testTeamSurface(t, nil)
-	handler := h.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {
@@ -309,25 +300,6 @@ func TestLocalPublicationStateRefusesUnavailableIdentityAndMidflightGate(t *test
 	}
 	if err := os.Rename(installation+".saved", installation); err != nil {
 		t.Fatal(err)
-	}
-	calls := 0
-	handler.peopleEnabled = func() bool { calls++; return calls == 1 }
-	if rec := doTeam(h, http.MethodGet, path, ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
-		t.Fatalf("midflight gate: %d %s", rec.Code, rec.Body.String())
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	calls = 0
-	handler.peopleEnabled = func() bool {
-		calls++
-		if calls == 2 {
-			cancel()
-		}
-		return true
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
-		t.Fatalf("cancelled: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -209,13 +209,6 @@ func TestRetireAbsentRejectsInvalidRequestsWithoutCancelling(t *testing.T) {
 	if rec.Code != http.StatusBadRequest || request.Context().Err() != nil {
 		t.Fatalf("read failure: %d", rec.Code)
 	}
-	handler.peopleEnabled = func() bool { return false }
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, base, nil))
-	handler.peopleEnabled = nil
-	if rec.Code != http.StatusConflict || request.Context().Err() != nil {
-		t.Fatalf("disabled: %d", rec.Code)
-	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, base, nil))
 	if rec.Code != http.StatusOK || request.Context().Err() != context.Canceled {
@@ -361,10 +354,9 @@ func TestRetireAbsentWebSecurity(t *testing.T) {
 }
 
 func TestRetireAbsentReportsIdentityGateAndStorageFailures(t *testing.T) {
-	for _, mode := range []string{"missing_identity", "second_gate", "cancelled", "full", "damaged_pending"} {
+	for _, mode := range []string{"missing_identity", "full", "damaged_pending"} {
 		t.Run(mode, func(t *testing.T) {
 			h, dir := testTeamSurface(t, nil)
-			handler := h.(*teamHandler)
 			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 			instance, err := team.EnsurePeopleCopyInstance(dir, id)
 			if err != nil {
@@ -377,22 +369,6 @@ func TestRetireAbsentReportsIdentityGateAndStorageFailures(t *testing.T) {
 				if err := os.Remove(filepath.Join(dir, identity.InstallationFile)); err != nil {
 					t.Fatal(err)
 				}
-			case "second_gate":
-				calls := 0
-				handler.peopleEnabled = func() bool { calls++; return calls == 1 }
-				defer func() { handler.peopleEnabled = nil }()
-			case "cancelled":
-				ctx, cancel := context.WithCancel(context.Background())
-				calls := 0
-				handler.peopleEnabled = func() bool {
-					calls++
-					if calls == 2 {
-						cancel()
-					}
-					return true
-				}
-				defer func() { handler.peopleEnabled = nil }()
-				request = request.WithContext(ctx)
 			case "full":
 				if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"storage_min_free_bytes":0,"storage_global_limit_bytes":1}`), 0600); err != nil {
 					t.Fatal(err)

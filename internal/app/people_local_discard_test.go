@@ -37,32 +37,6 @@ func TestLocalDiscardRetiresPendingWithoutRelay(t *testing.T) {
 	revision := sha256.Sum256(raw)
 	path := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation + "/pending/" + pending.Key + "?copy_instance=" + instance + "&revision=" + hex.EncodeToString(revision[:])
 	handler := h.(*teamHandler)
-	handler.peopleEnabled = func() bool { return false }
-	if denied := doTeam(h, http.MethodDelete, path, ""); denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), "not_active") {
-		t.Fatalf("disabled feature: %d %s", denied.Code, denied.Body.String())
-	}
-	calls := 0
-	handler.peopleEnabled = func() bool { calls++; return calls == 1 }
-	if denied := doTeam(h, http.MethodDelete, path, ""); denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), "copy_changed") {
-		t.Fatalf("feature disabled during request: %d %s", denied.Code, denied.Body.String())
-	}
-	handler.peopleEnabled = nil
-	ctx, cancel := context.WithCancel(context.Background())
-	calls = 0
-	handler.peopleEnabled = func() bool {
-		calls++
-		if calls == 2 {
-			cancel()
-		}
-		return true
-	}
-	request := httptest.NewRequest(http.MethodDelete, path, nil).WithContext(ctx)
-	cancelled := httptest.NewRecorder()
-	h.ServeHTTP(cancelled, request)
-	if cancelled.Code != http.StatusConflict || !strings.Contains(cancelled.Body.String(), "copy_changed") {
-		t.Fatalf("cancelled operation: %d %s", cancelled.Code, cancelled.Body.String())
-	}
-	handler.peopleEnabled = nil
 	malformedQuery := httptest.NewRequest(http.MethodDelete, path, nil)
 	malformedQuery.URL.RawQuery += "&broken=%ZZ"
 	badQuery := httptest.NewRecorder()

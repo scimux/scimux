@@ -217,9 +217,6 @@ func TestPeopleWriteCommitGuardRechecksCurrentCopyAndServer(t *testing.T) {
 	if err := team.SaveSubs(dir, []team.Subscription{sub}); err != nil {
 		t.Fatal(err)
 	}
-	h.peopleEnabled = func() bool { return false }
-	check(false)
-	h.peopleEnabled = nil
 	if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("synthetic damage"), 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -122,7 +121,6 @@ func TestLocalStageRemovalLostAuthorityAndPreconditions(t *testing.T) {
 
 func TestLocalStageRemovalFailsClosed(t *testing.T) {
 	h, dir := testTeamSurface(t, nil)
-	handler := h.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {
@@ -138,11 +136,6 @@ func TestLocalStageRemovalFailsClosed(t *testing.T) {
 	sum := sha256.Sum256(raw)
 	revision := hex.EncodeToString(sum[:])
 	base := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation + "/attachments/stage/" + stage.ID + "?copy_instance=" + instance + "&revision=" + revision
-	handler.peopleEnabled = func() bool { return false }
-	if rec := doTeam(h, http.MethodDelete, base, ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") {
-		t.Fatalf("disabled: %d", rec.Code)
-	}
-	handler.peopleEnabled = nil
 	malformed := httptest.NewRequest(http.MethodDelete, base, nil)
 	malformed.URL.RawQuery += "&bad=%ZZ"
 	rec := httptest.NewRecorder()
@@ -159,28 +152,6 @@ func TestLocalStageRemovalFailsClosed(t *testing.T) {
 	}
 	if err := os.Rename(install+".saved", install); err != nil {
 		t.Fatal(err)
-	}
-	calls := 0
-	handler.peopleEnabled = func() bool { calls++; return calls == 1 }
-	rec = doTeam(h, http.MethodDelete, base, "")
-	handler.peopleEnabled = nil
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") {
-		t.Fatalf("second gate: %d", rec.Code)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	calls = 0
-	handler.peopleEnabled = func() bool {
-		calls++
-		if calls == 2 {
-			cancel()
-		}
-		return true
-	}
-	canceled := httptest.NewRecorder()
-	h.ServeHTTP(canceled, httptest.NewRequest(http.MethodDelete, base, nil).WithContext(ctx))
-	handler.peopleEnabled = nil
-	if canceled.Code != http.StatusConflict || !strings.Contains(canceled.Body.String(), "not_active") {
-		t.Fatalf("canceled: %d", canceled.Code)
 	}
 	pending := team.PeoplePending{Key: "fedcba9876543210", Author: installationOf(t, dir), ConfigHash: stage.ConfigHash, Body: json.RawMessage(`{"v":1}`), StageIDs: []string{stage.ID}}
 	if err := team.SavePeoplePending(dir, id, pending, []team.PeopleStage{stage}); err != nil {
