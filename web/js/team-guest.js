@@ -7,6 +7,7 @@ import { promptSourceKey } from "./storage.js";
 import { peoplePendingStorageKey, parsePeoplePendingSnapshot } from "./people-local-review.js";
 import { attachmentTileHTML, attachmentUnavailableHTML } from "./attachment-tile.js";
 import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
+import { REACTIONS, reactionEligible, reactionControlHTML, reactionChipsHTML, replayReactionEvents, createReactionInteraction } from "./reactions.js";
 
 const LIST = "/api/team/subscriptions";
 
@@ -181,6 +182,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   const pending = new Set();
   let bound = false;
   let removeBubbleListeners = null;
+  let removeReactionListeners = null;
   let open = null;
   let owner = null;
   const ownerCopies = new Map();
@@ -200,6 +202,148 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   const classificationCancels = new Set();
   const retentionCancels = new Set();
   let classificationActive = 0;
+  const reactionUI = createReactionInteraction({doc, onChoose:chooseReaction});
+
+  function reactionComments(current) {
+    const comments = new Map();
+    for (const [key, entry] of current.entries) {
+      if (!key.startsWith("comments/") || !entry || !Number.isSafeInteger(entry.seq)) continue;
+      const attachments = sharedAttachmentDescriptors(entry);
+      comments.set(entry.seq, {author:entry.author, valid:!!entry.text || !!attachments?.length});
+    }
+    return comments;
+  }
+  function reactionSummary(current) {
+    return replayReactionEvents(current.reactionEvents, reactionComments(current));
+  }
+  function reactionOnline(view) {
+    const server = answer.servers.find(item => item.id === view.server);
+    return view.state === "live" && !!server && !["offline", "refused", "changed"].includes(server.delivery);
+  }
+  function syncReactionChips(current) {
+    const summaries = reactionSummary(current);
+    for (const turn of doc.querySelectorAll("#msgs [data-cseq]")) {
+      if (turn.dataset.gkey !== current.key) continue;
+      const container = turn.querySelector("[data-reaction-chips]");
+      if (container) {
+        const html = reactionChipsHTML(summaries, Number(turn.dataset.cseq));
+        if (container.innerHTML !== html) container.innerHTML = html;
+      }
+      const entry = current.entries.get("comments/" + turn.dataset.cseq);
+      if (!entry) continue;
+      const attachments = sharedAttachmentDescriptors(entry);
+      const eligible = reactionEligible({shared:true, type:"people-comment", author:entry.author, mine:entry.mine,
+        access:current.view.access, state:current.view.state, online:reactionOnline(current.view), text:entry.text || "", attachments});
+      const control = turn.querySelector("[data-reaction-entry]");
+      if (!eligible || !/^[0-9a-f]{32}$/.test(current.reactionCopyInstance || "")) {
+        control?.remove?.();
+      } else if (control) {
+        control.dataset.copyInstance = current.reactionCopyInstance;
+      } else {
+        turn.querySelector(".bubble")?.insertAdjacentHTML("beforeend", reactionControlHTML({target:entry.seq, key:current.key, copyInstance:current.reactionCopyInstance}));
+      }
+    }
+  }
+  function rememberReactionEvents(current, events) {
+    let changed = false;
+    const seen = new Set(current.reactionEvents.map(event => event.seq));
+    for (const event of events) {
+      if (seen.has(event.seq)) continue;
+      current.reactionEvents.push(event);
+      seen.add(event.seq);
+      changed = true;
+      for (const pending of current.reactionPending.values()) {
+        if (pending.target === event.target && pending.emoji === event.emoji && pending.active === event.active && event.key === "r/" + pending.key && event.mine === true) {
+          current.reactionPending.delete(pending.target + "\0" + pending.emoji);
+        }
+      }
+    }
+    return changed;
+  }
+
+  async function readReactionPages(current, isCurrent) {
+    if (current.reactionRetired) return true;
+    for (let pageNumber = 0; pageNumber < 40; pageNumber++) {
+      const previous = current.rnext || 0;
+      const instance = current.reactionCopyInstance || "";
+      const suffix = instance ? "&copy_instance=" + encodeURIComponent(instance) : "";
+      let page;
+      try {
+        page = await api(LIST + "/" + current.key + "/reactions?after=" + previous + suffix);
+      } catch (error) {
+        if (!isCurrent()) return false;
+        let code = "";
+        try { code = JSON.parse(error.message).error; } catch {}
+        if ((error.status === 409 && code === "copy_changed") || (error.status === 404 && code === "not_found")) {
+          retireReactionInteraction(current);
+          return true;
+        }
+        throw error;
+      }
+      if (!isCurrent()) return false;
+      if (!/^[0-9a-f]{32}$/.test(page.copy_instance || "")) return false;
+      const observedCopy = current.view.people_copy_instance || "";
+      if (/^[0-9a-f]{32}$/.test(observedCopy) && observedCopy !== page.copy_instance) {
+        retireReactionInteraction(current);
+        return true;
+      }
+      if (current.reactionCopyInstance && current.reactionCopyInstance !== page.copy_instance) {
+        retireReactionInteraction(current);
+        return true;
+      }
+      current.reactionCopyInstance = page.copy_instance;
+      current.reactionsChanged = rememberReactionEvents(current, page.events) || current.reactionsChanged === true;
+      current.rnext = page.next;
+      if (!page.more || current.rnext <= previous) break;
+    }
+    return true;
+  }
+
+  function retireReactionInteraction(current) {
+    current.reactionRetired = true;
+    current.reactionCopyInstance = "";
+    current.reactionEvents = [];
+    current.reactionPending?.clear?.();
+    current.rnext = 0;
+    reactionUI.close();
+    for (const turn of doc.querySelectorAll("#msgs [data-gkey]")) {
+      if (turn.dataset.gkey !== current.key) continue;
+      turn.querySelector("[data-reaction-entry]")?.remove?.();
+      const chips = turn.querySelector("[data-reaction-chips]");
+      if (chips) chips.innerHTML = "";
+    }
+    if (current === owner || ownerCopies.get(current.key) === current) panel.ownerChanged();
+  }
+
+  async function chooseReaction(destination) {
+    const current = open || (owner && selectedNode() === owner.node && selectedUID() === owner.view.chat ? owner : null);
+    if (!current || current.reactionRetired || current.key !== destination.key || current.reactionCopyInstance !== destination.copyInstance || !reactionOnline(current.view)) return;
+    const comment = current.entries.get("comments/" + destination.target);
+    if (!comment || comment.mine || current.view.access === "read" || current.view.state !== "live") return;
+    const key = destination.target + "\0" + destination.emoji;
+    let pending = current.reactionPending.get(key);
+    if (!pending) {
+      const activeNow = reactionSummary(current).some(chip => chip.target === destination.target && chip.emoji === destination.emoji && chip.mine);
+      const bytes = randomBytes(8);
+      pending = {target:destination.target, emoji:destination.emoji, active:!activeNow, key:guestHexKey(bytes), author:"", body:null};
+      pending.body = JSON.stringify({target:pending.target, emoji:pending.emoji, active:pending.active, key:pending.key});
+      current.reactionPending.set(key, pending);
+    }
+    const captured = {current, node:current.node, key:current.key, copy:destination.copyInstance, view:current.view, visit:open?.visit};
+    const stillCurrent = () => !destroyed && (open === current || ownerCopies.get(captured.key) === current) && current.view === captured.view && current.reactionCopyInstance === captured.copy && current.view.generation === captured.view.generation && reactionOnline(current.view) && (open === current || (selectedNode() === captured.node && selectedUID() === captured.view.chat)) && (!captured.visit || bubbleController.isCurrentVisit(captured.visit));
+    if (!stillCurrent()) return;
+    try {
+      await api(LIST + "/" + current.key + "/reactions?copy_instance=" + pendingCopy(current), {method:"POST", body:pending.body});
+    } catch (error) {
+      if (!stillCurrent()) return;
+      let code = "";
+      try { code = JSON.parse(error.message).error; } catch {}
+      if (error.status === 409 && code === "copy_changed") retireReactionInteraction(current);
+      /* Other uncertain outcomes retain the exact body and key for explicit retry. */
+    }
+    if (!stillCurrent()) return;
+  }
+  function pendingCopy(current) { return current.reactionCopyInstance; }
 
   // This is presentation evidence, not a read position. The durable comments
   // copy is populated by GET; only the existing /seen operation marks it read.
@@ -238,14 +382,24 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       for (let pageNo = 0; pageNo < 40 && cursor < view.comments_last; pageNo++) {
         const page = await readClassificationPage(LIST + "/" + guestKey(view) + "/comments?after=" + cursor + copyQuery(view));
         if (!page || !Array.isArray(page.entries) || !Number.isSafeInteger(page.next) || page.next <= cursor) return "unknown";
-        let expected = cursor + 1;
+        const known = new Map();
         for (const entry of page.entries) {
-          if (!Number.isSafeInteger(entry.seq) || entry.seq < expected || entry.seq > page.next) return "unknown";
-          if (entry.seq !== expected || typeof entry.mine !== "boolean") gap = true;
-          if (entry.mine === false && entry.seq <= view.comments_last) { classificationProgress.delete(key); return "unread"; }
-          expected = entry.seq + 1;
+          if (!Number.isSafeInteger(entry.seq) || entry.seq <= cursor || entry.seq > page.next || typeof entry.mine !== "boolean") return "unknown";
+          known.set(entry.seq, {kind:"comment", entry});
         }
-        if (expected <= Math.min(page.next, view.comments_last)) gap = true;
+        for (const event of page.reactions || []) {
+          if (!event || event.v !== 1 || event.t !== "reaction" || !Number.isSafeInteger(event.seq) || event.seq <= cursor || event.seq > page.next ||
+              !Number.isSafeInteger(event.target) || event.target < 1 || event.target >= event.seq ||
+              typeof event.emoji !== "string" || !REACTIONS.some(choice => choice.id === event.emoji) || typeof event.active !== "boolean" ||
+              typeof event.key !== "string" || !/^r\/[0-9a-f]{16}$/.test(event.key) || typeof event.author !== "string" || !event.author ||
+              typeof event.target_author !== "string" || !event.target_author || event.author === event.target_author || typeof event.mine !== "boolean") continue;
+          known.set(event.seq, {kind:"reaction"});
+        }
+        for (let seq = cursor + 1; seq <= Math.min(page.next, view.comments_last); seq++) {
+          const item = known.get(seq);
+          if (!item) { gap = true; continue; }
+          if (item.kind === "comment" && item.entry.mine === false) { classificationProgress.delete(key); return "unread"; }
+        }
         cursor = page.next;
         if (!gap) classificationProgress.set(key, {seen:view.seen_comments, next:cursor});
       }
@@ -472,9 +626,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     $("gueststate").textContent = guestStateText(view);
   }
   function openView(view) {
+    reactionUI.close();
     readGeneration++;
     const key = guestKey(view);
-    open = { key, view, visit:bubbleController.captureVisit(), next: 0, cnext: 0, first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), markerHTML:new Map(), row: null, lastRead: 0, busy: false, failed: false, empty: false, removing: false, removeNote: false };
+  open = { key, view, visit:bubbleController.captureVisit(), next: 0, cnext: 0, rnext:0, reactionCopyInstance:view.people_copy_instance || "", reactionEvents:[], reactionPending:new Map(), first: true, seenAtOpen: view.seen_mirror, commentsAtOpen: view.seen_comments, seen: view.seen_mirror, commentsSeen: view.seen_comments, names: {}, entries: new Map(), markerHTML:new Map(), row: null, lastRead: 0, busy: false, failed: false, empty: false, removing: false, removeNote: false };
     header(view);
     $("msgs").innerHTML = '<div class="previewtrunc">Loading…</div>';
     syncNotice(open);
@@ -626,11 +781,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (refreshPeople()) invalidateCards();
         for (const message of result.entries) {
           if (current.empty) { body.innerHTML = ""; current.empty = false; syncNotice(current); }
+          current.entries.set("comments/" + message.seq, message);
           const capture = guestCapture(message, current.view, current.names, knownPeople);
           const markers = capture ? panel.sharedMarkers?.(capture.team) || "" : "";
           if (capture) current.markerHTML.set("comments/" + message.seq, markers);
-          insertUpdate(guestMessageHTML(message, current.names, current.view.server, knownPeople, "", markers, current.key, assetURL, current.view.people_copy_instance || ""), [message.anchor, 1, message.seq]);
-          current.entries.set("comments/" + message.seq, message);
+          insertUpdate(guestMessageHTML({...message, access:current.view.access, state:current.view.state}, current.names, current.view.server, knownPeople, current.key, markers, current.key, assetURL, current.reactionCopyInstance || "", reactionSummary(current), reactionOnline(current.view)), [message.anchor, 1, message.seq]);
           hasEntries = true;
         }
         current.cnext = result.next;
@@ -638,6 +793,15 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (current.jump && moreComments && current.cnext <= previous) { moreComments = false; break; }
         if (!moreComments) break;
       }
+      if (current.cnext > 0) {
+        await readReactionPages(current, () => currentRead(current, gen));
+        if (!currentRead(current, gen)) return;
+      }
+      // Access, state, and relay availability can change without a new event.
+      // Reconcile only the reaction decorations after each ordinary comments
+      // poll so stale entry controls never outlive current permissions.
+      syncReactionChips(current);
+      current.reactionsChanged = false;
       syncNotice(current);
       if (first && !current.row?.renaming) {
         if (!hasEntries) {
@@ -756,10 +920,12 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const capture = guestCapture(entry, current.view, current.names, knownPeople);
     if (!capture) return;
     const selected = bubbleController.toggle({key:"shared/" + current.key + "/" + key, target:turn, kind:"shared", close:() => {
+      turn.classList?.remove("bubble-selected");
       current.row?.turn.nextElementSibling?.remove();
       current.row = null;
     }});
     if (!selected) return;
+    turn.classList?.add("bubble-selected");
     renderActionRow({doc, turn, html:actionButtons(capture), shared:true});
     current.row = { turn, capture, entry, renaming: false };
   }
@@ -885,6 +1051,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     invalidateCards();
     if (open !== current) return;
     open = null;
+    reactionUI.close();
     readGeneration++;
     clearDisclosure();
     panel.removed();
@@ -898,13 +1065,37 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     bound = true;
     $("guestmore").addEventListener("click", more);
     removeBubbleListeners = bubbleController.listen($("msgs"), {click:sharedClick, keydown:panelKeydown});
+    const messages = $("msgs");
+    const reactionClick = event => reactionUI.handle(event);
+    const reactionPointer = event => {
+      const root = doc.body || doc.documentElement;
+      if (!root?.classList || !event.pointerType) return;
+      root.classList.toggle("reaction-input-mouse", event.pointerType === "mouse");
+    };
+    if (typeof doc.addEventListener === "function") {
+      doc.addEventListener("click", reactionClick, true);
+      messages.addEventListener("pointermove", reactionPointer, {passive:true});
+      messages.addEventListener("pointerdown", reactionPointer, {passive:true});
+    }
+    removeReactionListeners = () => {
+      if (typeof doc.removeEventListener === "function") {
+        doc.removeEventListener("click", reactionClick, true);
+        messages.removeEventListener("pointermove", reactionPointer);
+        messages.removeEventListener("pointerdown", reactionPointer);
+      }
+      reactionUI.close();
+      (doc.body || doc.documentElement)?.classList?.remove("reaction-input-mouse");
+    };
     $("guestremove").addEventListener("click", removeClick);
   }
   function destroy() {
+    reactionUI.close();
     if (bound) {
       $("guestmore").removeEventListener("click", more);
       removeBubbleListeners();
       removeBubbleListeners = null;
+      removeReactionListeners?.();
+      removeReactionListeners = null;
       $("guestremove").removeEventListener("click", removeClick);
     }
     open = null; owner = null; ownerShare = null; ownerCopies.clear(); actionOwner = null;
@@ -998,7 +1189,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         changed = true;
       }
       if (!current) {
-        current = {key, node, view, order: view.local_order, share: null, next:0, cnext:0, mirrors:[], comments:[], entries:new Map(), row:null, names:{}, busy:false, lastRead:0};
+        current = {key, node, view, order: view.local_order, share: null, next:0, cnext:0, rnext:0, reactionCopyInstance:view.people_copy_instance || "", reactionEvents:[], reactionPending:new Map(), mirrors:[], comments:[], entries:new Map(), row:null, names:{}, busy:false, lastRead:0};
         ownerCopies.set(key,current); changed = true;
         startOwnerRead(current);
       } else { current.view = {...view, delivery: current.view.delivery}; current.order = view.local_order; }
@@ -1016,7 +1207,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function ownerCurrent(current) { return !destroyed && selectedNode() === current.node && ownerCopies.get(current.key) === current; }
   function ownerRenderSignature(current) {
     const view = current.view;
-    return JSON.stringify([view.title, view.owner_name, view.access, view.state, view.delivery, current.mirrors, current.comments, current.names]);
+    return JSON.stringify([view.title, view.owner_name, view.access, view.state, view.delivery, current.mirrors, current.comments, current.reactionEvents, current.names]);
   }
   async function readOwner(current) {
     const before = ownerRenderSignature(current);
@@ -1046,6 +1237,10 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         if (pendingOwnerJump?.key === current.key && moreComments && current.cnext <= previous) { moreComments = false; break; }
         if (!moreComments) break;
       }
+      if (current.cnext > 0) await readReactionPages(current, () => ownerCurrent(current));
+      if (!ownerCurrent(current)) return;
+      if (current.reactionsChanged) panel.ownerChanged();
+      current.reactionsChanged = false;
       if (pendingOwnerJump?.key === current.key && pendingOwnerJump.node === current.node) {
         const source = pendingOwnerJump.source;
         const found = source.log === "comments" ? current.entries.has("comments/" + source.seq) : current.mirrors.some(item => item.seq === source.seq);
@@ -1083,7 +1278,8 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       const frontier = copy.view.local_frontier;
       const missingStart = !copy.mirrors.some(entry => entry.t === "start");
       const mirrors = frontier && missingStart ? [{seq:0,t:"start",local_segment:frontier.segment,local_record:frontier.record}, ...copy.mirrors] : copy.mirrors;
-      return { uid:copy.view.chat, key:copy.key, view:copy.view, mirrors, comments:copy.comments, names:copy.names, people:knownPeople };
+      const reactionState = reactionSummary(copy);
+      return { uid:copy.view.chat, key:copy.key, view:copy.view, mirrors, comments:copy.comments, reactionEvents:copy.reactionEvents, reactionState, reactionCopyInstance:copy.reactionRetired ? "" : copy.reactionCopyInstance, online:reactionOnline(copy.view), names:copy.names, people:knownPeople };
     });
   }
   function canPreparePrompt(source) {
@@ -1514,7 +1710,7 @@ export function guestErrorText(code) {
   if (code === "storage_full") return "This computer's storage is full. Free some space to load more.";
   return "That did not work. It will be tried again.";
 }
-export function guestMessageHTML(entry, names, server = "", people = {}, ownerKey = "", markers = "", attachmentKey = "", assetURL = path => path, copyInstance = null) {
+export function guestMessageHTML(entry, names, server = "", people = {}, ownerKey = "", markers = "", attachmentKey = "", assetURL = path => path, copyInstance = null, reactionState = [], online = true) {
   let cls = "turn assistant gmsg";
   let who = guestName(server, entry.author, names[entry.author], people);
   let speakerAttributes = `data-seat="${esc(entry.author)}"`;
@@ -1522,8 +1718,14 @@ export function guestMessageHTML(entry, names, server = "", people = {}, ownerKe
   let tab = "";
   if (entry.text || entry.attachments?.length) tab = ' tabindex="0"';
   const tiles = sharedAttachmentTiles(entry, attachmentKey || ownerKey, assetURL, copyInstance);
+  const attachments = sharedAttachmentDescriptors(entry) || [];
+  const eligible = reactionEligible({shared:!!ownerKey, type:"people-comment", author:entry.author, mine:entry.mine,
+    access:entry.access || "write", state:entry.state || "live", online, text:entry.text || "", attachments});
+  const controls = eligible && /^[0-9a-f]{32}$/.test(copyInstance || "") ? reactionControlHTML({target:entry.seq, key:ownerKey, copyInstance}) : "";
+  const chips = reactionChipsHTML(reactionState, entry.seq);
   return renderBubbleTurn({turnClass:cls, turnAttributes:`data-cseq="${esc(entry.seq)}" data-anchor="${esc(entry.anchor)}"${ownerKey ? ` data-gkey="${esc(ownerKey)}"` : ""}`,
-    bubbleAttributes:`title="${esc(entry.at)}"${tab}`, markers, speakerName:who, speakerAttributes, text:entry.text || "", formatText:md, suffix:tiles});
+    bubbleAttributes:`title="${esc(entry.at)}"${tab}`, markers, speakerName:who, speakerAttributes, text:entry.text || "", formatText:md,
+    suffix:tiles + (chips ? `<span class="reaction-chips" data-reaction-chips>${chips}</span>` : '<span class="reaction-chips" data-reaction-chips></span>') + controls});
 }
 function sharedAttachmentDescriptors(entry) {
   if (entry.attachments === undefined) return [];

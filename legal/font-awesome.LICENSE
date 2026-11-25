@@ -11,9 +11,12 @@ The icons are licensed under the Creative Commons Attribution 4.0
 International License (CC BY 4.0):
 https://creativecommons.org/licenses/by/4.0/
 
-This notice covers the Font Awesome interface icons embedded in web/js/app.js.
-Some icon path data is reformatted into inline SVG templates and rendered with
-scimux's currentColor styling.
+This notice covers the Font Awesome interface icons embedded in web/js/app.js
+and the Classic Regular `face-smile` icon embedded in web/js/reactions.js.
+The latter is from Font Awesome Free 6.7.2, source SVG:
+https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/svgs/regular/face-smile.svg
+Its SVG path is embedded inline and rendered with scimux's currentColor
+styling; no Font Awesome runtime or webfont is included.
 
 ----------------------------------------------------------------------
 

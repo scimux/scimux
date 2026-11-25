@@ -5348,6 +5348,18 @@ test('ordinary human bubble exposes its action row to keyboard activation', asyn
  assert.equal(prevented,true);assert.equal(bubActionRows(ctx).length,1);ctx.feature.destroy();
 });
 
+test("selected bubble cleanup removes its selection marker on the next tap", async () => {
+ const ctx=makeFeature({chatPayload:{turns:[{role:"user",text:"synthetic"}],live:"quiet"}});ctx.feature.bind();await ctx.feature.render();
+ const stale=el("div",{className:"turn user bubble-selected",dataset:{bk:"stale"}}),turn=el("div",{className:"turn user",dataset:{bk:"i:0"}});ctx.roots.msgs.appendChild(stale);ctx.roots.msgs.appendChild(turn);
+ const queryAll=ctx.roots.msgs.querySelectorAll.bind(ctx.roots.msgs);
+ ctx.roots.msgs.querySelectorAll=selector=>selector===".bubble-selected"?[stale,turn].filter(node=>node.classList.contains("bubble-selected")):queryAll(selector);
+ firstListener(ctx.roots.msgs,"click")({target:turn});
+ assert.equal(stale.classList.contains("bubble-selected"),false);assert.equal(turn.classList.contains("bubble-selected"),true);
+ firstListener(ctx.roots.msgs,"click")({target:turn});
+ assert.equal(turn.classList.contains("bubble-selected"),false);
+ ctx.feature.destroy();
+});
+
 /* A document whose selection reports what a click-drag would have left behind. */
 function selectingDocument(text){
   return {
@@ -9320,6 +9332,23 @@ test('shared owner timeline retains both the prompt and discussion with human la
  const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},chatPayload:{turns:[{role:'user',uid:'u',segment:0,record:1,text:'agent prompt'}],log_uid:'u',live:'quiet'}});
  ctx.feature.bind();await ctx.feature.loadHistory('n1','');
  assert.match(ctx.roots.msgs.innerHTML,/data-bk="i:0"[^]*?>You<\/div><p>agent prompt<\/p>/);assert.match(ctx.roots.msgs.innerHTML,/data-cseq="1"[^]*?>You<\/div><p>human comment<\/p>/);ctx.feature.destroy();
+});
+
+test('owner discussion shows reaction chips on own comments and an eligible control on another person', async () => {
+ const copy={uid:'u',key:'s/o/u/g',view:{server:'s',access:'owner',state:'live'},reactionCopyInstance:'d'.repeat(32),reactionState:[
+  {target:1,emoji:'thumbs_up',glyph:'👍',count:2,mine:false},{target:2,emoji:'heart',glyph:'❤️',count:1,mine:true}],online:true,
+  names:{p:'Person'},people:{},mirrors:[{seq:1,local_segment:0,local_record:1}],comments:[
+   {seq:1,anchor:1,text:'other person comment',author:'p',mine:false},
+   {seq:2,anchor:1,text:'my comment',author:'o',mine:true}]};
+ const ctx=makeFeature({deps:{ownerDiscussion:()=>[copy]},chatPayload:{turns:[{role:'assistant',uid:'u',segment:0,record:1,text:'source'}],log_uid:'u',live:'quiet',source:'codex'}});
+ ctx.feature.bind();await ctx.feature.loadHistory('n1','');
+ const html=ctx.roots.msgs.innerHTML,other=html.slice(html.indexOf('data-cseq="1"'),html.indexOf('data-cseq="2"')),own=html.slice(html.indexOf('data-cseq="2"'));
+ assert.ok(other,html);assert.match(other,/data-copy-instance="d{32}"/);assert.match(other,/👍/);assert.match(other,/>2</);
+ assert.match(own,/❤️/);assert.match(own,/aria-label="❤️ 1, you reacted"/);assert.doesNotMatch(own,/data-reaction-open/);ctx.feature.destroy();
+
+ const legacy={...copy,reactionCopyInstance:"",view:{...copy.view,people_copy_instance:'c'.repeat(32)},reactionState:[],comments:[copy.comments[0]]};
+ const fallback=makeFeature({deps:{ownerDiscussion:()=>[legacy]},chatPayload:{turns:[{role:'assistant',uid:'u',segment:0,record:1,text:'source'}],log_uid:'u',live:'quiet',source:'codex'}});
+ fallback.feature.bind();await fallback.feature.loadHistory('n1','');assert.doesNotMatch(fallback.roots.msgs.innerHTML,/data-reaction-open/);fallback.feature.destroy();
 });
 
 test('another shared log does not label an unrelated owner prompt', async () => {

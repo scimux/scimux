@@ -105,7 +105,7 @@ body.cards-open #msgs { overflow: hidden; }
 .turn { max-width: 92%; display: flex; align-items: flex-end; gap: 6px; }
 .turn .bubble {
   padding: 10px 14px; border-radius: 16px; font-size: 16px; line-height: 1.52;
-  overflow-wrap: break-word; min-width: 0;
+  overflow-wrap: break-word; min-width: 0; position: relative;
 }
 .turn.user { align-self: flex-end; flex-direction: row-reverse; }
 .turn.user .bubble { background: var(--work); color: #fff; border-bottom-right-radius: 5px; }
@@ -115,6 +115,39 @@ body.cards-open #msgs { overflow: hidden; }
 .turn.echo .bubble { opacity: .55; }
 .turn.assistant { align-self: flex-start; }
 .turn.assistant .bubble { background: var(--surface); border: 1px solid var(--hairline); border-bottom-left-radius: 5px; }
+.reaction-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; min-height: 0; }
+.reaction-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 2px 8px;
+  border: 1px solid var(--hairline); border-radius: 16px; color: var(--dim); background: var(--surface); font-size: 13px; line-height: 1.2; }
+.reaction-chip.mine { color: var(--work); border-color: color-mix(in srgb, var(--work) 50%, var(--hairline)); background: color-mix(in srgb, var(--work) 11%, var(--surface)); }
+.reaction-entry { position: absolute; z-index: 4; right: 4px; top: 4px; display: flex; align-items: center; gap: 4px; }
+.reaction-divider { color: var(--work); font-size: 20px; line-height: 1; opacity: .8; }
+.reaction-trigger { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 2px;
+  border: 0; border-radius: 50%; color: var(--work); background: transparent; opacity: 0; pointer-events: none; }
+.reaction-trigger::before { content: ""; position: absolute; inset: 2px; border: 1px solid var(--hairline); border-radius: 50%; background: var(--surface); box-shadow: 0 2px 7px rgba(0,0,0,.18); transition: background-color .12s ease; }
+.reaction-trigger:hover::before, .reaction-trigger:active::before, .reaction-entry.open .reaction-trigger::before { background: color-mix(in srgb, var(--work) 12%, var(--surface)); }
+.reaction-trigger-glyph { position: relative; z-index: 1; width: 20px; height: 20px; display: block; }
+.reaction-entry .reaction-chooser { position: absolute; right: 48px; bottom: calc(100% + 8px); display: flex; flex-wrap: nowrap; gap: 3px;
+  padding: 4px; border: 1px solid var(--hairline); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 14px rgba(0,0,0,.2); }
+.reaction-entry .reaction-chooser[hidden] { display: none; }
+.reaction-entry.rightward .reaction-chooser { left: calc(100% + 4px); right: auto; }
+.reaction-entry.compact .reaction-chooser { display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, 44px); grid-template-columns: repeat(3, 44px); }
+.reaction-entry.stacked .reaction-chooser { grid-template-rows: repeat(6, 44px); grid-template-columns: 44px; }
+.reaction-entry.detached .reaction-chooser { left: var(--reaction-chat-center, 50%); right: auto; transform: translateX(-50%); }
+.reaction-entry.below .reaction-chooser { top: calc(100% + 8px); bottom: auto; }
+.reaction-choice { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 44px; width: 44px; height: 44px;
+  padding: 0; border: 0; border-radius: 10px; color: inherit; background: transparent; font-size: 23px; line-height: 1; }
+.reaction-choice:hover, .reaction-choice:active { background: var(--code-bg); }
+.turn.user .bubble:has(.reaction-entry), .turn.assistant .bubble:has(.reaction-entry) { padding-top: 54px; }
+.turn .bubble:has(.reaction-entry) { padding-right: 58px; padding-bottom: 50px; }
+.reaction-input-mouse .turn:hover:not(.bubble-selected) > .bubble > .reaction-entry .reaction-trigger,
+.reaction-input-mouse .turn:focus-within:not(.bubble-selected) > .bubble > .reaction-entry .reaction-trigger,
+.turn.bubble-selected > .bubble > .reaction-entry .reaction-trigger { opacity: 1; pointer-events: auto; }
+.turn.bubble-selected > .bubble > .reaction-entry { top: auto; bottom: 4px; }
+.reaction-input-mouse .turn:hover:not(.bubble-selected) > .bubble > .reaction-entry .reaction-chooser,
+.turn.bubble-selected > .bubble > .reaction-entry.open .reaction-chooser { visibility: visible; }
+@media (max-width: 480px) {
+  .reaction-entry .reaction-chooser { display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, 44px); grid-template-columns: repeat(3, 44px); }
+}
 .bubblemarkers { display: flex; align-items: center; gap: 3px; margin: -5px 0 4px -6px; }
 .bmarker { position: relative; display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; padding: 0; border-radius: 14px; color: currentColor;

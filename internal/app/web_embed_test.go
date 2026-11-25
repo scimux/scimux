@@ -50,6 +50,7 @@ var productionJSModules = []string{
 	"web/js/polling.js",
 	"web/js/qr.js",
 	"web/js/qrcodegen.js",
+	"web/js/reactions.js",
 	"web/js/reference-media.js",
 	"web/js/returnto.js",
 	"web/js/search.js",

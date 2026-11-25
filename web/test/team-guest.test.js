@@ -31,6 +31,329 @@ test("guest keys identify the subscription", () => {
   assert.equal(guestKey(base), "s/o/c/g");
 });
 
+test("People comments show received reactions, with entry controls only for another author in a live writable share", () => {
+  const share = {server:"11111111111111111111111111111111", owner:"22222222222222222222222222222222", chat:"aaaaaaaaaaaaaaaa", generation:"bbbbbbbbbbbbbbbb"};
+  const key = guestKey(share), copy = "c".repeat(32);
+  const chip = [{target:7, emoji:"thumbs_up", glyph:"👍", count:1, mine:true}];
+  const other = guestMessageHTML({seq:7,anchor:0,author:"writer",mine:false,text:"hello",at:"now"}, {}, "", {}, key, "", "", undefined, copy, chip);
+  assert.match(other, /data-reaction-open/);
+  assert.match(other, /👍/);
+  const own = guestMessageHTML({seq:7,anchor:0,author:"me",mine:true,text:"hello",at:"now"}, {}, "", {}, key, "", "", undefined, copy, chip);
+  assert.doesNotMatch(own, /data-reaction-open/);
+  assert.match(own, /aria-label="👍 1, you reacted"/);
+  const readOnly = guestMessageHTML({seq:7,anchor:0,author:"writer",mine:false,text:"hello",at:"now",access:"read"}, {}, "", {}, key, "", "", undefined, copy, chip);
+  assert.doesNotMatch(readOnly, /data-reaction-open/);
+  const ended = guestMessageHTML({seq:7,anchor:0,author:"writer",mine:false,text:"hello",at:"now",state:"ended"}, {}, "", {}, key, "", "", undefined, copy, chip);
+  assert.doesNotMatch(ended, /data-reaction-open/);
+  const offline = guestMessageHTML({seq:7,anchor:0,author:"writer",mine:false,text:"hello",at:"now"}, {}, "", {}, key, "", "", undefined, copy, chip, false);
+  assert.doesNotMatch(offline, /data-reaction-open/);
+  const unshared = guestMessageHTML({seq:7,anchor:0,author:"writer",mine:false,text:"hello",at:"now"}, {});
+  assert.doesNotMatch(unshared, /data-reaction-open/);
+});
+
+test("conversation polling reads reaction-only pages and decorates the exact retained comment", async () => {
+  const view={...base,access:"write",comments_last:2,people_copy_instance:undefined};
+  const event={v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"thumbs_up",active:true,author:"bob",mine:true};
+  const reactionPaths=[];
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],0,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source comment"}],1),
+    undefined,
+    {reactionTurns:[{dataset:{cseq:"99",gkey:guestKey(view)},querySelector(){return null;}},{dataset:{cseq:"100",gkey:"old/copy"},querySelector(){return null;}}],reactionsApi:async path=>{reactionPaths.push(path);return {copy_instance:"d".repeat(32),events:[event],last:2,next:2,more:false};}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const html=f.get("msgs").innerHTML;
+  assert.match(html,/data-cseq="1"/);assert.match(html,/👍/);assert.match(html,/aria-label="👍 1, you reacted"/);
+  assert.doesNotMatch(html,/data-cseq="2"/);assert.ok(reactionPaths.some(path=>path.endsWith("/reactions?after=0")),"missing legacy copy identity starts an unfenced reaction read");
+  assert.match(html,/data-copy-instance="d{32}"/);f.feature.destroy();
+});
+
+test("a valid file-only People comment remains reaction-eligible",async()=>{
+  const copy="d".repeat(32),view={...base,access:"write",comments_last:2,people_copy_instance:copy};
+  const file={id:"0123456789abcdef",sha256:"a".repeat(64),size:1,name:"note.txt",mime:"text/plain"};
+  const event={v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"thinking",active:true,author:"bob",mine:false};
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],0,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"",attachments:[file]}],1),undefined,
+    {reactionsApi:async()=>({copy_instance:copy,events:[event],last:2,next:2,more:false})});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  assert.match(f.get("msgs").innerHTML,/data-reaction-open/);assert.match(f.get("msgs").innerHTML,/aria-label="🤔 1"/);f.feature.destroy();
+});
+
+
+test("emoji selection writes one explicit operation and only retained polling confirms it", async () => {
+  const copy="d".repeat(32),view={...base,access:"write",comments_last:1};let submitted=null,retained=false,agentPosts=0;const event={v:1,t:"reaction",seq:2,key:"r/0101010101010101",target:1,target_author:"alice",emoji:"thumbs_up",active:true,author:"bob",mine:true};
+  const f=nativeViewFixture(async(path,opts)=>{
+    if(path==="/api/team/subscriptions")return list([view],[{id:"s",delivery:"ok"}]);
+    if(opts?.method==="POST"){agentPosts++;return {seq:1};}
+    return readAnswer([],1,false,view);
+  },async path=>new URL(path,"http://scimux").searchParams.get("after")==="0"?commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1):commentsAnswer([],1),n=>new Uint8Array(n).fill(1),{
+    reactionsApi:async(path,opts)=>{
+      if(opts?.method==="POST"){submitted=JSON.parse(opts.body);return {seq:2};}
+      return {copy_instance:copy,events:retained?[event]:[],last:retained?2:1,next:retained?2:1,more:false};
+    },
+  });
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const key=guestKey(view),entry={dataset:{rkey:key,rtarget:"1",copyInstance:copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?trigger:selector===".reaction-chooser"?chooser:null};
+  const trigger={entry,setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?trigger:entry,matches:()=>false};
+  const chooser={hidden:true,getBoundingClientRect:()=>({height:90})};
+  const emoji={entry,dataset:{reactionChoice:"thumbs_up"},matches:selector=>selector==="[data-reaction-choice]",closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?emoji:entry};
+  let stopped=false;f.dispatchDocument("click",{target:trigger,preventDefault(){},stopPropagation(){stopped=true;}});
+  assert.equal(chooser.hidden,false);f.dispatchDocument("click",{target:emoji,preventDefault(){},stopPropagation(){stopped=true;}});
+  assert.equal(stopped,true);assert.deepEqual(submitted,{target:1,emoji:"thumbs_up",active:true,key:"0101010101010101"});assert.equal(agentPosts,0);
+  assert.doesNotMatch(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);
+  retained=true;f.setTime(6000);f.feature.tick();await f.feature.settled();
+  assert.match(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);assert.equal((f.get("msgs").innerHTML.match(/data-cseq="1"/g)||[]).length,1);
+  f.setTime(12000);f.feature.tick();await f.feature.settled();assert.match(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);f.feature.destroy();
+});
+
+test("uncertain reaction retry reuses its exact desired state and idempotency key",async()=>{
+  const copy="d".repeat(32),view={...base,access:"write"},posts=[];let fail=true;
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),
+    n=>new Uint8Array(n).fill(2),{reactionsApi:async(_path,opts)=>{
+      if(opts?.method==="POST"){posts.push(opts.body);if(fail)throw new Error("uncertain");return {seq:2};}
+      return {copy_instance:copy,events:[],last:1,next:1,more:false};
+    }});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const key=guestKey(view),entry={dataset:{rkey:key,rtarget:"1",copyInstance:copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?trigger:selector===".reaction-chooser"?chooser:null};
+  const trigger={setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?trigger:entry,matches:()=>false},chooser={hidden:true,getBoundingClientRect:()=>({height:80})};
+  const emoji={entry,dataset:{reactionChoice:"heart"},matches:selector=>selector==="[data-reaction-choice]",closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?emoji:entry};
+  const click=target=>f.dispatchDocument("click",{target,preventDefault(){},stopPropagation(){}});
+  click(trigger);click(emoji);await new Promise(resolve=>setImmediate(resolve));fail=false;click(trigger);click(emoji);await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(posts,[JSON.stringify({target:1,emoji:"heart",active:true,key:"0202020202020202"}),JSON.stringify({target:1,emoji:"heart",active:true,key:"0202020202020202"})]);
+  f.feature.destroy();
+});
+
+test("reaction polling confirms retained events, updates an existing trigger and retires a replaced copy",async()=>{
+  const copy="d".repeat(32),replacement="e".repeat(32),view={...base,access:"write",comments_last:1};let page=0;
+  const events=[
+    {v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"thumbs_up",active:true,author:"bob",mine:true},
+    {v:1,t:"reaction",seq:3,key:"r/0000000000000003",target:1,target_author:"alice",emoji:"thumbs_up",active:false,author:"bob",mine:true},
+  ];
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>({copy_instance:page++<2?copy:replacement,events:page===1?[events[0]]:page===2?[events[1]]:[],last:page<3?2:3,next:page<3?2:3,more:false})});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  assert.match(f.get("msgs").innerHTML,/data-copy-instance="d{32}"/);assert.match(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);
+  f.setTime(6000);f.feature.tick();await f.feature.settled();assert.doesNotMatch(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);
+  f.setTime(12000);f.feature.tick();await f.feature.settled();assert.doesNotMatch(f.get("msgs").innerHTML,/data-reaction-entry/);assert.doesNotMatch(f.get("msgs").innerHTML,/data-reaction="thumbs_up"/);
+  f.setTime(18000);f.feature.tick();await f.feature.settled();assert.equal(page,3);f.feature.destroy();
+});
+
+test("a copy replacement during paged reaction catch-up retires the old local controls",async()=>{
+  const first="d".repeat(32),replacement="e".repeat(32),view={...base,access:"write",comments_last:1};let reads=0;
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>++reads===1?{copy_instance:first,events:[],last:1,next:1,more:true}:{copy_instance:replacement,events:[],last:1,next:1,more:false}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  assert.equal(reads,2);assert.doesNotMatch(f.get("msgs").innerHTML,/data-reaction-entry/);f.feature.destroy();
+});
+
+test("reaction copy-change and not-found responses retire UI while other read errors stay readable",async()=>{
+  for(const [status,message] of [[409,'{"error":"copy_changed"}'],[404,'{"error":"not_found"}'],[500,'{"error":"busy"}'],[502,'offline']]){
+    let reactionReads=0;const view={...base,access:"write",comments_last:1},f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+      async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+      {reactionsApi:async(path)=>{if(path.includes("after=")){reactionReads++;throw Object.assign(new Error(message),{status});}return {seq:3};}});
+    f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+    if(status===500||status===502)assert.equal(f.get("guestnote").textContent,"That did not work. It will be tried again.");
+    else {assert.doesNotMatch(f.get("msgs").innerHTML,/data-reaction-entry/);f.setTime(30000);f.feature.tick();await f.feature.settled();assert.equal(reactionReads,1,"retired reaction copies are not read again");}
+    f.feature.destroy();
+  }
+});
+
+test("relay going offline removes reaction entry controls but keeps received chips readable",async()=>{
+  const copy="d".repeat(32),view={...base,access:"write",comments_last:1};let delivery="ok",reads=0;
+  const event={v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"thumbs_up",active:true,author:"bob",mine:false};
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>{reads++;return {copy_instance:copy,events:[event],last:2,next:2,more:false};}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  assert.match(f.get("msgs").innerHTML,/data-reaction-open/);assert.match(f.get("msgs").innerHTML,/aria-label="👍 1"/);
+  delivery="offline";f.setTime(30000);f.feature.tick();await f.feature.settled();
+  assert.equal(reads,2);assert.doesNotMatch(f.get("msgs").innerHTML,/data-reaction-open/);assert.match(f.get("msgs").innerHTML,/aria-label="👍 1"/);f.feature.destroy();
+});
+
+test("reaction snapshot copy mismatch retires controls and permission loss removes entry but retains chips",async()=>{
+  const stale="f".repeat(32),copy="d".repeat(32),view={...base,access:"write",comments_last:1,people_copy_instance:stale};let calls=0,loseAccess=false;
+  const event={v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"heart",active:true,author:"bob",mine:false};
+  let unrelatedRemovals=0;const unrelatedChips={innerHTML:"kept reaction"};
+  const unrelatedTurn={dataset:{gkey:"another/copy"},querySelector:selector=>selector==="[data-reaction-chips]"?unrelatedChips:selector==="[data-reaction-entry]"?{remove(){unrelatedRemovals++;}}:null};
+  const mismatch=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionTurns:[unrelatedTurn],reactionsApi:async()=>({copy_instance:copy,events:[],last:1,next:1,more:false})});
+  mismatch.feature.tick();await mismatch.feature.settled();mismatch.open();await mismatch.feature.settled();
+  assert.doesNotMatch(mismatch.get("msgs").innerHTML,/data-reaction-entry/);assert.equal(unrelatedChips.innerHTML,"kept reaction");assert.equal(unrelatedRemovals,0);mismatch.feature.destroy();
+
+  const changed={...base,access:"write",comments_last:1,people_copy_instance:copy};
+  const permission=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([changed],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,{...changed,access:loseAccess?"read":"write"}),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>({copy_instance:copy,events:calls++?[event]:[],last:2,next:calls?2:1,more:false})});
+  permission.feature.tick();await permission.feature.settled();permission.open();await permission.feature.settled();
+  assert.match(permission.get("msgs").innerHTML,/data-reaction-open/);loseAccess=true;permission.setTime(6000);permission.feature.tick();await permission.feature.settled();
+  assert.doesNotMatch(permission.get("msgs").innerHTML,/data-reaction-open/);assert.match(permission.get("msgs").innerHTML,/aria-label="❤️ 1"/);permission.feature.destroy();
+});
+
+test("reaction pages stop on stale and invalid snapshots and respect the page cap",async()=>{
+  const view={...base,access:"write",comments_last:1};
+  const stale=deferred();let started;const requested=new Promise(resolve=>started=resolve);
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>{started();return stale.promise;}});
+  f.feature.tick();await f.feature.settled();f.open();await requested;f.navigate();stale.resolve({copy_instance:"d".repeat(32),events:[],last:1,next:1,more:false});await f.feature.settled();
+  assert.doesNotMatch(f.get("msgs").innerHTML,/data-reaction-open/);f.feature.destroy();
+
+  let invalidCalls=0;const invalid=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>{invalidCalls++;return {copy_instance:"invalid",events:[],last:1,next:1,more:false};}});
+  invalid.feature.tick();await invalid.feature.settled();invalid.open();await invalid.feature.settled();
+  assert.equal(invalidCalls,1);assert.doesNotMatch(invalid.get("msgs").innerHTML,/data-reaction-open/);invalid.feature.destroy();
+
+  let emptyCalls=0;const emptyIdentity=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>{emptyCalls++;return {copy_instance:"",events:[],last:1,next:1,more:false};}});
+  emptyIdentity.feature.tick();await emptyIdentity.feature.settled();emptyIdentity.open();await emptyIdentity.feature.settled();
+  assert.equal(emptyCalls,1);assert.doesNotMatch(emptyIdentity.get("msgs").innerHTML,/data-reaction-open/);emptyIdentity.feature.destroy();
+
+  let pages=0;const bounded=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async path=>{pages++;const after=Number(new URL(path,"http://scimux").searchParams.get("after"));return {copy_instance:"d".repeat(32),events:[],last:80,next:after+1,more:true};}});
+  bounded.feature.tick();await bounded.feature.settled();bounded.open();await bounded.feature.settled();assert.equal(pages,40);bounded.feature.destroy();
+
+  let stalled=0;const noProgress=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),undefined,
+    {reactionsApi:async()=>{stalled++;return {copy_instance:"d".repeat(32),events:[],last:5,next:0,more:true};}});
+  noProgress.feature.tick();await noProgress.feature.settled();noProgress.open();await noProgress.feature.settled();assert.equal(stalled,1);noProgress.feature.destroy();
+});
+
+test("late reaction write is fenced and copy-change acknowledgement retires its chooser",async()=>{
+  const copy="d".repeat(32),view={...base,access:"write"};let post,resolvePost,startPost;const postStarted=new Promise(resolve=>startPost=resolve);
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),n=>new Uint8Array(n).fill(3),
+    {reactionsApi:async(_path,opts)=>{if(opts?.method==="POST"){post=JSON.parse(opts.body);startPost();return new Promise(resolve=>resolvePost=resolve);}return {copy_instance:copy,events:[],last:1,next:1,more:false};}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+  const key=guestKey(view),entry={dataset:{rkey:key,rtarget:"1",copyInstance:copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?trigger:selector===".reaction-chooser"?chooser:null};
+  const trigger={setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?trigger:entry,matches:()=>false},chooser={hidden:true,getBoundingClientRect:()=>({height:80})};
+  const emoji={entry,dataset:{reactionChoice:"heart"},matches:selector=>selector==="[data-reaction-choice]",closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?emoji:entry};
+  f.dispatchDocument("click",{target:trigger,preventDefault(){},stopPropagation(){}});f.dispatchDocument("click",{target:emoji,preventDefault(){},stopPropagation(){}});await postStarted;
+  f.navigate();resolvePost({seq:2});await f.feature.settled();assert.equal(post.active,true);f.feature.destroy();
+
+  const calls=[];const staleWrite=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),n=>new Uint8Array(n).fill(4),
+    {reactionsApi:async(_path,opts)=>{if(opts?.method==="POST"){calls.push(JSON.parse(opts.body));throw Object.assign(new Error('{"error":"copy_changed"}'),{status:409});}return {copy_instance:copy,events:[],last:1,next:1,more:false};}});
+  staleWrite.feature.tick();await staleWrite.feature.settled();staleWrite.open();await staleWrite.feature.settled();
+  const e={dataset:{rkey:key,rtarget:"1",copyInstance:copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?t:selector===".reaction-chooser"?c:null};
+  const t={setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?t:e,matches:()=>false},c={hidden:true,getBoundingClientRect:()=>({height:80})};
+  const choice={entry:e,dataset:{reactionChoice:"heart"},matches:selector=>selector==="[data-reaction-choice]",closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?choice:e};
+  staleWrite.dispatchDocument("click",{target:t,preventDefault(){},stopPropagation(){}});staleWrite.dispatchDocument("click",{target:choice,preventDefault(){},stopPropagation(){}});await staleWrite.feature.settled();
+  assert.equal(calls.length,1);assert.equal(staleWrite.get("msgs").innerHTML.includes("data-reaction-entry"),false);staleWrite.feature.destroy();
+});
+
+test("stale reaction write and read errors cannot close a newly opened chooser",async()=>{
+  const copy="d".repeat(32),view={...base,access:"write",comments_last:1};
+  const comments=async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1);
+  const parts=(key)=>{const chooser={hidden:true,getBoundingClientRect:()=>({height:80})};const entry={dataset:{rkey:key,rtarget:"1",copyInstance:copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?trigger:selector===".reaction-chooser"?chooser:null};const trigger={setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?trigger:entry,matches:()=>false};return {entry,trigger,chooser};};
+  const click=(f,target)=>f.dispatchDocument("click",{target,preventDefault(){},stopPropagation(){}});
+
+  let rejectPost,postStarted=false;
+  const write=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),comments,undefined,
+    {reactionsApi:async(_path,opts)=>opts?.method==="POST"?new Promise((_resolve,reject)=>{rejectPost=reject;postStarted=true;}):{copy_instance:copy,events:[],last:1,next:1,more:false}});
+  write.feature.tick();await write.feature.settled();write.open();await write.feature.settled();
+  const key=guestKey(view),old=parts(key),oldChoice={dataset:{reactionChoice:"heart"},matches:()=>true,closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?oldChoice:old.entry};
+  click(write,old.trigger);click(write,oldChoice);await Promise.resolve();assert.equal(postStarted,true,"reaction choice starts the held POST");
+  write.navigate();write.open();await write.feature.settled();
+  const reopened=parts(key);click(write,reopened.trigger);assert.equal(reopened.chooser.hidden,false);
+  rejectPost(Object.assign(new Error('{"error":"copy_changed"}'),{status:409}));await new Promise(resolve=>setImmediate(resolve));await write.feature.settled();
+  const writeChooserStayedOpen=!reopened.chooser.hidden;write.feature.destroy();
+
+  let rejectRead,readStarted=false,firstRead=true;
+  const read=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),comments,undefined,
+    {reactionsApi:async()=>{if(firstRead){firstRead=false;return new Promise((_resolve,reject)=>{rejectRead=reject;readStarted=true;});}return {copy_instance:copy,events:[],last:1,next:1,more:false};}});
+  read.feature.tick();await read.feature.settled();read.open();await new Promise(resolve=>setImmediate(resolve));assert.equal(readStarted,true,"first reaction read is held");
+  read.navigate();read.open();await new Promise(resolve=>setImmediate(resolve));
+  const latest=parts(key);click(read,latest.trigger);assert.equal(latest.chooser.hidden,false);
+  rejectRead(Object.assign(new Error('{"error":"copy_changed"}'),{status:409}));await read.feature.settled();
+  const readChooserStayedOpen=!latest.chooser.hidden;read.feature.destroy();
+  assert.equal(writeChooserStayedOpen,true,"old write failure leaves the reopened chooser open");
+  assert.equal(readChooserStayedOpen,true,"old read failure leaves the reopened chooser open");
+});
+
+test("invalid, self, read-only and ended reaction destinations never write",async()=>{
+  const copy="d".repeat(32);
+  for(const scenario of ["wrong-key","wrong-copy","missing-comment","own-comment","read-only","ended","no-selection"]){
+    const view={...base,access:scenario==="read-only"?"read":"write",state:scenario==="ended"?"ended":"live",people_copy_instance:copy};let posts=0;
+    const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+      async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:scenario==="own-comment",text:"source"}],1),undefined,
+      {reactionsApi:async(_path,opts)=>opts?.method==="POST"?(posts++,{seq:2}):{copy_instance:copy,events:[],last:1,next:1,more:false}});
+    f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();
+    const key=guestKey(view),entry={dataset:{rkey:scenario==="wrong-key"?"other/key":key,rtarget:scenario==="missing-comment"?"2":"1",copyInstance:scenario==="wrong-copy"?"e".repeat(32):copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?trigger:selector===".reaction-chooser"?chooser:null};
+    const trigger={setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?trigger:entry,matches:()=>false},chooser={hidden:true,getBoundingClientRect:()=>({height:80})};
+    const emoji={entry,dataset:{reactionChoice:"heart"},matches:selector=>selector==="[data-reaction-choice]",closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?emoji:entry};
+    if(scenario==="no-selection")f.navigate();
+    f.dispatchDocument("click",{target:trigger,preventDefault(){},stopPropagation(){}});f.dispatchDocument("click",{target:emoji,preventDefault(){},stopPropagation(){}});
+    assert.equal(posts,0,scenario);f.feature.destroy();
+  }
+});
+
+test("a reaction destination whose captured bubble visit is stale never posts",async()=>{
+  const copy="d".repeat(32),view={...base,access:"write"};let posts=0,keys=0;
+  const bubbleController=createBubbleActionController();
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"source"}],1),n=>{keys++;return new Uint8Array(n).fill(5);},
+    {bubbleController,reactionsApi:async(_path,opts)=>{if(opts?.method==="POST")posts++;return {copy_instance:copy,events:[],last:1,next:1,more:false};}});
+  f.feature.tick();await f.feature.settled();f.open();await f.feature.settled();bubbleController.isCurrentVisit=()=>false;
+  const key=guestKey(view),entry={dataset:{rkey:key,rtarget:"1",copyInstance:copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?trigger:selector===".reaction-chooser"?chooser:null};
+  const trigger={setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?trigger:entry,matches:()=>false},chooser={hidden:true,getBoundingClientRect:()=>({height:80})};
+  const choice={entry,dataset:{reactionChoice:"heart"},matches:selector=>selector==="[data-reaction-choice]",closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?choice:entry};
+  f.dispatchDocument("click",{target:trigger,preventDefault(){},stopPropagation(){}});f.dispatchDocument("click",{target:choice,preventDefault(){},stopPropagation(){}});await f.feature.settled();
+  assert.equal(keys,1,"stale visit was fenced after creating its stable retry identity");assert.equal(posts,0);f.feature.destroy();
+});
+
+test("pointer input follows mouse and touch and teardown removes its state",async()=>{
+  const classes=new Set(),root={classList:{toggle(name,on){if(on)classes.add(name);else classes.delete(name);},remove(name){classes.delete(name);}}};
+  const f=nativeViewFixture(async()=>list());f.doc.documentElement=root;f.feature.bind();
+  const move=f.get("msgs").listeners.get("pointermove"),down=f.get("msgs").listeners.get("pointerdown");
+  move({pointerType:"mouse"});assert.ok(classes.has("reaction-input-mouse"));down({pointerType:"touch"});assert.ok(!classes.has("reaction-input-mouse"));move({});
+  f.feature.destroy();assert.ok(!classes.has("reaction-input-mouse"));
+});
+
+test("owner timeline reads reactions and adds a reaction without an open shared view",async()=>{
+  const copy="d".repeat(32),view={...base,access:"owner",state:"live",people_copy_instance:copy,local_order:0};let posted=null,ownerChanges=0,replaceCopy=false;
+  const retained={v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"laughing",active:true,author:"bob",mine:true};
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"owner source"}],1),n=>new Uint8Array(n),
+    {selectedNode:()=>"n1",selectedUID:()=>"c",panel:{ownerChanged(){ownerChanges++;}},reactionsApi:async(_path,opts)=>{
+      if(opts?.method==="POST"){posted=JSON.parse(opts.body);return {seq:3};}
+      return {copy_instance:replaceCopy?"e".repeat(32):copy,events:[retained],last:2,next:2,more:false};
+    }});
+  f.feature.tick();await f.feature.settled();f.feature.setOwnerShare("n1",{node:"n1",uid:"c",server:"s",generation:"g",state:"active"});await f.feature.settled();
+  const snapshot=f.feature.ownerSnapshots()[0];assert.deepEqual(snapshot.reactionState,[{target:1,emoji:"laughing",glyph:"😂",count:1,mine:true}]);assert.ok(ownerChanges>0);
+  const key=guestKey(view),entry={dataset:{rkey:key,rtarget:"1",copyInstance:copy},classList:{add(){},remove(){}},contains:()=>true,querySelector:selector=>selector==="[data-reaction-open]"?trigger:selector===".reaction-chooser"?chooser:null};
+  const trigger={setAttribute(){},getBoundingClientRect:()=>({top:100,bottom:144}),closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?trigger:entry,matches:()=>false};
+  const chooser={hidden:true,getBoundingClientRect:()=>({height:80})},emoji={entry,dataset:{reactionChoice:"laughing"},matches:selector=>selector==="[data-reaction-choice]",closest:selector=>selector==="[data-reaction-open], [data-reaction-choice]"?emoji:entry};
+  const click=target=>f.dispatchDocument("click",{target,preventDefault(){},stopPropagation(){}});click(trigger);click(emoji);
+  assert.deepEqual(posted,{target:1,emoji:"laughing",active:false,key:"0000000000000000"});
+  const before=ownerChanges;replaceCopy=true;f.setTime(6000);f.feature.tick();await f.feature.settled();assert.ok(ownerChanges>before);assert.deepEqual(f.feature.ownerSnapshots()[0].reactionEvents,[]);f.feature.destroy();
+});
+
+test("a held owner reaction read cannot update a newly selected chat",async()=>{
+  const copy="d".repeat(32),view={...base,access:"owner",state:"live",people_copy_instance:copy,local_order:0};
+  let selected="n1",selectedChat="c",ownerChanges=0,reactionReadStarted;
+  const pending=deferred(),started=new Promise(resolve=>reactionReadStarted=resolve);
+  const f=nativeViewFixture(async path=>path==="/api/team/subscriptions"?list([view],[{id:"s",delivery:"ok"}]):readAnswer([],1,false,view),
+    async()=>commentsAnswer([{seq:1,anchor:0,author:"alice",mine:false,text:"owner source"}],1),n=>new Uint8Array(n),
+    {selectedNode:()=>selected,selectedUID:()=>selectedChat,panel:{ownerChanged(){ownerChanges++;}},reactionsApi:async(_path,opts)=>{
+      reactionReadStarted();
+      return pending.promise;
+    }});
+  f.feature.tick();
+  await started;
+  const before=ownerChanges;
+  selected="n2";selectedChat="another";
+  pending.resolve({copy_instance:copy,events:[{v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"thumbs_up",active:true,author:"bob",mine:false}],last:2,next:2,more:false});
+  await f.feature.settled();
+  assert.equal(ownerChanges,before,"response for the previously selected chat caused no owner refresh");
+  assert.equal(f.feature.ownerSnapshots().length,0,"the old owner copy is not projected into the newly selected chat");
+  f.feature.destroy();
+});
+
 test("gate off is retried on a bounded cadence and hides the tab", async () => {
   let calls = 0;
   const f = nativeViewFixture(async () => { calls++; throw Object.assign(new Error("not found"), { status: 404 }); });
@@ -98,7 +421,9 @@ test("items sort live first, then case-insensitive title and first seen", () => 
 function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names: {}, next: 0, more: false }), randomBytes = n => new Uint8Array(n), extra = {}) {
   let time = 0, invalidations = 0, selected = "";
   const elements = new Map();
-  const doc = { activeElement: null, querySelector: selector => elements.get(selector) || null };
+  const docListeners = new Map();
+  const doc = { activeElement: null, querySelector: selector => elements.get(selector) || null,
+    addEventListener(type,listener) { docListeners.set(type,listener); }, removeEventListener(type) { docListeners.delete(type); } };
   const ids = ["cardlist", "cardtabs", "chattitle", "chatmission", "gueststate", "msgs", "guestmore", "guestnote", "guestremove"];
   if (!extra.omitChatHead) ids.push("chathead");
   for (const id of ids) {
@@ -149,6 +474,16 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
     };
   }
   const body = elements.get("#msgs");
+  doc.querySelectorAll = selector => {
+    if (selector !== "#msgs [data-cseq]" && selector !== "#msgs [data-gkey]") return [];
+    const html=body.innerHTML||"", matches=[...html.matchAll(/<span class="reaction-chips" data-reaction-chips>([\s\S]*?)<\/span>/g)];
+    return matches.map(match=>{
+      const start=html.lastIndexOf('<div class="turn',match.index),head=html.slice(start,match.index),cseq=head.match(/data-cseq="(\d+)"/)?.[1],gkey=head.match(/data-gkey="([^"]+)"/)?.[1];
+      const chips={get innerHTML(){return match[1];},set innerHTML(value){body.innerHTML=body.innerHTML.replace(match[0],'<span class="reaction-chips" data-reaction-chips>'+value+'</span>');}};
+      const turn={dataset:{cseq,gkey},querySelector:sel=>sel==="[data-reaction-chips]"?chips:sel==="[data-reaction-entry]"?(body.innerHTML.includes('data-reaction-entry')?{dataset:{},remove(){body.innerHTML=body.innerHTML.replace(/<span class="reaction-entry"[\s\S]*?<\/span><\/span>/,"");}}:null):sel===".bubble"?{insertAdjacentHTML(_where,value){body.innerHTML+=value;}}:null,remove(){body.innerHTML=body.innerHTML.replace(head+match[0],"");}};
+      return turn;
+    }).filter(turn=>selector==="#msgs [data-cseq]"?turn.dataset.cseq!==undefined:turn.dataset.gkey!==undefined).concat(extra.reactionTurns||[]);
+  };
   Object.defineProperty(body, "firstElementChild", { get() {
     const html = this.innerHTML || "";
     if (!html) return null;
@@ -181,7 +516,14 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
         insertAdjacentHTML(_where, html) { pieces.splice(index, 0, html); body.innerHTML = pieces.join(""); } };
     });
   } });
-  const routed = (path, opts) => path.includes("/comments?") && opts?.method !== "POST" ? commentsApi(path, opts) : api(path, opts);
+  const routed = (path, opts) => {
+    if (path.includes("/reactions?")) {
+      if (extra.reactionsApi) return extra.reactionsApi(path, opts);
+      const copyInstance = new URL(path, "http://scimux").searchParams.get("copy_instance") || "d".repeat(32);
+      return Promise.resolve({copy_instance:copyInstance,events:[],last:0,next:0,more:false});
+    }
+    return path.includes("/comments?") && opts?.method !== "POST" ? commentsApi(path, opts) : api(path, opts);
+  };
   let feature;
   const callbacks = extra.panel || {};
   const panel = { bubbleActions:bubbleActionsHTML, promptIcon:"", preparePrompt() {}, ...callbacks,
@@ -192,6 +534,7 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
   const get = id => elements.get("#" + id);
   feature.bind();
   return { feature, doc, get, actionRoot: "msgs", setTime: n => { time = n; }, invalidations: () => invalidations, selected: () => selected,
+    dispatchDocument(type,event) { docListeners.get(type)?.(event); },
     open(id = "team/" + guestKey(base)) { feature.tab.open(id); },
     navigate(id = "local") { selected = id; feature.selectActivity(id); },
     click(id, target = get(id)) { get(id).listeners.get("click")({ target }); } };
@@ -214,7 +557,7 @@ test("native reader teardown drops pending data and removes native listeners", a
   const held = deferred();
   const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : held.promise);
   f.feature.tick(); await f.feature.settled(); f.open();
-  assert.equal(f.get("msgs").listeners.size, 2);
+  assert.deepEqual([...f.get("msgs").listeners.keys()].sort(), ["click", "keydown", "pointerdown", "pointermove"]);
   assert.equal(f.get("guestmore").listeners.size, 1);
   assert.equal(f.get("guestremove").listeners.size, 1);
   f.feature.destroy();
@@ -953,7 +1296,10 @@ test("capturable shared bubbles are keyboard reachable", () => {
 });
 
 function sharedActionBubble(seq) {
-  const turn = { dataset: { seq: String(seq) }, nextElementSibling: null };
+  const selected = new Set();
+  const turn = { dataset: { seq: String(seq) }, nextElementSibling: null, classList: {
+    add(value) { selected.add(value); }, remove(value) { selected.delete(value); }, contains(value) { return selected.has(value); },
+  } };
   const bubble = { closest(sel) {
     if (sel === ".bubble") return bubble;
     if (sel === "[data-seq], [data-cseq]") return turn;
@@ -1429,7 +1775,10 @@ test("native shared header and group retain the owner's identity", async () => {
 });
 
 function sharedRenameBubble(seq, fixture) {
-  const turn = { dataset: { seq: String(seq) }, nextElementSibling: null };
+  const selected = new Set();
+  const turn = { dataset: { seq: String(seq) }, nextElementSibling: null, classList: {
+    add(value) { selected.add(value); }, remove(value) { selected.delete(value); }, contains(value) { return selected.has(value); },
+  } };
   const bubble = { closest(sel) { if (sel === ".bubble") return bubble; if (sel === "[data-seq], [data-cseq]" || (sel === "[data-cseq]" && turn.dataset.cseq !== undefined)) return turn; return null; } };
   turn.insertAdjacentHTML = (_where, html) => {
     let inner = html, field = null;
@@ -1715,6 +2064,30 @@ test('comment classification detects incoming across pages and never marks them 
   f.feature.destroy();
 });
 
+test("validated reaction records are neutral for unread and never hide an earlier incoming comment", async () => {
+  const reaction = {v:1,t:"reaction",seq:2,key:"r/0000000000000002",target:1,target_author:"alice",emoji:"thumbs_up",active:true,author:"bob",mine:false};
+  const unreadView={...base,access:"owner",local_node:"local",unread:true,comments_last:2,seen_comments:0};
+  const writes=[];
+  const incoming=nativeViewFixture(async (path,opts)=>{if(path==="/api/team/subscriptions")return list([unreadView]);if(opts?.method)writes.push(opts.method);return readAnswer();},async()=>({...commentsAnswer([{seq:1,mine:false,text:"incoming"}],2),reactions:[reaction]}));
+  incoming.feature.tick();await incoming.feature.settled();
+  assert.equal(incoming.feature.tab.ownerUnread("local"),true);
+  assert.deepEqual(writes,[]);incoming.feature.destroy();
+
+  const reactionOnlyView={...unreadView,seen_comments:1,comments_last:2};
+  const neutral=nativeViewFixture(async (path,opts)=>{if(path==="/api/team/subscriptions")return list([reactionOnlyView]);if(opts?.method)writes.push(opts.method);return readAnswer();},async()=>({...commentsAnswer([],2),reactions:[{...reaction,seq:2,target:1}]}));
+  neutral.feature.tick();await neutral.feature.settled();
+  assert.equal(neutral.feature.tab.ownerUnreadStatus("local"),"read");
+  assert.deepEqual(writes,[]);neutral.feature.destroy();
+
+  const invalidOnlyView={...unreadView,seen_comments:1,comments_last:3};
+  const invalidOnly=nativeViewFixture(async (path,opts)=>{if(path==="/api/team/subscriptions")return list([invalidOnlyView]);if(opts?.method)writes.push(opts.method);return readAnswer();},async()=>({...commentsAnswer([],3),reactions:[
+    {...reaction,seq:2,author:"alice"},
+    {...reaction,seq:3,key:"r/0000000000000003",mine:undefined},
+  ]}));
+  invalidOnly.feature.tick();await invalidOnly.feature.settled();
+  assert.equal(invalidOnly.feature.tab.ownerUnreadStatus("local"),"unknown");assert.deepEqual(writes,[]);invalidOnly.feature.destroy();
+});
+
 test('a gap in projected comments is unknown and a later proved incoming record still counts', async () => {
   const view={...base,access:'owner',local_node:'local',unread:true,comments_last:3,seen_comments:0};
   let incoming=false;
@@ -1912,7 +2285,7 @@ test("owner comment bubble keeps author identity in the normal-panel Send-to act
   const panel={ids:{},loaded(){},select(){},removed(){},changed(){},ownerChanged(){}};
   const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([view]):readAnswer([{t:'assistant',seq:1,local_segment:0,local_record:4,text:'answer'}],1,false,view),async()=>({entries:[{seq:1,anchor:1,text:'reply',author:'p',at:'T'}],names:{p:'Person'},next:1,more:false}),undefined,{panel,selectedNode:()=>"n1",openSendTo: opts=>sends.push(opts)});
   f.feature.tick(); await f.feature.settled(); f.feature.setOwnerShare('n1',{node:'n1',uid:'c',server:'s',generation:'g',state:'active'}); await f.feature.settled();
-  const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null};
+  const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,classList:{add(){},remove(){}}};
   const bubble={closest:selector=>selector==='.bubble'?bubble:(selector==='[data-seq], [data-cseq]' || selector==='[data-cseq]')?turn:null};
   turn.insertAdjacentHTML=()=>{turn.nextElementSibling={remove(){}}};
   f.click('msgs',bubble);
@@ -2222,7 +2595,7 @@ test('owner comment prompt action prepares attributed source and recipient forge
  const comments=async()=>({entries:[{seq:1,anchor:0,text:'reply',author:'p',prov:true}],names:{p:'Alex'},next:1,more:false});
  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([owner]):readAnswer([],0,false,owner),comments,undefined,{panel,selectedNode:()=>"n1"});
  f.feature.tick(); await f.feature.settled();
- const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,insertAdjacentHTML(_where,html){this.rowHTML=html; this.nextElementSibling={remove(){}}}};
+ const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,classList:{add(){},remove(){}},insertAdjacentHTML(_where,html){this.rowHTML=html; this.nextElementSibling={remove(){}}}};
  const bubble={closest:s=>s==='.bubble'?bubble:(s==='[data-cseq]'||s==='[data-seq], [data-cseq]')?turn:null};
  f.click('msgs',bubble); assert.match(turn.rowHTML,/data-gact="prompt"/);
  const action={dataset:{gact:'prompt'},closest:s=>s==='[data-gact]'?action:null}; f.click('msgs',action);
@@ -2234,7 +2607,7 @@ test('owner comment prompt action prepares attributed source and recipient forge
  f.feature.destroy();
  const g=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([base]):readAnswer([],0),comments,undefined,{panel});
  g.feature.tick(); await g.feature.settled(); g.feature.selectActivity('team/s/o/c/g'); await g.feature.settled();
- const gt={dataset:{cseq:'1'},nextElementSibling:null,insertAdjacentHTML(_where,html){this.rowHTML=html;this.nextElementSibling={remove(){}}}};
+ const gt={dataset:{cseq:'1'},nextElementSibling:null,classList:{add(){},remove(){}},insertAdjacentHTML(_where,html){this.rowHTML=html;this.nextElementSibling={remove(){}}}};
  const gb={closest:s=>s==='.bubble'?gb:s==='[data-seq], [data-cseq]'?gt:null};
  g.click('msgs',gb); assert.doesNotMatch(gt.rowHTML,/data-gact="prompt"/); g.click('msgs',action); assert.equal(prepared.length,1); g.feature.destroy();
 });
@@ -2245,7 +2618,7 @@ test('preparing an owner-authored People message retains its own authorship', as
  const comments=async()=>({entries:[{seq:1,anchor:0,text:'my own note',author:'self',mine:true,prov:true}],names:{self:'Owner'},next:1,more:false});
  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([owner]):readAnswer([],0,false,owner),comments,undefined,{panel,selectedNode:()=>'n1'});
  f.feature.tick();await f.feature.settled();
- const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,insertAdjacentHTML(){this.nextElementSibling={remove(){}}}};
+ const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,classList:{add(){},remove(){}},insertAdjacentHTML(){this.nextElementSibling={remove(){}}}};
  const bubble={closest:s=>s==='.bubble'?bubble:(s==='[data-cseq]'||s==='[data-seq], [data-cseq]')?turn:null};f.click('msgs',bubble);
  const action={dataset:{gact:'prompt'},closest:s=>s==='[data-gact]'?action:null};f.click('msgs',action);
  assert.equal(prepared[0][0].role,'user');assert.equal(prepared[0][0].who,undefined);assert.equal(prepared[0][0].prov,true);f.feature.destroy();
@@ -2257,7 +2630,7 @@ test('owner marker and unavailable action adapters cannot activate another actio
  const comments=async()=>({entries:[{seq:1,anchor:0,text:'reply',author:'p'}],names:{p:'Alex'},next:1,more:false});
  const f=nativeViewFixture(async path=>path==='/api/team/subscriptions'?list([owner]):readAnswer([],0,false,owner),comments,undefined,{panel,selectedNode:()=>'n1'});
  f.feature.tick();await f.feature.settled();
- const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,insertAdjacentHTML(){this.nextElementSibling={remove(){}}}};
+ const turn={dataset:{cseq:'1',gkey:'s/o/c/g'},nextElementSibling:null,classList:{add(){},remove(){}},insertAdjacentHTML(){this.nextElementSibling={remove(){}}}};
  const bubble={closest:s=>s==='.bubble'?bubble:(s==='[data-cseq]'||s==='[data-seq], [data-cseq]')?turn:null};f.click('msgs',bubble);
  const marker={closest:s=>s==='[data-bmarker]'?marker:null};f.click('msgs',marker);
  for(const name of ['fork','prompt']) {const action={dataset:{gact:name},closest:s=>s==='[data-gact]'?action:null};assert.doesNotThrow(()=>f.click('msgs',action));}

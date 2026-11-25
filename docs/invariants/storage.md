@@ -76,6 +76,24 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   independently of hidden browser controls; retries, reconnects and tool
   auto-approval never authorize forwarding. Preserve original authorship
   and applicable AI provenance when the owner forwards text.
+- **People reactions are append-only, derived decorations.** The unchanged
+  relay authenticates the author and stores/forwards the opaque versioned
+  application record `{v:1,t:"reaction",target,emoji,active}` in its existing
+  comments log. scimux derives the participant only from the authenticated
+  envelope, validates the earlier target against a retained valid People
+  comment, and rejects self-reactions. Replaying retained events in log order
+  uses the latest valid event for each target, participant and fixed emoji.
+  Remove appends an explicit inactive record; it never rewrites history.
+  Reactions render beneath the exact source comment and remain separate from
+  ordinary `comments.entries`, authored text, bookmarks and prompt forwarding.
+  They are polled and paged with existing orchestration; no push channel or
+  independent timer is introduced. A response acknowledgment is not evidence
+  of state: only a matching validated retained event confirms the desired
+  state. Uncertain writes retain their exact body and idempotency key for an
+  explicit retry and are never replayed after reload. Reaction-only records
+  are neutral for upgraded unread classification, without advancing `/seen`;
+  unexplained gaps remain unknown. Retained reactions stay readable offline
+  and after share retirement.
 - **Use as prompt retains its source.** In the unified shared-chat UI, the
   owner-only action marks its source bubble using the existing bookmark
   marker placement and visual style, with a distinct prompt icon and

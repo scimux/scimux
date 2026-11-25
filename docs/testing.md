@@ -434,6 +434,20 @@ To exercise the held-multipart forwarder's cleanup paths, run the selected
 fail; the signal run reports interruption. Check the resulting manifest and
 owned process and socket cleanup. Leave this probe unset for the default run.
 
+People reactions use the unchanged relay comments envelope. Unit tests cover
+fixed event identifiers, validation/replay and local API fences; browser unit
+tests cover controls, event propagation, and retained polling integration.
+For this feature, run the real-browser acceptance through the same
+`web/test/team-e2e.cjs` ownership, private-relay, and cleanup harness described
+above, against a separately built relay binary. Capture browser screenshots
+and assertion manifests under the configured evidence parent. Chromium device
+emulation verifies touch-oriented behavior; it does not establish Safari or
+physical iPad behavior. Go coverage reports statements. The standard Go
+profile has no branch counters, so report that as the measurement fallback,
+and exercise both outcomes of new decisions in tests wherever feasible. Keep
+raw profiles and source snapshots together under task-specific `/tmp` evidence
+paths; do not compare coverage from profiles whose source hashes differ.
+
 The mapping identifies exercised behavior, not every combination of transport,
 error and lifecycle state. Tests never substitute callback invocation for a
 browser interaction. Structured refusal reports its actual error and does not
