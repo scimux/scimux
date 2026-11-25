@@ -59,7 +59,7 @@ export function reactionControlHTML({target = 0, key = "", copyInstance = ""} = 
   const copy = /^[0-9a-f]{32}$/.test(copyInstance) ? copyInstance : "";
   const safeKey = /^[0-9a-f]{32}\/[0-9a-f]{32}\/[0-9a-f]{16}\/[0-9a-f]{16}$/.test(key) ? key : "";
   const safeTarget = Number.isSafeInteger(target) && target > 0 ? target : 0;
-  return `<span class="reaction-entry" data-reaction-entry data-rkey="${safeKey}" data-rtarget="${safeTarget}" data-copy-instance="${copy}"><span class="reaction-divider" aria-hidden="true">│</span><button type="button" class="reaction-trigger" data-reaction-open aria-label="React with emoji." title="React with emoji" aria-expanded="false">${faceSmile}</button><span class="reaction-chooser" role="group" aria-label="Choose a reaction" hidden>${choices}</span></span>`;
+  return `<span class="reaction-entry" data-reaction-entry data-rkey="${safeKey}" data-rtarget="${safeTarget}" data-copy-instance="${copy}"><button type="button" class="reaction-trigger" data-reaction-open aria-label="React with emoji." title="React with emoji" aria-expanded="false">${faceSmile}</button><span class="reaction-chooser" role="group" aria-label="Choose a reaction" hidden>${choices}</span></span>`;
 }
 
 export function createReactionInteraction({doc, onChoose}) {

@@ -631,6 +631,13 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerS
   await open(owner,ownerSeat.node.id);const source=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] .bubble');await source.waitFor({timeout:40000});
   const shortMessage=owner.locator('#msgs .gmsg[data-cseq="'+shortComment.seq+'"]'),shortBubble=shortMessage.locator('.bubble');await shortBubble.waitFor({timeout:40000});
   const shortTrigger=shortMessage.locator('[data-reaction-open]');await shortTrigger.waitFor({timeout:30000});
+  const compactBubble=await shortBubble.evaluate(bubble=>{
+    const turn=bubble.parentElement,entry=bubble.querySelector('[data-reaction-entry]'),chips=bubble.querySelector('[data-reaction-chips]');
+    const before=bubble.getBoundingClientRect();entry.remove();if(chips&&!chips.childElementCount)chips.remove();
+    const plain=bubble.getBoundingClientRect();if(chips)bubble.append(chips);bubble.append(entry);
+    return {sameHeight:Math.abs(before.height-plain.height)<1,sameWidth:Math.abs(before.width-plain.width)<1,separator:!!turn.querySelector('.reaction-divider')};
+  });
+  assertID('stage2-reaction-overlay-preserves-bubble-size-'+mode,compactBubble.sameHeight&&compactBubble.sameWidth&&!compactBubble.separator);
   await shortBubble.click();const shortPoint=await shortTrigger.boundingBox();
   if(mode==='phone')await owner.touchscreen.tap(shortPoint.x+shortPoint.width/2,shortPoint.y+shortPoint.height/2);else await shortTrigger.click();
   await shortMessage.locator('[data-reaction-choice="thumbs_up"]').waitFor({state:'visible',timeout:10000});
@@ -669,7 +676,7 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerS
     const note=await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{text:'A short note',anchor:0,key:'f11e500000000001'}),noteMessage=owner.locator('#msgs .gmsg[data-cseq="'+note.seq+'"]'),noteTrigger=noteMessage.locator('[data-reaction-open]');
     await noteTrigger.waitFor({timeout:30000});await noteMessage.evaluate(el=>el.scrollIntoView({block:'center'}));await noteMessage.locator('.bubble').click({position:{x:12,y:12}});
     const selectedNote=await noteTrigger.evaluate(button=>{const turn=button.closest('.gmsg'),bubble=button.closest('.bubble'),entry=button.closest('.reaction-entry'),b=bubble.getBoundingClientRect(),r=entry.getBoundingClientRect();return {selected:turn.classList.contains('bubble-selected'),bottomGap:b.bottom-r.bottom,topGap:r.top-b.top};});
-    assertID('stage2-reaction-short-note-selected-bottom-right-'+mode,selectedNote.selected&&Math.abs(selectedNote.bottomGap-4)<3);
+    assertID('stage2-reaction-short-note-selected-bottom-right-'+mode,selectedNote.selected&&selectedNote.bottomGap<0);
     await noteTrigger.click();
     await noteMessage.locator('.reaction-chooser').waitFor({state:'visible',timeout:10000});
     const noteBefore=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
@@ -680,7 +687,7 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerS
     await noteMessage.locator('.reaction-chooser').waitFor({state:'hidden',timeout:10000});
     const noteAfter=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
     assertID('stage2-reaction-rightward-picker-clears-trigger-'+mode,tinyGeometry.pane.width===320&&tinyGeometry.rightward&&tinyGeometry.clear&&!tinyGeometry.overlap&&afterTiny.last===beforeTiny.last&&await shortTrigger.getAttribute('aria-expanded')==='false');
-    assertID('stage2-reaction-short-note-fits-320x230-and-trigger-dismisses-without-selection-'+mode,noteGeometry.pane.width===320&&noteGeometry.pane.height===230&&noteGeometry.selected&&Math.abs(noteGeometry.triggerBottomGap-4)<3&&noteGeometry.count===6&&noteGeometry.inside&&noteGeometry.clear&&!noteGeometry.overlap&&noteAfter.last===noteBefore.last&&await noteTrigger.getAttribute('aria-expanded')==='false');
+    assertID('stage2-reaction-short-note-fits-320x230-and-trigger-dismisses-without-selection-'+mode,noteGeometry.pane.width===320&&noteGeometry.pane.height===230&&noteGeometry.selected&&noteGeometry.triggerBottomGap<0&&noteGeometry.count===6&&noteGeometry.inside&&noteGeometry.clear&&!noteGeometry.overlap&&noteAfter.last===noteBefore.last&&await noteTrigger.getAttribute('aria-expanded')==='false');
     await owner.locator('#chattitle').click();
     await owner.locator('#msgs').evaluate(el=>{for(const property of ['width','max-width','flex','height','min-height','max-height'])el.style.removeProperty(property);});
   }
@@ -689,7 +696,7 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerS
   if(mode==='desktop'){
     await source.hover();
     const hoverGeometry=await ownerReaction.evaluate(button=>{const bubble=button.closest('.bubble'),entry=button.closest('.reaction-entry'),b=bubble.getBoundingClientRect(),r=entry.getBoundingClientRect();return {selected:button.closest('.gmsg').classList.contains('bubble-selected'),top:r.top-b.top,bottom:b.bottom-r.bottom};});
-    assertID('stage2-reaction-hover-top-right-'+mode,!hoverGeometry.selected&&Math.abs(hoverGeometry.top-4)<3);
+    assertID('stage2-reaction-hover-top-right-'+mode,!hoverGeometry.selected&&hoverGeometry.top<0);
     await ownerReaction.click();const hoverChoice=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction-choice="thumbs_up"]');await hoverChoice.waitFor({state:'visible',timeout:10000});
     await owner.locator('#chattitle').hover();await hoverChoice.waitFor({state:'visible',timeout:10000});
     const noWriteBefore=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
@@ -698,18 +705,22 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerS
     assertID('stage2-reaction-outside-dismiss-no-write-'+mode,noWriteAfter.last===noWriteBefore.last&&await ownerReaction.getAttribute('aria-expanded')==='false');
   }
   await source.click();await owner.locator('#msgs .gmsg[data-cseq="'+seq+'"]').waitFor();
-  const triggerBox=await ownerReaction.boundingBox();assertID('stage2-reaction-trigger-hit-target-'+mode,triggerBox.width>=40&&triggerBox.height>=40);
+  const triggerBox=await ownerReaction.boundingBox();assertID('stage2-reaction-trigger-hit-target-'+mode,triggerBox.width>=44&&triggerBox.height>=44);
   const selectedGeometry=await ownerReaction.evaluate(button=>{const bubble=button.closest('.bubble'),entry=button.closest('.reaction-entry'),b=bubble.getBoundingClientRect(),r=entry.getBoundingClientRect();return {selected:button.closest('.gmsg').classList.contains('bubble-selected'),top:r.top-b.top,bottom:b.bottom-r.bottom};});
-  assertID('stage2-reaction-selected-bottom-right-'+mode,selectedGeometry.selected&&Math.abs(selectedGeometry.bottom-4)<3);
+  assertID('stage2-reaction-selected-bottom-right-'+mode,selectedGeometry.selected&&selectedGeometry.bottom<0);
   const scrollGeometry=await owner.evaluate(seq=>{const msgs=document.querySelector('#msgs'),turn=document.querySelector('#msgs .gmsg[data-cseq="'+seq+'"]');msgs.scrollTop=0;const start=msgs.scrollTop;msgs.scrollTop=msgs.scrollHeight;const button=turn.querySelector('[data-reaction-open]'),bubble=turn.querySelector('.bubble'),r=button.closest('.reaction-entry').getBoundingClientRect(),b=bubble.getBoundingClientRect();return {start,top:msgs.scrollTop,max:msgs.scrollHeight-msgs.clientHeight,gap:b.bottom-r.bottom};},seq);
-  assertID('stage2-reaction-scroll-attached-'+mode,scrollGeometry.max>0&&scrollGeometry.top===scrollGeometry.max&&Math.abs(scrollGeometry.gap-4)<3);
+  assertID('stage2-reaction-scroll-attached-'+mode,scrollGeometry.max>0&&scrollGeometry.top===scrollGeometry.max&&scrollGeometry.gap<0);
   const chooserPoint=await ownerReaction.boundingBox();
   if(mode==='phone')await owner.touchscreen.tap(chooserPoint.x+chooserPoint.width/2,chooserPoint.y+chooserPoint.height/2);else await ownerReaction.click();
   const ownerChooser=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction-choice="thumbs_up"]');await ownerChooser.waitFor({state:'visible',timeout:10000});
   const chooserGeometry=await ownerChooser.evaluate(choice=>{const entry=choice.closest('.reaction-entry'),trigger=entry.querySelector('[data-reaction-open]'),chooser=entry.querySelector('.reaction-chooser'),buttons=[...chooser.querySelectorAll('[data-reaction-choice]')],rects=buttons.map(button=>{const r=button.getBoundingClientRect();return {id:button.dataset.reactionChoice,left:r.left,top:r.top,right:r.right,bottom:r.bottom};}),tr=trigger.getBoundingClientRect(),cr=chooser.getBoundingClientRect(),style=getComputedStyle(chooser);return {order:buttons.map(button=>button.dataset.reactionChoice),display:style.display,rows:style.gridTemplateRows.split(' ').length,columns:style.gridTemplateColumns.split(' ').length,leftward:cr.right<=tr.left,overlap:!(cr.right<=tr.left||cr.left>=tr.right||cr.bottom<=tr.top||cr.top>=tr.bottom),within:cr.left>=0&&cr.right<=innerWidth&&cr.top>=0&&cr.bottom<=innerHeight,rects};});
   const expectedRows=[['celebration','laughing','thumbs_down'],['thinking','heart','thumbs_up']];
   const actualRows=[...new Set(chooserGeometry.rects.map(r=>r.top))].sort((a,b)=>a-b).map(top=>chooserGeometry.rects.filter(r=>r.top===top).sort((a,b)=>a.left-b.left).map(r=>r.id));
-  assertID('stage2-reaction-chooser-geometry-'+mode,chooserGeometry.order.join(',')==='celebration,thinking,laughing,heart,thumbs_down,thumbs_up'&&chooserGeometry.leftward&&!chooserGeometry.overlap&&chooserGeometry.within&&(mode==='phone'?chooserGeometry.display==='grid'&&chooserGeometry.rows===2&&chooserGeometry.columns===3&&JSON.stringify(actualRows)===JSON.stringify(expectedRows):chooserGeometry.display==='flex'));
+  const chooserBox=await ownerChooser.locator('..').boundingBox(),paneBox=await owner.locator('#msgs').boundingBox();
+  const prefersLeft=chooserPoint.x-paneBox.x-4>=chooserBox.width;
+  const fixedGrid=chooserGeometry.display==='grid'&&chooserGeometry.rows===2&&chooserGeometry.columns===3&&JSON.stringify(actualRows)===JSON.stringify(expectedRows);
+  const fitsPane=chooserBox.x>=paneBox.x&&chooserBox.x+chooserBox.width<=paneBox.x+paneBox.width&&chooserBox.y>=paneBox.y&&chooserBox.y+chooserBox.height<=paneBox.y+paneBox.height;
+  assertID('stage2-reaction-chooser-geometry-'+mode,chooserGeometry.order.join(',')==='celebration,thinking,laughing,heart,thumbs_down,thumbs_up'&&(!prefersLeft||chooserGeometry.leftward)&&!chooserGeometry.overlap&&chooserGeometry.within&&fitsPane&&(mode==='phone'?fixedGrid:chooserGeometry.display==='flex'||fixedGrid));
   assertID('stage2-reaction-stops-bubble-action-'+mode,await owner.locator('#msgs .gmsg[data-cseq="'+seq+'"]').evaluate(el=>el.classList.contains('bubble-selected')));
   if(mode==='phone'){
     const bubbleBox=await source.boundingBox();await owner.mouse.move(bubbleBox.x+bubbleBox.width/2,bubbleBox.y+bubbleBox.height/2);
