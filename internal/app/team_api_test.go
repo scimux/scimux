@@ -71,6 +71,18 @@ func dumpRecorder(rec *httptest.ResponseRecorder) string {
 	return b.String()
 }
 
+func TestCoreMuxWithoutTeamComponentsMatchesUnknownRoute(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if a.teamHandler != nil || a.shareOutbox != nil {
+		t.Fatal("unexpected team components")
+	}
+	h, err := newCoreMux(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTeamPathsMatchUnknown(t, h)
+}
+
 func TestTeamGateOnOutsideTheMuxerMatchesUnknownRoute(t *testing.T) {
 	cmd, data, _, _ := startTeamCommand(t, false)
 	assertTeamPathsMatchUnknown(t, cmd.Handler())
@@ -1029,7 +1041,7 @@ func TestTeamRoutesAndStorageAreDocumented(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, forbidden := range []string{"SCIMUX_ENABLE_EXPERIMENTAL_" + "FEATURE_TEAM", "experimental_" + "feature_team", "team gate"} {
+		for _, forbidden := range []string{"SCIMUX_ENABLE_EXPERIMENTAL_FEATURE_TEAM", "experimental_feature_team", "team gate"} {
 			if strings.Contains(string(raw), forbidden) {
 				t.Errorf("%s contains %q", file, forbidden)
 			}
@@ -2233,6 +2245,11 @@ func TestTeamAlwaysAvailableWithoutJoin(t *testing.T) {
 			}
 			cmd.application.copySharedChats()
 			assertNoTeamFile(t, data)
+			for _, name := range []string{team.SubsFile, team.PeopleFile, team.CopiesDir} {
+				if _, err := os.Stat(filepath.Join(data, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s stat = %v", name, err)
+				}
+			}
 		})
 	}
 }

@@ -2854,7 +2854,7 @@ async function run() {
   await p.waitForFunction(()=>document.querySelector('#msgs').innerText.includes('Synthetic response'));
   assertID('no-server-icon-hidden-'+mode,!(await p.locator('#sharebtn').isVisible()));
   const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
-  await p.locator('#burger').click();assertID('sharing-menu-before-join-'+mode,await p.locator('#m_sharing').isVisible());await p.locator('#m_sharing summary').click();await p.locator('#m_team_add').click();
+  await p.locator('#burger').click();await p.locator('#m_sharing').waitFor({state:'visible',timeout:15000});assertID('sharing-menu-before-join-'+mode,await p.locator('#m_sharing').isVisible());await p.locator('#m_sharing summary').click();await p.locator('#m_team_add').click();
   await p.locator('#m_team_link').fill(issue.link);await p.locator('#m_team_name').fill('Same sharer');
   const joined=p.waitForResponse(resp=>resp.request().method()==='POST'&&resp.url().endsWith('/api/team/servers')&&resp.status()===201,{timeout:30000});
   await p.locator('#m_team_join').click();await joined;await p.locator('#m_team_form').waitFor({state:'hidden',timeout:30000});

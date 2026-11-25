@@ -5024,3 +5024,51 @@ func TestOwnerRefreshCapturesFrontierAndProjectsStartAddress(t *testing.T) {
 		t.Fatalf("owner start: %+v", result.Entries)
 	}
 }
+
+func TestEndSubscriptionPreservesCanceledCopyAndSubscription(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
+	seedTeam(t, dir, server)
+	sub := baseSub()
+	seedSub(t, dir, sub)
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	instance, err := team.EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := team.MirrorRecord{Seq: 1, Key: "1/1", Author: sub.Owner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"synthetic"}`)}
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	subsPath := filepath.Join(dir, team.SubsFile)
+	copyPath := filepath.Join(dir, team.CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "mirror.jsonl")
+	beforeSubs, err := os.ReadFile(subsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCopy, err := os.ReadFile(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, "/", nil), id, "")
+	defer finish()
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	changed, err := h.endSubscription(req, id, server, false)
+	if err != nil || changed {
+		t.Fatalf("canceled operation changed=%v err=%v", changed, err)
+	}
+	afterSubs, err := os.ReadFile(subsPath)
+	if err != nil || !bytes.Equal(beforeSubs, afterSubs) {
+		t.Fatalf("subscription changed: %v", err)
+	}
+	afterCopy, err := os.ReadFile(copyPath)
+	if err != nil || !bytes.Equal(beforeCopy, afterCopy) {
+		t.Fatalf("copy changed: %v", err)
+	}
+	if got, err := team.ReadPeopleCopyInstance(dir, id); err != nil || got != instance {
+		t.Fatalf("copy identity changed: %v", err)
+	}
+}
