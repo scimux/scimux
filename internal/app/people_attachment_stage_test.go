@@ -807,6 +807,9 @@ func TestPeopleStageRemovalRechecksChangedLocalStage(t *testing.T) {
 	path := subReadPath() + "/attachments/stage/" + stage.ID + "?copy_instance=" + instance + "&revision=" + localStageRevision(stage)
 	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, path, nil), id, stage.ID)
 	defer finish()
+	if !h.requirePeopleCopy(httptest.NewRecorder(), req) {
+		t.Fatal("stage removal did not bind its copy")
+	}
 	if err := team.DeletePeopleStage(dir, id, stage.ID); err != nil {
 		t.Fatal(err)
 	}
