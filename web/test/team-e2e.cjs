@@ -53,7 +53,7 @@ try {
   if (scimux === relayBin) throw Error('scimux and relay must be distinct binaries');
   for (const p of [scimux, relayBin]) fs.accessSync(p, fs.constants.X_OK);
   playwright = require(prerequisite('SCIMUX_E2E_PLAYWRIGHT'));
-  if (!process.env.SCIMUX_E2E_SCENARIO || process.env.SCIMUX_E2E_SCENARIO === 'legacy-reader') {
+  if (!process.env.SCIMUX_E2E_SCENARIO || process.env.SCIMUX_E2E_SCENARIO === 'legacy-reader' || process.env.SCIMUX_E2E_LEGACY_BINARY) {
     legacyScimux = prerequisite('SCIMUX_E2E_LEGACY_BINARY');
     legacySource = prerequisite('SCIMUX_E2E_LEGACY_SOURCE');
     fs.accessSync(path.join(legacySource,'web','js','app.js'), fs.constants.R_OK);
@@ -562,12 +562,16 @@ async function stage1Unread(mode,ownerSeat,readerSeat) {
   assertID('stage1-recipient-discussion-zero-dispatch-'+mode,JSON.stringify(counts(ownerSeat))===JSON.stringify(beforeOwner)&&JSON.stringify(counts(readerSeat))===JSON.stringify(beforeReader));
   await screenshot(reader,'stage1-recipient-unread-pinned-'+mode+'.png');
 }
-async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat) {
+async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerSeat) {
   await otherSeat.api('/api/team/shares/'+otherSeat.node.id,'PUT',{server:otherSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
+  await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'},{seat:observerSeat.self,access:'write'},{seat:otherSeat.self,access:'read'}]});
   const share=await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id);
   const sub=await until(async()=>(await readerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation),30000,'stage2 shared subscription');
   const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/'),received='team/'+key;
-  const reader=await pageFor(readerSeat,mode,'stage2-reader-'+mode),owner=await pageFor(ownerSeat,mode,'stage2-owner-'+mode);
+  for(let i=0;i<12;i++)await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{text:'Synthetic reaction scroll filler '+mode+' '+i,anchor:0,key:(mode==='desktop'?'f11e0000':'f11e1000')+i.toString(16).padStart(8,'0')});
+  const observerSub=await until(async()=>(await observerSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation),30000,'reaction observer subscription');
+  const readOnlySub=await until(async()=>(await otherSeat.api('/api/team/subscriptions')).subscriptions.find(x=>x.owner===ownerSeat.self&&x.chat===share.uid&&x.generation===share.generation),30000,'read-only reaction subscription');
+  const reader=await pageFor(readerSeat,mode,'stage2-reader-'+mode),owner=await pageFor(ownerSeat,mode,'stage2-owner-'+mode),observer=await pageFor(observerSeat,mode,'stage2-reaction-observer-'+mode);
   const beforeReader=counts(readerSeat),beforeOwner=counts(ownerSeat),beforeOther=counts(otherSeat);
   await reader.locator('[data-tab=shared]').click();await reader.locator('.shared-card .agent-logo svg[data-icon="users"]').first().waitFor({timeout:30000});
   const header=reader.locator('[data-activity-group]').first(),headerStyle=await header.evaluate(el=>({height:el.getBoundingClientRect().height,border:getComputedStyle(el).borderBottomStyle,expanded:el.getAttribute('aria-expanded')}));
@@ -585,6 +589,8 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat) {
   const text='Identical shared message '+mode;
   for(let i=0;i<2;i++){await reader.locator('#prompt').fill(text);await reader.locator('#sendbtn').click();await until(async()=>await reader.locator('#msgs .gmsg .bubble').filter({hasText:text}).count()===i+1,30000,'duplicate publication');}
   const duplicate=reader.locator('#msgs .gmsg').filter({hasText:text}).last(),seq=Number(await duplicate.getAttribute('data-cseq'));const bubble=duplicate.locator('.bubble');
+  const reactionButton=duplicate.locator('[data-reaction-open]');
+  assertID('stage2-reaction-no-self-control-'+mode,await reactionButton.count()===0);
   await bubble.focus();await bubble.press('Enter');const actions=reader.locator('#msgs [data-gactions]');
   const order=await actions.locator('[data-gact]').evaluateAll(els=>els.map(el=>el.dataset.gact).filter(x=>['fork','sendto','desc','bookmark','copy'].includes(x)));
   assertID('stage2-shared-actions-time-'+mode,JSON.stringify(order)===JSON.stringify(['fork','sendto','desc','bookmark','copy'])&&await actions.locator('.bubwhen').count()===1&&await duplicate.locator('.gwho').innerText()==='You');
@@ -621,7 +627,147 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat) {
   const annotation='Local annotation '+mode;await reader.locator('#bookmarkprompt').fill(annotation);await reader.locator('#bookmarksend').click();
   const localComment=await until(async()=>{const ui=await readerSeat.api('/api/ui');return (ui.bookmarks||[]).find(x=>x.text===annotation&&x.anchor===saved.t);},30000,'local bookmark annotation');
   assertID('stage2-bookmark-comment-local-'+mode,!!localComment&&(await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0')).entries.length===relayBefore);
-  await open(owner,ownerSeat.node.id);const source=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] .bubble');await source.waitFor({timeout:40000});await source.click();
+  const shortComment=await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{text:'OK',anchor:0,key:(mode==='desktop'?'f11e2000':'f11e3000')+'00000001'});
+  await open(owner,ownerSeat.node.id);const source=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] .bubble');await source.waitFor({timeout:40000});
+  const shortMessage=owner.locator('#msgs .gmsg[data-cseq="'+shortComment.seq+'"]'),shortBubble=shortMessage.locator('.bubble');await shortBubble.waitFor({timeout:40000});
+  const shortTrigger=shortMessage.locator('[data-reaction-open]');await shortTrigger.waitFor({timeout:30000});
+  await shortBubble.click();const shortPoint=await shortTrigger.boundingBox();
+  if(mode==='phone')await owner.touchscreen.tap(shortPoint.x+shortPoint.width/2,shortPoint.y+shortPoint.height/2);else await shortTrigger.click();
+  await shortMessage.locator('[data-reaction-choice="thumbs_up"]').waitFor({state:'visible',timeout:10000});
+  const shortGeometry=await shortMessage.evaluate(message=>{const viewport=document.querySelector('#msgs').getBoundingClientRect(),buttons=[...message.querySelectorAll('[data-reaction-choice]')],rects=buttons.map(button=>{const r=button.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom};});return {count:rects.length,inside:rects.every(r=>r.left>=viewport.left&&r.right<=viewport.right&&r.top>=viewport.top&&r.bottom<=viewport.bottom),rects,viewport:{left:viewport.left,right:viewport.right,top:viewport.top,bottom:viewport.bottom}};});
+  assertID('stage2-reaction-short-message-all-choices-visible-'+mode,shortGeometry.count===6&&shortGeometry.inside);
+  await screenshot(owner,'stage2-reaction-short-message-'+mode+'.png');
+  if(mode==='desktop'){
+    const medium=await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{text:'This is a medium length note',anchor:0,key:'f11e400000000001'});
+    await owner.locator('#msgs').evaluate(el=>{el.style.setProperty('width','500px','important');el.style.setProperty('max-width','500px','important');el.style.setProperty('flex','0 0 500px','important');});
+    const paneWidth=await owner.locator('#msgs').evaluate(el=>el.getBoundingClientRect().width);
+    const mediumMessage=owner.locator('#msgs .gmsg[data-cseq="'+medium.seq+'"]'),mediumTrigger=mediumMessage.locator('[data-reaction-open]');
+    await mediumTrigger.waitFor({timeout:30000});await mediumMessage.evaluate(el=>el.scrollIntoView({block:'center'}));await mediumMessage.hover();await mediumTrigger.click();
+    await mediumMessage.locator('[data-reaction-choice="thumbs_up"]').waitFor({state:'visible',timeout:10000});
+    const mediumGeometry=await mediumMessage.evaluate(message=>{const viewport=document.querySelector('#msgs').getBoundingClientRect(),entry=message.querySelector('.reaction-entry'),chooser=entry.querySelector('.reaction-chooser'),buttons=[...chooser.querySelectorAll('[data-reaction-choice]')],rects=buttons.map(button=>button.getBoundingClientRect());return {pane:viewport.width,count:buttons.length,compact:entry.classList.contains('compact'),order:buttons.map(button=>button.dataset.reactionChoice),inside:rects.every(r=>r.left>=viewport.left&&r.right<=viewport.right&&r.top>=viewport.top&&r.bottom<=viewport.bottom),right:Math.max(...rects.map(r=>r.right)),viewportRight:viewport.right};});
+    assertID('stage2-reaction-medium-message-500px-pane-all-choices-visible-'+mode,paneWidth===500&&mediumGeometry.pane===500&&mediumGeometry.count===6&&mediumGeometry.compact&&mediumGeometry.inside&&mediumGeometry.order.join(',')==='celebration,thinking,laughing,heart,thumbs_down,thumbs_up');
+    await screenshot(owner,'stage2-reaction-medium-message-500px-pane-'+mode+'.png');
+    await owner.locator('#chattitle').click();
+    await owner.locator('#msgs').evaluate(el=>{el.style.setProperty('width','440px','important');el.style.setProperty('max-width','440px','important');el.style.setProperty('flex','0 0 440px','important');});
+    const medium440Message=mediumMessage,medium440Trigger=mediumTrigger;
+    await medium440Message.evaluate(el=>el.scrollIntoView({block:'center'}));await medium440Message.hover();await medium440Trigger.click();
+    await medium440Message.locator('[data-reaction-choice="thumbs_up"]').waitFor({state:'visible',timeout:10000});
+    const medium440Geometry=await medium440Message.evaluate(message=>{const viewport=document.querySelector('#msgs').getBoundingClientRect(),entry=message.querySelector('.reaction-entry'),buttons=[...entry.querySelector('.reaction-chooser').querySelectorAll('[data-reaction-choice]')],rects=buttons.map(button=>button.getBoundingClientRect());return {pane:viewport.width,count:buttons.length,compact:entry.classList.contains('compact'),inside:rects.every(r=>r.left>=viewport.left&&r.right<=viewport.right&&r.top>=viewport.top&&r.bottom<=viewport.bottom)};});
+    assertID('stage2-reaction-medium-message-440px-pane-all-choices-visible-'+mode,medium440Geometry.pane===440&&medium440Geometry.count===6&&medium440Geometry.compact&&medium440Geometry.inside);
+    await screenshot(owner,'stage2-reaction-medium-message-440px-pane-'+mode+'.png');
+    await owner.locator('#chattitle').click();
+    await owner.locator('#msgs').evaluate(el=>{el.style.removeProperty('width');el.style.removeProperty('max-width');el.style.removeProperty('flex');});
+    await owner.locator('#msgs').evaluate(el=>{el.style.setProperty('width','320px','important');el.style.setProperty('max-width','320px','important');el.style.setProperty('flex','0 0 320px','important');el.style.setProperty('height','230px','important');el.style.setProperty('min-height','230px','important');el.style.setProperty('max-height','230px','important');});
+    await shortMessage.evaluate(el=>el.scrollIntoView({block:'center'}));await shortMessage.hover();await shortTrigger.click();
+    await shortMessage.locator('.reaction-chooser').waitFor({state:'visible',timeout:10000});
+    const tinyGeometry=await shortMessage.evaluate(message=>{const viewport=document.querySelector('#msgs').getBoundingClientRect(),entry=message.querySelector('.reaction-entry'),trigger=entry.querySelector('[data-reaction-open]').getBoundingClientRect(),chooser=entry.querySelector('.reaction-chooser').getBoundingClientRect(),buttons=[...entry.querySelectorAll('[data-reaction-choice]')],rects=buttons.map(button=>button.getBoundingClientRect()),first=rects[0],overlap=!(chooser.right<=trigger.left||chooser.left>=trigger.right||chooser.bottom<=trigger.top||chooser.top>=trigger.bottom),firstChoiceOverlapsTrigger=first&&!(first.right<=trigger.left||first.left>=trigger.right||first.bottom<=trigger.top||first.top>=trigger.bottom);return {pane:{width:viewport.width,height:viewport.height},rightward:entry.classList.contains('rightward'),count:buttons.length,overlap,firstChoiceOverlapsTrigger,clear:chooser.left>=trigger.right||chooser.right<=trigger.left,inside:rects.every(r=>r.left>=viewport.left&&r.right<=viewport.right&&r.top>=viewport.top&&r.bottom<=viewport.bottom),trigger:{left:trigger.left,right:trigger.right,top:trigger.top,bottom:trigger.bottom},firstChoice:first,chooser:{left:chooser.left,right:chooser.right,top:chooser.top,bottom:chooser.bottom,width:chooser.width,height:chooser.height},viewport:{left:viewport.left,right:viewport.right,top:viewport.top,bottom:viewport.bottom}};});
+    const beforeTiny=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
+    const tinyHit=await shortMessage.evaluate(message=>{const entry=message.querySelector('.reaction-entry'),trigger=entry.querySelector('[data-reaction-open]').getBoundingClientRect(),choice=entry.querySelector('[data-reaction-choice]').getBoundingClientRect(),left=Math.max(trigger.left,choice.left),right=Math.min(trigger.right,choice.right),top=Math.max(trigger.top,choice.top),bottom=Math.min(trigger.bottom,choice.bottom);return left<right&&top<bottom?{x:(left+right)/2,y:(top+bottom)/2}:{x:trigger.right-2,y:(trigger.top+trigger.bottom)/2};});
+    const overlapWrite=tinyGeometry.firstChoiceOverlapsTrigger?owner.waitForResponse(response=>response.request().method()==='POST'&&response.url().includes('/reactions?'),{timeout:10000}):null;await owner.mouse.click(tinyHit.x,tinyHit.y);if(overlapWrite)await overlapWrite;
+    await shortMessage.locator('.reaction-chooser').waitFor({state:'hidden',timeout:10000});
+    const afterTiny=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
+    const note=await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{text:'A short note',anchor:0,key:'f11e500000000001'}),noteMessage=owner.locator('#msgs .gmsg[data-cseq="'+note.seq+'"]'),noteTrigger=noteMessage.locator('[data-reaction-open]');
+    await noteTrigger.waitFor({timeout:30000});await noteMessage.evaluate(el=>el.scrollIntoView({block:'center'}));await noteMessage.locator('.bubble').click({position:{x:12,y:12}});
+    const selectedNote=await noteTrigger.evaluate(button=>{const turn=button.closest('.gmsg'),bubble=button.closest('.bubble'),entry=button.closest('.reaction-entry'),b=bubble.getBoundingClientRect(),r=entry.getBoundingClientRect();return {selected:turn.classList.contains('bubble-selected'),bottomGap:b.bottom-r.bottom,topGap:r.top-b.top};});
+    assertID('stage2-reaction-short-note-selected-bottom-right-'+mode,selectedNote.selected&&Math.abs(selectedNote.bottomGap-4)<3);
+    await noteTrigger.click();
+    await noteMessage.locator('.reaction-chooser').waitFor({state:'visible',timeout:10000});
+    const noteBefore=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
+    const noteGeometry=await noteMessage.evaluate(message=>{const viewport=document.querySelector('#msgs').getBoundingClientRect(),entry=message.querySelector('.reaction-entry'),trigger=entry.querySelector('[data-reaction-open]').getBoundingClientRect(),chooser=entry.querySelector('.reaction-chooser').getBoundingClientRect(),bubble=message.querySelector('.bubble').getBoundingClientRect(),buttons=[...entry.querySelectorAll('[data-reaction-choice]')],rects=buttons.map(button=>button.getBoundingClientRect()),overlap=!(chooser.right<=trigger.left||chooser.left>=trigger.right||chooser.bottom<=trigger.top||chooser.top>=trigger.bottom),horizontalGap=Math.max(0,trigger.left-chooser.right,chooser.left-trigger.right),verticalGap=Math.max(0,trigger.top-chooser.bottom,chooser.top-trigger.bottom);return {pane:{width:viewport.width,height:viewport.height},selected:message.classList.contains('bubble-selected'),triggerBottomGap:bubble.bottom-trigger.bottom,count:buttons.length,inside:rects.every(r=>r.left>=viewport.left&&r.right<=viewport.right&&r.top>=viewport.top&&r.bottom<=viewport.bottom),overlap,clear:Math.max(horizontalGap,verticalGap)>=8,trigger:{left:trigger.left,right:trigger.right,top:trigger.top,bottom:trigger.bottom},chooser:{left:chooser.left,right:chooser.right,top:chooser.top,bottom:chooser.bottom,width:chooser.width,height:chooser.height},viewport:{left:viewport.left,right:viewport.right,top:viewport.top,bottom:viewport.bottom}};});
+    await screenshot(owner,'stage2-reaction-320x230-'+mode+'.png');
+    const noteOverlapWrite=noteGeometry.overlap?owner.waitForResponse(response=>response.request().method()==='POST'&&response.url().includes('/reactions?'),{timeout:10000}):null,noteTriggerBox=await noteTrigger.boundingBox();
+    await owner.mouse.click(noteTriggerBox.x+noteTriggerBox.width/2,noteTriggerBox.y+noteTriggerBox.height/2);if(noteOverlapWrite)await noteOverlapWrite;
+    await noteMessage.locator('.reaction-chooser').waitFor({state:'hidden',timeout:10000});
+    const noteAfter=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
+    assertID('stage2-reaction-rightward-picker-clears-trigger-'+mode,tinyGeometry.pane.width===320&&tinyGeometry.rightward&&tinyGeometry.clear&&!tinyGeometry.overlap&&afterTiny.last===beforeTiny.last&&await shortTrigger.getAttribute('aria-expanded')==='false');
+    assertID('stage2-reaction-short-note-fits-320x230-and-trigger-dismisses-without-selection-'+mode,noteGeometry.pane.width===320&&noteGeometry.pane.height===230&&noteGeometry.selected&&Math.abs(noteGeometry.triggerBottomGap-4)<3&&noteGeometry.count===6&&noteGeometry.inside&&noteGeometry.clear&&!noteGeometry.overlap&&noteAfter.last===noteBefore.last&&await noteTrigger.getAttribute('aria-expanded')==='false');
+    await owner.locator('#chattitle').click();
+    await owner.locator('#msgs').evaluate(el=>{for(const property of ['width','max-width','flex','height','min-height','max-height'])el.style.removeProperty(property);});
+  }
+  await owner.locator('#chattitle').click();
+  const ownerReaction=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction-open]');await ownerReaction.waitFor({timeout:30000});
+  if(mode==='desktop'){
+    await source.hover();
+    const hoverGeometry=await ownerReaction.evaluate(button=>{const bubble=button.closest('.bubble'),entry=button.closest('.reaction-entry'),b=bubble.getBoundingClientRect(),r=entry.getBoundingClientRect();return {selected:button.closest('.gmsg').classList.contains('bubble-selected'),top:r.top-b.top,bottom:b.bottom-r.bottom};});
+    assertID('stage2-reaction-hover-top-right-'+mode,!hoverGeometry.selected&&Math.abs(hoverGeometry.top-4)<3);
+    await ownerReaction.click();const hoverChoice=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction-choice="thumbs_up"]');await hoverChoice.waitFor({state:'visible',timeout:10000});
+    await owner.locator('#chattitle').hover();await hoverChoice.waitFor({state:'visible',timeout:10000});
+    const noWriteBefore=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
+    await owner.locator('#chattitle').click();await hoverChoice.waitFor({state:'hidden',timeout:10000});
+    const noWriteAfter=await ownerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
+    assertID('stage2-reaction-outside-dismiss-no-write-'+mode,noWriteAfter.last===noWriteBefore.last&&await ownerReaction.getAttribute('aria-expanded')==='false');
+  }
+  await source.click();await owner.locator('#msgs .gmsg[data-cseq="'+seq+'"]').waitFor();
+  const triggerBox=await ownerReaction.boundingBox();assertID('stage2-reaction-trigger-hit-target-'+mode,triggerBox.width>=40&&triggerBox.height>=40);
+  const selectedGeometry=await ownerReaction.evaluate(button=>{const bubble=button.closest('.bubble'),entry=button.closest('.reaction-entry'),b=bubble.getBoundingClientRect(),r=entry.getBoundingClientRect();return {selected:button.closest('.gmsg').classList.contains('bubble-selected'),top:r.top-b.top,bottom:b.bottom-r.bottom};});
+  assertID('stage2-reaction-selected-bottom-right-'+mode,selectedGeometry.selected&&Math.abs(selectedGeometry.bottom-4)<3);
+  const scrollGeometry=await owner.evaluate(seq=>{const msgs=document.querySelector('#msgs'),turn=document.querySelector('#msgs .gmsg[data-cseq="'+seq+'"]');msgs.scrollTop=0;const start=msgs.scrollTop;msgs.scrollTop=msgs.scrollHeight;const button=turn.querySelector('[data-reaction-open]'),bubble=turn.querySelector('.bubble'),r=button.closest('.reaction-entry').getBoundingClientRect(),b=bubble.getBoundingClientRect();return {start,top:msgs.scrollTop,max:msgs.scrollHeight-msgs.clientHeight,gap:b.bottom-r.bottom};},seq);
+  assertID('stage2-reaction-scroll-attached-'+mode,scrollGeometry.max>0&&scrollGeometry.top===scrollGeometry.max&&Math.abs(scrollGeometry.gap-4)<3);
+  const chooserPoint=await ownerReaction.boundingBox();
+  if(mode==='phone')await owner.touchscreen.tap(chooserPoint.x+chooserPoint.width/2,chooserPoint.y+chooserPoint.height/2);else await ownerReaction.click();
+  const ownerChooser=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction-choice="thumbs_up"]');await ownerChooser.waitFor({state:'visible',timeout:10000});
+  const chooserGeometry=await ownerChooser.evaluate(choice=>{const entry=choice.closest('.reaction-entry'),trigger=entry.querySelector('[data-reaction-open]'),chooser=entry.querySelector('.reaction-chooser'),buttons=[...chooser.querySelectorAll('[data-reaction-choice]')],rects=buttons.map(button=>{const r=button.getBoundingClientRect();return {id:button.dataset.reactionChoice,left:r.left,top:r.top,right:r.right,bottom:r.bottom};}),tr=trigger.getBoundingClientRect(),cr=chooser.getBoundingClientRect(),style=getComputedStyle(chooser);return {order:buttons.map(button=>button.dataset.reactionChoice),display:style.display,rows:style.gridTemplateRows.split(' ').length,columns:style.gridTemplateColumns.split(' ').length,leftward:cr.right<=tr.left,overlap:!(cr.right<=tr.left||cr.left>=tr.right||cr.bottom<=tr.top||cr.top>=tr.bottom),within:cr.left>=0&&cr.right<=innerWidth&&cr.top>=0&&cr.bottom<=innerHeight,rects};});
+  const expectedRows=[['celebration','laughing','thumbs_down'],['thinking','heart','thumbs_up']];
+  const actualRows=[...new Set(chooserGeometry.rects.map(r=>r.top))].sort((a,b)=>a-b).map(top=>chooserGeometry.rects.filter(r=>r.top===top).sort((a,b)=>a.left-b.left).map(r=>r.id));
+  assertID('stage2-reaction-chooser-geometry-'+mode,chooserGeometry.order.join(',')==='celebration,thinking,laughing,heart,thumbs_down,thumbs_up'&&chooserGeometry.leftward&&!chooserGeometry.overlap&&chooserGeometry.within&&(mode==='phone'?chooserGeometry.display==='grid'&&chooserGeometry.rows===2&&chooserGeometry.columns===3&&JSON.stringify(actualRows)===JSON.stringify(expectedRows):chooserGeometry.display==='flex'));
+  assertID('stage2-reaction-stops-bubble-action-'+mode,await owner.locator('#msgs .gmsg[data-cseq="'+seq+'"]').evaluate(el=>el.classList.contains('bubble-selected')));
+  if(mode==='phone'){
+    const bubbleBox=await source.boundingBox();await owner.mouse.move(bubbleBox.x+bubbleBox.width/2,bubbleBox.y+bubbleBox.height/2);
+    await ownerChooser.waitFor({state:'visible'});const choiceBox=await ownerChooser.boundingBox();
+    await owner.touchscreen.tap(choiceBox.x+choiceBox.width/2,choiceBox.y+choiceBox.height/2);
+  } else await ownerChooser.click();
+  await owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  if(mode==='phone')assertID('stage2-reaction-input-switch-mouse-to-touch-'+mode,!await owner.evaluate(()=>document.body.classList.contains('reaction-input-mouse')));
+  if(mode==='phone'&&await reader.locator('#bookmarkspane').isVisible())await reader.locator('#bookmarksback').click();
+  if(mode==='phone')await reader.locator('#chatback').click();
+  await open(reader,received);await reader.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  await open(observer,'team/'+[observerSub.server,observerSub.owner,observerSub.chat,observerSub.generation].join('/'));
+  const ownerMessage=owner.locator(`#msgs .gmsg[data-cseq="${seq}"]`),readerMessage=reader.locator(`#msgs .gmsg[data-cseq="${seq}"]`);
+  const observerMessage=observer.locator(`#msgs .gmsg[data-cseq="${seq}"]`);await observerMessage.locator('[data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  const readOnly=await pageFor(otherSeat,mode,'stage2-reaction-readonly-'+mode);await open(readOnly,'team/'+[readOnlySub.server,readOnlySub.owner,readOnlySub.chat,readOnlySub.generation].join('/'));
+  const readOnlySeatIsLegacy=Boolean(legacyScimux&&otherSeat.binary===legacyScimux);
+  const readOnlyMessage=readOnly.locator(`#msgs .gmsg[data-cseq="${seq}"]`);
+  if(readOnlySeatIsLegacy) await readOnlyMessage.getByText(text,{exact:true}).waitFor({timeout:40000});
+  else await readOnlyMessage.locator('[data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  assertID('stage2-reaction-readonly-observes-'+mode,await readOnlyMessage.locator('[data-reaction-open]').count()===0&&await readOnlyMessage.locator('[data-reaction="thumbs_up"].mine').count()===0);
+  if(readOnlySeatIsLegacy) assertID('stage2-legacy-client-skips-reaction-record-'+mode,await readOnlyMessage.getByText(text,{exact:true}).count()===1&&await readOnlyMessage.locator('[data-reaction-chip], [data-reaction-entry]').count()===0);
+  assertID('stage2-reaction-three-view-sync-'+mode,await ownerMessage.locator('[data-reaction="thumbs_up"] span').last().innerText()==='1'&&await readerMessage.locator('[data-reaction="thumbs_up"] span').last().innerText()==='1'&&await observerMessage.locator('[data-reaction="thumbs_up"] span').last().innerText()==='1');
+  assertID('stage2-reaction-own-message-readonly-'+mode,await readerMessage.locator('[data-reaction-open]').count()===0&&await readerMessage.locator('[data-reaction="thumbs_up"].mine').count()===0&&await ownerMessage.locator('[data-reaction="thumbs_up"].mine').count()===1&&await observerMessage.locator('[data-reaction="thumbs_up"].mine').count()===0);
+  if(mode==='desktop'){
+    await terminate(relay.child);assertID('stage2-reaction-relay-stopped-'+mode,relay.child.exitCode!==null||relay.child.signalCode!==null);
+    await restartRelay();
+    await until(async()=>{const state=await observerSeat.api('/api/team/subscriptions'),server=state.servers?.find(item=>item.id===observerSub.server);return server&&!['offline','refused','changed'].includes(server.delivery);},30000,'reaction relay reconnect');
+  }
+  const observerTrigger=observerMessage.locator('[data-reaction-open]');
+  if(mode==='phone')await observerMessage.locator('.bubble').click();else await observerMessage.locator('.bubble').hover();
+  await observerTrigger.waitFor({state:'visible'});
+  const observerTriggerBox=await observerTrigger.boundingBox();
+  if(mode==='phone')await observer.touchscreen.tap(observerTriggerBox.x+observerTriggerBox.width/2,observerTriggerBox.y+observerTriggerBox.height/2);else await observerTrigger.click();
+  const observerChoice=observerMessage.locator('[data-reaction-choice="thumbs_up"]');await observerChoice.waitFor({state:'visible',timeout:10000});
+  if(mode==='phone')await observer.touchscreen.tap((await observerChoice.boundingBox()).x+22,(await observerChoice.boundingBox()).y+22);else await observerChoice.click();
+  await ownerMessage.locator('[data-reaction="thumbs_up"] span').last().filter({hasText:'2'}).waitFor({timeout:40000});
+  await readerMessage.locator('[data-reaction="thumbs_up"] span').last().filter({hasText:'2'}).waitFor({timeout:40000});
+  await observerMessage.locator('[data-reaction="thumbs_up"] span').last().filter({hasText:'2'}).waitFor({timeout:40000});
+  if(readOnlySeatIsLegacy) assertID('stage2-legacy-client-keeps-original-comment-'+mode,await readOnlyMessage.getByText(text,{exact:true}).count()===1&&await readOnly.locator(`#msgs .gmsg[data-cseq="${seq}"]`).count()===1);
+  else await readOnlyMessage.locator('[data-reaction="thumbs_up"] span').last().filter({hasText:'2'}).waitFor({timeout:40000});
+  assertID('stage2-reaction-participant-highlights-'+mode,await ownerMessage.locator('[data-reaction="thumbs_up"].mine').count()===1&&await readerMessage.locator('[data-reaction="thumbs_up"].mine').count()===0&&await observerMessage.locator('[data-reaction="thumbs_up"].mine').count()===1);
+  await ownerReaction.click();await ownerMessage.locator('[data-reaction-choice="thumbs_up"]').click();
+  await ownerMessage.locator('[data-reaction="thumbs_up"] span').last().filter({hasText:'1'}).waitFor({timeout:40000});
+  assertID('stage2-reaction-independent-remove-'+mode,await ownerMessage.locator('[data-reaction="thumbs_up"].mine').count()===0&&await readerMessage.locator('[data-reaction="thumbs_up"].mine').count()===0&&await observerMessage.locator('[data-reaction="thumbs_up"].mine').count()===1);
+  await owner.reload({waitUntil:'networkidle'});await owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  await reader.reload({waitUntil:'networkidle'});await reader.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  await observer.reload({waitUntil:'networkidle'});await observer.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  assertID('stage2-reaction-reload-retained-'+mode,await owner.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"] span').last().innerText()==='1'&&await reader.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction-open]').count()===0&&await observer.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"].mine').count()===1);
+  const membershipPath='/api/team/shares/'+ownerSeat.node.id;
+  await ownerSeat.api(membershipPath,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'},{seat:observerSeat.self,access:'read'},{seat:otherSeat.self,access:'read'}]});
+  const observerRead=await until(async()=>{const list=await observerSeat.api('/api/team/subscriptions');return list.subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='read');},30000,'reaction observer read-only update');
+  await observer.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction-open]').waitFor({state:'detached',timeout:30000});
+  const observerCopy=[observerRead.server,observerRead.owner,observerRead.chat,observerRead.generation].join('/');
+  const denied=await observerSeat.status('/api/team/subscriptions/'+observerCopy+'/reactions?copy_instance='+encodeURIComponent(observerRead.people_copy_instance),{target:seq,emoji:'thumbs_up',active:false,key:'dededede76543210'});
+  assertID('stage2-reaction-permission-change-'+mode,denied===403&&await observer.locator('#msgs .gmsg[data-cseq="'+seq+'"] [data-reaction="thumbs_up"].mine').count()===1);
+  await screenshot(owner,'stage2-reactions-'+mode+'.png');
+  if(mode==='phone')await owner.locator('#chatback').click();
+  await open(owner,ownerSeat.node.id);await source.waitFor({timeout:30000});await source.click();
   await owner.locator('[data-gact=bookmark]').click();const ownerSaved=await until(async()=>{const ui=await ownerSeat.api('/api/ui');return (ui.bookmarks||[]).find(x=>x.team?.chat===sub.chat&&x.team?.generation===sub.generation&&x.team?.log==='comments'&&x.team.seq===seq);},30000,'owner shared bookmark');
   await owner.locator('#bookmarksbtn').click();const ownerBookmark=owner.locator('#bookmarklist .bookmark').filter({hasText:text}).last();await ownerBookmark.locator('.nbubble').click();await ownerBookmark.locator('[data-bmact=jump]').click();
   await owner.locator('#msgs .gmsg[data-gkey="'+key+'"][data-cseq="'+seq+'"].jumpflash').waitFor({timeout:30000});assertID('stage2-owner-bookmark-exact-jump-'+mode,ownerSaved.team.seq===seq);
@@ -2809,7 +2955,7 @@ async function run() {
  if(!scenarioNames.includes(selected))throw Error('unknown SCIMUX_E2E_SCENARIO');
  if(selected!=='default')manifest.scope=selected+' scenario only';
  relay=await launchRelay();
- for(const name of ['owner-a','owner-b','recipient','observer']) await makeSeat(name);
+ for(const name of ['owner-a','owner-b','recipient','observer']) await makeSeat(name,false,name==='owner-b'&&legacyScimux?legacyScimux:scimux);
  const [a,b,r,observer]=seats;
  for(const s of seats)s.node=await node(s,'codex',s.name+' chat','Synthetic initial request');
  if(selected==='native-start-failure'){
@@ -2907,7 +3053,7 @@ async function run() {
  if(selected==='stage1-scanner'){for(const mode of ['desktop','phone'])await stage1Scanner(mode,a,r);return;}
  if(selected==='stage1-unread'){for(const mode of ['desktop','phone'])await stage1Unread(mode,a,r);return;}
  if(selected==='stage1-owner-files'){for(const mode of ['desktop','phone'])await stage1OwnerFiles(mode,a,r);return;}
- if(selected==='stage2-shared-actions'){await r.api('/api/nodes/'+r.node.id,'PATCH',{title:'Synthetic renamed recipient'});for(const mode of ['desktop','phone'])await stage2SharedActions(mode,a,b,r);return;}
+ if(selected==='stage2-shared-actions'){await r.api('/api/nodes/'+r.node.id,'PATCH',{title:'Synthetic renamed recipient'});for(const mode of ['desktop','phone'])await stage2SharedActions(mode,a,b,r,observer);return;}
  if(selected==='stage2-bookmark-pages'){for(const mode of ['desktop','phone'])await stage2BookmarkPages(mode,a,r);return;}
  if(selected==='recreated-chat-isolation'){for(const mode of ['desktop','phone'])await recreatedChatIsolation(mode,a,r);return;}
  if(selected==='bubble-selection'){const before=counts(a),sh=await a.api('/api/team/shares/'+a.node.id);const sub=await until(async()=>(await a.api('/api/team/subscriptions')).subscriptions.find(x=>x.chat===sh.uid&&x.access==='owner'),30000,'selection seed');const key=[sub.server,sub.owner,sub.chat,sub.generation].join('/');for(let i=0;i<40;i++)await a.api('/api/team/subscriptions/'+key+'/comments','POST',{key:i.toString(16).padStart(16,'0'),anchor:0,text:'Synthetic selection history '+i});assertID('bubble-selection-seed-zero-dispatch',JSON.stringify(before)===JSON.stringify(counts(a)));for(const mode of ['desktop','phone'])await bubbleSelection(mode,a,r);return;}

@@ -46,6 +46,7 @@ var productionJSURLs = []string{
 	"/js/polling.js",
 	"/js/qr.js",
 	"/js/qrcodegen.js",
+	"/js/reactions.js",
 	"/js/reference-media.js",
 	"/js/returnto.js",
 	"/js/search.js",

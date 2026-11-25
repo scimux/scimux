@@ -129,7 +129,7 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 			return
 		} else {
 			switch parts[4] {
-			case "seen", "comments", "attachments", "local":
+			case "seen", "comments", "reactions", "attachments", "local":
 			default:
 				writeTeamError(w, http.StatusNotFound, "not_found")
 				return
@@ -143,7 +143,7 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	id := team.CopyID{Server: parts[0], Owner: parts[1], Chat: parts[2], Generation: parts[3]}
-	if (len(parts) == 4 && (r.Method == http.MethodGet || r.Method == http.MethodDelete)) || (len(parts) >= 5 && (parts[4] == "attachments" || parts[4] == "comments" || parts[4] == "pending" || (parts[4] == "local" && r.Method == http.MethodGet) || (parts[4] == "seen" && r.Method == http.MethodPut))) {
+	if (len(parts) == 4 && (r.Method == http.MethodGet || r.Method == http.MethodDelete)) || (len(parts) >= 5 && (parts[4] == "attachments" || parts[4] == "comments" || parts[4] == "reactions" || parts[4] == "pending" || (parts[4] == "local" && r.Method == http.MethodGet) || (parts[4] == "seen" && r.Method == http.MethodPut))) {
 		stageID := ""
 		if len(parts) == 7 && parts[5] == "stage" {
 			stageID = parts[6]
@@ -224,6 +224,10 @@ func (h *teamHandler) serveSubscriptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if len(parts) == 5 {
+		if parts[4] == "reactions" {
+			h.serveReactions(w, r, id)
+			return
+		}
 		if parts[4] == "comments" {
 			switch r.Method {
 			case http.MethodGet:
@@ -1584,11 +1588,12 @@ func (h *teamHandler) removeSubscription(w http.ResponseWriter, r *http.Request,
 }
 
 type commentReadResponse struct {
-	Entries []map[string]any  `json:"entries"`
-	Names   map[string]string `json:"names"`
-	Last    uint64            `json:"last"`
-	Next    uint64            `json:"next"`
-	More    bool              `json:"more"`
+	Entries   []map[string]any     `json:"entries"`
+	Reactions []team.ReactionEvent `json:"reactions"`
+	Names     map[string]string    `json:"names"`
+	Last      uint64               `json:"last"`
+	Next      uint64               `json:"next"`
+	More      bool                 `json:"more"`
 }
 
 func (h *teamHandler) answerComments(w http.ResponseWriter, r *http.Request, id team.CopyID, server team.Entry, joined bool, records []team.MirrorRecord, last, after uint64, stopped, full bool) {
@@ -1597,12 +1602,31 @@ func (h *teamHandler) answerComments(w http.ResponseWriter, r *http.Request, id 
 		writeTeamError(w, http.StatusInternalServerError, "identity_unavailable")
 		return
 	}
-	out := commentReadResponse{Entries: []map[string]any{}, Last: last, Next: after}
+	out := commentReadResponse{Entries: []map[string]any{}, Reactions: []team.ReactionEvent{}, Last: last, Next: after}
 	if out.Next > last {
 		out.Next = last
 	}
 	textBytes := 0
 	for _, record := range records {
+		var reactionBody struct {
+			Target *uint64 `json:"target"`
+		}
+		var kind struct {
+			Type string `json:"t"`
+		}
+		if json.Unmarshal(record.Body, &kind) == nil && kind.Type == "reaction" && json.Unmarshal(record.Body, &reactionBody) == nil && reactionBody.Target != nil && *reactionBody.Target > 0 && *reactionBody.Target < record.Seq {
+			targets, _, readErr := team.ReadCopy(h.dataDir, id, team.CommentsLog, *reactionBody.Target-1, 1, 4<<20)
+			if readErr != nil {
+				writeTeamError(w, http.StatusInternalServerError, "copy_damaged")
+				return
+			}
+			if len(targets) == 1 && targets[0].Seq == *reactionBody.Target {
+				if event, valid := team.ParseReactionEvent(record, targets[0]); valid {
+					event.Mine = event.Author == string(inst)
+					out.Reactions = append(out.Reactions, event)
+				}
+			}
+		}
 		entry, size, ok := projectCommentRecord(record, string(inst))
 		if !ok {
 			out.Next = record.Seq

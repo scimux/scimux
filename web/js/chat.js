@@ -1723,7 +1723,7 @@ export function createChatFeature(deps){
     const source = {...copy.view, log:"comments", seq:comment.seq};
     discussionSources[`${copy.key}/${comment.seq}`] = source;
     const markers = discussionMarkerHTML(source, nodeId);
-    return guestMessageHTML(comment, copy.names, copy.view.server, copy.people, copy.key, markers, copy.key, d.assetURL, copy.view.people_copy_instance || "");
+    return guestMessageHTML({...comment, access:copy.view.access, state:copy.view.state}, copy.names, copy.view.server, copy.people, copy.key, markers, copy.key, d.assetURL, copy.reactionCopyInstance || "", copy.reactionState || [], copy.online === true);
   }
 
   function discussionMarkerHTML(source, nodeId){
@@ -2309,6 +2309,7 @@ export function createChatFeature(deps){
   function renderBubbleActions(){
     if (!msgs) return;
     qa(msgs, ".bubactions").forEach(x => x.remove());
+    qa(msgs, ".bubble-selected").forEach(x => x.classList.remove("bubble-selected"));
     if (!tappedTurn) {
       if (bubbleController.current()?.kind === "local") bubbleController.clear();
       return;
@@ -2316,6 +2317,7 @@ export function createChatFeature(deps){
     const turnEl = q(msgs, `.turn[data-bk="${tappedTurn}"]`);
     const turn = bubbleTurns[tappedTurn];
     if (!turnEl || !turn){ tappedTurn = ""; return; }
+    turnEl.classList.add("bubble-selected");
     const foldEntry = foldByBK[tappedTurn];
     const html = bubbleActionsHTML(turn, {
       escape, fmtTime: bubTimeFn,
@@ -3091,6 +3093,7 @@ export function createChatFeature(deps){
     const k = turnEl.dataset.bk;
     const selected = bubbleController.toggle({key:"local/" + k, target:turnEl, kind:"local", close:() => {
       tappedTurn = "";
+      turnEl.classList?.remove("bubble-selected");
       qa(msgs, ".bubactions").forEach(x => x.remove());
     }});
     tappedTurn = selected ? k : "";

@@ -54,6 +54,60 @@ payloads (images, PDF, zip, …) and empty short-circuit responses (`304`,
 
 ## Reading state
 
+### People reaction records
+
+People reactions use the existing authenticated comments log and unchanged
+relay envelope. The relay treats each body as opaque. scimux application
+records use this versioned shape:
+
+```json
+{"v":1,"t":"reaction","target":42,"emoji":"thumbs_up","active":true}
+```
+
+`target` is the earlier comments sequence of a valid People comment, including
+a file-only comment. The participant is the authenticated relay envelope
+author; a body-supplied actor is invalid. A target comment author cannot react
+to their own comment. Supported identifiers, in fixed display order, are
+`celebration` (🎉), `thinking` (🤔), `laughing` (😂), `heart` (❤️, including
+U+FE0F), `thumbs_down` (👎), and `thumbs_up` (👍). Each event is an explicit
+desired state. The latest valid retained event for a target, participant, and
+emoji wins; removal appends `active:false` and never edits history.
+
+The local routes are scoped by server, owner, chat, and generation:
+
+* `GET /api/team/subscriptions/{server}/{owner}/{chat}/{generation}/reactions?after=N&copy_instance=HEX`
+  reads at most 256 log entries and 4 MiB per page. `after` is an optional
+  canonical decimal sequence (default `0`); `copy_instance` is the 32-digit
+  local copy identity and is required by the UI to fence stale views. The
+  response is `{ "events": [...], "last": N, "next": N, "more": false }`;
+  events contain the validated record fields plus `seq`, `key`,
+  `target_author`, and viewer-relative `mine`. Invalid events are omitted.
+  This read is available from a retained local copy after the share is offline
+  or ended.
+* `POST` to the same path requires `copy_instance` and the ordinary
+  `X-Scimux-CSRF` header. JSON is exactly
+  `{ "target": 42, "emoji": "thumbs_up", "active": true, "key": "0123456789abcdef" }`.
+  Bodies are limited to 4096 bytes; unknown fields are rejected. The key is a
+  caller-generated 16-digit lowercase hexadecimal idempotency key, scoped by
+  the route's generation. `200` returns `{ "seq": N }`; that acknowledgment
+  alone does not confirm a payload. Clients confirm only when the matching
+  validated retained event is read back. A retry after an uncertain response
+  must repeat the exact body and key. Pending writes are never replayed
+  automatically. `400 bad_request`, `403 read_only`, `404 not_found`,
+  `409 not_active|copy_changed|copy_instance_required`, `413` for an oversized
+  body, `500` for local storage/identity failure, and `502 refused|offline|changed`
+  are possible. Writes require current live write access, an online joined
+  server, and an unchanged generation, copy identity, membership and server
+  configuration. These are local UI routes; no relay upgrade is needed.
+
+Reaction events are a separate `reactions` property in the ordinary comments
+read response and never appear in `comments.entries`. Reaction-only records
+are neutral to upgraded unread classification; earlier unread human comments
+remain unread, and unknown gaps remain unknown. Classification does not
+advance `/seen`. Older clients skip the opaque reaction body and preserve the
+conversation, but their existing unknown-unread fallback may trigger when
+skipped sequence numbers make the comments projection discontinuous.
+
 ### `GET /api/state`
 
 The polling snapshot the UI runs on. Returns:
