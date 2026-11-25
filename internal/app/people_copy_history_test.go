@@ -1594,3 +1594,36 @@ func TestPeopleRosterCannotAdoptRetiredOperationWithoutContextCancellation(t *te
 		t.Fatal("retired operation returned current roster names")
 	}
 }
+
+func TestPeopleRosterAndCommentNamesRespectCancellation(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	joinLab(t, dir, teamServerID, "http://127.0.0.1:1")
+	servers, err := team.Load(dir)
+	if err != nil || len(servers) != 1 {
+		t.Fatalf("setup: %v", err)
+	}
+	server := servers[0]
+	h.subAsks = map[string]subAsk{teamServerID: {names: map[string]string{subOwner: "Synthetic name"}}}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.storeRosterCurrent(canceled, server, []team.Seat{{ID: subOwner, Name: "Should not be saved"}})
+	if got := h.subAsks[teamServerID].names[subOwner]; got != "Synthetic name" {
+		t.Fatalf("canceled roster changed name: %q", got)
+	}
+	entries := []map[string]any{{"author": subOwner}}
+	if names := h.commentNames(canceled, teamServerID, server, false, "", entries); len(names) != 0 {
+		t.Fatal("canceled request returned names")
+	}
+	ctx, cancelMidflight := context.WithCancel(context.Background())
+	defer cancelMidflight()
+	trigger := &cancelOnSecondCopyCheck{Context: ctx, cancel: cancelMidflight}
+	if names := h.commentNames(trigger, teamServerID, server, false, "", entries); len(names) != 0 || ctx.Err() != context.Canceled {
+		t.Fatal("midflight canceled request returned names")
+	}
+	stale := server
+	stale.Token = strings.Repeat("f", 64)
+	if names := h.commentNames(context.Background(), teamServerID, stale, true, "", entries); len(names) != 0 {
+		t.Fatal("stale server returned names")
+	}
+}
