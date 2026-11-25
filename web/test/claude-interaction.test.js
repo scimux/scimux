@@ -656,6 +656,77 @@ test("manual controls bind cancellation to the dialog epoch and fail closed when
   assert.deepEqual(unmatched.posts[0].body, { request_id: "req-letter", action: "terminal" });
 });
 
+test("same-phase manual refresh preserves answerability", async () => {
+  const view = {
+    ...radioQuestion(), phase: "manual", native_keys: true, dialog_id: "epoch-refresh",
+    native_choices: [{ question_id: "q1", option_id: "q1o1", label: "Alpha" }],
+  };
+  const mounted = mountCard(view);
+  mounted.parent.querySelector(".ci-terminal").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  mounted.card.update(mounted.parent, view, { nodeId: "c1" });
+  const answer = mounted.parent.querySelector(".ci-native-choice");
+  assert.equal(answer.disabled, false, "refreshing controls permanently disabled a still-outstanding question");
+  answer.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(mounted.posts.length, 2);
+  assert.equal(mounted.posts[1].body.action, "native");
+  assert.equal(mounted.posts[1].body.dialog_id, "epoch-refresh");
+});
+
+test("manual terminal refresh does not clear a sent answer hold", async () => {
+  const view = {
+    ...radioQuestion(), phase: "manual", native_keys: true, dialog_id: "epoch-sent-hold",
+    native_choices: [{ question_id: "q1", option_id: "q1o1", label: "Alpha" }],
+  };
+  const mounted = mountCard(view);
+  mounted.parent.querySelector(".ci-native-choice").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  mounted.card.update(mounted.parent, view, { nodeId: "c1" });
+  assert.equal(mounted.parent.querySelector(".ci-native-choice").disabled, true);
+  mounted.parent.querySelector(".ci-terminal").click();
+  await Promise.resolve();
+  await Promise.resolve();
+  mounted.card.update(mounted.parent, view, { nodeId: "c1" });
+  const answer = mounted.parent.querySelector(".ci-native-choice");
+  assert.equal(answer.disabled, true, "terminal refresh released the answer delivery hold");
+  answer.click();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(mounted.posts.length, 2, "held answer was posted again");
+});
+
+test("manual terminal refresh with no question data remains terminal-only", async () => {
+  const view = {
+    ...radioQuestion(), phase: "manual", native_keys: true, dialog_id: "epoch-empty",
+    questions: [],
+  };
+  delete view.native_choices;
+  const mounted = mountCard(view);
+  assert.equal(mounted.parent.querySelectorAll(".ci-q").length, 0);
+  assert.equal(mounted.parent.querySelectorAll(".ci-native-choice").length, 0);
+  assert.equal(mounted.parent.querySelector(".ci-cancel"), null);
+  assert.ok(mounted.parent.querySelector(".ci-terminal"));
+  assert.match(mounted.parent.querySelectorAll(".ci-text").map(n => n.textContent).join(" "), /could not be matched safely/);
+});
+
+test("failed manual terminal refresh does not lock a still-outstanding answer", async () => {
+  const view = {
+    ...radioQuestion(), phase: "manual", native_keys: true, dialog_id: "epoch-refresh-error",
+    native_choices: [{ question_id: "q1", option_id: "q1o1", label: "Alpha" }],
+  };
+  const mounted = mountCard(view, {
+    onPost: async () => { throw Object.assign(new Error("refresh conflict"), { status: 409 }); },
+  });
+  mounted.parent.querySelector(".ci-terminal").click();
+  await settled();
+  mounted.card.update(mounted.parent, view, { nodeId: "c1" });
+  assert.equal(mounted.parent.querySelector(".ci-native-choice").disabled, false);
+});
+
 test("native handoff and a missing interaction keep the native key path", async () => {
   const standing = {
     ...radioQuestion(), phase: "native", native_keys: true, dialog_id: "epoch-1",

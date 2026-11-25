@@ -359,11 +359,15 @@ export function createClaudeInteractionCard(deps){
         body: JSON.stringify(built.body),
       });
       if (!sameFlight(token, view, nodeId)) return;
-      holdId = view.request_id;
-      setStatus("Recorded. Not confirmed by Claude.");
+      if (kind === "terminal"){
+        setStatus("Terminal handoff refreshed.");
+      } else {
+        holdId = view.request_id;
+        setStatus("Recorded. Not confirmed by Claude.");
+      }
     } catch (err) {
       if (!sameFlight(token, view, nodeId)) return;
-      if (err && err.status === 409) holdId = view.request_id;
+      if (kind !== "terminal" && err && err.status === 409) holdId = view.request_id;
       setStatus(err && err.message ? err.message : "The interaction could not be recorded.");
     } finally {
       if (token !== flight) return;
