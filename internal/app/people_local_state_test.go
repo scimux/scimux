@@ -2,12 +2,14 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -348,4 +350,64 @@ func localStateCopyFiles(t *testing.T, copyDir string) map[string][32]byte {
 		t.Fatal(err)
 	}
 	return result
+}
+
+// cancelOnSecondCopyCheck changes a real context to canceled between copy
+// admission and its locked commit check.
+type cancelOnSecondCopyCheck struct {
+	context.Context
+	cancel context.CancelFunc
+	checks int
+}
+
+func (c *cancelOnSecondCopyCheck) Err() error {
+	c.checks++
+	if c.checks == 2 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestPeopleLocalOperationsRecheckMidflightCancellation(t *testing.T) {
+	for _, operation := range []string{"discard", "inventory", "state", "retire", "stage"} {
+		t.Run(operation, func(t *testing.T) {
+			handler, dir := testTeamSurface(t, nil)
+			h := handler.(*teamHandler)
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			instance, err := team.EnsurePeopleCopyInstance(dir, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := "/?copy_instance=" + instance
+			if operation == "discard" || operation == "stage" {
+				path += "&revision=" + strings.Repeat("0", 64)
+			}
+			req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, path, nil), id, "")
+			defer finish()
+			ctx, cancel := context.WithCancel(req.Context())
+			defer cancel()
+			trigger := &cancelOnSecondCopyCheck{Context: ctx, cancel: cancel}
+			req = req.WithContext(trigger)
+			rec := httptest.NewRecorder()
+			switch operation {
+			case "discard":
+				h.discardPeoplePending(rec, req, id, "fedcba9876543210")
+			case "inventory":
+				h.localPeopleInventory(rec, req, id)
+			case "state":
+				h.localPeoplePublicationState(rec, req, id, "fedcba9876543210")
+			case "retire":
+				h.retireAbsentPeople(rec, req, id, "fedcba9876543210")
+			case "stage":
+				h.removePeopleStage(rec, req, id, "0123456789abcdef")
+			}
+			want := "copy_changed"
+			if operation == "stage" {
+				want = "not_active"
+			}
+			if trigger.checks != 2 || rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), want) || ctx.Err() != context.Canceled {
+				t.Fatalf("checks=%d status=%d body=%s cancellation=%v", trigger.checks, rec.Code, rec.Body.String(), ctx.Err())
+			}
+		})
+	}
 }
