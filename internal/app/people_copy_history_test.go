@@ -1092,6 +1092,7 @@ func TestPeopleOldCommentRosterCannotPersistNamesAfterConfigurationChange(t *tes
 		t.Fatalf("setup: %v", err)
 	}
 	old := entries[0]
+	h.subAsks = map[string]subAsk{teamServerID: {names: map[string]string{subOwner: "Synthetic cached name"}, rosterBinding: peopleServerFingerprint(old)}}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, subReadPath()+"/comments", nil), id, "")
 	defer finish()
@@ -1605,9 +1606,14 @@ func TestPeopleRosterAndCommentNamesRespectCancellation(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	server := servers[0]
-	h.subAsks = map[string]subAsk{teamServerID: {names: map[string]string{subOwner: "Synthetic name"}}}
+	h.subAsks = map[string]subAsk{teamServerID: {names: map[string]string{subOwner: "Synthetic name"}, rosterBinding: peopleServerFingerprint(server)}}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
+	emptyHandler, _ := testTeamSurface(t, team.NewClient())
+	empty := emptyHandler.(*teamHandler)
+	if names := empty.commentNames(canceled, teamServerID, team.Entry{}, false, "", nil); len(names) != 0 || empty.subAsks != nil {
+		t.Fatal("canceled request initialized roster state")
+	}
 	h.storeRosterCurrent(canceled, server, []team.Seat{{ID: subOwner, Name: "Should not be saved"}})
 	if got := h.subAsks[teamServerID].names[subOwner]; got != "Synthetic name" {
 		t.Fatalf("canceled roster changed name: %q", got)
@@ -1627,14 +1633,27 @@ func TestPeopleRosterAndCommentNamesRespectCancellation(t *testing.T) {
 	if names := h.commentNames(context.Background(), teamServerID, stale, true, "", entries); len(names) != 0 {
 		t.Fatal("stale server returned names")
 	}
+	if got := h.subAsks[teamServerID].names[subOwner]; got != "Synthetic name" {
+		t.Fatalf("stale server changed cached name: %q", got)
+	}
 }
 
 func TestPeopleRosterRejectsForgottenServerBeforeRequest(t *testing.T) {
-	handler, _ := testTeamSurface(t, team.NewClient())
+	calls := 0
+	client := team.NewClient()
+	client.Transport = teamRoundTrip(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("unexpected synthetic network")
+	})
+	handler, _ := testTeamSurface(t, client)
 	h := handler.(*teamHandler)
+	h.subAsks = make(map[string]subAsk)
 	server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
 	if got := h.askSeats(context.Background(), server); !errors.Is(got.err, team.ErrUnreachable) {
 		t.Fatalf("forgotten server error = %v", got.err)
+	}
+	if calls != 0 {
+		t.Fatalf("forgotten server contacted relay %d times", calls)
 	}
 }
 

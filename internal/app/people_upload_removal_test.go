@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -668,7 +669,7 @@ func TestPeopleUploadRejectsCancellationAtLockedAdmission(t *testing.T) {
 }
 
 func TestPeopleUploadRechecksEachAuthorityBeforeAdmission(t *testing.T) {
-	for _, change := range []string{"damaged subscriptions", "removed subscription", "forgotten server", "ended subscription", "read-only access", "replaced server", "owner replaced", "canceled copy"} {
+	for _, change := range []string{"damaged subscriptions", "removed subscription", "forgotten server", "ended subscription", "read-only access", "replaced server", "owner replaced", "owner ended", "owner server replaced", "canceled copy"} {
 		t.Run(change, func(t *testing.T) {
 			script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "write", 0))}
 			var puts atomic.Int32
@@ -688,9 +689,10 @@ func TestPeopleUploadRechecksEachAuthorityBeforeAdmission(t *testing.T) {
 			readSubList(t, handler)
 			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 			var ownerCurrent atomic.Bool
+			var ownerChecks atomic.Int32
 			ownerCurrent.Store(true)
 			extra := ""
-			if change == "owner replaced" {
+			if change == "owner replaced" || change == "owner ended" || change == "owner server replaced" {
 				subs, err := team.LoadSubs(dir)
 				if err != nil || len(subs) != 1 {
 					t.Fatalf("subs: %v", err)
@@ -701,7 +703,17 @@ func TestPeopleUploadRechecksEachAuthorityBeforeAdmission(t *testing.T) {
 				if err := team.SaveSubs(dir, subs); err != nil {
 					t.Fatal(err)
 				}
-				h.ownerInstance = func(string, string) bool { return ownerCurrent.Load() }
+				h.ownerInstance = func(string, string) bool {
+					ownerChecks.Add(1)
+					if ownerCurrent.Load() {
+						return true
+					}
+					if h.mu.TryLock() {
+						h.mu.Unlock()
+						return false
+					}
+					return true
+				}
 				extra = "&chat_instance=synthetic-owner"
 			}
 			var body bytes.Buffer
@@ -740,18 +752,18 @@ func TestPeopleUploadRechecksEachAuthorityBeforeAdmission(t *testing.T) {
 				err = team.SaveSubs(dir, nil)
 			case "forgotten server":
 				err = team.Remove(dir, teamServerID)
-			case "ended subscription", "read-only access":
+			case "ended subscription", "read-only access", "owner ended":
 				var subs []team.Subscription
 				subs, err = team.LoadSubs(dir)
 				if err == nil {
-					if change == "ended subscription" {
+					if change == "ended subscription" || change == "owner ended" {
 						subs[0].State = "ended"
 					} else {
 						subs[0].Access = "read"
 					}
 					err = team.SaveSubs(dir, subs)
 				}
-			case "replaced server":
+			case "replaced server", "owner server replaced":
 				var entries []team.Entry
 				entries, err = team.Load(dir)
 				if err == nil {
@@ -776,9 +788,66 @@ func TestPeopleUploadRechecksEachAuthorityBeforeAdmission(t *testing.T) {
 				if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || puts.Load() != 0 {
 					t.Fatalf("status=%d body=%s puts=%d", rec.Code, rec.Body.String(), puts.Load())
 				}
+				if change == "owner ended" && ownerChecks.Load() != 1 {
+					t.Fatalf("ended owner was revalidated %d times", ownerChecks.Load())
+				}
+				if change == "owner server replaced" && ownerChecks.Load() != 2 {
+					t.Fatalf("stale server reached locked owner validation: %d checks", ownerChecks.Load())
+				}
+
 			case <-time.After(5 * time.Second):
 				t.Fatal("upload did not finish")
 			}
 		})
+	}
+}
+
+func TestPeopleUploadRejectsRetiredCopyAfterBlobResponse(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "write", 0))}
+	payload := []byte("synthetic file")
+	sum := sha256.Sum256(payload)
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	var h *teamHandler
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hello" {
+			w.Header().Set("Scimux-Blob-Generation", "1")
+			script.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/blobs/") {
+			_, _ = io.Copy(io.Discard, r.Body)
+			h.mu.Lock()
+			h.copyRemovalEpoch[id].epoch++
+			h.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"id":"%s","size":%d}`, hex.EncodeToString(sum[:]), len(payload))
+			return
+		}
+		script.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	handler, dir := testTeamSurface(t, clientFor(srv))
+	h = handler.(*teamHandler)
+	joinLab(t, dir, teamServerID, srv.URL)
+	readSubList(t, handler)
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("files", "synthetic.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation + "/attachments?stage_id=0123456789abcdef"
+	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, path), &body)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") {
+		t.Fatalf("retired upload: %d %s", rec.Code, rec.Body.String())
 	}
 }

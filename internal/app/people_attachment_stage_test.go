@@ -2138,10 +2138,10 @@ func TestPeopleOwnerStageRequiresVerifiedNativeInstance(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := post(""); rec.Code == http.StatusOK || puts != 0 {
+	if rec := post(""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "identity_unavailable") || puts != 0 {
 		t.Fatalf("missing owner identity accepted: %d", rec.Code)
 	}
-	if rec := post("?chat_instance=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); rec.Code == http.StatusOK || puts != 0 {
+	if rec := post("?chat_instance=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "identity_unavailable") || puts != 0 {
 		t.Fatalf("wrong owner identity accepted: %d", rec.Code)
 	}
 	if rec := post("?chat_instance=" + instance); rec.Code != http.StatusOK || puts != 1 {
