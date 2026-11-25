@@ -4991,3 +4991,36 @@ func TestStopKeepsShareWhenOwnerFrontierCannotBeSaved(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnerRefreshCapturesFrontierAndProjectsStartAddress(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := identity.LoadOrCreateInstallation(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := baseSub()
+	sub.Owner = string(inst)
+	sub.Access = "owner"
+	sub.State = "ended"
+	seedSub(t, dir, sub)
+	writeChatLog(t, dir, "local", sub.Chat, 2)
+	mustSaveShare(t, dir, team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2})
+	h := newTeamHandler(dir, fixedTeamClock(), team.NewClient()).(*teamHandler)
+	if _, err := h.commitSubs(string(inst), nil, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	subs, err := team.LoadSubs(dir)
+	if err != nil || len(subs) != 1 || subs[0].OwnerFrontier == nil || subs[0].OwnerFrontier.Record != 1 {
+		t.Fatalf("frontier: %+v, %v", subs, err)
+	}
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	record := team.MirrorRecord{Seq: 1, Key: "start", Author: sub.Owner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"start","scope":"all","time":"synthetic"}`)}
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation
+	result := decodeSubRead(t, doTeam(h, http.MethodGet, path, ""))
+	if len(result.Entries) != 1 || result.Entries[0]["local_segment"] != float64(0) || result.Entries[0]["local_record"] != float64(1) {
+		t.Fatalf("owner start: %+v", result.Entries)
+	}
+}

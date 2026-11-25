@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1625,5 +1626,37 @@ func TestPeopleRosterAndCommentNamesRespectCancellation(t *testing.T) {
 	stale.Token = strings.Repeat("f", 64)
 	if names := h.commentNames(context.Background(), teamServerID, stale, true, "", entries); len(names) != 0 {
 		t.Fatal("stale server returned names")
+	}
+}
+
+func TestPeopleRosterRejectsForgottenServerBeforeRequest(t *testing.T) {
+	handler, _ := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
+	if got := h.askSeats(context.Background(), server); !errors.Is(got.err, team.ErrUnreachable) {
+		t.Fatalf("forgotten server error = %v", got.err)
+	}
+}
+
+func TestPeopleRemovalRejectsCanceledOperation(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	sub := baseSub()
+	sub.State = "ended"
+	seedSub(t, dir, sub)
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, "/", nil), id, "")
+	defer finish()
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.removeSubscription(rec, req, id)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	subs, err := team.LoadSubs(dir)
+	if err != nil || len(subs) != 1 {
+		t.Fatalf("canceled removal changed subscriptions: %v", err)
 	}
 }

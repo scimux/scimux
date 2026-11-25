@@ -1461,6 +1461,78 @@ func TestPeopleFileOnlyPublicationRetainsLegacyFallback(t *testing.T) {
 			t.Fatal("changed access completion retried relay upload")
 		}
 	})
+	for _, mode := range []string{"identity missing", "author changed", "server binding changed", "owner instance changed"} {
+		t.Run(mode, func(t *testing.T) {
+			entries, err := team.Load(dir)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("servers: %v", err)
+			}
+			subs, err := team.LoadSubs(dir)
+			if err != nil || len(subs) != 1 {
+				t.Fatalf("subscriptions: %v", err)
+			}
+			th := h.(*teamHandler)
+			original := subs[0]
+			server := entries[0]
+			requestPath := "/"
+			switch mode {
+			case "identity missing", "author changed":
+				identityPath := filepath.Join(dir, identity.InstallationFile)
+				saved, err := os.ReadFile(identityPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.WriteFile(identityPath, saved, 0600); err != nil {
+						t.Error(err)
+					}
+				})
+				replacement := []byte(`{"v":1,"id":"00000000000000000000000000000000"}`)
+				if mode == "identity missing" {
+					replacement = []byte("invalid")
+				}
+				if err := os.WriteFile(identityPath, replacement, 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "server binding changed":
+				old := server
+				server.Token = strings.Repeat("f", 64)
+				if err := team.Remove(dir, teamServerID); err != nil {
+					t.Fatal(err)
+				}
+				if err := team.Add(dir, server); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					_ = team.Remove(dir, teamServerID)
+					if err := team.Add(dir, old); err != nil {
+						t.Error(err)
+					}
+				})
+			case "owner instance changed":
+				writeChatLog(t, dir, "local", original.Chat, 2)
+				original.Access = "owner"
+				original.OwnerFrontier = &team.OwnerFrontier{Node: "local", Segment: 0, Record: 1}
+				if err := team.SaveSubs(dir, []team.Subscription{original}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := team.SaveSubs(dir, subs); err != nil {
+						t.Error(err)
+					}
+					th.ownerInstance = nil
+				})
+				th.ownerInstance = func(string, string) bool { return true }
+				requestPath = "/?chat_instance=synthetic-owner"
+			}
+			req, finish := th.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, requestPath, nil), copyID, "")
+			defer finish()
+			rec := httptest.NewRecorder()
+			if handled := th.tryPeopleCompletion(rec, req, copyID, original, server, "", 0, "0123456789abcdef", []string{staged.Attachments[0].ID}); !handled || rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "publication_conflict") {
+				t.Fatalf("%s: handled=%v status=%d body=%s", mode, handled, rec.Code, rec.Body.String())
+			}
+		})
+	}
 	changedBody, _ := json.Marshal(map[string]any{"text": "different", "anchor": 0, "key": "0123456789abcdef", "attachments": []string{staged.Attachments[0].ID}})
 	conflict := doTeam(h, http.MethodPost, peopleTestURL(t, dir, path+"/comments"), string(changedBody))
 	if conflict.Code == http.StatusOK || blobPuts.Load() != 2 {
@@ -2196,5 +2268,57 @@ func TestPeopleOwnerNativeUUIDInstanceCanStage(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || puts != 1 {
 		t.Fatalf("valid native UUID was refused: status=%d puts=%d body=%s", rec.Code, puts, rec.Body.String())
+	}
+}
+
+func TestPeopleRetainedAttachmentRechecksCanceledCopy(t *testing.T) {
+	for _, at := range []int{1, 3} {
+		t.Run(fmt.Sprint(at), func(t *testing.T) {
+			handler, dir := testTeamSurface(t, team.NewClient())
+			h := handler.(*teamHandler)
+			server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
+			seedTeam(t, dir, server)
+			sub := baseSub()
+			seedSub(t, dir, sub)
+			id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+			instance, err := team.EnsurePeopleCopyInstance(dir, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := []byte("synthetic retained bytes")
+			sum := sha256.Sum256(data)
+			stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hex.EncodeToString(sum[:]), Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
+			if err := team.SavePeoplePublished(dir, id, 1, stage); err != nil {
+				t.Fatal(err)
+			}
+			req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, "/?copy_instance="+instance, nil), id, "")
+			defer finish()
+			ctx, cancel := context.WithCancel(req.Context())
+			defer cancel()
+			trigger := &cancelOnSecondCopyCheck{Context: ctx, cancel: cancel, cancelAt: at}
+			req = req.WithContext(trigger)
+			rec := httptest.NewRecorder()
+			h.readPeopleAttachment(rec, req, id, 1, stage.ID)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || bytes.Contains(rec.Body.Bytes(), data) || ctx.Err() != context.Canceled {
+				t.Fatalf("checks=%d status=%d body=%s", trigger.checks, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestPeopleCompletionRejectsUnverifiedOwner(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
+	seedTeam(t, dir, server)
+	sub := baseSub()
+	sub.Access = "owner"
+	seedSub(t, dir, sub)
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, "/", nil), id, "")
+	defer finish()
+	rec := httptest.NewRecorder()
+	if handled := h.tryPeopleCompletion(rec, req, id, sub, server, "synthetic", 0, "0123456789abcdef", []string{"fedcba9876543210"}); !handled || rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "identity_unavailable") {
+		t.Fatalf("handled=%v status=%d body=%s", handled, rec.Code, rec.Body.String())
 	}
 }

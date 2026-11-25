@@ -356,13 +356,14 @@ func localStateCopyFiles(t *testing.T, copyDir string) map[string][32]byte {
 // admission and its locked commit check.
 type cancelOnSecondCopyCheck struct {
 	context.Context
-	cancel context.CancelFunc
-	checks int
+	cancel   context.CancelFunc
+	checks   int
+	cancelAt int
 }
 
 func (c *cancelOnSecondCopyCheck) Err() error {
 	c.checks++
-	if c.checks == 2 {
+	if c.checks == c.cancelAt || (c.cancelAt == 0 && c.checks == 2) {
 		c.cancel()
 	}
 	return c.Context.Err()

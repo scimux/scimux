@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -287,5 +289,136 @@ func TestPeoplePublicationStopsAfterAccessChangesDuringAppendReconciliation(t *t
 	}
 	if err := team.DeletePeopleStage(dir, id, stage.ID); err == nil {
 		t.Fatal("pending file lost pin")
+	}
+}
+
+// publicationCancelContext cancels after the named durable boundary is visible.
+// It leaves the actual request context and storage checks intact.
+type publicationCancelContext struct {
+	context.Context
+	cancel   context.CancelFunc
+	dir      string
+	id       team.CopyID
+	boundary string
+}
+
+func (c *publicationCancelContext) Err() error {
+	reached := false
+	switch c.boundary {
+	case "pending":
+		_, err := team.ReadPeoplePending(c.dir, c.id, "fedcba9876543210")
+		reached = err == nil
+	case "history":
+		_, last, err := team.ReadCopy(c.dir, c.id, team.CommentsLog, 0, 1, 4<<20)
+		reached = err == nil && last == 1
+	case "completion":
+		_, err := team.ReadPeopleCompletion(c.dir, c.id, "fedcba9876543210")
+		reached = err == nil
+	}
+	if reached {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestPeoplePublicationCancellationKeepsDurableState(t *testing.T) {
+	for _, boundary := range []string{"pending", "history", "completion"} {
+		t.Run(boundary, func(t *testing.T) { testPeoplePublicationCanceledAtBoundary(t, boundary) })
+	}
+}
+
+func testPeoplePublicationCanceledAtBoundary(t *testing.T, boundary string) {
+	t.Helper()
+	data := []byte("synthetic file")
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+	var puts, posts atomic.Int32
+	var stored json.RawMessage
+	var author string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hello" {
+			w.Header().Set("Scimux-Blob-Generation", "1")
+			fmt.Fprint(w, helloJSON(teamServerID, "Synthetic relay"))
+			return
+		}
+		if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/blobs/") {
+			puts.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"id":"%s","size":%d}`, hash, len(data))
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments") {
+			posts.Add(1)
+			var input struct {
+				Entries []struct {
+					Key  string          `json:"key"`
+					Body json.RawMessage `json:"body"`
+				} `json:"entries"`
+			}
+			if json.NewDecoder(r.Body).Decode(&input) != nil || len(input.Entries) != 1 {
+				t.Error("invalid synthetic append")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			stored = append([]byte(nil), input.Entries[0].Body...)
+			fmt.Fprintf(w, `{"generation":"%s","results":[{"key":"%s","seq":1,"duplicate":false}],"last":1}`, subGen, input.Entries[0].Key)
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"generation": subGen, "entries": []any{map[string]any{"seq": 1, "key": "c/fedcba9876543210", "author": author, "at": "2026-01-01T00:00:00.000Z", "body": stored}}, "last": 1, "more": false})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	handler, dir := testTeamSurface(t, clientFor(srv))
+	h := handler.(*teamHandler)
+	server := labEntry(teamServerID, srv.URL, teamToken)
+	seedTeam(t, dir, server)
+	sub := baseSub()
+	sub.Access = "write"
+	seedSub(t, dir, sub)
+	author = installationOf(t, dir)
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	stage := team.PeopleStage{ID: "0123456789abcdef", Hash: hash, Name: "synthetic.txt", MIME: "text/plain", ConfigHash: peopleServerFingerprint(server), Data: data}
+	if err := team.SavePeopleStage(dir, id, stage); err != nil {
+		t.Fatal(err)
+	}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, "/", nil), id, "")
+	defer finish()
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	trigger := &publicationCancelContext{Context: ctx, cancel: cancel, dir: dir, id: id, boundary: boundary}
+	req = req.WithContext(trigger)
+	rec := httptest.NewRecorder()
+	h.postPeopleFileComment(rec, req, id, sub, server, "synthetic caption", 0, "fedcba9876543210", []string{stage.ID})
+	wantWrites := int32(1)
+	if boundary == "pending" {
+		wantWrites = 0
+	}
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || puts.Load() != wantWrites || posts.Load() != wantWrites {
+		t.Fatalf("status=%d puts=%d posts=%d body=%s", rec.Code, puts.Load(), posts.Load(), rec.Body.String())
+	}
+	if boundary == "history" || boundary == "pending" {
+		pending, err := team.ReadPeoplePending(dir, id, "fedcba9876543210")
+		if err != nil || (boundary != "pending" && !bytes.Equal(pending.Body, stored)) {
+			t.Fatalf("frozen pending changed: %v", err)
+		}
+		if err := team.DeletePeopleStage(dir, id, stage.ID); err == nil {
+			t.Fatal("stage pin was released")
+		}
+		if _, err := team.ReadPeoplePublished(dir, id, 1, stage.ID); err == nil {
+			t.Fatal("canceled completion retained attachment")
+		}
+	} else {
+		completed, err := team.ReadPeopleCompletion(dir, id, "fedcba9876543210")
+		if err != nil || completed.Seq != 1 || !bytes.Equal(completed.Pending.Body, stored) {
+			t.Fatalf("verified completion changed: %v", err)
+		}
+		retained, err := team.ReadPeoplePublished(dir, id, 1, stage.ID)
+		if err != nil || !bytes.Equal(retained.Data, data) {
+			t.Fatalf("verified bytes changed: %v", err)
+		}
 	}
 }

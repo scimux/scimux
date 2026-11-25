@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,8 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/scimux/scimux/internal/team"
 )
@@ -750,6 +753,113 @@ func TestPeoplePublicationRejectsReplacedStageBeforeRelayWrites(t *testing.T) {
 				t.Fatalf("unexpected pending: %v", err)
 			}
 
+		})
+	}
+}
+
+func TestPeoplePublicationRechecksEachAuthorityAfterHello(t *testing.T) {
+	for _, change := range []string{"damaged subscriptions", "removed subscription", "forgotten server", "ended subscription", "read-only access", "replaced server", "owner replaced", "canceled copy"} {
+		t.Run(change, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			var released sync.Once
+			t.Cleanup(func() { released.Do(func() { close(release) }) })
+			var writes atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/hello" {
+					w.Header().Set("Scimux-Blob-Generation", "1")
+					body := helloJSON(teamServerID, "Synthetic relay")
+					_, _ = io.WriteString(w, body[:len(body)-1])
+					w.(http.Flusher).Flush()
+					close(entered)
+					<-release
+					_, _ = io.WriteString(w, body[len(body)-1:])
+					return
+				}
+				writes.Add(1)
+				http.NotFound(w, r)
+			}))
+			defer srv.Close()
+			handler, dir := testTeamSurface(t, clientFor(srv))
+			h := handler.(*teamHandler)
+			server := labEntry(teamServerID, srv.URL, teamToken)
+			seedTeam(t, dir, server)
+			sub := baseSub()
+			sub.Access = "write"
+			var ownerCurrent atomic.Bool
+			ownerCurrent.Store(true)
+			path := "/"
+			if change == "owner replaced" {
+				writeChatLog(t, dir, "local", sub.Chat, 2)
+				sub.Access = "owner"
+				sub.OwnerFrontier = &team.OwnerFrontier{Node: "local", Segment: 0, Record: 1}
+				h.ownerInstance = func(string, string) bool { return ownerCurrent.Load() }
+				path = "/?chat_instance=synthetic-owner"
+			}
+			seedSub(t, dir, sub)
+			id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+			req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, path, nil), id, "")
+			defer finish()
+			ctx, cancel := context.WithCancel(req.Context())
+			defer cancel()
+			if change == "canceled copy" {
+				req = req.WithContext(&cancelAtCopyLookup{Context: ctx, cancel: cancel, target: 1})
+			} else {
+				req = req.WithContext(ctx)
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				rec := httptest.NewRecorder()
+				h.postPeopleFileComment(rec, req, id, sub, server, "synthetic", 0, "0123456789abcdef", []string{"fedcba9876543210"})
+				done <- rec
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("hello boundary not reached")
+			}
+			var err error
+			h.mu.Lock()
+			switch change {
+			case "damaged subscriptions":
+				err = os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("damaged synthetic subscriptions"), 0600)
+			case "removed subscription":
+				err = team.SaveSubs(dir, nil)
+			case "forgotten server":
+				err = team.Remove(dir, teamServerID)
+			case "ended subscription", "read-only access":
+				var subs []team.Subscription
+				subs, err = team.LoadSubs(dir)
+				if err == nil {
+					if change == "ended subscription" {
+						subs[0].State = "ended"
+					} else {
+						subs[0].Access = "read"
+					}
+					err = team.SaveSubs(dir, subs)
+				}
+			case "replaced server":
+				err = team.Remove(dir, teamServerID)
+				if err == nil {
+					next := server
+					next.Token = strings.Repeat("f", 64)
+					err = team.Add(dir, next)
+				}
+			case "owner replaced":
+				ownerCurrent.Store(false)
+			}
+			h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			released.Do(func() { close(release) })
+			select {
+			case rec := <-done:
+				if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "attachments_unavailable") || writes.Load() != 0 {
+					t.Fatalf("status=%d body=%s writes=%d", rec.Code, rec.Body.String(), writes.Load())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("publication did not finish")
+			}
 		})
 	}
 }

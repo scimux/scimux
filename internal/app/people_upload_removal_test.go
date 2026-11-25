@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -597,5 +598,187 @@ func TestPeopleRemovedStageCannotBeResurrectedByOldUpload(t *testing.T) {
 	}
 	if _, err := team.ReadPeopleStage(dir, id, stage.ID); err == nil {
 		t.Fatalf("old upload restored a removed stage: status %d", rec.Code)
+	}
+}
+
+// cancelAtCopyLookup cancels a real request context at a selected copy check.
+type cancelAtCopyLookup struct {
+	context.Context
+	cancel  context.CancelFunc
+	lookups atomic.Int32
+	target  int32
+}
+
+func (c *cancelAtCopyLookup) Value(key any) any {
+	if _, ok := key.(peopleCopyOperationKey); ok {
+		c.lookups.Add(1)
+	}
+	return c.Context.Value(key)
+}
+func (c *cancelAtCopyLookup) Err() error {
+	if c.lookups.Load() >= c.target {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestPeopleUploadRejectsCancellationAtLockedAdmission(t *testing.T) {
+	script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "write", 0))}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/hello" {
+			w.Header().Set("Scimux-Blob-Generation", "1")
+		}
+		script.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	handler, dir := testTeamSurface(t, clientFor(srv))
+	h := handler.(*teamHandler)
+	joinLab(t, dir, teamServerID, srv.URL)
+	readSubList(t, handler)
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("files", "synthetic.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("synthetic bytes")); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation + "/attachments?stage_id=0123456789abcdef"
+	req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, path), &body)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	req, finish := h.beginPeopleCopyOperation(req, id, "0123456789abcdef")
+	defer finish()
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	trigger := &cancelAtCopyLookup{Context: ctx, cancel: cancel, target: 4}
+	req = req.WithContext(trigger)
+	rec := httptest.NewRecorder()
+	h.stagePeopleAttachment(rec, req, id)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || ctx.Err() != context.Canceled {
+		t.Fatalf("lookups=%d status=%d body=%s", trigger.lookups.Load(), rec.Code, rec.Body.String())
+	}
+	if _, err := team.ReadPeopleStage(dir, id, "0123456789abcdef"); err == nil {
+		t.Fatal("canceled admission created stage")
+	}
+}
+
+func TestPeopleUploadRechecksEachAuthorityBeforeAdmission(t *testing.T) {
+	for _, change := range []string{"damaged subscriptions", "removed subscription", "forgotten server", "ended subscription", "read-only access", "replaced server", "owner replaced", "canceled copy"} {
+		t.Run(change, func(t *testing.T) {
+			script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic chat", subGen, "write", 0))}
+			var puts atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/hello" {
+					w.Header().Set("Scimux-Blob-Generation", "1")
+				}
+				if r.Method == http.MethodPut {
+					puts.Add(1)
+				}
+				script.ServeHTTP(w, r)
+			}))
+			defer srv.Close()
+			handler, dir := testTeamSurface(t, clientFor(srv))
+			h := handler.(*teamHandler)
+			joinLab(t, dir, teamServerID, srv.URL)
+			readSubList(t, handler)
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			var ownerCurrent atomic.Bool
+			ownerCurrent.Store(true)
+			extra := ""
+			if change == "owner replaced" {
+				subs, err := team.LoadSubs(dir)
+				if err != nil || len(subs) != 1 {
+					t.Fatalf("subs: %v", err)
+				}
+				writeChatLog(t, dir, "local", id.Chat, 2)
+				subs[0].Access = "owner"
+				subs[0].OwnerFrontier = &team.OwnerFrontier{Node: "local", Segment: 0, Record: 1}
+				if err := team.SaveSubs(dir, subs); err != nil {
+					t.Fatal(err)
+				}
+				h.ownerInstance = func(string, string) bool { return ownerCurrent.Load() }
+				extra = "&chat_instance=synthetic-owner"
+			}
+			var body bytes.Buffer
+			form := multipart.NewWriter(&body)
+			part, err := form.CreateFormFile("files", "synthetic.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := part.Write([]byte("synthetic bytes")); err != nil {
+				t.Fatal(err)
+			}
+			if err := form.Close(); err != nil {
+				t.Fatal(err)
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			var released sync.Once
+			t.Cleanup(func() { released.Do(func() { close(release) }) })
+			base := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation + "/attachments?stage_id=0123456789abcdef" + extra
+			req := httptest.NewRequest(http.MethodPost, peopleTestURL(t, dir, base), &heldUploadBody{data: bytes.NewReader(body.Bytes()), entered: entered, release: release})
+			req.Header.Set("Content-Type", form.FormDataContentType())
+			ctx, cancel := context.WithCancel(req.Context())
+			defer cancel()
+			req = req.WithContext(ctx)
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { rec := httptest.NewRecorder(); handler.ServeHTTP(rec, req); done <- rec }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("body boundary not reached")
+			}
+			h.mu.Lock()
+			switch change {
+			case "damaged subscriptions":
+				err = os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("damaged synthetic subscriptions"), 0600)
+			case "removed subscription":
+				err = team.SaveSubs(dir, nil)
+			case "forgotten server":
+				err = team.Remove(dir, teamServerID)
+			case "ended subscription", "read-only access":
+				var subs []team.Subscription
+				subs, err = team.LoadSubs(dir)
+				if err == nil {
+					if change == "ended subscription" {
+						subs[0].State = "ended"
+					} else {
+						subs[0].Access = "read"
+					}
+					err = team.SaveSubs(dir, subs)
+				}
+			case "replaced server":
+				var entries []team.Entry
+				entries, err = team.Load(dir)
+				if err == nil {
+					err = team.Remove(dir, teamServerID)
+				}
+				if err == nil {
+					entries[0].Token = strings.Repeat("f", 64)
+					err = team.Add(dir, entries[0])
+				}
+			case "owner replaced":
+				ownerCurrent.Store(false)
+			case "canceled copy":
+				cancel()
+			}
+			h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			released.Do(func() { close(release) })
+			select {
+			case rec := <-done:
+				if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || puts.Load() != 0 {
+					t.Fatalf("status=%d body=%s puts=%d", rec.Code, rec.Body.String(), puts.Load())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("upload did not finish")
+			}
+		})
 	}
 }
