@@ -182,6 +182,10 @@ func (s *Server) Close() error {
 	return closeErr
 }
 
+// proxyContinueTimeout is how long Proxy waits for the muxer's 100 Continue
+// before sending a request body anyway.
+const proxyContinueTimeout = 30 * time.Second
+
 // Client is a versioned caller and HTTP proxy for one Link.
 type Client struct {
 	link      Link
@@ -199,6 +203,9 @@ func NewClient(link Link) (*Client, error) {
 	}
 	tr := &http.Transport{
 		DisableCompression: true,
+		// Proxy asks the muxer to admit a body before sending it. The muxer
+		// always answers, so this only bounds a peer that never does.
+		ExpectContinueTimeout: proxyContinueTimeout,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", link.Socket)
@@ -327,6 +334,12 @@ func (c *Client) Proxy() http.Handler {
 		req.RequestURI = ""
 		req.Header = incoming.Header.Clone()
 		removeHopHeaders(req.Header)
+		if incoming.ContentLength != 0 {
+			// A muxer that refuses before reading the body closes the
+			// connection. Sending the body anyway races that close, and a
+			// lost race would turn the refusal into a 502.
+			req.Header.Set("Expect", "100-continue")
+		}
 		c.authorize(req)
 		resp, err := c.http.Do(req)
 		if err != nil {

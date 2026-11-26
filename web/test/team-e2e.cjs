@@ -2217,8 +2217,8 @@ async function peoplePermissionMidBody(mode,ownerSeat,readerSeat) {
     await Promise.race([reached,delay(15000).then(()=>{throw Error('upload body read not reached')})]);
     if(forwardFailure)throw forwardFailure;
     assertID('people-midbody-admitted-'+mode,forwarded===1&&continued===1&&firstBytes>0);
-    // A direct muxer 100 is emitted by Go's server on the first Body.Read;
-    // unlike frontend Continue, it follows the real attachment admission path.
+    // A direct muxer 100 is emitted by Go's server on the first Body.Read,
+    // which the attachment handler reaches only after admission.
     assertID('people-midbody-muxer-body-read-'+mode,continued===1&&firstBytes>0&&firstBytes<heldBody.length);
     if(process.env.SCIMUX_E2E_MIDBODY_PROBE==='failure')throw Error('synthetic midbody cleanup failure');
     if(process.env.SCIMUX_E2E_MIDBODY_PROBE==='signal') {
@@ -2252,7 +2252,7 @@ async function peoplePermissionMidBody(mode,ownerSeat,readerSeat) {
       negativeRequest.on('error',reject);negativeRequest.flushHeaders();
     });
     manifest['people-midbody-negative-'+mode]={frontContinue,frontBytes,frontStatus,refusedContinue,refusedStatus};
-    assertID('people-midbody-frontend-continue-not-admission-'+mode,frontContinue===1&&frontBytes>0&&frontBytes<heldBody.length&&frontStatus===403&&refusedContinue===0);
+    assertID('people-midbody-frontend-refused-before-body-'+mode,frontContinue===0&&frontBytes===0&&frontStatus===403&&refusedContinue===0);
     const failed=page.waitForResponse(response=>response.request().method()==='POST'&&new URL(response.url()).pathname===base+'/attachments',{timeout:30000});release();heldReleases.delete(release);const response=await failed;
     assertID('people-midbody-rejected-'+mode,response.status()===409);
     const refusal=await response.json();assertID('people-midbody-not-active-'+mode,refusal?.error==='not_active');

@@ -12,15 +12,15 @@ const {verifyLocalBudget}=require('./testdata/team-e2e/verify-local-budget.cjs')
 function evidence() {
   const manifest={assertions:[]};
   for (const mode of ['desktop','phone']) {
-    for (const prefix of ['people-midbody-muxer-body-read-','people-midbody-refused-before-body-','people-midbody-frontend-continue-not-admission-','people-local-budget-refusal-','people-local-budget-preserved-','people-local-budget-explicit-retry-','people-local-budget-zero-agent-']) manifest.assertions.push({id:prefix+mode,result:'pass'});
-    manifest['people-midbody-permission-'+mode]={muxerContinue:1,refusedContinue:0,refusedStatus:403,frontContinue:1,frontBytes:1024,frontStatus:403};
+    for (const prefix of ['people-midbody-muxer-body-read-','people-midbody-refused-before-body-','people-midbody-frontend-refused-before-body-','people-local-budget-refusal-','people-local-budget-preserved-','people-local-budget-explicit-retry-','people-local-budget-zero-agent-']) manifest.assertions.push({id:prefix+mode,result:'pass'});
+    manifest['people-midbody-permission-'+mode]={muxerContinue:1,refusedContinue:0,refusedStatus:403,frontContinue:0,frontBytes:0,frontStatus:403};
     manifest['people-local-budget-'+mode]={status:507,code:'storage_full',commentCount:1};
   }
   return manifest;
 }
-test('midbody witness requires backend admission and refused frontend negative evidence',()=>{
+test('midbody witness requires backend admission and a frontend refusal before body',()=>{
   const manifest=evidence();verifyMidbodyWitness(manifest);
-  for(const mutate of [m=>delete m.assertions,m=>{m.assertions=m.assertions.filter(x=>x.id!=='people-midbody-muxer-body-read-desktop')},m=>{m['people-midbody-permission-desktop'].muxerContinue=0},m=>{m['people-midbody-permission-phone'].refusedContinue=1},m=>{m['people-midbody-permission-phone'].frontBytes=0},m=>{m['people-midbody-permission-phone'].frontStatus=200}]) {
+  for(const mutate of [m=>delete m.assertions,m=>{m.assertions=m.assertions.filter(x=>x.id!=='people-midbody-muxer-body-read-desktop')},m=>{m['people-midbody-permission-desktop'].muxerContinue=0},m=>{m['people-midbody-permission-phone'].refusedContinue=1},m=>{m['people-midbody-permission-phone'].frontContinue=1},m=>{m['people-midbody-permission-phone'].frontBytes=1024},m=>{m['people-midbody-permission-phone'].frontStatus=502}]) {
     const copy=structuredClone(manifest);mutate(copy);
     assert.throws(()=>verifyMidbodyWitness(copy));
   }
