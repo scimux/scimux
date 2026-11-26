@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -18,8 +19,9 @@ import (
 var errClaudeWorkerConflict = errors.New("claude session worker: state conflict")
 
 type preparedClaudeAnswer struct {
-	dialogID string
-	keys     []string
+	dialogID   string
+	keys       []string
+	standingID string
 }
 
 // claudeSessionHarness puts the existing one-node Claude controller behind
@@ -297,6 +299,12 @@ func (h *claudeSessionHarness) Interrupt(context.Context) (sessionworker.ActionE
 	return sessionworker.ActionEvidence{Evidence: "interrupt: " + lastLines(cap, 12), Keys: []string{"Escape"}}, nil
 }
 
+// claudeNativePreparePause and claudeNativeQuestionAfterValidation are nil in
+// production. Tests use them to exercise state and pane changes between the
+// initial permission snapshot and the standing-question checks.
+var claudeNativePreparePause func(*Node)
+var claudeNativeQuestionAfterValidation func(*Node)
+
 func (h *claudeSessionHarness) PreparePermission(_ context.Context, decision sessionworker.PermissionDecision) (sessionworker.PreparedPermission, error) {
 	n := h.node()
 	if n == nil {
@@ -325,9 +333,46 @@ func (h *claudeSessionHarness) PreparePermission(_ context.Context, decision ses
 		return sessionworker.PreparedPermission{}, fmt.Errorf("refusing keypress without pane evidence (capture failed): %w", err)
 	}
 	keys := tmuxKeySequence(n, decision.Key)
+	if pause := claudeNativePreparePause; pause != nil {
+		pause(n)
+	}
+	standingID := ""
+	if st, ok := standingVisibleForSession(h.app.claudeHookBundle(n), n.SessionID); ok && st.Status == standingOutstanding {
+		bundle := h.app.claudeHookBundle(n)
+		if st.SentKey != "" || standingStructuredDecisionPending(bundle, st.ID) || (st.Manual && st.ManualEpoch != dlg.DialogID) {
+			return sessionworker.PreparedPermission{}, errClaudeWorkerConflict
+		}
+		if !dlg.Question {
+			// This epoch is classified as a permission dialog, not the standing
+			// AskUserQuestion. Preserve its ordinary native controls without
+			// attributing their key to the standing question.
+		} else if err := h.validateStandingDialog(n, st, dlg); err == nil {
+			if pause := claudeNativeQuestionAfterValidation; pause != nil {
+				pause(n)
+			}
+			options = h.app.claudeDialogOptions(n, dlg)
+			_, choices, block := matchStandingMenu(st.Questions, options)
+			if block != "" {
+				return sessionworker.PreparedPermission{}, errClaudeWorkerConflict
+			}
+			questionKey := false
+			for _, choice := range choices {
+				if choice.Key == decision.Key {
+					questionKey = true
+					break
+				}
+			}
+			if !questionKey {
+				return sessionworker.PreparedPermission{}, errClaudeWorkerConflict
+			}
+			standingID = st.ID
+		} else if st.Manual || standingMenuMatchesLabels(st.Questions, options) {
+			return sessionworker.PreparedPermission{}, errClaudeWorkerConflict
+		}
+	}
 	token := newWorkerInstanceID()
 	h.answerMu.Lock()
-	h.answers[token] = preparedClaudeAnswer{dialogID: dlg.DialogID, keys: keys}
+	h.answers[token] = preparedClaudeAnswer{dialogID: dlg.DialogID, keys: keys, standingID: standingID}
 	h.answerMu.Unlock()
 	return sessionworker.PreparedPermission{Token: token, Evidence: lastLines(cap, 12), Keys: keys}, nil
 }
@@ -364,7 +409,11 @@ func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string
 			return errClaudeWorkerConflict
 		}
 	}
-	if err := h.sendPreparedNativeKeys(n, prepared.keys); err != nil {
+	if prepared.standingID != "" {
+		if err := h.deliverManualStandingKey(n, prepared); err != nil {
+			return err
+		}
+	} else if err := h.sendPreparedNativeKeys(n, prepared.keys); err != nil {
 		return err
 	}
 	h.app.retireClaudeVisibleDialog(n, prepared.dialogID)
@@ -374,6 +423,68 @@ func (h *claudeSessionHarness) DeliverPermission(_ context.Context, token string
 	delete(h.app.attnAt, n.ID)
 	h.app.mu.Unlock()
 	h.app.persistAttentionTransition(n, prev, "")
+	return nil
+}
+
+func (h *claudeSessionHarness) deliverManualStandingKey(n *Node, prepared preparedClaudeAnswer) error {
+	standingDeliveryMu.Lock()
+	defer standingDeliveryMu.Unlock()
+	bundle := h.app.claudeHookBundle(n)
+	unlock, err := lockStandingFence(bundle)
+	if err != nil {
+		return errClaudeWorkerConflict
+	}
+	defer unlock()
+	st, ok := readStandingQuestion(bundle, prepared.standingID)
+	if !ok || st.Status != standingOutstanding || st.SentKey != "" || standingStructuredDecisionPending(bundle, st.ID) || (st.Manual && st.ManualEpoch != prepared.dialogID) {
+		return errClaudeWorkerConflict
+	}
+	dlg := h.app.claudeVisibleDialog(n)
+	if dlg.DialogID != prepared.dialogID {
+		return errClaudeWorkerConflict
+	}
+	if err := h.validateStandingDialog(n, st, dlg); err != nil {
+		return errClaudeWorkerConflict
+	}
+	if pause := standingManualAfterValidation; pause != nil {
+		pause(n)
+	}
+	options := h.app.claudeDialogOptions(n, dlg)
+	_, choices, block := matchStandingMenu(st.Questions, options)
+	if block != "" {
+		return errClaudeWorkerConflict
+	}
+	key := ""
+	for _, choice := range choices {
+		if reflect.DeepEqual(tmuxKeySequence(n, choice.Key), prepared.keys) {
+			key = choice.Key
+			break
+		}
+	}
+	if key == "" {
+		return errClaudeWorkerConflict
+	}
+	st.SentEpoch = prepared.dialogID
+	st.SentKey = key
+	st.Delivery = "unconfirmed"
+	path, err := interactionChild(bundle, "standing", st.ID+".json")
+	if err != nil || writeClaudePermFile(path, st) != nil {
+		return fmt.Errorf("%w: could not persist no-replay fence", errInteractionIO)
+	}
+	if err := markInteractionExpired(bundle, st.ID); err != nil {
+		return fmt.Errorf("%w: could not fence structured helper", errInteractionIO)
+	}
+	if err := h.app.server.Session(n.ID).SendKeys(prepared.keys...); err != nil {
+		return fmt.Errorf("%w: %v", errInteractionIO, err)
+	}
+	if pause := standingNativeAfterSend; pause != nil {
+		pause()
+	}
+	st.Delivery = "sent"
+	if err := writeClaudePermFile(path, st); err != nil {
+		return fmt.Errorf("%w: key was sent, but persisting the standing record failed", errInteractionIO)
+	}
+	h.app.retireClaudeVisibleDialog(n, prepared.dialogID)
 	return nil
 }
 

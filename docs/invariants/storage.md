@@ -241,10 +241,19 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   training dataset.
   - Ordinary disarmed Claude tool calls keep digest-only permission evidence.
     A pending human question or plan may hold its original bounded payload
-    transiently until the helper deadline. After that deadline the owning
-    worker removes the raw request and response copies, including answered,
-    canceled, handed-off, and uncertain ones, and leaves a request-specific
-    replay fence. Marked helpers that exit early release ownership and their
+    transiently until the helper deadline. An unanswered `AskUserQuestion`
+    also has a normalized private standing record so its question can remain
+    visible after raw payload retirement; the record is settled by matching
+    transcript evidence or an explicit session lifecycle boundary. This
+    side store has a fixed 256-record, 8 MiB per-bundle cap and removes only
+    resolved records when admitting a new question. After the
+    helper deadline the owning worker removes the raw request and response
+    copies, including answered, canceled, handed-off, and uncertain ones, and
+    leaves request-specific replay fences. A native or manually controlled
+    key writes an unconfirmed fence before delivery; a failed or ambiguous
+    send remains non-retryable across terminal handoff and fresh notification
+    epochs. Manual controls are bound to the current dialog epoch captured at
+    handoff. Marked helpers that exit early release ownership and their
     payloads through the same recovery path. The durable manual decision is a
     bounded append-only exception on the existing decision record: request
     identity, reviewed content and its digest, the human's selections or

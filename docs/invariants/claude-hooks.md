@@ -278,6 +278,47 @@ field in the settings document before serialization, never a JSON byte patch.
 Immutable capability manifests are cached with file-identity checks; enabled
 bundles still check that the baked executable remains usable.
 
+An unanswered `AskUserQuestion` outlives all of those helper clocks. Its
+normalized question record remains under the private hook bundle after the raw
+request is retired, and matching asked-notice evidence is retained past the
+ordinary four-hour leak backstop. The 135-second answer cutoff only transfers
+authority from the structured helper to the current native dialog; it never
+removes the chat card or its question attention. The poller still snapshots
+the current pane and never infers a dialog from quietness.
+
+Native submission rechecks the session binding, current notification epoch,
+visible prompt text, and numbered option labels while holding the interaction
+fence. Immediately before a key can be sent, scimux records a durable
+no-replay marker and an unconfirmed delivery state. That marker prevents a
+helper that is still alive between 135 and 150 seconds from emitting a
+structured answer too. A successful `SendKeys` changes the audit to `sent`,
+not consumed; an I/O error or process crash stays unconfirmed. A new
+notification epoch cannot replay an answer for the same request. When a
+structured answer file or claim already exists, native delivery refuses it.
+
+The current native bridge can answer one visible single-select question when
+its exact question text and option labels match the retained request. AX
+dialog headers and quote-prefixed prompt lines are normalized against the
+retained header and prompt; numbered answer rows must still match, with only
+the native `Other` and `Chat about this` suffix rows allowed. A terminal
+handoff validates the current dialog and records its epoch. Existing key
+controls can then answer the question once: the worker persists an unconfirmed
+no-replay marker before sending, and stale or fresh notification epochs cannot
+authorize another key. The standing question remains visible and in attention
+until transcript or lifecycle evidence settles it. The
+standing side store is capped at 256 records and 8 MiB per hook bundle;
+admission collects only already-resolved records and refuses growth when the
+remaining records are still outstanding or damaged. It does not expose
+multi-select or free-text `Other` through the native bridge. The card's
+terminal handoff is an audited UI handoff only: it sends no key, keeps the
+standing question and attention, and enables the existing epoch-bound native
+controls only for the dialog validated at handoff. It does not convert a sent
+or uncertain answer into a retry. The
+Notification hook still has no PermissionRequest id, so the visible epoch is
+not proof of exact request identity; question text and choices are additional
+guards, not a replacement for such an upstream identity. Those cases remain
+manual in the terminal and are a known limitation of this implementation.
+
 Cancellation polling scans current requests and minimal cancellation fences,
 not the historical acknowledgement directory. Payload retirement also removes
 the claim. Small request-specific replay fences remain for the bundle's lifetime

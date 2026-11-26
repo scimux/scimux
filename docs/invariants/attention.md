@@ -48,10 +48,13 @@ node never raises inspect from quietness, AX, owing or transcript faults.
   even though Claude writes it with role `user`; it clears Owing/pending and
   releases the next-prompt gate.
 - A current worker-owned structured Claude interaction is a narrow attention
-  source of kind `question` while its phase is pending or claimed, including
-  while an auto-approve lease is armed. The owning worker releases it after
-  the helper deadline, so a dead helper does not leave the question in
-  attention. It does not change mechanical
+  source of kind `question` while its phase is pending, claimed, or recorded, including
+  while an auto-approve lease is armed. A standing `AskUserQuestion` keeps
+  question attention through helper expiry and native delivery; only
+  transcript evidence or an explicit session lifecycle boundary settles it.
+  Manual handoff, recorded structured answers, and sent or uncertain native
+  keys stay visible and in attention; sent or uncertain keys are never
+  replayed, including after a new notification epoch. It does not change mechanical
   liveness, does not authorize pane-text attention, and does not apply to
   legacy or unsupported sessions. Those keep the existing policy.
   Stopping or failing hooks are not required to clear it.

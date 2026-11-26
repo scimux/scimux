@@ -1076,10 +1076,12 @@ func (a *app) tmuxChatInto(resp map[string]any, n *Node, seg sessionlog.Segment)
 		if view, ok := a.claudeInteractionView(n); ok {
 			claudeInteraction = view
 			claudeInteractionOwned = true
-			// The chat poll can race ahead of the supervisor. A pending or
-			// claimed interaction is attention even when the stored attn map
-			// still names the visible permission dialog.
-			if !view.NativeKeys && interactionNeedsAttention(view.Phase) {
+			// The chat poll can race ahead of the supervisor. A pending,
+			// claimed, or still-outstanding question is attention even when
+			// native keys are allowed and even when the stored attn map
+			// still names the visible permission dialog. Handoff is not
+			// outstanding and does not force question attention.
+			if interactionNeedsAttention(view.Phase) {
 				attn = "question"
 			}
 		}

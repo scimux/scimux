@@ -28,6 +28,7 @@ func interactionDirs() []string {
 		"perm/interact/interrupted",
 		"perm/interact/waiter",
 		"perm/interact/cancel",
+		"perm/interact/standing",
 	}
 }
 

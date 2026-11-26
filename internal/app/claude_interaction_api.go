@@ -48,7 +48,7 @@ func (a *app) handleClaudeInteraction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch action.Action {
-	case "answer", "discuss", "approve", "request_changes", "cancel", "terminal":
+	case "answer", "discuss", "approve", "request_changes", "cancel", "terminal", "native":
 	default:
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return

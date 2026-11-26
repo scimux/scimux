@@ -698,6 +698,7 @@ body.cards-open #msgs { overflow: hidden; }
 #keyrow .ci-card .ci-status { color: var(--dim); font-size: 12px; }
 #keyrow .ci-card .ci-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 #keyrow .ci-card .ci-action { font: inherit; }
+#keyrow .ci-card .ci-native-choice { font: inherit; text-align: left; }
 #keyrow .ci-card textarea { font: inherit; width: 100%; }
 
 /* Share control in the chat header. The later rule wins over the 34px

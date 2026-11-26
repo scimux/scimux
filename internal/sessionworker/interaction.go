@@ -31,16 +31,29 @@ type InteractionOwner interface {
 // InteractionView is the public projection of one owned manual interaction.
 // It carries no filesystem path, raw hook document, or permission update.
 type InteractionView struct {
-	RequestID   string                  `json:"request_id"`
-	Phase       string                  `json:"phase"`
-	Tool        string                  `json:"tool"`
-	Digest      string                  `json:"digest,omitempty"`
-	AnswerUntil string                  `json:"answer_until,omitempty"`
-	Questions   []InteractionQuestion   `json:"questions,omitempty"`
-	Plan        string                  `json:"plan,omitempty"`
-	Modes       []InteractionModeChoice `json:"modes,omitempty"`
-	Delivery    string                  `json:"delivery,omitempty"`
-	NativeKeys  bool                    `json:"native_keys"`
+	RequestID     string                    `json:"request_id"`
+	Phase         string                    `json:"phase"`
+	Tool          string                    `json:"tool"`
+	Digest        string                    `json:"digest,omitempty"`
+	AnswerUntil   string                    `json:"answer_until,omitempty"`
+	Questions     []InteractionQuestion     `json:"questions,omitempty"`
+	Plan          string                    `json:"plan,omitempty"`
+	Modes         []InteractionModeChoice   `json:"modes,omitempty"`
+	Delivery      string                    `json:"delivery,omitempty"`
+	NativeKeys    bool                      `json:"native_keys"`
+	DialogID      string                    `json:"dialog_id,omitempty"`
+	NativeChoices []InteractionNativeChoice `json:"native_choices,omitempty"`
+	Block         string                    `json:"block,omitempty"`
+	Status        string                    `json:"status,omitempty"`
+}
+
+// InteractionNativeChoice is one server-resolved key for the current menu.
+// The browser posts the option id. It does not choose the key number.
+type InteractionNativeChoice struct {
+	QuestionID string `json:"question_id"`
+	OptionID   string `json:"option_id"`
+	Key        string `json:"key"`
+	Label      string `json:"label"`
 }
 
 // InteractionQuestion is one server-assigned question. IDs are stable for the
@@ -75,6 +88,7 @@ type InteractionAction struct {
 	Answers   []InteractionSelection `json:"answers,omitempty"`
 	Feedback  string                 `json:"feedback,omitempty"`
 	Mode      string                 `json:"mode,omitempty"`
+	DialogID  string                 `json:"dialog_id,omitempty"`
 }
 
 // InteractionSelection names server-issued question and option ids. Free text

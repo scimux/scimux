@@ -46,6 +46,7 @@ var claudeInteractionSubdirs = []string{
 	filepath.Join("perm", "interact", "interrupted"),
 	filepath.Join("perm", "interact", "waiter"),
 	filepath.Join("perm", "interact", "cancel"),
+	filepath.Join("perm", "interact", "standing"),
 }
 
 type claudeInteractionCaller struct {
@@ -607,6 +608,11 @@ func publishInteractionRequest(dir string, ev claudePermissionEvent, id string, 
 	active := filepath.Join(dir, "perm", "interact", "active.json")
 	if err := exclWrite(active, []byte(`{"id":"`+id+`"}`)); err != nil {
 		return fmt.Errorf("%w: active", errInteractionIO)
+	}
+	if err := writeStandingQuestion(dir, rec, model); err != nil {
+		_ = os.Remove(reqPath)
+		removeInteractionActive(dir, id)
+		return err
 	}
 	return nil
 }

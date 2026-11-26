@@ -137,6 +137,13 @@ func readClaudeAskedFiles(perm string, now time.Time) []askedFile {
 		}
 		at, err := time.Parse(time.RFC3339Nano, note.At)
 		if err != nil || now.Sub(at) > claudeAskedTTL {
+			// Age is a leak backstop. An outstanding AskUserQuestion is not a
+			// leak: the native dialog can still be on screen after the helper
+			// and this TTL have both elapsed. Other tools keep the deletion.
+			if err == nil && claudeAskedHeldByStanding(perm, note) {
+				out = append(out, askedFile{path: p, note: note, at: at})
+				continue
+			}
 			_ = os.Remove(p)
 			continue
 		}
@@ -173,7 +180,10 @@ func retireOldestAskedNotice(perm string, before, now time.Time) bool {
 	files := readClaudeAskedFiles(perm, now)
 	for i := len(files) - 1; i >= 0; i-- { // oldest first
 		if files[i].at.Before(before) {
-			return os.Remove(files[i].path) == nil
+			if os.Remove(files[i].path) == nil {
+				noteStandingExternal(perm, files[i].note)
+				return true
+			}
 		}
 	}
 	return false
@@ -353,6 +363,7 @@ func retireAskedByToolEvidence(perm string, seen []toolEvidence, now time.Time) 
 				continue // the ask is newer than its supposed proof
 			}
 			if os.Remove(f.path) == nil {
+				noteStandingExternal(perm, f.note)
 				used[i] = true
 				retired++
 			}
