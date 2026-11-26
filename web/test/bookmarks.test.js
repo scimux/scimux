@@ -699,7 +699,6 @@ function createFeature(overrides = {}){
     storage,
     setTimeout: setTimeoutFn,
     clearTimeout: clearTimeoutFn,
-    CSS: { escape: s => s },
     esc: s => String(s ?? "").replace(/[<>&"]/g, c => ({
       "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;",
     }[c])),
@@ -816,6 +815,49 @@ test("openBookmark opens the matching lane and expands that bookmark", () => {
   assert.match(ctx.roots.bookmarklist.innerHTML, /class="actionbar/);
   assert.equal(ctx.feature.openBookmark("missing"), false);
 });
+
+for (const t of [
+  "plain", 'quote"', "backslash\\", 'backslash\\"quote',
+  '", .other, [data-t="', "line\nreturn\rtab\tform\ffeed", "control\u0001\u007f", "雪🔖",
+]){
+  test(`bookmark navigation treats ${JSON.stringify(t)} as a literal key`, () => {
+    const ctx = createFeature({ bookmarks: [{ t, text: "saved" }] });
+    const target = el("div", { className: "bookmark", dataset: { t } });
+    const decoy = el("div", { className: "bookmark", dataset: { t: t + "-other" } });
+    const actions = el("div", { className: "actionbar" });
+    const decoyActions = el("div", { className: "actionbar" });
+    target.querySelector = selector => selector === ".actionbar" ? actions : null;
+    decoy.querySelector = selector => selector === ".actionbar" ? decoyActions : null;
+    // Supply parsed DOM rows directly: the fixture's HTML parser does not
+    // decode attribute entities or implement CSS string escaping.
+    ctx.roots.bookmarklist.querySelectorAll = selector => {
+      assert.equal(selector, ".bookmark");
+      return [decoy, target];
+    };
+    ctx.roots.bookmarklist.querySelector = () => assert.fail("bookmark keys must not enter selectors");
+    const querySelector = ctx.document.querySelector;
+    ctx.document.querySelector = selector => {
+      assert.equal(selector.includes("data-t="), false);
+      return querySelector.call(ctx.document, selector);
+    };
+
+    assert.equal(ctx.feature.openBookmark(t), true);
+    ctx.flush(0);
+    assert.equal(target.classList.contains("jump-target"), true);
+    assert.equal(target._scrolled, true);
+    assert.equal(decoy._scrolled, undefined);
+    ctx.flush(1400);
+    assert.equal(target.classList.contains("jump-target"), false);
+
+    ctx.feature.bind();
+    ctx.roots.bookmarkspane.dispatch("click", { target }); // fold
+    assert.equal(actions._scrolled, undefined);
+    ctx.roots.bookmarkspane.dispatch("click", { target }); // unfold after render
+    assert.equal(actions._scrolled, true);
+    assert.equal(decoyActions._scrolled, undefined);
+    ctx.feature.destroy();
+  });
+}
 
 test("openChoiceList reuses the destination sheet and returns the selected row", () => {
   const ctx = createFeature();

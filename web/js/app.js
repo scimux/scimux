@@ -1039,7 +1039,6 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
     storage: store,
     setTimeout,
     clearTimeout,
-    CSS,
     esc,
     md,
     fmtWhen,
