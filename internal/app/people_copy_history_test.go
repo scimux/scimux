@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -871,106 +872,6 @@ func TestPeopleOldServerHistoryCannotPopulateCurrentCopy(t *testing.T) {
 	}
 }
 
-func TestPeopleDisabledGateCannotCommitHeldHistory(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/hello" {
-			_, _ = fmt.Fprint(w, helloJSON(teamServerID, "Synthetic"))
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/comments") {
-			close(entered)
-			<-release
-			_, _ = fmt.Fprint(w, subPage(subGen, 1, false, subRecord(1, `{"v":1,"t":"comment","text":"synthetic","anchor":0}`)))
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	handler, dir := testTeamSurface(t, clientFor(srv))
-	h := handler.(*teamHandler)
-	joinLab(t, dir, teamServerID, srv.URL)
-	seedSub(t, dir, baseSub())
-	var enabled atomic.Bool
-	enabled.Store(true)
-	h.peopleEnabled = enabled.Load
-	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodGet, subReadPath()+"/comments", "") }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("history not reached")
-	}
-	enabled.Store(false)
-	once.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("disabled gate response=%d", rec.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("history did not finish")
-	}
-	records, _, err := team.ReadCopy(dir, id, team.CommentsLog, 0, 10, 4<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 0 {
-		t.Fatal("disabled gate committed history")
-	}
-}
-
-func TestPeopleDisabledGateCannotReturnHeldOfflineHistory(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/hello" {
-			_, _ = fmt.Fprint(w, helloJSON(teamServerID, "Synthetic"))
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/comments") {
-			close(entered)
-			<-release
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	handler, dir := testTeamSurface(t, clientFor(srv))
-	h := handler.(*teamHandler)
-	joinLab(t, dir, teamServerID, srv.URL)
-	seedSub(t, dir, baseSub())
-	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{{Seq: 1, Key: "c/1111111111111111", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: []byte(`{"v":1,"t":"comment","text":"saved synthetic","anchor":0}`)}}); err != nil {
-		t.Fatal(err)
-	}
-	var enabled atomic.Bool
-	enabled.Store(true)
-	h.peopleEnabled = enabled.Load
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodGet, subReadPath()+"/comments", "") }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("history not reached")
-	}
-	enabled.Store(false)
-	once.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "saved synthetic") {
-			t.Fatalf("disabled gate returned retained history: status=%d", rec.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("history did not finish")
-	}
-}
-
 func TestPeopleHeldOfflineHistoryReportsDamagedCurrentSubscriptionStore(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -1018,278 +919,6 @@ func TestPeopleHeldOfflineHistoryReportsDamagedCurrentSubscriptionStore(t *testi
 	records, _, err := team.ReadCopy(dir, id, team.CommentsLog, 0, 256, 4<<20)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("damaged subscription metadata changed retained history: %v", err)
-	}
-}
-
-func TestPeopleDisabledGateCannotCommitHeldSeen(t *testing.T) {
-	handler, dir := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	seedSub(t, dir, baseSub())
-	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
-	if err := team.AppendCopy(dir, id, team.CommentsLog, []team.MirrorRecord{{Seq: 1, Key: "c/1111111111111111", Author: subOwner, At: "2026-11-14T09:30:00.000Z", Body: []byte(`{"v":1,"t":"comment","text":"synthetic","anchor":0}`)}}); err != nil {
-		t.Fatal(err)
-	}
-	var enabled atomic.Bool
-	enabled.Store(true)
-	h.peopleEnabled = enabled.Load
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	body := &heldLegacySeenBody{entered: entered, release: release, body: strings.NewReader(`{"comments":1}`)}
-	req := httptest.NewRequest(http.MethodPut, subReadPath()+"/seen", body)
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { rec := httptest.NewRecorder(); h.ServeHTTP(rec, req); done <- rec }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("seen body not reached")
-	}
-	enabled.Store(false)
-	once.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("disabled seen status=%d", rec.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("seen did not finish")
-	}
-	subs, err := team.LoadSubs(dir)
-	if err != nil || len(subs) != 1 || subs[0].SeenComments != 0 {
-		t.Fatalf("disabled gate changed read position: %v", err)
-	}
-}
-
-func TestPeopleDisabledGateCannotRetireSubscriptionsFromHeldResponse(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/hello" {
-			_, _ = fmt.Fprint(w, helloJSON(teamServerID, "Synthetic"))
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/comments") {
-			close(entered)
-			<-release
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	handler, dir := testTeamSurface(t, clientFor(srv))
-	h := handler.(*teamHandler)
-	joinLab(t, dir, teamServerID, srv.URL)
-	first := baseSub()
-	second := first
-	second.Owner = subOwnerB
-	second.Chat = subChatB
-	if err := team.SaveSubs(dir, []team.Subscription{first, second}); err != nil {
-		t.Fatal(err)
-	}
-	var enabled atomic.Bool
-	enabled.Store(true)
-	h.peopleEnabled = enabled.Load
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodGet, subReadPath()+"/comments", "") }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("history not reached")
-	}
-	enabled.Store(false)
-	once.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("disabled response=%d", rec.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("history did not finish")
-	}
-	subs, err := team.LoadSubs(dir)
-	if err != nil || len(subs) != 2 {
-		t.Fatalf("subscriptions unavailable: %v", err)
-	}
-	for _, sub := range subs {
-		if sub.State != "live" {
-			t.Fatal("disabled gate retired subscription")
-		}
-	}
-}
-
-func TestPeopleDisabledGateCannotRemoveCopyFromHeldResponse(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/hello" {
-			_, _ = fmt.Fprint(w, helloJSON(teamServerID, "Synthetic"))
-			return
-		}
-		if strings.HasSuffix(r.URL.Path, "/membership") && r.Method == http.MethodDelete {
-			close(entered)
-			<-release
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(srv.Close)
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	handler, dir := testTeamSurface(t, clientFor(srv))
-	h := handler.(*teamHandler)
-	joinLab(t, dir, teamServerID, srv.URL)
-	sub := baseSub()
-	sub.Access = "write"
-	sub.State = "live"
-	seedSub(t, dir, sub)
-	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
-	instance, err := team.EnsurePeopleCopyInstance(dir, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var enabled atomic.Bool
-	enabled.Store(true)
-	h.peopleEnabled = enabled.Load
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodDelete, subReadPath()+"?copy_instance="+instance, "") }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("removal not reached")
-	}
-	enabled.Store(false)
-	once.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("disabled removal status=%d", rec.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("removal did not finish")
-	}
-	got, err := team.ReadPeopleCopyInstance(dir, id)
-	if err != nil || got != instance {
-		t.Fatalf("disabled gate deleted copy: %v", err)
-	}
-}
-
-func TestPeopleDisabledGateCannotCommitSubscriptionPoll(t *testing.T) {
-	handler, dir := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	h.subAsks = make(map[string]subAsk)
-	joinLab(t, dir, teamServerID, "http://127.0.0.1:1")
-	seedSub(t, dir, baseSub())
-	entries, err := team.Load(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("setup: %v", err)
-	}
-	h.peopleEnabled = func() bool { return false }
-	_, err = h.commitSubs("", []subOutcome{{entry: entries[0], delivery: "refused"}}, nil, time.Now())
-	if err == nil {
-		t.Fatal("disabled gate accepted poll commit")
-	}
-	subs, err := team.LoadSubs(dir)
-	if err != nil || len(subs) != 1 || subs[0].State != "live" {
-		t.Fatalf("disabled gate changed subscription: %v", err)
-	}
-}
-
-func TestPeopleDisabledGateCannotPlanRosterPoll(t *testing.T) {
-	handler, dir := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	h.subAsks = make(map[string]subAsk)
-	joinLab(t, dir, teamServerID, "http://127.0.0.1:1")
-	seedSub(t, dir, baseSub())
-	entries, err := team.Load(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("setup: %v", err)
-	}
-	h.peopleEnabled = func() bool { return false }
-	due := h.planSeats("", []subOutcome{{entry: entries[0], delivery: "ok", channels: []team.Channel{{Owner: subOwner, Chat: subChat, Generation: subGen, Access: "write"}}}}, time.Now())
-	if len(due) != 0 || len(h.subAsks) != 0 {
-		t.Fatal("disabled gate scheduled roster work")
-	}
-}
-
-func TestPeopleDisabledGateCannotStartRosterRequest(t *testing.T) {
-	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		_, _ = fmt.Fprint(w, seatsOf(subOwner, "synthetic"))
-	}))
-	t.Cleanup(srv.Close)
-	handler, dir := testTeamSurface(t, clientFor(srv))
-	h := handler.(*teamHandler)
-	h.subAsks = make(map[string]subAsk)
-	joinLab(t, dir, teamServerID, srv.URL)
-	entries, err := team.Load(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("setup: %v", err)
-	}
-	h.peopleEnabled = func() bool { return false }
-	h.askSeats(context.Background(), entries[0])
-	if requests.Load() != 0 || len(h.subAsks) != 0 {
-		t.Fatal("disabled gate initiated roster work")
-	}
-}
-
-func TestPeopleDisabledGateCannotCommitHeldRoster(t *testing.T) {
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(entered)
-		<-release
-		_, _ = fmt.Fprint(w, seatsOf(subOwner, "synthetic"))
-	}))
-	t.Cleanup(srv.Close)
-	t.Cleanup(func() { once.Do(func() { close(release) }) })
-	handler, dir := testTeamSurface(t, clientFor(srv))
-	h := handler.(*teamHandler)
-	h.subAsks = make(map[string]subAsk)
-	joinLab(t, dir, teamServerID, srv.URL)
-	entries, err := team.Load(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("setup: %v", err)
-	}
-	var enabled atomic.Bool
-	enabled.Store(true)
-	h.peopleEnabled = enabled.Load
-	done := make(chan struct{})
-	go func() { h.askSeats(context.Background(), entries[0]); close(done) }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("roster not reached")
-	}
-	enabled.Store(false)
-	once.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("roster did not finish")
-	}
-	h.mu.Lock()
-	name := h.subAsks[teamServerID].names[subOwner]
-	h.mu.Unlock()
-	if name != "" {
-		t.Fatal("disabled gate committed roster")
-	}
-}
-
-func TestPeopleDisabledGateCannotPersistCommentNames(t *testing.T) {
-	handler, dir := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	h.subAsks = make(map[string]subAsk)
-	h.storeRoster(teamServerID, []team.Seat{{ID: subOwner, Name: "synthetic"}})
-	h.peopleEnabled = func() bool { return false }
-	names := h.commentNames(context.Background(), teamServerID, team.Entry{}, false, "", []map[string]any{{"author": subOwner}})
-	if len(names) != 0 {
-		t.Fatal("disabled gate returned comment names")
-	}
-	if _, err := os.Stat(filepath.Join(dir, team.PeopleFile)); !os.IsNotExist(err) {
-		t.Fatal("disabled gate wrote people metadata")
 	}
 }
 
@@ -1463,6 +1092,7 @@ func TestPeopleOldCommentRosterCannotPersistNamesAfterConfigurationChange(t *tes
 		t.Fatalf("setup: %v", err)
 	}
 	old := entries[0]
+	h.subAsks = map[string]subAsk{teamServerID: {names: map[string]string{subOwner: "Synthetic cached name"}, rosterBinding: peopleServerFingerprint(old)}}
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, subReadPath()+"/comments", nil), id, "")
 	defer finish()
@@ -1598,120 +1228,6 @@ func TestPeopleLegacyMirrorReadPreservesEndedHistoryWithoutFileCapability(t *tes
 	}
 	if got, err := team.ReadPeopleCopyInstance(dir, id); err != nil || got != instance {
 		t.Fatalf("copy identity changed: %v", err)
-	}
-}
-
-func TestPeopleEndedHistoryReadCannotRestoreRemovedCopyAfterGateWait(t *testing.T) {
-	handler, dir := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	sub := baseSub()
-	sub.State = "ended"
-	seedSub(t, dir, sub)
-	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
-	if _, err := team.EnsurePeopleCopyInstance(dir, id); err != nil {
-		t.Fatal(err)
-	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var held atomic.Bool
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if held.CompareAndSwap(false, true) {
-			close(entered)
-			<-release
-		}
-		return true
-	}
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodGet, subReadPath(), "") }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("history gate not reached")
-	}
-	if rec := doTeam(h, http.MethodDelete, subReadPath(), ""); rec.Code != http.StatusNoContent {
-		t.Fatalf("copy removal status=%d", rec.Code)
-	}
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("retired read status=%d", rec.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("retired read did not finish")
-	}
-	copyDir := filepath.Join(dir, team.CopiesDir, id.Server, id.Owner, id.Chat, id.Generation)
-	if _, err := os.Stat(copyDir); !os.IsNotExist(err) {
-		t.Fatalf("retired read restored copy: %v", err)
-	}
-	if subs, err := team.LoadSubs(dir); err != nil || len(subs) != 0 {
-		t.Fatalf("retired read restored subscription: %+v err=%v", subs, err)
-	}
-}
-
-func TestPeopleHistoryCleanupPreservesUnrelatedCopy(t *testing.T) {
-	handler, dir := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	first := baseSub()
-	first.State = "ended"
-	second := first
-	second.Owner, second.Chat = subOwnerB, subChatB
-	if err := team.SaveSubs(dir, []team.Subscription{first, second}); err != nil {
-		t.Fatal(err)
-	}
-	id := team.CopyID{Server: first.Server, Owner: first.Owner, Chat: first.Chat, Generation: first.Generation}
-	otherID := team.CopyID{Server: second.Server, Owner: second.Owner, Chat: second.Chat, Generation: second.Generation}
-	if _, err := team.EnsurePeopleCopyInstance(dir, id); err != nil {
-		t.Fatal(err)
-	}
-	otherInstance, err := team.EnsurePeopleCopyInstance(dir, otherID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var held atomic.Bool
-	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		if held.CompareAndSwap(false, true) {
-			close(entered)
-			<-release
-		}
-		return true
-	}
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() { done <- doTeam(h, http.MethodGet, subReadPath(), "") }()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("history gate not reached")
-	}
-	h.mu.Lock()
-	err = team.SaveSubs(dir, []team.Subscription{second})
-	h.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	releaseOnce.Do(func() { close(release) })
-	select {
-	case rec := <-done:
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("removed copy status=%d", rec.Code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("history did not finish")
-	}
-	if _, err := team.ReadPeopleCopyInstance(dir, id); err == nil {
-		t.Fatal("removed copy was restored")
-	}
-	got, err := team.ReadPeopleCopyInstance(dir, otherID)
-	if err != nil || got != otherInstance {
-		t.Fatalf("unrelated identity changed: %v", err)
-	}
-	subs, err := team.LoadSubs(dir)
-	if err != nil || len(subs) != 1 || !reflect.DeepEqual(subs[0], second) {
-		t.Fatalf("unrelated subscription changed: %+v err=%v", subs, err)
 	}
 }
 
@@ -2078,5 +1594,88 @@ func TestPeopleRosterCannotAdoptRetiredOperationWithoutContextCancellation(t *te
 	}
 	if names := h.commentNames(req.Context(), teamServerID, server, false, "", []map[string]any{{"author": subOwner}}); len(names) != 0 {
 		t.Fatal("retired operation returned current roster names")
+	}
+}
+
+func TestPeopleRosterAndCommentNamesRespectCancellation(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	joinLab(t, dir, teamServerID, "http://127.0.0.1:1")
+	servers, err := team.Load(dir)
+	if err != nil || len(servers) != 1 {
+		t.Fatalf("setup: %v", err)
+	}
+	server := servers[0]
+	h.subAsks = map[string]subAsk{teamServerID: {names: map[string]string{subOwner: "Synthetic name"}, rosterBinding: peopleServerFingerprint(server)}}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	emptyHandler, _ := testTeamSurface(t, team.NewClient())
+	empty := emptyHandler.(*teamHandler)
+	if names := empty.commentNames(canceled, teamServerID, team.Entry{}, false, "", nil); len(names) != 0 || empty.subAsks != nil {
+		t.Fatal("canceled request initialized roster state")
+	}
+	h.storeRosterCurrent(canceled, server, []team.Seat{{ID: subOwner, Name: "Should not be saved"}})
+	if got := h.subAsks[teamServerID].names[subOwner]; got != "Synthetic name" {
+		t.Fatalf("canceled roster changed name: %q", got)
+	}
+	entries := []map[string]any{{"author": subOwner}}
+	if names := h.commentNames(canceled, teamServerID, server, false, "", entries); len(names) != 0 {
+		t.Fatal("canceled request returned names")
+	}
+	ctx, cancelMidflight := context.WithCancel(context.Background())
+	defer cancelMidflight()
+	trigger := &cancelOnSecondCopyCheck{Context: ctx, cancel: cancelMidflight}
+	if names := h.commentNames(trigger, teamServerID, server, false, "", entries); len(names) != 0 || ctx.Err() != context.Canceled {
+		t.Fatal("midflight canceled request returned names")
+	}
+	stale := server
+	stale.Token = strings.Repeat("f", 64)
+	if names := h.commentNames(context.Background(), teamServerID, stale, true, "", entries); len(names) != 0 {
+		t.Fatal("stale server returned names")
+	}
+	if got := h.subAsks[teamServerID].names[subOwner]; got != "Synthetic name" {
+		t.Fatalf("stale server changed cached name: %q", got)
+	}
+}
+
+func TestPeopleRosterRejectsForgottenServerBeforeRequest(t *testing.T) {
+	calls := 0
+	client := team.NewClient()
+	client.Transport = teamRoundTrip(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("unexpected synthetic network")
+	})
+	handler, _ := testTeamSurface(t, client)
+	h := handler.(*teamHandler)
+	h.subAsks = make(map[string]subAsk)
+	server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
+	if got := h.askSeats(context.Background(), server); !errors.Is(got.err, team.ErrUnreachable) {
+		t.Fatalf("forgotten server error = %v", got.err)
+	}
+	if calls != 0 {
+		t.Fatalf("forgotten server contacted relay %d times", calls)
+	}
+}
+
+func TestPeopleRemovalRejectsCanceledOperation(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	sub := baseSub()
+	sub.State = "ended"
+	seedSub(t, dir, sub)
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodDelete, "/", nil), id, "")
+	defer finish()
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.removeSubscription(rec, req, id)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	subs, err := team.LoadSubs(dir)
+	if err != nil || len(subs) != 1 {
+		t.Fatalf("canceled removal changed subscriptions: %v", err)
 	}
 }

@@ -9,10 +9,6 @@ import (
 )
 
 func (h *teamHandler) localPeopleInventory(w http.ResponseWriter, r *http.Request, id team.CopyID) {
-	if !h.peopleFilesEnabled() {
-		writeTeamError(w, http.StatusConflict, "not_active")
-		return
-	}
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil || len(query["cursor"]) > 1 || len(query["copy_instance"]) != 1 || len(query) > 2 || (len(query) == 2 && len(query["cursor"]) != 1) {
 		writeTeamError(w, http.StatusBadRequest, "invalid_inventory_query")
@@ -33,7 +29,7 @@ func (h *teamHandler) localPeopleInventory(w http.ResponseWriter, r *http.Reques
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.peopleFilesEnabled() || !peopleCopyCurrentLocked(r) {
+	if !peopleCopyCurrentLocked(r) {
 		writeTeamError(w, http.StatusConflict, "copy_changed")
 		return
 	}

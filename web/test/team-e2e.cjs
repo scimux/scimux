@@ -2367,7 +2367,6 @@ async function oldRelayFiles(mode) {
     const relayURL='http://127.0.0.1:'+proxy.address().port,owner=await makeSeat('old-owner-'+mode),reader=await makeSeat('old-reader-'+mode);
     owner.node=await node(owner,'codex','Old relay owner '+mode,'Synthetic old relay owner');reader.node=await node(reader,'codex','Old relay reader '+mode,'Synthetic old relay reader');
     for(const seat of [owner,reader]) {
-      await seat.api('/api/settings','PUT',{experimental_feature_team:true});
       const issue=JSON.parse(execFileSync(legacyRelayBin,['-state-dir',old.dir,'-url',relayURL,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
       await seat.api('/api/team/servers','POST',{link:issue.link,name:'Synthetic old relay'});seat.serverID=(await seat.api('/api/team/servers')).servers[0].id;seat.self=(await seat.api('/api/team/servers/'+seat.serverID+'/seats')).self;
     }
@@ -2719,7 +2718,6 @@ async function recipientLeaveStale(mode,ownerSeat,readerSeat) {
 }
 async function recipientLeaveEmpty(mode,ownerSeat) {
   const seat=await makeSeat('empty-'+mode);
-  await seat.api('/api/settings','PUT',{experimental_feature_team:true});
   const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
   await seat.api('/api/team/servers','POST',{link:issue.link,name:'empty '+mode});
   seat.serverID=(await seat.api('/api/team/servers')).servers[0].id;seat.self=(await seat.api('/api/team/servers/'+seat.serverID+'/seats')).self;
@@ -3231,10 +3229,9 @@ async function run() {
   const s=mode==='desktop'?a:b;
   const p=await pageFor(s,mode,'activation-'+mode);await open(p,s.node.id);
   await p.waitForFunction(()=>document.querySelector('#msgs').innerText.includes('Synthetic response'));
-  assertID('team-off-icon-hidden-'+mode,!(await p.locator('#sharebtn').isVisible()));
-  await s.api('/api/settings','PUT',{experimental_feature_team:true});
+  assertID('no-server-icon-hidden-'+mode,!(await p.locator('#sharebtn').isVisible()));
   const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));
-  await p.locator('#burger').click();await p.locator('#m_sharing summary').click();await p.locator('#m_team_add').click();
+  await p.locator('#burger').click();await p.locator('#m_sharing').waitFor({state:'visible',timeout:15000});assertID('sharing-menu-before-join-'+mode,await p.locator('#m_sharing').isVisible());await p.locator('#m_sharing summary').click();await p.locator('#m_team_add').click();
   await p.locator('#m_team_link').fill(issue.link);await p.locator('#m_team_name').fill('Same sharer');
   const joined=p.waitForResponse(resp=>resp.request().method()==='POST'&&resp.url().endsWith('/api/team/servers')&&resp.status()===201,{timeout:30000});
   await p.locator('#m_team_join').click();await joined;await p.locator('#m_team_form').waitFor({state:'hidden',timeout:30000});
@@ -3248,7 +3245,7 @@ async function run() {
   await p.locator('#prompt').click({trial:true});await screenshot(p,'activation-'+mode+'.png');
  }
  if(selected==='ui-join')return;
- for(const s of selected==='default'?[r,observer]:seats){await s.api('/api/settings','PUT',{experimental_feature_team:true});const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));await s.api('/api/team/servers','POST',{link:issue.link,name:selected==='received-offline'&&s===a?'Synthetic sharer':s.name});}
+ for(const s of selected==='default'?[r,observer]:seats){const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));await s.api('/api/team/servers','POST',{link:issue.link,name:selected==='received-offline'&&s===a?'Synthetic sharer':s.name});}
  for(const s of seats){s.serverID=(await s.api('/api/team/servers')).servers[0].id;s.self=(await s.api('/api/team/servers/'+s.serverID+'/seats')).self;}
  for(const s of [a,b])await s.api('/api/team/shares/'+s.node.id,'PUT',{server:s.serverID,scope:'all',members:[{seat:r.self,access:'write'},...(s===b?[{seat:observer.self,access:'write'}]:[])]});
  if(selected==='people-source-cancel'){for(const mode of ['desktop','phone'])await peopleSourceCancellation(mode,a,r);return;}
@@ -3515,11 +3512,11 @@ async function run() {
    });
    await Promise.race([oldReady,delay(20000).then(()=>{throw Error('no real held mirror response');})]);
    const off=rp.waitForResponse(x=>x.url().endsWith('/api/team/subscriptions')&&x.status()===404,{timeout:20000});
-   await r.api('/api/settings','PUT',{experimental_feature_team:false});await off;
+   await rp.route('**/api/team/**', route=>route.fulfill({status:404,contentType:'application/json',body:'{\"error\":\"not_found\"}'}));await off;
    await rp.waitForFunction(()=>document.querySelector('#prompt').getAttribute('contenteditable')!=='true');
    assertID('recovery-disabled-draft-'+mode,(await rp.locator('#prompt').innerText())===recoveryDraft);
    const on=rp.waitForResponse(x=>x.url().endsWith('/api/team/subscriptions')&&x.status()===200,{timeout:20000});
-   await r.api('/api/settings','PUT',{experimental_feature_team:true});await on;
+   await rp.unroute('**/api/team/**');await on;
    await rp.locator('#prompt[contenteditable=true]').waitFor({timeout:15000});
    await until(()=>reads>=2,15000,'replacement mirror read');
    releaseOld();await delay(6200);
@@ -3534,7 +3531,7 @@ async function run() {
    await rp.locator('#prompt').click({trial:true});
    manifest.counters['recovery-'+mode]={before:counterBefore,after:Object.fromEntries(seats.map(s=>[s.name,counts(s)])),offlineFailedRequests:failedRequests,heldReads:2};
    for(const s of seats)assert.deepEqual(counts(s),counterBefore[s.name]);
-  } finally {releaseOld();releaseNew();heldReleases.delete(releaseOld);heldReleases.delete(releaseNew);await rp.unroute('**/api/team/subscriptions/*/*/*/*?after=*');}
+  } finally {releaseOld();releaseNew();heldReleases.delete(releaseOld);heldReleases.delete(releaseNew);await rp.unroute('**/api/team/**');await rp.unroute('**/api/team/subscriptions/*/*/*/*?after=*');}
   await screenshot(op,'owner-'+mode+'.png');await screenshot(rp,'recipient-'+mode+'.png');
  }
  for(const s of seats)assert.deepEqual(counts(s),before[s.name],s.name+' counters unchanged by comments');

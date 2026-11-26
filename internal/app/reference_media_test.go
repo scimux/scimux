@@ -52,7 +52,6 @@ func TestReferenceMediaTeamCaptureUsesExactRetainedAssociation(t *testing.T) {
 	joinLab(t, dir, teamServerID, srv.URL)
 	readSubList(t, h)
 	a := newTestApp(t, &fakeTmux{})
-	a.teamDataDir = dir
 	a.teamHandler = h
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	var raster bytes.Buffer
@@ -109,7 +108,7 @@ func TestReferenceMediaTeamSourceValidationAndUnavailableRetention(t *testing.T)
 	h, dir := testTeamSurface(t, team.NewClient())
 	seedSub(t, dir, baseSub())
 	a := newTestApp(t, &fakeTmux{})
-	a.teamHandler, a.teamDataDir = h, dir
+	a.teamHandler = h
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	attachment := peopleAttachmentDescriptor{ID: "0123456789abcdef", SHA256: strings.Repeat("a", 64), Size: 1, Name: "synthetic.png", MIME: "image/png"}
 	body, err := json.Marshal(map[string]any{"v": 1, "t": "comment", "text": "Synthetic\n" + peopleAttachmentNotice, "content_text": "Synthetic", "anchor": 0, "people_attachments_version": 1, "people_attachments": []peopleAttachmentDescriptor{attachment}})
@@ -163,7 +162,7 @@ func TestReferenceMediaTeamCaptureRejectsUnusableHistoryAndDamagedSubscriptions(
 	h, dir := testTeamSurface(t, team.NewClient())
 	seedSub(t, dir, baseSub())
 	a := newTestApp(t, &fakeTmux{})
-	a.teamHandler, a.teamDataDir = h, dir
+	a.teamHandler = h
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	for i, body := range []string{`{"v":2,"t":"comment","text":"synthetic","anchor":0}`, `{"v":1,"t":"comment","text":"synthetic text","anchor":0}`} {
 		record := team.MirrorRecord{Seq: uint64(i + 1), Key: fmt.Sprintf("c/%016x", i+1), Author: strings.Repeat("b", 32), At: "2026-01-01T00:00:00.000Z", Body: json.RawMessage(body)}
@@ -216,7 +215,7 @@ func TestReferenceMediaTeamCaptureDoesNotTreatOtherFilesAsRasters(t *testing.T) 
 	h, dir := testTeamSurface(t, team.NewClient())
 	seedSub(t, dir, baseSub())
 	a := newTestApp(t, &fakeTmux{})
-	a.teamHandler, a.teamDataDir = h, dir
+	a.teamHandler = h
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	var pngBytes bytes.Buffer
 	if err := png.Encode(&pngBytes, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {

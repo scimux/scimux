@@ -1789,7 +1789,7 @@ func TestShareRoutesMatchTheSettingsBoundary(t *testing.T) {
 		c.Transport = srv.Client().Transport
 		return c
 	}
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	if cmd.application == nil || cmd.application.teamHandler == nil {
 		t.Fatal("muxer did not install the team handler")
 	}

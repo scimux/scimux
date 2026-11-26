@@ -19,8 +19,8 @@ import (
 
 const maxTeamJoinBody = 4 << 10
 
-// teamHandler serves the experimental team routes. mu is held only around
-// reads and writes of the server file.
+// teamHandler serves team routes in the muxer. Other processes do not install
+// it. mu is held only around reads and writes of the server file.
 type teamHandler struct {
 	dataDir string
 	now     func() time.Time
@@ -51,8 +51,6 @@ type teamHandler struct {
 	copyRemovalEpoch map[team.CopyID]*peopleCopyRemovalEpoch
 	// ownerInstance checks the current native node through the owning app.
 	ownerInstance func(nodeID, instance string) bool
-	// peopleEnabled checks the live feature gate for in-flight file work.
-	peopleEnabled func() bool
 	// Stage storage defaults to the managed team store; tests may inject failures.
 	stageRead func(string, team.CopyID, string) (team.PeopleStage, error)
 	stageSave func(string, team.CopyID, team.PeopleStage) error

@@ -314,41 +314,6 @@ func assertNoSubsFile(t *testing.T, dir string) {
 	}
 }
 
-func TestSubListGateOffDoesNothing(t *testing.T) {
-	var hits int
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		hits++
-	}))
-	t.Cleanup(srv.Close)
-	orig := newTeamClient
-	t.Cleanup(func() { newTeamClient = orig })
-	newTeamClient = func() *team.Client {
-		c := orig()
-		c.Transport = srv.Client().Transport
-		return c
-	}
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	h, err := newCoreMux(cmd.application)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, method := range []string{http.MethodGet, http.MethodPut} {
-		unknown := recordedText(h, method, "/api/not-a-route")
-		got := recordedText(h, method, "/api/team/subscriptions")
-		if got != unknown {
-			t.Fatalf("%s subscriptions\n%s\nwant the unknown-route response\n%s", method, got, unknown)
-		}
-	}
-	assertNoTeamFile(t, data)
-	assertNoSubsFile(t, data)
-	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("copies stat = %v", err)
-	}
-	if hits != 0 {
-		t.Fatalf("gate off contacted a server %d times", hits)
-	}
-}
-
 func TestSubListOtherMethodsDoNothing(t *testing.T) {
 	h, dir := testTeamSurface(t, team.NewClient())
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
@@ -1891,7 +1856,7 @@ func TestSubReadReplacedGenerationSaveFailure(t *testing.T) {
 }
 
 func TestSubSeenRequiresCSRF(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	seedSub(t, data, baseSub())
 	core, err := newCoreMux(cmd.application)
 	if err != nil {
@@ -2707,7 +2672,7 @@ func TestSubRemoveRejectsUnknownAndMalformedIdentities(t *testing.T) {
 }
 
 func TestSubRemoveRequiresCSRF(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	seedSub(t, data, baseSub())
 	core, err := newCoreMux(cmd.application)
 	if err != nil {
@@ -2893,22 +2858,6 @@ func TestSubRemoveNetworkCallsHoldNoHandlerLock(t *testing.T) {
 	}
 	if earlyAuth.Load() {
 		t.Error("hello carried authorization")
-	}
-}
-
-func TestSubRemoveGateOffDoesNothing(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	core, err := newCoreMux(cmd.application)
-	if err != nil {
-		t.Fatal("cannot create core mux")
-	}
-	if got, want := recordedText(core, http.MethodDelete, subReadPath()), recordedText(core, http.MethodDelete, "/api/not-a-route"); got != want {
-		t.Error("gate-off route did not match the unknown route")
-	}
-	assertNoTeamFile(t, data)
-	assertNoSubsFile(t, data)
-	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
-		t.Error("gate-off route touched copies")
 	}
 }
 
@@ -3709,7 +3658,7 @@ func TestSubCommentPostValidationAndInactive(t *testing.T) {
 }
 
 func TestSubCommentPostRequiresCSRF(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, true, true)
+	cmd, data, _, _ := startTeamCommand(t, true)
 	s := baseSub()
 	s.Access = "write"
 	seedSub(t, data, s)
@@ -4075,27 +4024,6 @@ func TestSubCommentsRosterRefusesChangedServer(t *testing.T) {
 | comments_last missing || seen_comments missing | TestSubsVersionTwoNeedsBothValidCounters: each missing field |
 | access != read && != write && != owner | TestSubsRoundTripKeepsFieldsAndMode: read and write; TestSubsVersionTwoAndLegacyMigration: owner |
 */
-
-func TestSubCommentsGateOffDoesNothing(t *testing.T) {
-	cmd, data, _, _ := startTeamCommand(t, false, true)
-	core, err := newCoreMux(cmd.application)
-	if err != nil {
-		t.Fatal("cannot create core mux")
-	}
-	for _, method := range []string{http.MethodGet, http.MethodPost} {
-		if got, want := recordedText(core, method, subReadPath()+"/comments"), recordedText(core, method, "/api/not-a-route"); got != want {
-			t.Error("gate-off comment route differs from unknown route")
-		}
-	}
-	assertNoTeamFile(t, data)
-	assertNoSubsFile(t, data)
-	if _, err := os.Stat(filepath.Join(data, "team-people.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("gate-off route touched people storage")
-	}
-	if _, err := os.Stat(filepath.Join(data, team.CopiesDir)); !errors.Is(err, os.ErrNotExist) {
-		t.Error("gate-off comment route touched copies")
-	}
-}
 
 func TestSubCommentsReadMirrorErrorCases(t *testing.T) {
 	t.Run("gap is refused", func(t *testing.T) {
@@ -5061,5 +4989,86 @@ func TestStopKeepsShareWhenOwnerFrontierCannotBeSaved(t *testing.T) {
 				t.Fatalf("share not retained: %v %v", shares, err)
 			}
 		})
+	}
+}
+
+func TestOwnerRefreshCapturesFrontierAndProjectsStartAddress(t *testing.T) {
+	dir := t.TempDir()
+	inst, err := identity.LoadOrCreateInstallation(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := baseSub()
+	sub.Owner = string(inst)
+	sub.Access = "owner"
+	sub.State = "ended"
+	seedSub(t, dir, sub)
+	writeChatLog(t, dir, "local", sub.Chat, 2)
+	mustSaveShare(t, dir, team.Share{UID: sub.Chat, Node: "local", Server: sub.Server, Generation: sub.Generation, Start: 2, Next: 2})
+	h := newTeamHandler(dir, fixedTeamClock(), team.NewClient()).(*teamHandler)
+	if _, err := h.commitSubs(string(inst), nil, nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	subs, err := team.LoadSubs(dir)
+	if err != nil || len(subs) != 1 || subs[0].OwnerFrontier == nil || subs[0].OwnerFrontier.Record != 1 {
+		t.Fatalf("frontier: %+v, %v", subs, err)
+	}
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	record := team.MirrorRecord{Seq: 1, Key: "start", Author: sub.Owner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"start","scope":"all","time":"synthetic"}`)}
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/team/subscriptions/" + id.Server + "/" + id.Owner + "/" + id.Chat + "/" + id.Generation
+	result := decodeSubRead(t, doTeam(h, http.MethodGet, path, ""))
+	if len(result.Entries) != 1 || result.Entries[0]["local_segment"] != float64(0) || result.Entries[0]["local_record"] != float64(1) {
+		t.Fatalf("owner start: %+v", result.Entries)
+	}
+}
+
+func TestEndSubscriptionPreservesCanceledCopyAndSubscription(t *testing.T) {
+	handler, dir := testTeamSurface(t, team.NewClient())
+	h := handler.(*teamHandler)
+	server := labEntry(teamServerID, "http://127.0.0.1:1", teamToken)
+	seedTeam(t, dir, server)
+	sub := baseSub()
+	seedSub(t, dir, sub)
+	id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+	instance, err := team.EnsurePeopleCopyInstance(dir, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := team.MirrorRecord{Seq: 1, Key: "1/1", Author: sub.Owner, At: "2026-11-14T09:30:00.000Z", Body: json.RawMessage(`{"v":1,"t":"user","text":"synthetic"}`)}
+	if err := team.AppendCopy(dir, id, team.MirrorLog, []team.MirrorRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	subsPath := filepath.Join(dir, team.SubsFile)
+	copyPath := filepath.Join(dir, team.CopiesDir, id.Server, id.Owner, id.Chat, id.Generation, "mirror.jsonl")
+	beforeSubs, err := os.ReadFile(subsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCopy, err := os.ReadFile(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, "/", nil), id, "")
+	defer finish()
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	changed, err := h.endSubscription(req, id, server, false)
+	if err != nil || changed {
+		t.Fatalf("canceled operation changed=%v err=%v", changed, err)
+	}
+	afterSubs, err := os.ReadFile(subsPath)
+	if err != nil || !bytes.Equal(beforeSubs, afterSubs) {
+		t.Fatalf("subscription changed: %v", err)
+	}
+	afterCopy, err := os.ReadFile(copyPath)
+	if err != nil || !bytes.Equal(beforeCopy, afterCopy) {
+		t.Fatalf("copy changed: %v", err)
+	}
+	if got, err := team.ReadPeopleCopyInstance(dir, id); err != nil || got != instance {
+		t.Fatalf("copy identity changed: %v", err)
 	}
 }

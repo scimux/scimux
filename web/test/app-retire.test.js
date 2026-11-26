@@ -237,13 +237,13 @@ test("app restores the selected chat's sharing header without switching chats", 
   app.retire();
 });
 
-test("app refreshes the current share and subscriptions when settings enable team and after join", async () => {
+test("app refreshes the current share and subscriptions after join", async () => {
   const host = installHost({}); host.window.localStorage.setItem("scimux-sel", "n1");
-  let enabled = false; const calls = [];
+  const calls = [];
   const fetchImpl = async (path, opts = {}) => {
     path = String(path); calls.push({path, method:opts.method || "GET"});
     if (path.startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"One",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
-    if (path === "/api/settings") return jsonResponse({experimental_feature_team:enabled});
+    if (path === "/api/settings") return jsonResponse({});
     if (path === "/api/team/servers" && opts.method === "POST") return jsonResponse({id:"server",name:"Team"});
     if (path === "/api/team/servers") return jsonResponse({servers:[{id:"server",name:"Team"}]});
     if (path === "/api/team/shares/n1") return jsonResponse({state:"active",server:"server",members:[],delivery:"ok"});
@@ -254,11 +254,6 @@ test("app refreshes the current share and subscriptions when settings enable tea
   await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
   let before = calls.filter(c=>c.path === "/api/team/shares/n1").length;
   let subs = calls.filter(c=>c.path === "/api/team/subscriptions").length;
-  enabled = true; await host.byId.get("burger").click(); await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
-  assert.ok(calls.filter(c=>c.path === "/api/team/shares/n1").length > before);
-  assert.ok(calls.filter(c=>c.path === "/api/team/subscriptions").length > subs);
-  before = calls.filter(c=>c.path === "/api/team/shares/n1").length;
-  subs = calls.filter(c=>c.path === "/api/team/subscriptions").length;
   host.byId.get("m_team_link").value = "http://127.0.0.1/join#synthetic";
   host.byId.get("m_team_name").value = "Synthetic";
   await host.byId.get("m_team_join").click(); await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
@@ -267,18 +262,24 @@ test("app refreshes the current share and subscriptions when settings enable tea
   app.retire();
 });
 
-test("retired app ignores a late settings activation", async () => {
-  const host = installHost({}); let resolveSettings; const calls = [];
-  const fetchImpl = async (path, opts) => {
-    calls.push(String(path));
-    if (String(path) === "/api/settings") return new Promise(resolve => { resolveSettings = resolve; });
-    return host.trapFetch(path,opts);
+test("settings team key does not trigger sharing refresh", async () => {
+  const host = installHost({}); host.window.localStorage.setItem("scimux-sel", "n1");
+  let enabled = false; const calls = [];
+  const fetchImpl = async (path, opts = {}) => {
+    path = String(path); calls.push(path);
+    if (path.startsWith("/api/state")) return jsonResponse({nodes:[{id:"n1",title:"One",agent:"codex",created_at:"T0"}],unadopted:[],hostname:"computer",version:"test",sys:{}});
+    if (path === "/api/settings") return jsonResponse({experimental_feature_team:enabled});
+    if (path === "/api/team/servers") return jsonResponse({servers:[{id:"server",name:"Team"}]});
+    if (path === "/api/team/shares/n1") return jsonResponse({state:"active",server:"server",members:[],delivery:"ok"});
+    if (path === "/api/team/subscriptions") return jsonResponse({subscriptions:[],servers:[],truncated:false});
+    return host.trapFetch(path, opts);
   };
   const app = await (await import("../js/app.js?graph=successor")).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
-  await flush(100); app.retire();
-  const before = calls.filter(c=>c.startsWith("/api/team/")).length;
-  resolveSettings(jsonResponse({experimental_feature_team:true})); await flush(100);
-  assert.equal(calls.filter(c=>c.startsWith("/api/team/")).length,before);
+  await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
+  const before = calls.filter(c=>c === "/api/team/shares/n1" || c === "/api/team/subscriptions").length;
+  enabled = true; await host.byId.get("burger").click(); await flush(100); await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(calls.filter(c=>c === "/api/team/shares/n1" || c === "/api/team/subscriptions").length, before);
+  app.retire();
 });
 
 test("app restores a received selection without substituting an owned chat", async () => {
@@ -670,7 +671,7 @@ test('received metadata that arrives before a delayed state response still resto
  const view={server:'s',owner:'o',chat:'c',generation:'g',access:'read',state:'live',title:'Received',server_name:'Team',owner_name:'Owner',first_seen:'1'};
  const fetchImpl=async(path,opts)=>{path=String(path);
   if(path.startsWith('/api/state')) return new Promise(resolve=>{resolveState=resolve});
-  if(path==='/api/settings') return jsonResponse({experimental_feature_team:true});
+  if(path==='/api/settings') return jsonResponse({});
   if(path==='/api/team/subscriptions') return jsonResponse({subscriptions:[view],servers:[],truncated:false});
   if(path.includes('/comments?')) return jsonResponse({entries:[],names:{},next:0,more:false});
   if(path.includes('/subscriptions/s/o/c/g?')) return jsonResponse({view,entries:[],next:0,more:false});

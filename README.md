@@ -191,7 +191,7 @@ or distill models. Your selected provider's processing and training practices
 depend on its terms, your plan, and settings.
 scimux does not publish comparative harness benchmarks.
 
-Experimental team sharing never gives recipients control of your agent.
+Team sharing never gives recipients control of your agent.
 People with view access can read; people with comment access can also reply
 to the human discussion. The unified sharing UI invites people with view
 and comment access by default, without a permission dropdown; existing
@@ -285,7 +285,8 @@ by the web page is documented in [docs/http-api.md](docs/http-api.md).
 scimux is not a scheduler, task queue, browser terminal, plugin host, or
 cloud store. It manages only chats it started, and never takes over unrelated
 agent processes or histories. It is a single-user supervisor for agents
-running on your machine.
+running on your machine: invite colleagues to watch a chat live and weigh in,
+but your agent takes orders from you alone.
 
 ## Development
 

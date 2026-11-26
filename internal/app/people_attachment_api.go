@@ -167,7 +167,7 @@ func (h *teamHandler) stagePeopleAttachment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	instance, ok := h.peopleWriteInstance(r, sub)
-	if !ok || !h.peopleFilesEnabled() {
+	if !ok {
 		writeTeamError(w, http.StatusConflict, "identity_unavailable")
 		return
 	}
@@ -214,7 +214,7 @@ func (h *teamHandler) stagePeopleAttachment(w http.ResponseWriter, r *http.Reque
 	}
 	current := func() bool {
 		next, configured, found, joined, err := h.lookupSubscription(id)
-		return err == nil && found && joined && next.State == "live" && next.Access == sub.Access && h.peopleWriteBound(next, instance) && h.peopleFilesEnabled() && peopleSameServer(configured, server) && h.peopleCopyCurrent(r)
+		return err == nil && found && joined && next.State == "live" && next.Access == sub.Access && h.peopleWriteBound(next, instance) && peopleSameServer(configured, server) && h.peopleCopyCurrent(r)
 	}
 	if !current() {
 		writeTeamError(w, http.StatusConflict, "not_active")
@@ -301,7 +301,7 @@ func (h *teamHandler) authorizedPeopleStage(w http.ResponseWriter, r *http.Reque
 		writeTeamError(w, http.StatusNotFound, "not_found")
 		return team.PeopleStage{}, team.Subscription{}, team.Entry{}, false
 	}
-	if !joined || sub.State != "live" || !h.peopleFilesEnabled() {
+	if !joined || sub.State != "live" {
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return team.PeopleStage{}, team.Subscription{}, team.Entry{}, false
 	}
@@ -334,10 +334,6 @@ func (h *teamHandler) readPeopleStage(w http.ResponseWriter, r *http.Request, id
 }
 
 func (h *teamHandler) removePeopleStage(w http.ResponseWriter, r *http.Request, id team.CopyID, stageID string) {
-	if !h.peopleFilesEnabled() {
-		writeTeamError(w, http.StatusConflict, "not_active")
-		return
-	}
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil || len(query["revision"]) != 1 || !subHex(query.Get("revision"), 64) {
 		writeTeamError(w, http.StatusConflict, "revision_required")
@@ -352,7 +348,7 @@ func (h *teamHandler) removePeopleStage(w http.ResponseWriter, r *http.Request, 
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.peopleFilesEnabled() || !peopleCopyCurrentLocked(r) {
+	if !peopleCopyCurrentLocked(r) {
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
@@ -371,10 +367,6 @@ func (h *teamHandler) removePeopleStage(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (h *teamHandler) peopleFilesEnabled() bool {
-	return h.peopleEnabled == nil || h.peopleEnabled()
 }
 
 func (h *teamHandler) peopleWriteInstance(r *http.Request, sub team.Subscription) (string, bool) {
@@ -410,7 +402,7 @@ func (h *teamHandler) peopleWriteBound(sub team.Subscription, instance string) b
 // subscription removal and configuration updates. No relay I/O occurs here.
 func (h *teamHandler) peopleWriteCurrentLocked(id team.CopyID, original team.Subscription, server team.Entry, instance string) bool {
 	entries, subs, err := h.loadSubState()
-	if err != nil || !h.peopleFilesEnabled() {
+	if err != nil {
 		return false
 	}
 	for _, sub := range subs {
@@ -429,7 +421,7 @@ func (h *teamHandler) peopleWriteCurrentLocked(id team.CopyID, original team.Sub
 // readPeopleAttachment serves a retained association or fetches one from a
 // validated local comment while current read permission still exists.
 func (h *teamHandler) readPeopleAttachment(w http.ResponseWriter, r *http.Request, id team.CopyID, seq uint64, attachmentID string) {
-	if !h.peopleFilesEnabled() || !h.peopleCopyCurrent(r) {
+	if !h.peopleCopyCurrent(r) {
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
@@ -470,7 +462,7 @@ func (h *teamHandler) readPeopleAttachment(w http.ResponseWriter, r *http.Reques
 		writeTeamError(w, http.StatusInternalServerError, "attachment_corrupt")
 		return
 	}
-	if !h.peopleFilesEnabled() || !h.peopleCopyCurrent(r) {
+	if !h.peopleCopyCurrent(r) {
 		writeTeamError(w, http.StatusConflict, "not_active")
 		return
 	}
@@ -570,7 +562,7 @@ func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq
 			}
 		}
 	}
-	if !allowed || !h.peopleFilesEnabled() || !peopleCopyCurrentLocked(r) {
+	if !allowed || !peopleCopyCurrentLocked(r) {
 		return team.PeopleStage{}, false, team.ErrPeopleStageMissing
 	}
 	if err := team.SavePeoplePublished(h.dataDir, id, seq, stage); err != nil {
@@ -588,13 +580,13 @@ func (h *teamHandler) fetchPeopleAttachment(r *http.Request, id team.CopyID, seq
 // Pending recovery remains incomplete until the browser integration is wired.
 func (h *teamHandler) postPeopleFileComment(w http.ResponseWriter, r *http.Request, id team.CopyID, sub team.Subscription, server team.Entry, text string, anchor uint64, key string, stageIDs []string) {
 	instance, ok := h.peopleWriteInstance(r, sub)
-	if !ok || !h.peopleFilesEnabled() {
+	if !ok {
 		writeTeamError(w, http.StatusConflict, "identity_unavailable")
 		return
 	}
 	current := func() bool {
 		next, configured, found, joined, err := h.lookupSubscription(id)
-		return err == nil && found && joined && next.State == "live" && next.Access == sub.Access && h.peopleWriteBound(next, instance) && h.peopleFilesEnabled() && peopleSameServer(configured, server) && h.peopleCopyCurrent(r)
+		return err == nil && found && joined && next.State == "live" && next.Access == sub.Access && h.peopleWriteBound(next, instance) && peopleSameServer(configured, server) && h.peopleCopyCurrent(r)
 	}
 	hello, err := h.client.Hello(r.Context(), server.URL)
 	if err != nil || hello.ID != server.ID || !hello.BlobGeneration || !current() {
@@ -756,7 +748,7 @@ func (h *teamHandler) tryPeopleCompletion(w http.ResponseWriter, r *http.Request
 	if !ok {
 		instance, ok = h.peopleWriteInstance(r, original)
 	}
-	if !ok || !h.peopleFilesEnabled() {
+	if !ok {
 		writeTeamError(w, http.StatusConflict, "identity_unavailable")
 		return true
 	}
@@ -790,7 +782,7 @@ func (h *teamHandler) tryPeopleCompletion(w http.ResponseWriter, r *http.Request
 		}
 	}
 	author, authorErr := identity.LoadInstallation(h.dataDir)
-	if !current || !h.peopleFilesEnabled() || authorErr != nil || completed.Pending.Author != string(author) || completed.Pending.ConfigHash != peopleServerFingerprint(server) || completed.Pending.OwnerInstance != instance || !peopleCompletionMatches(completed.Pending, text, anchor, stageIDs) {
+	if !current || authorErr != nil || completed.Pending.Author != string(author) || completed.Pending.ConfigHash != peopleServerFingerprint(server) || completed.Pending.OwnerInstance != instance || !peopleCompletionMatches(completed.Pending, text, anchor, stageIDs) {
 		writeTeamError(w, http.StatusConflict, "publication_conflict")
 		return true
 	}

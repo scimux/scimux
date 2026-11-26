@@ -217,9 +217,6 @@ func TestPeopleWriteCommitGuardRechecksCurrentCopyAndServer(t *testing.T) {
 	if err := team.SaveSubs(dir, []team.Subscription{sub}); err != nil {
 		t.Fatal(err)
 	}
-	h.peopleEnabled = func() bool { return false }
-	check(false)
-	h.peopleEnabled = nil
 	if err := os.WriteFile(filepath.Join(dir, team.SubsFile), []byte("synthetic damage"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -289,65 +286,6 @@ func peopleTestURL(t *testing.T, dataDir, path string) string {
 	query.Set("copy_instance", instance)
 	u.RawQuery = query.Encode()
 	return u.String()
-}
-
-func TestPeopleCapabilityProductionConstructorFollowsTeamSetting(t *testing.T) {
-	handler, _ := testTeamSurface(t, team.NewClient())
-	h := handler.(*teamHandler)
-	enabled := true
-	h.peopleEnabled = func() bool { return enabled }
-	for _, want := range []bool{true, false, true} {
-		enabled = want
-		rec := doTeam(handler, http.MethodGet, "/api/team/subscriptions", "")
-		if !want && rec.Code != http.StatusOK {
-			// The application normally removes the route when Team is disabled.
-			if h.subscriptionView(nil, nil, false).PeopleAttachments != nil {
-				t.Fatal("disabled team setting advertised People files")
-			}
-			continue
-		}
-		var result subListResponse
-		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &result) != nil {
-			t.Fatalf("subscription list unavailable: %d", rec.Code)
-		}
-		cap := result.PeopleAttachments
-		if want && (cap == nil || cap.Version != 1 || cap.MaxFileBytes != 4194304 || cap.MaxFiles != 16 || cap.MaxTotalBytes != 16777216) {
-			t.Fatal("production handler did not advertise the supported People file limits")
-		}
-		if !want && cap != nil {
-			t.Fatal("disabled team setting advertised People files")
-		}
-	}
-}
-
-func TestPeopleCapabilityFollowsLiveServerTeamSetting(t *testing.T) {
-	cmd, _, _, _ := startTeamCommand(t, false, true)
-	a := cmd.application
-	h, err := newCoreMux(a)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, enabled := range []bool{true, false, true} {
-		body := `{"experimental_feature_team":false}`
-		if enabled {
-			body = `{"experimental_feature_team":true}`
-		}
-		if err := os.WriteFile(a.settingsPath, []byte(body), 0600); err != nil {
-			t.Fatal(err)
-		}
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/team/subscriptions", nil))
-		if !enabled {
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("disabled Team route status=%d", rec.Code)
-			}
-			continue
-		}
-		var result subListResponse
-		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &result) != nil || result.PeopleAttachments == nil || result.PeopleAttachments.Version != 1 {
-			t.Fatalf("enabled Team route did not advertise files: status=%d", rec.Code)
-		}
-	}
 }
 
 func TestPeopleCapabilityExposesDurableCopyInstance(t *testing.T) {

@@ -1388,7 +1388,7 @@ func TestCopySharedChatsIsWired(t *testing.T) {
 		t.Fatal("poll loop does not copy shared chats")
 	}
 
-	on, _, _, _ := startTeamCommand(t, true, true)
+	on, _, _, _ := startTeamCommand(t, true)
 	if on.application.shareOutbox == nil {
 		t.Fatal("muxer gate on left the outbox nil")
 	}
@@ -1405,13 +1405,7 @@ func TestCopySharedChatsIsWired(t *testing.T) {
 }
 
 func TestCopySharedChatsStaysNilOutsideTheMuxer(t *testing.T) {
-	off, _, _, _ := startTeamCommand(t, false, true)
-	if off.application.shareOutbox != nil {
-		t.Fatal("gate off constructed an outbox")
-	}
-	off.application.copySharedChats()
-
-	outside, _, _, _ := startTeamCommand(t, true, false)
+	outside, _, _, _ := startTeamCommand(t, false)
 	if outside.application == nil || outside.application.shareOutbox != nil {
 		t.Fatal("gate on outside the muxer constructed an outbox")
 	}

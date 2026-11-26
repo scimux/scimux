@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -291,13 +292,42 @@ func TestPeoplePublicationStopsAfterAccessChangesDuringAppendReconciliation(t *t
 	}
 }
 
-func TestPeoplePublicationStopsWhenSharingEndsAfterHistoryRetention(t *testing.T) {
-	for _, boundary := range []string{"history", "completion"} {
-		t.Run(boundary, func(t *testing.T) { testPeoplePublicationSharingStopsAtBoundary(t, boundary) })
+// publicationCancelContext cancels after the named durable boundary is visible.
+// It leaves the actual request context and storage checks intact.
+type publicationCancelContext struct {
+	context.Context
+	cancel   context.CancelFunc
+	dir      string
+	id       team.CopyID
+	boundary string
+}
+
+func (c *publicationCancelContext) Err() error {
+	reached := false
+	switch c.boundary {
+	case "pending":
+		_, err := team.ReadPeoplePending(c.dir, c.id, "fedcba9876543210")
+		reached = err == nil
+	case "history":
+		_, last, err := team.ReadCopy(c.dir, c.id, team.CommentsLog, 0, 1, 4<<20)
+		reached = err == nil && last == 1
+	case "completion":
+		_, err := team.ReadPeopleCompletion(c.dir, c.id, "fedcba9876543210")
+		reached = err == nil
+	}
+	if reached {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestPeoplePublicationCancellationKeepsDurableState(t *testing.T) {
+	for _, boundary := range []string{"pending", "history", "completion"} {
+		t.Run(boundary, func(t *testing.T) { testPeoplePublicationCanceledAtBoundary(t, boundary) })
 	}
 }
 
-func testPeoplePublicationSharingStopsAtBoundary(t *testing.T, boundary string) {
+func testPeoplePublicationCanceledAtBoundary(t *testing.T, boundary string) {
 	t.Helper()
 	data := []byte("synthetic file")
 	sum := sha256.Sum256(data)
@@ -355,59 +385,31 @@ func testPeoplePublicationSharingStopsAtBoundary(t *testing.T, boundary string) 
 	if err := team.SavePeopleStage(dir, id, stage); err != nil {
 		t.Fatal(err)
 	}
-	entered, release := make(chan struct{}), make(chan struct{})
-	var held, enabled atomic.Bool
-	enabled.Store(true)
-	var released sync.Once
-	t.Cleanup(func() { released.Do(func() { close(release) }) })
-	h.peopleEnabled = func() bool {
-		reached := false
-		if boundary == "history" {
-			_, last, err := team.ReadCopy(dir, id, team.CommentsLog, 0, 1, 4<<20)
-			reached = err == nil && last == 1
-		} else {
-			_, err := team.ReadPeopleCompletion(dir, id, "fedcba9876543210")
-			reached = err == nil
-		}
-		if reached && held.CompareAndSwap(false, true) {
-			close(entered)
-			<-release
-		}
-		return enabled.Load()
-	}
 	req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodPost, "/", nil), id, "")
 	defer finish()
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	trigger := &publicationCancelContext{Context: ctx, cancel: cancel, dir: dir, id: id, boundary: boundary}
+	req = req.WithContext(trigger)
 	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.postPeopleFileComment(rec, req, id, sub, server, "synthetic caption", 0, "fedcba9876543210", []string{stage.ID})
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("retained history boundary not reached")
+	h.postPeopleFileComment(rec, req, id, sub, server, "synthetic caption", 0, "fedcba9876543210", []string{stage.ID})
+	wantWrites := int32(1)
+	if boundary == "pending" {
+		wantWrites = 0
 	}
-	enabled.Store(false)
-	released.Do(func() { close(release) })
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("publication did not finish")
-	}
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || puts.Load() != 1 || posts.Load() != 1 {
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") || puts.Load() != wantWrites || posts.Load() != wantWrites {
 		t.Fatalf("status=%d puts=%d posts=%d body=%s", rec.Code, puts.Load(), posts.Load(), rec.Body.String())
 	}
-	if boundary == "history" {
+	if boundary == "history" || boundary == "pending" {
 		pending, err := team.ReadPeoplePending(dir, id, "fedcba9876543210")
-		if err != nil || !bytes.Equal(pending.Body, stored) {
+		if err != nil || (boundary != "pending" && !bytes.Equal(pending.Body, stored)) {
 			t.Fatalf("frozen pending changed: %v", err)
 		}
 		if err := team.DeletePeopleStage(dir, id, stage.ID); err == nil {
 			t.Fatal("stage pin was released")
 		}
 		if _, err := team.ReadPeoplePublished(dir, id, 1, stage.ID); err == nil {
-			t.Fatal("disabled completion retained attachment")
+			t.Fatal("canceled completion retained attachment")
 		}
 	} else {
 		completed, err := team.ReadPeopleCompletion(dir, id, "fedcba9876543210")

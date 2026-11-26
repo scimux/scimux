@@ -193,7 +193,6 @@ func TestLocalPublicationStateQueryAndMissing(t *testing.T) {
 		return nil, errors.New("unexpected synthetic relay call")
 	})
 	h, dir := testTeamSurface(t, client)
-	handler := h.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {
@@ -227,11 +226,6 @@ func TestLocalPublicationStateQueryAndMissing(t *testing.T) {
 	if rec := doTeam(h, http.MethodPost, path, ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("method: %d", rec.Code)
 	}
-	handler.peopleEnabled = func() bool { return false }
-	if rec := doTeam(h, http.MethodGet, path, ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "not_active") {
-		t.Fatalf("disabled: %d %s", rec.Code, rec.Body.String())
-	}
-	handler.peopleEnabled = nil
 	if calls != 0 {
 		t.Fatalf("relay calls: %d", calls)
 	}
@@ -293,7 +287,6 @@ func TestLocalPublicationStateNeedsNoLiveAuthority(t *testing.T) {
 
 func TestLocalPublicationStateRefusesUnavailableIdentityAndMidflightGate(t *testing.T) {
 	h, dir := testTeamSurface(t, nil)
-	handler := h.(*teamHandler)
 	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
 	instance, err := team.EnsurePeopleCopyInstance(dir, id)
 	if err != nil {
@@ -309,25 +302,6 @@ func TestLocalPublicationStateRefusesUnavailableIdentityAndMidflightGate(t *test
 	}
 	if err := os.Rename(installation+".saved", installation); err != nil {
 		t.Fatal(err)
-	}
-	calls := 0
-	handler.peopleEnabled = func() bool { calls++; return calls == 1 }
-	if rec := doTeam(h, http.MethodGet, path, ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
-		t.Fatalf("midflight gate: %d %s", rec.Code, rec.Body.String())
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	calls = 0
-	handler.peopleEnabled = func() bool {
-		calls++
-		if calls == 2 {
-			cancel()
-		}
-		return true
-	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "copy_changed") {
-		t.Fatalf("cancelled: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -376,4 +350,65 @@ func localStateCopyFiles(t *testing.T, copyDir string) map[string][32]byte {
 		t.Fatal(err)
 	}
 	return result
+}
+
+// cancelOnSecondCopyCheck changes a real context to canceled between copy
+// admission and its locked commit check.
+type cancelOnSecondCopyCheck struct {
+	context.Context
+	cancel   context.CancelFunc
+	checks   int
+	cancelAt int
+}
+
+func (c *cancelOnSecondCopyCheck) Err() error {
+	c.checks++
+	if c.checks == c.cancelAt || (c.cancelAt == 0 && c.checks == 2) {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestPeopleLocalOperationsRecheckMidflightCancellation(t *testing.T) {
+	for _, operation := range []string{"discard", "inventory", "state", "retire", "stage"} {
+		t.Run(operation, func(t *testing.T) {
+			handler, dir := testTeamSurface(t, nil)
+			h := handler.(*teamHandler)
+			id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+			instance, err := team.EnsurePeopleCopyInstance(dir, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := "/?copy_instance=" + instance
+			if operation == "discard" || operation == "stage" {
+				path += "&revision=" + strings.Repeat("0", 64)
+			}
+			req, finish := h.beginPeopleCopyOperation(httptest.NewRequest(http.MethodGet, path, nil), id, "")
+			defer finish()
+			ctx, cancel := context.WithCancel(req.Context())
+			defer cancel()
+			trigger := &cancelOnSecondCopyCheck{Context: ctx, cancel: cancel}
+			req = req.WithContext(trigger)
+			rec := httptest.NewRecorder()
+			switch operation {
+			case "discard":
+				h.discardPeoplePending(rec, req, id, "fedcba9876543210")
+			case "inventory":
+				h.localPeopleInventory(rec, req, id)
+			case "state":
+				h.localPeoplePublicationState(rec, req, id, "fedcba9876543210")
+			case "retire":
+				h.retireAbsentPeople(rec, req, id, "fedcba9876543210")
+			case "stage":
+				h.removePeopleStage(rec, req, id, "0123456789abcdef")
+			}
+			want := "copy_changed"
+			if operation == "stage" {
+				want = "not_active"
+			}
+			if trigger.checks != 2 || rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), want) || ctx.Err() != context.Canceled {
+				t.Fatalf("checks=%d status=%d body=%s cancellation=%v", trigger.checks, rec.Code, rec.Body.String(), ctx.Err())
+			}
+		})
+	}
 }

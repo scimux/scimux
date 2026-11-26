@@ -461,56 +461,6 @@ func TestSettingsConcurrentPutsPreserveEachOthersConsent(t *testing.T) {
 	}
 }
 
-func TestTeamSettingValues(t *testing.T) {
-	for _, tc := range []struct {
-		name, body string
-		want       bool
-	}{
-		{"true", `{"experimental_feature_team":true}`, true},
-		{"missing", `{}`, false}, {"false", `{"experimental_feature_team":false}`, false},
-		{"null", `{"experimental_feature_team":null}`, false}, {"string", `{"experimental_feature_team":"true"}`, false},
-		{"number", `{"experimental_feature_team":1}`, false}, {"object", `{"experimental_feature_team":{}}`, false},
-		{"empty", ``, false}, {"malformed", `{`, false},
-		{"oversized", `{"experimental_feature_team":true,"pad":"` + strings.Repeat("x", settingsMax) + `"}`, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a := settingsApp(t)
-			if err := os.WriteFile(a.settingsPath, []byte(tc.body), 0600); err != nil {
-				t.Fatal(err)
-			}
-			checkTeamSetting(t, a.settings(), tc.want)
-		})
-	}
-	a := settingsApp(t)
-	checkTeamSetting(t, a.settings(), false)
-	if err := os.Mkdir(a.settingsPath, 0700); err != nil {
-		t.Fatal(err)
-	}
-	checkTeamSetting(t, a.settings(), false)
-	if err := os.Remove(a.settingsPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(a.settingsPath, []byte(`{"experimental_feature_team":"true","claude_usage_checks":true}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s := a.settings()
-	if !s.ClaudeUsageChecks {
-		t.Fatal("bad team value changed consent")
-	}
-	checkTeamSetting(t, s, false)
-}
-
-func checkTeamSetting(t *testing.T, s settings, want bool) {
-	t.Helper()
-	reader, ok := any(s).(interface{ teamEnabled() bool })
-	if !ok {
-		t.Fatal("team setting reader is missing")
-	}
-	if got := reader.teamEnabled(); got != want {
-		t.Fatalf("team enabled = %v, want %v", got, want)
-	}
-}
-
 func TestTeamSettingPUTPreservesUnknownField(t *testing.T) {
 	a := settingsApp(t)
 	for _, step := range []struct{ body, want string }{
