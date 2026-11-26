@@ -88,7 +88,7 @@ import {
 import { hashStr, hashTurns } from "./lanes.js";
 import { hardAttention as hardAttentionMod, canReceiveSend } from "./map-model.js";
 import { focusAtEnd } from "./caret.js";
-import { ownerCommentAnchors, ownerUnplacedComments, guestMessageHTML } from "./team-guest.js";
+import { ownerCommentAnchors, ownerUnplacedComments, guestMessageHTML, ownerDiscussionSignature } from "./team-guest.js";
 import { attachmentTileHTML, replaceFailedAttachmentPreview, retryAttachmentDownload } from "./attachment-tile.js";
 import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
 import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
@@ -2658,7 +2658,7 @@ export function createChatFeature(deps){
       compacting: !!data.compacting,
       elicitationKey: elicitationKey(data),
       interactionKey: interactionSignature(data.claude_interaction),
-      foldVersion: foldStateVersion(foldState) + (discussion ? JSON.stringify(discussion) : ""),
+      foldVersion: foldStateVersion(foldState) + (discussion ? ownerDiscussionSignature(discussion) : ""),
     });
     const label = unconfirmed
       ? "Send unconfirmed \u2014 check the terminal"

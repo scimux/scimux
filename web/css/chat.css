@@ -121,6 +121,8 @@ body.cards-open #msgs { overflow: hidden; }
 .reaction-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 2px 8px;
   border: 1px solid var(--hairline); border-radius: 16px; color: var(--dim); background: var(--surface); font-size: 13px; line-height: 1.2; }
 .reaction-chip.mine { color: var(--work); border-color: color-mix(in srgb, var(--work) 50%, var(--hairline)); background: color-mix(in srgb, var(--work) 11%, var(--surface)); }
+/* Local feedback awaiting confirmation: same box, quieter outline. */
+.reaction-chip.reaction-pending { border-style: dashed; opacity: .72; }
 .reaction-entry { position: absolute; z-index: 4; right: -12px; top: -12px; display: flex; align-items: center; }
 .reaction-trigger { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 2px;
   border: 0; border-radius: 50%; color: var(--work); background: transparent; opacity: 0; pointer-events: none; }

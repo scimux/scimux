@@ -7,7 +7,7 @@ import { promptSourceKey } from "./storage.js";
 import { peoplePendingStorageKey, parsePeoplePendingSnapshot } from "./people-local-review.js";
 import { attachmentTileHTML, attachmentUnavailableHTML } from "./attachment-tile.js";
 import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
-import { REACTIONS, reactionEligible, reactionControlHTML, reactionChipsHTML, replayReactionEvents, createReactionInteraction } from "./reactions.js";
+import { REACTIONS, reactionEligible, reactionControlHTML, reactionChipsHTML, replayReactionEvents, acceptedReactionEvents, projectReactionIntent, createReactionInteraction } from "./reactions.js";
 
 const LIST = "/api/team/subscriptions";
 
@@ -220,8 +220,31 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const server = answer.servers.find(item => item.id === view.server);
     return view.state === "live" && !!server && !["offline", "refused", "changed"].includes(server.delivery);
   }
+  function reactionWritable(current) {
+    return reactionOnline(current.view) && current.view.access !== "read" && current.view.state === "live";
+  }
+  /* What the sender sees: confirmed reactions with local operations applied.
+     Read-only, offline and ended copies show confirmed state only. */
+  function reactionDisplay(current) {
+    const confirmed = reactionSummary(current);
+    if (!reactionWritable(current)) return confirmed;
+    return projectReactionIntent(confirmed, [...current.reactionPending.values()]);
+  }
+  /* A pending operation settles only on a validated retained record for the same
+     key, target, emoji and direction, written by this viewer. A removal settles
+     even though it leaves no aggregate chip. Raw page records never settle one. */
+  function settleReactionOperations(current) {
+    if (current.reactionPending.size === 0) return;
+    const accepted = acceptedReactionEvents(current.reactionEvents, reactionComments(current));
+    for (const [key, pending] of current.reactionPending) {
+      if (accepted.some(event => event.mine === true && event.key === "r/" + pending.key && event.target === pending.target && event.emoji === pending.emoji && event.active === pending.active)) {
+        current.reactionPending.delete(key);
+      }
+    }
+  }
   function syncReactionChips(current) {
-    const summaries = reactionSummary(current);
+    settleReactionOperations(current);
+    const summaries = reactionDisplay(current);
     for (const turn of doc.querySelectorAll("#msgs [data-cseq]")) {
       if (turn.dataset.gkey !== current.key) continue;
       const container = turn.querySelector("[data-reaction-chips]");
@@ -252,11 +275,6 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       current.reactionEvents.push(event);
       seen.add(event.seq);
       changed = true;
-      for (const pending of current.reactionPending.values()) {
-        if (pending.target === event.target && pending.emoji === event.emoji && pending.active === event.active && event.key === "r/" + pending.key && event.mine === true) {
-          current.reactionPending.delete(pending.target + "\0" + pending.emoji);
-        }
-      }
     }
     return changed;
   }
@@ -315,33 +333,85 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (current === owner || ownerCopies.get(current.key) === current) panel.ownerChanged();
   }
 
+  /* A local operation is sending, acknowledged (awaiting its retained event) or
+     uncertain. Only the matching retained event removes it; an acknowledgment
+     never does. An explicit recognized rejection removes it. Anything else keeps
+     the exact body and key for a deliberate retry, which is never automatic. */
+  function reactionRejected(error, code) {
+    const status = error?.status;
+    return [400, 403, 404, 409, 413].includes(status) || (status === 502 && code === "refused");
+  }
+  /* The write receipt is the appended comment's sequence, later than its target.
+     A success without it is not evidence the record was stored. */
+  function reactionReceiptUsable(receipt, target) {
+    return !!receipt && Number.isSafeInteger(receipt.seq) && receipt.seq > target;
+  }
+  function sameLogicalView(view, other) {
+    return guestKey(view) === guestKey(other) && copyIdentity(view) === copyIdentity(other);
+  }
+  /* Coalesces with a running read: a busy read sets one flag, and its settle
+     path starts exactly one follow-up. No timer is involved. */
+  function requestReactionRefresh(current) {
+    if (current.busy) { current.reactionRefresh = true; return; }
+    if (current === open) startRead();
+    else startOwnerRead(current);
+  }
   async function chooseReaction(destination) {
     const current = open || (owner && selectedNode() === owner.node && selectedUID() === owner.view.chat ? owner : null);
     if (!current || current.reactionRetired || current.key !== destination.key || current.reactionCopyInstance !== destination.copyInstance || !reactionOnline(current.view)) return;
     const comment = current.entries.get("comments/" + destination.target);
     if (!comment || comment.mine || current.view.access === "read" || current.view.state !== "live") return;
     const key = destination.target + "\0" + destination.emoji;
+    const captured = {current, node:current.node, key:current.key, copy:destination.copyInstance, view:current.view, visit:open?.visit, access:current.view.access, state:current.view.state};
+    const stillCurrent = () => !destroyed && (open === current || ownerCopies.get(captured.key) === current) && sameLogicalView(current.view, captured.view) && current.reactionCopyInstance === captured.copy && current.view.access === captured.access && current.view.state === captured.state && reactionOnline(current.view) && (open === current || (selectedNode() === captured.node && selectedUID() === captured.view.chat)) && (!captured.visit || bubbleController.isCurrentVisit(captured.visit));
     let pending = current.reactionPending.get(key);
-    if (!pending) {
+    if (pending && pending.state !== "uncertain") return;
+    const created = !pending;
+    if (created) {
       const activeNow = reactionSummary(current).some(chip => chip.target === destination.target && chip.emoji === destination.emoji && chip.mine);
       const bytes = randomBytes(8);
-      pending = {target:destination.target, emoji:destination.emoji, active:!activeNow, key:guestHexKey(bytes), author:"", body:null};
+      pending = {target:destination.target, emoji:destination.emoji, active:!activeNow, key:guestHexKey(bytes), body:null, state:"sending"};
       pending.body = JSON.stringify({target:pending.target, emoji:pending.emoji, active:pending.active, key:pending.key});
       current.reactionPending.set(key, pending);
     }
-    const captured = {current, node:current.node, key:current.key, copy:destination.copyInstance, view:current.view, visit:open?.visit};
-    const stillCurrent = () => !destroyed && (open === current || ownerCopies.get(captured.key) === current) && current.view === captured.view && current.reactionCopyInstance === captured.copy && current.view.generation === captured.view.generation && reactionOnline(current.view) && (open === current || (selectedNode() === captured.node && selectedUID() === captured.view.chat)) && (!captured.visit || bubbleController.isCurrentVisit(captured.visit));
-    if (!stillCurrent()) return;
+    /* A fenced request was never sent: a new operation is dropped, and an
+       uncertain one keeps its state so the explicit retry remains available. */
+    if (!stillCurrent()) {
+      if (created) current.reactionPending.delete(key);
+      return;
+    }
+    pending.state = "sending";
+    const operationCurrent = () => stillCurrent() && current.reactionPending.get(key) === pending;
+    syncReactionChips(current);
+    let receipt;
     try {
-      await api(LIST + "/" + current.key + "/reactions?copy_instance=" + pendingCopy(current), {method:"POST", body:pending.body});
+      receipt = await api(LIST + "/" + current.key + "/reactions?copy_instance=" + pendingCopy(current), {method:"POST", body:pending.body});
     } catch (error) {
-      if (!stillCurrent()) return;
       let code = "";
       try { code = JSON.parse(error.message).error; } catch {}
-      if (error.status === 409 && code === "copy_changed") retireReactionInteraction(current);
-      /* Other uncertain outcomes retain the exact body and key for explicit retry. */
+      if (!operationCurrent()) {
+        if (current.reactionPending.get(key) === pending && pending.state === "sending") pending.state = "uncertain";
+        return;
+      }
+      if (error.status === 409 && code === "copy_changed") { retireReactionInteraction(current); return; }
+      if (reactionRejected(error, code)) {
+        current.reactionPending.delete(key);
+        syncReactionChips(current);
+        if (typeof toast === "function") toast("Reaction was not saved.");
+        return;
+      }
+      pending.state = "uncertain";
+      syncReactionChips(current);
+      return;
     }
-    if (!stillCurrent()) return;
+    if (!reactionReceiptUsable(receipt, destination.target)) {
+      /* Ambiguous, not failed: the exact body and key stay for a deliberate retry. */
+      pending.state = "uncertain";
+      if (operationCurrent()) syncReactionChips(current);
+      return;
+    }
+    if (current.reactionPending.get(key) === pending) pending.state = "acknowledged";
+    if (operationCurrent()) requestReactionRefresh(current);
   }
   function pendingCopy(current) { return current.reactionCopyInstance; }
 
@@ -785,7 +855,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
           const capture = guestCapture(message, current.view, current.names, knownPeople);
           const markers = capture ? panel.sharedMarkers?.(capture.team) || "" : "";
           if (capture) current.markerHTML.set("comments/" + message.seq, markers);
-          insertUpdate(guestMessageHTML({...message, access:current.view.access, state:current.view.state}, current.names, current.view.server, knownPeople, current.key, markers, current.key, assetURL, current.reactionCopyInstance || "", reactionSummary(current), reactionOnline(current.view)), [message.anchor, 1, message.seq]);
+          insertUpdate(guestMessageHTML({...message, access:current.view.access, state:current.view.state}, current.names, current.view.server, knownPeople, current.key, markers, current.key, assetURL, current.reactionCopyInstance || "", reactionDisplay(current), reactionOnline(current.view)), [message.anchor, 1, message.seq]);
           hasEntries = true;
         }
         current.cnext = result.next;
@@ -839,7 +909,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       if (code === "not_found") { current.failed = true; panel.changed(); }
     } finally {
       if (current.busy === gen) current.busy = false;
-      if (continueJump && currentRead(current, gen)) startRead();
+      const refresh = current.reactionRefresh === true;
+      current.reactionRefresh = false;
+      if ((continueJump || refresh) && currentRead(current, gen)) startRead();
     }
   }
   async function markSeen(current, gen, marks) {
@@ -1239,6 +1311,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       if (current.cnext > 0) await readReactionPages(current, () => ownerCurrent(current));
       if (!ownerCurrent(current)) return;
+      syncReactionChips(current);
       if (current.reactionsChanged) panel.ownerChanged();
       current.reactionsChanged = false;
       if (pendingOwnerJump?.key === current.key && pendingOwnerJump.node === current.node) {
@@ -1269,7 +1342,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     } finally {
       if (ownerCurrent(current)) {
         current.busy = false;
-        if (continueJump && pendingOwnerJump?.key === current.key) startOwnerRead(current);
+        const refresh = current.reactionRefresh === true;
+        current.reactionRefresh = false;
+        if ((continueJump && pendingOwnerJump?.key === current.key) || refresh) startOwnerRead(current);
       }
     }
   }
@@ -1278,7 +1353,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       const frontier = copy.view.local_frontier;
       const missingStart = !copy.mirrors.some(entry => entry.t === "start");
       const mirrors = frontier && missingStart ? [{seq:0,t:"start",local_segment:frontier.segment,local_record:frontier.record}, ...copy.mirrors] : copy.mirrors;
-      const reactionState = reactionSummary(copy);
+      const reactionState = reactionDisplay(copy);
       return { uid:copy.view.chat, key:copy.key, view:copy.view, mirrors, comments:copy.comments, reactionEvents:copy.reactionEvents, reactionState, reactionCopyInstance:copy.reactionRetired ? "" : copy.reactionCopyInstance, online:reactionOnline(copy.view), names:copy.names, people:knownPeople };
     });
   }
@@ -1709,6 +1784,12 @@ export function guestErrorText(code) {
   if (code === "copy_damaged") return "The saved copy of this chat is damaged and cannot be shown.";
   if (code === "storage_full") return "This computer's storage is full. Free some space to load more.";
   return "That did not work. It will be tried again.";
+}
+/* The owner timeline's rebuild signature. Derived pending chips are excluded so a
+   local preview never forces a transcript rebuild; retained reaction events and
+   relay availability stay in the signature, so confirmed changes still rebuild. */
+export function ownerDiscussionSignature(discussion) {
+  return JSON.stringify((discussion || []).map(({ reactionState, ...copy }) => copy));
 }
 export function guestMessageHTML(entry, names, server = "", people = {}, ownerKey = "", markers = "", attachmentKey = "", assetURL = path => path, copyInstance = null, reactionState = [], online = true) {
   let cls = "turn assistant gmsg";

@@ -258,3 +258,83 @@ test("chooser safely handles an event without an entry and optional callback", (
   assert.equal(controller.handle({target,preventDefault(){},stopPropagation(){}}),true);
   assert.equal(controller.handle({target:{closest:()=>null}}),false);
 });
+
+/* Instant local feedback. The namespace import keeps the file loadable while
+   the projection helper is still absent, so each new test fails on its own. */
+import * as reactionModule from "../js/reactions.js";
+
+const confirmedChip = (target, emoji, count, mine = false) => ({target, emoji, glyph: reactionModule.REACTIONS.find(item => item.id === emoji).emoji, count, mine});
+const deepFreezeAll = value => {
+  if (value && typeof value === "object") { for (const item of Object.values(value)) deepFreezeAll(item); Object.freeze(value); }
+  return value;
+};
+
+test("pending projection adds the sender's pending reaction once and keeps others' contributions", () => {
+  const project = reactionModule.projectReactionIntent;
+  const confirmed = deepFreezeAll([confirmedChip(4, "thumbs_up", 2), confirmedChip(4, "heart", 1, true)]);
+  const before = JSON.stringify(confirmed);
+  const added = project(confirmed, [{target:4, emoji:"celebration", active:true, state:"sending"}]);
+  assert.deepEqual(added.map(chip => [chip.emoji, chip.count, chip.mine, chip.unconfirmed]), [
+    ["celebration", 1, true, "pending"], ["heart", 1, true, undefined], ["thumbs_up", 2, false, undefined],
+  ]);
+  assert.equal(JSON.stringify(confirmed), before, "projection never mutates confirmed input");
+  assert.equal(project(confirmed, []).length, 2, "no operations means the confirmed summary");
+  assert.equal(project(confirmed).length, 2, "an omitted operation list defaults to none");
+  assert.deepEqual(project(confirmed, []).map(chip => chip.unconfirmed), [undefined, undefined]);
+});
+
+test("pending add counts an already confirmed personal reaction once and never doubles it", () => {
+  const confirmed = deepFreezeAll([confirmedChip(4, "heart", 3, true)]);
+  const again = reactionModule.projectReactionIntent(confirmed, [{target:4, emoji:"heart", active:true, state:"acknowledged"}]);
+  assert.deepEqual(again.map(chip => [chip.count, chip.mine, chip.unconfirmed]), [[3, true, "pending"]]);
+});
+
+test("pending removal subtracts only the sender's confirmed contribution and hides a sole chip", () => {
+  const project = reactionModule.projectReactionIntent;
+  const withOthers = deepFreezeAll([confirmedChip(4, "laughing", 3, true)]);
+  const removedWithOthers = project(withOthers, [{target:4, emoji:"laughing", active:false, state:"sending"}]);
+  assert.deepEqual(removedWithOthers.map(chip => [chip.count, chip.mine, chip.unconfirmed]), [[2, false, "pending"]]);
+  const sole = deepFreezeAll([confirmedChip(4, "thinking", 1, true)]);
+  assert.deepEqual(project(sole, [{target:4, emoji:"thinking", active:false, state:"uncertain"}]), [], "zero-count chips are hidden");
+  assert.deepEqual(project(sole, [{target:4, emoji:"thinking", active:false, state:"sending"}]), [], "a removal cannot drive a count below zero");
+  const absent = deepFreezeAll([confirmedChip(4, "heart", 1)]);
+  assert.deepEqual(project(absent, [{target:4, emoji:"thinking", active:false, state:"sending"}]).map(chip => chip.emoji), ["heart"], "removing an absent reaction changes nothing for other emoji");
+});
+
+test("pending projection preserves fixed ordering and concurrent confirmed updates across targets", () => {
+  const project = reactionModule.projectReactionIntent;
+  const confirmed = deepFreezeAll([confirmedChip(9, "thumbs_up", 1), confirmedChip(2, "thumbs_up", 1), confirmedChip(2, "celebration", 4)]);
+  const projected = project(confirmed, [
+    {target:2, emoji:"thumbs_up", active:true, state:"sending"},
+    {target:9, emoji:"heart", active:true, state:"uncertain"},
+    {target:2, emoji:"heart", active:true, state:"acknowledged"},
+  ]);
+  assert.deepEqual(projected.map(chip => `${chip.target}:${chip.emoji}:${chip.count}:${chip.unconfirmed}`), [
+    "2:celebration:4:undefined", "2:heart:1:pending", "2:thumbs_up:2:pending", "9:heart:1:uncertain", "9:thumbs_up:1:undefined",
+  ]);
+  assert.equal(projected[0].glyph, "🎉", "projected chips keep their glyph");
+  assert.deepEqual(project(null, null), [], "missing inputs produce an empty projection");
+  assert.deepEqual(project(undefined, [{target:1, emoji:"thumbs_up", active:true, state:"sending"}]).map(chip => chip.count), [1]);
+});
+
+test("pending chips expose a quiet state and an accessible confirmation label", () => {
+  const pendingAdd = reactionModule.reactionChipsHTML([{target:5, emoji:"thumbs_up", glyph:"👍", count:1, mine:true, unconfirmed:"pending"}], 5);
+  assert.match(pendingAdd, /class="reaction-chip mine reaction-pending"/);
+  assert.match(pendingAdd, /aria-label="👍 1, you reacted, pending confirmation" aria-pressed="true" title="Reaction pending confirmation"/);
+  const uncertain = reactionModule.reactionChipsHTML([{target:5, emoji:"heart", glyph:"❤️", count:2, mine:false, unconfirmed:"uncertain"}], 5);
+  assert.match(uncertain, /class="reaction-chip reaction-pending"/);
+  assert.match(uncertain, /aria-label="❤️ 2, not confirmed" aria-pressed="false" title="Reaction not confirmed; select to retry"/);
+  const settled = reactionModule.reactionChipsHTML([{target:5, emoji:"thumbs_up", glyph:"👍", count:1, mine:true}], 5);
+  assert.doesNotMatch(settled, /pending|not confirmed|title=/);
+});
+
+test("acceptedReactionEvents keeps exactly the records replay accepts, in sequence order", () => {
+  const comments = new Map([[1, { author: "alice", valid: true }]]);
+  const record = (seq, fields = {}) => ({ v: 1, t: "reaction", seq, key: "r/0101010101010101", target: 1, target_author: "alice", emoji: "thumbs_up", active: true, author: "me", mine: true, ...fields });
+  const events = [record(2), record(3, { target_author: "mallory" }), record(2, { active: false }), record(4, { active: false })];
+  const accepted = reactionModule.acceptedReactionEvents(events, comments);
+  assert.deepEqual(accepted, [record(2), record(4, { active: false })]);
+  assert.deepEqual(reactionModule.acceptedReactionEvents(null, comments), []);
+  assert.deepEqual(reactionModule.acceptedReactionEvents(events, {}), []);
+  assert.deepEqual(reactionModule.replayReactionEvents(events, comments, "me"), [], "the removal leaves no aggregate chip");
+});

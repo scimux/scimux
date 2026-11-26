@@ -98,7 +98,9 @@ test("emoji selection writes one explicit operation and only retained polling co
   let stopped=false;f.dispatchDocument("click",{target:trigger,preventDefault(){},stopPropagation(){stopped=true;}});
   assert.equal(chooser.hidden,false);f.dispatchDocument("click",{target:emoji,preventDefault(){},stopPropagation(){stopped=true;}});
   assert.equal(stopped,true);assert.deepEqual(submitted,{target:1,emoji:"thumbs_up",active:true,key:"0101010101010101"});assert.equal(agentPosts,0);
-  assert.doesNotMatch(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);
+  assert.match(f.get("msgs").innerHTML,/class="reaction-chip mine reaction-pending" data-reaction="thumbs_up" aria-label="👍 1, you reacted, pending confirmation"/);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted, pending confirmation"/,"a POST acknowledgment alone does not confirm the reaction");
   retained=true;f.setTime(6000);f.feature.tick();await f.feature.settled();
   assert.match(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);assert.equal((f.get("msgs").innerHTML.match(/data-cseq="1"/g)||[]).length,1);
   f.setTime(12000);f.feature.tick();await f.feature.settled();assert.match(f.get("msgs").innerHTML,/aria-label="👍 1, you reacted"/);f.feature.destroy();
@@ -476,7 +478,8 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
   const body = elements.get("#msgs");
   doc.querySelectorAll = selector => {
     if (selector !== "#msgs [data-cseq]" && selector !== "#msgs [data-gkey]") return [];
-    const html=body.innerHTML||"", matches=[...html.matchAll(/<span class="reaction-chips" data-reaction-chips>([\s\S]*?)<\/span>/g)];
+    /* Chips contain nested spans, so the container match must consume whole chips. */
+    const html=body.innerHTML||"", matches=[...html.matchAll(/<span class="reaction-chips" data-reaction-chips>((?:<span class="reaction-chip[^"]*"[^>]*>[\s\S]*?<span>\d+<\/span><\/span>)*)<\/span>/g)];
     return matches.map(match=>{
       const start=html.lastIndexOf('<div class="turn',match.index),head=html.slice(start,match.index),cseq=head.match(/data-cseq="(\d+)"/)?.[1],gkey=head.match(/data-gkey="([^"]+)"/)?.[1];
       const chips={get innerHTML(){return match[1];},set innerHTML(value){body.innerHTML=body.innerHTML.replace(match[0],'<span class="reaction-chips" data-reaction-chips>'+value+'</span>');}};
@@ -4379,3 +4382,568 @@ test("sharing notice preserves viewport only when its text changes", async () =>
   assert.equal(f.get("msgs").scrollTop, 800);
   f.feature.destroy();
 });
+
+/* Instant local reaction feedback. Each scenario runs for the received chat and
+   the owner timeline. Writes are held with deferred promises so the sender's
+   pending preview is inspected before any confirmation is simulated. */
+const INSTANT_COPY = "d".repeat(32);
+const instantFlush = () => new Promise(resolve => setImmediate(resolve));
+const instantEvent = (seq, fields = {}) => ({ v:1, t:"reaction", seq, key:"r/" + String(seq).padStart(16, "0"), target:1, target_author:"alice", emoji:"thumbs_up", active:true, author:"bob", mine:false, ...fields });
+const instantMine = (seq, key, fields = {}) => instantEvent(seq, { author:"me", mine:true, key:"r/" + key, ...fields });
+const instantChips = html => [...html.matchAll(/<span class="(reaction-chip[^"]*)" data-reaction="([^"]+)" aria-label="([^"]+)"/g)].map(match => ({ cls:match[1], emoji:match[2], label:match[3] }));
+const instantRejected = (status, message = "{}") => Object.assign(new Error(message), { status });
+const instantPending = { cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 1, you reacted, pending confirmation" };
+const instantConfirmed = { cls:"reaction-chip mine", emoji:"thumbs_up", label:"👍 1, you reacted" };
+
+function instantRelay(copy = INSTANT_COPY, events = []) {
+  const relay = { copy, events, posts:[], reads:0, onPost: async () => ({ seq:9 }) };
+  relay.reactionsApi = async (path, opts) => {
+    if (opts?.method === "POST") {
+      const body = JSON.parse(opts.body);
+      relay.posts.push(body);
+      return relay.onPost(relay.posts.length, body);
+    }
+    relay.reads++;
+    const last = relay.events.reduce((max, event) => Math.max(max, event.seq), 0);
+    return { copy_instance:relay.copy, events:relay.events.slice(), last, next:last, more:false };
+  };
+  return relay;
+}
+
+function instantChoose(f, key, copy, emoji, target = 1) {
+  const entry = { dataset:{ rkey:key, rtarget:String(target), copyInstance:copy }, classList:{ add(){}, remove(){} }, contains:() => true,
+    querySelector:selector => selector === "[data-reaction-open]" ? trigger : selector === ".reaction-chooser" ? chooser : null };
+  const trigger = { entry, setAttribute(){}, getBoundingClientRect:() => ({ top:100, bottom:144 }),
+    closest:selector => selector === "[data-reaction-open], [data-reaction-choice]" ? trigger : entry, matches:() => false };
+  const chooser = { hidden:true, getBoundingClientRect:() => ({ height:80 }) };
+  const choice = { entry, dataset:{ reactionChoice:emoji }, matches:selector => selector === "[data-reaction-choice]",
+    closest:selector => selector === "[data-reaction-open], [data-reaction-choice]" ? choice : entry };
+  const click = element => f.dispatchDocument("click", { target:element, preventDefault(){}, stopPropagation(){} });
+  click(trigger);
+  click(choice);
+}
+
+function instantSurface(kind, relay, { comments = null, noToast = false, bubbleController = undefined } = {}) {
+  const toasts = [];
+  let seed = 0, time = 0, sel = kind === "owner" ? "n1" : "", hold = null, rebuilds = 0, currentAccess = "write";
+  const share = { node:"n1", uid:"c", server:"s", generation:"g", state:"active" };
+  const viewFor = () => kind === "owner"
+    ? { ...base, access:"owner", state:"live", people_copy_instance:relay.copy, local_order:0 }
+    : { ...base, access:currentAccess, comments_last:1, people_copy_instance:relay.copy };
+  const commentsRead = path => {
+    const after = new URL(path, "http://scimux").searchParams.get("after");
+    if (hold && after === "1") return hold.promise;
+    if (comments) return comments(path);
+    return after === "0" ? commentsAnswer([{ seq:1, anchor:0, author:"alice", mine:false, text:"source" }], 1) : commentsAnswer([], 1);
+  };
+  const rebuild = () => {
+    rebuilds++;
+    f.get("msgs").innerHTML = f.feature.ownerSnapshots().flatMap(copy => copy.comments.map(comment => guestMessageHTML({ ...comment, access:copy.view.access, state:copy.view.state }, copy.names, copy.view.server, copy.people, copy.key, "", copy.key, undefined, copy.reactionCopyInstance || "", copy.reactionState || [], copy.online === true))).join("");
+  };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([viewFor()], [{ id:"s", delivery:"ok" }]) : readAnswer([], 1, false, viewFor()),
+    commentsRead, n => new Uint8Array(n).fill(++seed),
+    { reactionsApi:relay.reactionsApi, toast:noToast ? undefined : message => toasts.push(message), bubbleController, selectedNode:() => sel, selectedUID:() => "c",
+      panel:{ ownerChanged() { if (kind === "owner") rebuild(); } } });
+  const surface = {
+    f, toasts, key:guestKey(viewFor()), copy:relay.copy, relay,
+    get rebuilds() { return rebuilds; },
+    async start() {
+      f.feature.tick(); await f.feature.settled();
+      if (kind === "owner") f.feature.setOwnerShare("n1", share); else f.open();
+      await f.feature.settled(); await instantFlush();
+    },
+    choose(emoji, target = 1) { instantChoose(f, surface.key, relay.copy, emoji, target); },
+    chips() { return instantChips(f.get("msgs").innerHTML); },
+    async flush() { await f.feature.settled(); await instantFlush(); },
+    async poll() { time += 6000; f.setTime(time); f.feature.tick(); await f.feature.settled(); await instantFlush(); },
+    async leave() {
+      if (kind === "owner") { sel = "n2"; f.feature.setOwnerShare("n2", null); } else f.navigate();
+      await surface.flush();
+    },
+    async ret() {
+      if (kind === "owner") { sel = "n1"; f.feature.setOwnerShare("n1", share); } else f.open();
+      await surface.flush();
+    },
+    holdComments() { hold = deferred(); },
+    releaseComments() { const held = hold; hold = null; held.resolve(commentsAnswer([], 1)); },
+    setAccess(value) { currentAccess = value; },
+    destroy() { f.feature.destroy(); },
+  };
+  return surface;
+}
+
+for (const kind of ["received", "owner"]) {
+  test(`${kind}: a pending add renders before the write settles, and only a retained confirmation settles it`, async () => {
+    const relay = instantRelay(), held = deferred();
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    const rendersBefore = s.rebuilds;
+    s.choose("thumbs_up");
+    assert.deepEqual(relay.posts, [{ target:1, emoji:"thumbs_up", active:true, key:"0101010101010101" }]);
+    assert.deepEqual(s.chips(), [instantPending], "the sender sees the preview while the POST is held");
+    assert.equal(relay.events.length, 0, "no fabricated shared state reaches the relay");
+    if (kind === "owner") assert.equal(s.rebuilds, rendersBefore, "owner timeline decorations update in place without a transcript rebuild");
+    const readsBefore = relay.reads;
+    held.resolve({ seq:2 });
+    await s.flush();
+    assert.equal(relay.reads, readsBefore + 1, "the acknowledgment requests exactly one confirmation read");
+    assert.deepEqual(s.chips(), [instantPending], "a POST acknowledgment alone does not confirm");
+    await s.poll();
+    assert.deepEqual(s.chips(), [instantPending], "an empty ordinary poll leaves the operation unconfirmed");
+    relay.events.push(instantMine(2, "0101010101010101"));
+    await s.poll();
+    assert.deepEqual(s.chips(), [instantConfirmed], "the matching retained event settles the preview with one contribution");
+    assert.deepEqual(s.toasts, []);
+    s.destroy();
+  });
+
+  test(`${kind}: a pending removal updates the count and highlight, and hides a sole chip until rejected`, async () => {
+    const relay = instantRelay(INSTANT_COPY, [instantMine(2, "0000000000000002")]);
+    relay.onPost = () => Promise.reject(instantRejected(409, '{"error":"not_active"}'));
+    const s = instantSurface(kind, relay);
+    await s.start();
+    assert.deepEqual(s.chips(), [instantConfirmed]);
+    s.choose("thumbs_up");
+    assert.deepEqual(s.chips(), [], "removing the sole personal reaction hides its chip at once");
+    await s.flush();
+    assert.deepEqual(s.chips(), [instantConfirmed], "an explicit rejection restores the latest confirmed display");
+    assert.deepEqual(s.toasts, ["Reaction was not saved."]);
+    s.destroy();
+  });
+
+  test(`${kind}: a pending removal keeps other participants' contributions and settles once`, async () => {
+    const held = deferred(), relay = instantRelay(INSTANT_COPY, [instantEvent(2, { author:"bob" }), instantMine(3, "0000000000000003")]);
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip mine", emoji:"thumbs_up", label:"👍 2, you reacted" }]);
+    s.choose("thumbs_up");
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip reaction-pending", emoji:"thumbs_up", label:"👍 1, pending confirmation" }], "only the sender's contribution is subtracted");
+    held.resolve({ seq:4 });
+    await s.flush();
+    relay.events.push(instantMine(4, "0101010101010101", { active:false }));
+    await s.poll();
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip", emoji:"thumbs_up", label:"👍 1" }]);
+    s.destroy();
+  });
+
+  test(`${kind}: confirmed counts stay accurate while other participants arrive during a pending add`, async () => {
+    const held = deferred(), relay = instantRelay(INSTANT_COPY, [instantEvent(2, { author:"bob" }), instantEvent(3, { author:"carol" })]);
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    assert.deepEqual(s.chips(), [{ ...instantPending, label:"👍 3, you reacted, pending confirmation" }]);
+    relay.events.push(instantEvent(4, { author:"dave" }));
+    await s.poll();
+    assert.deepEqual(s.chips(), [{ ...instantPending, label:"👍 4, you reacted, pending confirmation" }], "another participant's retained event is kept alongside the preview");
+    held.resolve({ seq:5 });
+    await s.flush();
+    relay.events.push(instantMine(5, "0101010101010101"));
+    await s.poll();
+    assert.deepEqual(s.chips(), [{ ...instantConfirmed, label:"👍 4, you reacted" }], "confirmation adds the sender once");
+    s.destroy();
+  });
+
+  test(`${kind}: mismatched, malformed and wrong-actor events never settle the preview`, async () => {
+    const relay = instantRelay();
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    await s.flush();
+    relay.events.push(instantMine(2, "0202020202020202"), instantMine(3, "0101010101010101", { active:false }));
+    await s.poll();
+    assert.match(s.f.get("msgs").innerHTML, /aria-label="👍 1, you reacted, pending confirmation"/, "a different key or desired state is not a match");
+    relay.events.push(instantEvent(4, { author:"bob", key:"r/0101010101010101" }), instantMine(5, "0101", {}), instantMine(6, "0101010101010101", { emoji:"heart" }));
+    await s.poll();
+    assert.deepEqual(s.chips().map(chip => chip.label).sort(), ["❤️ 1, you reacted", "👍 2, you reacted, pending confirmation"].sort(), "wrong actor, malformed key and wrong emoji stay unmatched; the sender is not counted twice");
+    relay.events.push(instantMine(7, "0101010101010101"));
+    await s.poll();
+    assert.deepEqual(s.chips().filter(chip => chip.emoji === "thumbs_up"), [{ ...instantConfirmed, label:"👍 2, you reacted" }]);
+    s.destroy();
+  });
+
+  test(`${kind}: an explicit rejection removes only its preview, restores the confirmed display and reports once`, async () => {
+    const relay = instantRelay(INSTANT_COPY, [instantEvent(2, { author:"bob" })]);
+    relay.onPost = () => Promise.reject(instantRejected(403, '{"error":"read_only"}'));
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    await s.flush();
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip", emoji:"thumbs_up", label:"👍 1" }]);
+    assert.deepEqual(s.toasts, ["Reaction was not saved."]);
+    await s.poll();
+    assert.equal(relay.posts.length, 1, "a rejected write is not resent automatically");
+    s.destroy();
+  });
+
+  test(`${kind}: an ambiguous failure stays unconfirmed, is never resent automatically, and creates no interval`, async () => {
+    const relay = instantRelay();
+    relay.onPost = () => Promise.reject(new Error("network down"));
+    const s = instantSurface(kind, relay);
+    await s.start();
+    const originalSetInterval = globalThis.setInterval;
+    let intervals = 0;
+    globalThis.setInterval = (...args) => { intervals++; return originalSetInterval(...args); };
+    try {
+      s.choose("thumbs_up");
+      await s.flush();
+      assert.deepEqual(s.chips(), [{ cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 1, you reacted, not confirmed" }]);
+      assert.deepEqual(s.toasts, [], "an uncertain outcome is not reported as a definite failure");
+      await s.poll();
+      await s.poll();
+      assert.equal(relay.posts.length, 1, "nothing is replayed automatically");
+      assert.equal(intervals, 0, "no new periodic timer");
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+    }
+    s.destroy();
+  });
+
+  test(`${kind}: an explicit retry repeats the exact body and key and never increments the preview twice`, async () => {
+    const relay = instantRelay();
+    relay.onPost = n => n === 1 ? Promise.reject(new Error("network down")) : { seq:3 };
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    await s.flush();
+    s.choose("thumbs_up");
+    await s.flush();
+    assert.equal(relay.posts.length, 2);
+    assert.deepEqual(relay.posts[1], relay.posts[0], "the retry is byte-identical to the uncertain write");
+    assert.deepEqual(s.chips(), [{ ...instantPending }], "one preview, one contribution");
+    relay.events.push(instantMine(2, "0101010101010101"));
+    await s.poll();
+    assert.deepEqual(s.chips(), [instantConfirmed]);
+    s.destroy();
+  });
+
+  test(`${kind}: repeated selection while in flight or awaiting confirmation sends one write`, async () => {
+    const held = deferred(), relay = instantRelay();
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    s.choose("thumbs_up");
+    s.choose("thumbs_up");
+    assert.equal(relay.posts.length, 1, "no second POST while the exact operation is in flight");
+    assert.deepEqual(s.chips(), [instantPending]);
+    held.resolve({ seq:2 });
+    await s.flush();
+    s.choose("thumbs_up");
+    await s.flush();
+    assert.equal(relay.posts.length, 1, "an acknowledged operation awaits confirmation rather than writing again");
+    assert.deepEqual(s.chips(), [instantPending]);
+    s.destroy();
+  });
+
+  test(`${kind}: independent emoji operations on one comment do not interfere`, async () => {
+    const held = deferred(), relay = instantRelay();
+    relay.onPost = n => n === 1 ? held.promise : Promise.reject(instantRejected(403, '{"error":"read_only"}'));
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    s.choose("heart");
+    await s.flush();
+    assert.deepEqual(s.chips(), [instantPending], "the rejected heart leaves no chip and the thumbs-up preview stands");
+    assert.deepEqual(s.toasts, ["Reaction was not saved."]);
+    held.resolve({ seq:2 });
+    await s.flush();
+    assert.deepEqual(s.chips(), [instantPending]);
+    s.destroy();
+  });
+
+  test(`${kind}: a confirmation read before the POST response is not double-counted, and a late rejection changes nothing`, async () => {
+    const held = deferred(), relay = instantRelay();
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    relay.events.push(instantMine(2, "0101010101010101"));
+    await s.poll();
+    assert.deepEqual(s.chips(), [instantConfirmed], "the retained event settles the preview before the response arrives");
+    held.reject(instantRejected(403, '{"error":"read_only"}'));
+    await s.flush();
+    assert.deepEqual(s.chips(), [instantConfirmed], "a late rejection cannot roll back a confirmed reaction");
+    assert.deepEqual(s.toasts, []);
+    s.destroy();
+  });
+
+  test(`${kind}: a late error from a superseded operation cannot affect a newer operation on the same emoji`, async () => {
+    const first = deferred(), second = deferred(), relay = instantRelay(INSTANT_COPY, [instantEvent(2, { author:"bob" })]);
+    relay.onPost = n => n === 1 ? first.promise : second.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    relay.events.push(instantMine(3, "0101010101010101"));
+    await s.poll();
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip mine", emoji:"thumbs_up", label:"👍 2, you reacted" }]);
+    s.choose("thumbs_up");
+    assert.deepEqual(relay.posts[1], { target:1, emoji:"thumbs_up", active:false, key:"0202020202020202" });
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip reaction-pending", emoji:"thumbs_up", label:"👍 1, pending confirmation" }]);
+    first.reject(instantRejected(403, '{"error":"read_only"}'));
+    await s.flush();
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip reaction-pending", emoji:"thumbs_up", label:"👍 1, pending confirmation" }], "the newer removal keeps its own preview");
+    assert.deepEqual(s.toasts, []);
+    s.destroy();
+  });
+
+  test(`${kind}: leaving and returning fences a stale rejection and shows only confirmed state`, async () => {
+    const held = deferred(), relay = instantRelay();
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    await s.leave();
+    held.reject(instantRejected(403, '{"error":"read_only"}'));
+    await s.flush();
+    assert.deepEqual(s.toasts, [], "a stale callback reports nothing after navigation");
+    await s.ret();
+    assert.deepEqual(s.chips(), [], "a reopened chat shows confirmed state only");
+    s.destroy();
+  });
+
+  test(`${kind}: destruction fences a late acknowledgment and rejection`, async () => {
+    const held = deferred(), relay = instantRelay();
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    const html = s.f.get("msgs").innerHTML;
+    s.destroy();
+    held.reject(instantRejected(403, '{"error":"read_only"}'));
+    await instantFlush();
+    assert.equal(s.f.get("msgs").innerHTML, html, "a destroyed surface is not repainted");
+    assert.deepEqual(s.toasts, []);
+  });
+
+  test(`${kind}: an ordinary poll that replaces the view object does not retire a valid operation`, async () => {
+    const held = deferred(), relay = instantRelay();
+    relay.onPost = () => held.promise;
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    await s.poll();
+    const readsBeforeAck = relay.reads;
+    held.resolve({ seq:2 });
+    await s.flush();
+    assert.equal(relay.reads, readsBeforeAck + 1, "the valid operation still requests its confirmation read");
+    relay.events.push(instantMine(2, "0101010101010101"));
+    await s.poll();
+    assert.deepEqual(s.chips(), [instantConfirmed]);
+    s.destroy();
+  });
+
+  test(`${kind}: the confirmation read coalesces into one follow-up when a read is already running`, async () => {
+    const relay = instantRelay();
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.holdComments();
+    const pollStarted = s.poll();
+    await instantFlush();
+    s.choose("thumbs_up");
+    await instantFlush();
+    const readsWhileBusy = relay.reads;
+    s.releaseComments();
+    await pollStarted;
+    await s.flush();
+    assert.equal(relay.reads, readsWhileBusy + 2, "the held poll's own read plus exactly one coalesced follow-up");
+    assert.deepEqual(s.chips(), [instantPending], "the preview survives the coalesced read without a confirmation");
+    s.destroy();
+  });
+}
+
+test("received: a read-only transition gates the preview without cancelling the write, and restoring access reveals it", async () => {
+  const held = deferred(), relay = instantRelay(INSTANT_COPY, [instantEvent(2, { author:"bob" })]);
+  relay.onPost = () => held.promise;
+  const s = instantSurface("received", relay);
+  await s.start();
+  s.choose("thumbs_up");
+  assert.deepEqual(s.chips(), [{ cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 2, you reacted, pending confirmation" }]);
+  s.setAccess("read");
+  await s.poll();
+  assert.deepEqual(s.chips(), [{ cls:"reaction-chip", emoji:"thumbs_up", label:"👍 1" }], "read-only copies show confirmed state only");
+  const readsBeforeAck = relay.reads;
+  held.resolve({ seq:3 });
+  await s.flush();
+  assert.equal(relay.reads, readsBeforeAck, "a read-only copy requests no confirmation read");
+  s.setAccess("write");
+  await s.poll();
+  assert.deepEqual(s.chips(), [{ cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 2, you reacted, pending confirmation" }]);
+  relay.events.push(instantMine(4, "0101010101010101"));
+  await s.poll();
+  assert.deepEqual(s.chips(), [{ cls:"reaction-chip mine", emoji:"thumbs_up", label:"👍 2, you reacted" }]);
+  s.destroy();
+});
+
+test("owner signature ignores derived pending chips but keeps confirmed reaction inputs", () => {
+  const copy = { key:"s/o/c/g", view:{ ...base, access:"owner" }, comments:[{ seq:1 }], reactionEvents:[{ seq:2 }], reactionState:[{ target:1, emoji:"thumbs_up", count:1 }] };
+  const signature = guestModule.ownerDiscussionSignature([copy]);
+  assert.equal(guestModule.ownerDiscussionSignature([{ ...copy, reactionState:[{ target:1, emoji:"thumbs_up", count:2, mine:true, unconfirmed:"pending" }] }]), signature, "a derived pending chip never forces a transcript rebuild");
+  assert.notEqual(guestModule.ownerDiscussionSignature([{ ...copy, reactionEvents:[] }]), signature, "a retained reaction event still rebuilds");
+  assert.notEqual(guestModule.ownerDiscussionSignature([{ ...copy, online:false }]), signature, "relay availability still rebuilds");
+  assert.deepEqual(copy.reactionState, [{ target:1, emoji:"thumbs_up", count:1 }], "the signature does not mutate its input");
+  assert.equal(guestModule.ownerDiscussionSignature(null), "[]");
+});
+
+for (const kind of ["received", "owner"]) {
+  test(`${kind}: each recognized rejection removes the preview, and each uncertain status keeps it`, async () => {
+    const rejected = [[400, '{"error":"bad_request"}'], [403, '{"error":"read_only"}'], [404, '{"error":"not_found"}'], [409, '{"error":"not_active"}'], [413, '{"error":"too_large"}'], [502, '{"error":"refused"}']];
+    const uncertain = [[500, '{"error":"storage"}'], [502, '{"error":"offline"}'], [502, '{"error":"changed"}'], [0, "socket hang up"]];
+    for (const [status, message] of rejected) {
+      const relay = instantRelay();
+      relay.onPost = () => Promise.reject(instantRejected(status, message));
+      const s = instantSurface(kind, relay);
+      await s.start();
+      s.choose("thumbs_up");
+      await s.flush();
+      assert.deepEqual(s.chips(), [], `status ${status} is an explicit rejection`);
+      assert.deepEqual(s.toasts, ["Reaction was not saved."]);
+      s.destroy();
+    }
+    for (const [status, message] of uncertain) {
+      const relay = instantRelay();
+      relay.onPost = () => Promise.reject(status ? instantRejected(status, message) : new Error(message));
+      const s = instantSurface(kind, relay);
+      await s.start();
+      s.choose("thumbs_up");
+      await s.flush();
+      assert.deepEqual(s.chips(), [{ cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 1, you reacted, not confirmed" }], `status ${status} is uncertain`);
+      assert.deepEqual(s.toasts, [], `status ${status} is not reported as a definite failure`);
+      s.destroy();
+    }
+  });
+
+  test(`${kind}: an explicit rejection without a toast callback still restores the confirmed display`, async () => {
+    const relay = instantRelay(INSTANT_COPY, [instantEvent(2, { author:"bob" })]);
+    relay.onPost = () => Promise.reject(instantRejected(403, '{"error":"read_only"}'));
+    const s = instantSurface(kind, relay, { noToast:true });
+    await s.start();
+    s.choose("thumbs_up");
+    await s.flush();
+    assert.deepEqual(s.chips(), [{ cls:"reaction-chip", emoji:"thumbs_up", label:"👍 1" }]);
+    s.destroy();
+  });
+}
+
+test("received: a stale visit cannot resend an uncertain operation, and the explicit retry stays available", async () => {
+  const bubbleController = createBubbleActionController(), realVisit = bubbleController.isCurrentVisit.bind(bubbleController);
+  const relay = instantRelay();
+  relay.onPost = n => n === 1 ? Promise.reject(new Error("network down")) : { seq:3 };
+  const s = instantSurface("received", relay, { bubbleController });
+  await s.start();
+  s.choose("thumbs_up");
+  await s.flush();
+  const uncertain = { cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 1, you reacted, not confirmed" };
+  assert.deepEqual(s.chips(), [uncertain]);
+  bubbleController.isCurrentVisit = () => false;
+  s.choose("thumbs_up");
+  await s.flush();
+  assert.equal(relay.posts.length, 1, "a fenced click sends nothing");
+  assert.deepEqual(s.chips(), [uncertain], "the uncertain state is kept, not discarded");
+  bubbleController.isCurrentVisit = realVisit;
+  s.choose("thumbs_up");
+  await s.flush();
+  assert.deepEqual(relay.posts[1], relay.posts[0], "the retry reuses the exact body and key");
+  assert.deepEqual(s.chips(), [{ ...instantPending }]);
+  s.destroy();
+});
+
+/* A success is an acknowledgment only when it carries a usable receipt: the
+   appended comment's safe integer sequence, later than the target. Anything else
+   stays uncertain, so an explicit retry with the exact body remains available. */
+const malformedReceipts = [null, "ok", {}, { seq:0 }, { seq:1 }, { seq:"9" }, { seq:9.5 }, { seq:Number.MAX_SAFE_INTEGER + 2 }];
+const uncertainInstant = { cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 1, you reacted, not confirmed" };
+test("received: an unusable receipt after the visit ends stays uncertain, and the retry still reuses the exact body", async () => {
+  const bubbleController = createBubbleActionController(), realVisit = bubbleController.isCurrentVisit.bind(bubbleController);
+  const held = deferred(), relay = instantRelay();
+  relay.onPost = n => n === 1 ? held.promise : { seq:9 };
+  const s = instantSurface("received", relay, { bubbleController });
+  await s.start();
+  s.choose("thumbs_up");
+  bubbleController.isCurrentVisit = () => false;
+  held.resolve(null);
+  await s.flush();
+  assert.equal(relay.posts.length, 1, "the write was already in flight and is not repeated");
+  bubbleController.isCurrentVisit = realVisit;
+  s.choose("thumbs_up");
+  await s.flush();
+  assert.equal(relay.posts.length, 2, "the operation remained uncertain, so the explicit retry is sent");
+  assert.deepEqual(relay.posts[1], relay.posts[0], "the retry reuses the exact body and key");
+  assert.deepEqual(s.chips(), [{ ...instantPending }]);
+  s.destroy();
+});
+
+for (const kind of ["received", "owner"]) {
+  for (const receipt of malformedReceipts) {
+    test(`${kind}: a success with receipt ${JSON.stringify(receipt)} stays uncertain and an explicit retry reuses the exact body`, async () => {
+      const relay = instantRelay();
+      relay.onPost = n => n === 1 ? Promise.resolve(receipt) : { seq:9 };
+      const s = instantSurface(kind, relay);
+      await s.start();
+      s.choose("thumbs_up");
+      await s.flush();
+      assert.deepEqual(s.chips(), [uncertainInstant], "an unusable receipt is not an acknowledgment");
+      assert.deepEqual(s.toasts, [], "an ambiguous receipt is not reported as a failure");
+      s.choose("thumbs_up");
+      await s.flush();
+      assert.equal(relay.posts.length, 2, "the explicit retry is sent");
+      assert.deepEqual(relay.posts[1], relay.posts[0], "the retry reuses the exact body and key");
+      assert.deepEqual(s.chips(), [{ ...instantPending }], "a valid receipt is still not confirmation");
+      s.destroy();
+    });
+  }
+}
+
+/* Only a retained event that passes the same validation as the display may settle
+   a pending operation. Each record below matches the operation's key, target,
+   emoji and direction, and differs from a valid record in exactly one validated
+   field, so only the validation decides the outcome. */
+const malformedMatches = {
+  "a non-positive sequence": instantMine(0, "0101010101010101"),
+  "an unsupported version": instantMine(2, "0101010101010101", { v:2 }),
+  "an unexpected record type": instantMine(2, "0101010101010101", { t:"comment" }),
+  "an unexpected field": instantMine(2, "0101010101010101", { extra:true }),
+  "a target author that differs from the comment": instantMine(2, "0101010101010101", { target_author:"mallory" }),
+  "a reactor who is the comment author": instantMine(2, "0101010101010101", { author:"alice", target_author:"alice" }),
+  "a non-boolean active flag": instantMine(2, "0101010101010101", { active:"true" }),
+  "an empty reactor": instantMine(2, "0101010101010101", { author:"" }),
+};
+for (const kind of ["received", "owner"]) {
+  for (const [label, record] of Object.entries(malformedMatches)) {
+    test(`${kind}: a malformed retained record that matches the pending write (${label}) does not settle it`, async () => {
+      const held = deferred(), relay = instantRelay();
+      relay.onPost = () => held.promise;
+      const s = instantSurface(kind, relay);
+      await s.start();
+      s.choose("thumbs_up");
+      relay.events.push(record);
+      await s.poll();
+      assert.deepEqual(s.chips(), [{ ...instantPending }], "the unvalidated record cannot remove the preview");
+      held.resolve({ seq:9 });
+      await s.flush();
+      relay.events.push(instantMine(3, "0101010101010101"));
+      await s.poll();
+      assert.deepEqual(s.chips(), [{ ...instantConfirmed }], "the validated record settles the operation");
+      s.destroy();
+    });
+  }
+
+  test(`${kind}: a validated removal settles its pending operation even though it leaves no chip`, async () => {
+    const relay = instantRelay(INSTANT_COPY, [instantMine(2, "0101010101010101")]);
+    const s = instantSurface(kind, relay);
+    await s.start();
+    s.choose("thumbs_up");
+    await s.flush();
+    assert.deepEqual(s.chips(), [], "the pending removal hides the sole personal chip");
+    relay.events.push(instantMine(3, "0101010101010101", { active:false }));
+    await s.poll();
+    assert.deepEqual(s.chips(), [], "the validated removal leaves no aggregate chip");
+    s.choose("thumbs_up");
+    await s.flush();
+    assert.equal(relay.posts.length, 2, "a settled removal no longer blocks a new operation");
+    assert.equal(relay.posts[1].active, true, "the new operation adds the reaction again");
+    s.destroy();
+  });
+}
