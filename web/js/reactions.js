@@ -18,9 +18,12 @@ export function reactionEligible({shared, type, author, viewer, mine, access, st
     access !== "read" && state === "live" && online === true;
 }
 
-export function replayReactionEvents(events, comments, viewer = "") {
+/* The retained records that may change display state, in sequence order. Replay
+   and pending settlement both use this one validation, so an unvalidated record
+   can neither add a chip nor settle a local operation. */
+export function acceptedReactionEvents(events, comments) {
   if (!Array.isArray(events) || !(comments instanceof Map)) return [];
-  const active = new Map();
+  const accepted = [];
   let previous = 0;
   for (const event of events) {
     if (!event || !Number.isSafeInteger(event.seq) || event.seq <= previous) continue;
@@ -31,6 +34,14 @@ export function replayReactionEvents(events, comments, viewer = "") {
         typeof event.author !== "string" || !event.author || typeof event.target_author !== "string" || !event.target_author || !/^r\/[0-9a-f]{16}$/.test(event.key || "")) continue;
     const target = comments.get(event.target);
     if (!target || target.valid !== true || target.author !== event.target_author || target.author === event.author) continue;
+    accepted.push(event);
+  }
+  return accepted;
+}
+
+export function replayReactionEvents(events, comments, viewer = "") {
+  const active = new Map();
+  for (const event of acceptedReactionEvents(events, comments)) {
     active.set(`${event.target}\0${event.author}\0${event.emoji}`, {active:event.active, mine:event.mine === true});
   }
   const grouped = new Map();
@@ -48,10 +59,43 @@ export function replayReactionEvents(events, comments, viewer = "") {
   })).sort((a, b) => a.target - b.target || order.get(a.emoji) - order.get(b.emoji));
 }
 
+const UNCONFIRMED_LABEL = {pending:", pending confirmation", uncertain:", not confirmed"};
+const UNCONFIRMED_TITLE = {pending:"Reaction pending confirmation", uncertain:"Reaction not confirmed; select to retry"};
+const operationKey = (target, emoji) => target + "\0" + emoji;
+
+/* Derives the sender's displayed reactions: the latest confirmed summary with
+   the sender's local operations applied. Pure: neither argument is mutated, and
+   operations are a presentation overlay, never retained events. An add counts the
+   sender only if the confirmed summary does not already contain them; a removal
+   subtracts only that confirmed contribution. Zero-count chips are dropped. */
+export function projectReactionIntent(confirmed, operations = []) {
+  const chips = new Map();
+  for (const chip of Array.isArray(confirmed) ? confirmed : []) {
+    chips.set(operationKey(chip.target, chip.emoji), {target:chip.target, emoji:chip.emoji, glyph:chip.glyph, count:chip.count, mine:chip.mine === true});
+  }
+  for (const operation of Array.isArray(operations) ? operations : []) {
+    const key = operationKey(operation.target, operation.emoji);
+    const chip = chips.get(key) || {target:operation.target, emoji:operation.emoji, glyph:byID.get(operation.emoji), count:0, mine:false};
+    if (operation.active && !chip.mine) { chip.count += 1; chip.mine = true; }
+    else if (!operation.active && chip.mine) { chip.count -= 1; chip.mine = false; }
+    chip.unconfirmed = operation.state === "uncertain" ? "uncertain" : "pending";
+    chips.set(key, chip);
+  }
+  const order = new Map(REACTIONS.map((item, index) => [item.id, index]));
+  return [...chips.values()].filter(chip => chip.count > 0)
+    .sort((a, b) => a.target - b.target || order.get(a.emoji) - order.get(b.emoji));
+}
+
 export function reactionChipsHTML(chips, target = null) {
   if (!Array.isArray(chips)) return "";
   return chips.filter(chip => chip && (target === null || chip.target === target) && Number.isSafeInteger(chip.count) && chip.count > 0 && byID.get(chip.emoji) === chip.glyph)
-    .map(chip => `<span class="reaction-chip${chip.mine ? " mine" : ""}" data-reaction="${chip.emoji}"${chip.mine ? ' aria-label="' + chip.glyph + " " + chip.count + ', you reacted" aria-pressed="true"' : ' aria-label="' + chip.glyph + " " + chip.count + '" aria-pressed="false"'}><span aria-hidden="true">${chip.glyph}</span><span>${chip.count}</span></span>`).join("");
+    .map(chip => {
+      const state = ["pending", "uncertain"].includes(chip.unconfirmed) ? chip.unconfirmed : "";
+      const classes = "reaction-chip" + (chip.mine ? " mine" : "") + (state ? " reaction-pending" : "");
+      const label = chip.glyph + " " + chip.count + (chip.mine ? ", you reacted" : "") + (state ? UNCONFIRMED_LABEL[state] : "");
+      const title = state ? ` title="${UNCONFIRMED_TITLE[state]}"` : "";
+      return `<span class="${classes}" data-reaction="${chip.emoji}" aria-label="${label}" aria-pressed="${chip.mine ? "true" : "false"}"${title}><span aria-hidden="true">${chip.glyph}</span><span>${chip.count}</span></span>`;
+    }).join("");
 }
 
 export function reactionControlHTML({target = 0, key = "", copyInstance = ""} = {}) {

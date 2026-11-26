@@ -795,6 +795,226 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerS
   assertID('stage2-own-source-provenance-'+mode,ownSource.some(source=>source.seq===ownSeq&&source.role==='user'&&!source.who));
   assertID('stage2-own-source-no-dispatch-'+mode,counts(ownerSeat).attempted===beforeOwner.attempted+1&&counts(ownerSeat).controls===beforeOwner.controls);
   manifest['stage2-shared-'+mode]={key,seq,bookmark:saved.team,beforeReader,afterReader:counts(readerSeat),beforeOwner,afterOwner:counts(ownerSeat),beforeOther,afterOther:counts(otherSeat)};
+  await stage2InstantReactions(mode,{ownerSeat,observerSeat,readerSeat,otherSeat,share,key,owner,observer,reader});
+}
+
+/* Route gate for People reaction writes on one page. Reads pass through; a POST
+   either continues to the real local server, is held until the test decides, or
+   is answered synthetically (403 read_only or an aborted connection). A synthetic
+   answer replaces only the browser request, never the relay record. */
+async function gateReactionWrites(page) {
+  const gate={plan:{hold:false,outcome:'continue'},bodies:[],held:null,arrived:null};
+  await page.route('**/reactions?*',async route=>{
+    try {
+      if(route.request().method()!=='POST')return await route.fallback();
+      gate.bodies.push(route.request().postData());
+      const plan=gate.plan;gate.plan={hold:false,outcome:'continue'};
+      let outcome=plan.outcome;
+      if(plan.hold) {
+        const decided=new Promise(resolve=>{gate.held=resolve;});
+        heldReleases.add(gate.held);
+        if(gate.arrived)gate.arrived();gate.arrived=null;
+        outcome=await decided;
+      }
+      if(outcome==='reject')return await route.fulfill({status:403,contentType:'application/json',body:'{"error":"read_only"}'});
+      if(outcome==='abort')return await route.abort('connectionreset');
+      return await route.continue();
+    } catch {}
+  });
+  gate.hold=()=>{gate.plan={hold:true,outcome:'continue'};return new Promise(resolve=>{gate.arrived=resolve;});};
+  gate.next=outcome=>{gate.plan={hold:false,outcome};};
+  gate.release=outcome=>{const resolve=gate.held;gate.held=null;if(!resolve)return;heldReleases.delete(resolve);resolve(outcome);};
+  return gate;
+}
+/* Null when no toast element exists; a stale response must not create one. */
+async function toastText(page) {
+  return page.evaluate(()=>document.querySelector('#toast')?.textContent ?? null);
+}
+/* Computed box and type of one reaction chip, so a pending preview can be compared with its confirmed form. */
+async function reactionChipGeometry(message,emoji) {
+  return message.locator('[data-reaction-chips] [data-reaction="'+emoji+'"]').evaluate(el=>{const cs=getComputedStyle(el),box=el.getBoundingClientRect();return {height:box.height,padding:cs.padding,borderWidth:cs.borderTopWidth,borderStyle:cs.borderTopStyle,fontSize:cs.fontSize,lineHeight:cs.lineHeight,fontStyle:cs.fontStyle,count:el.querySelectorAll('span')[1]?.textContent.trim()};});
+}
+async function reactionChipsOf(message) {
+  return message.locator('[data-reaction-chips] [data-reaction]').evaluateAll(els=>els.map(el=>({emoji:el.dataset.reaction,label:el.getAttribute('aria-label'),pending:el.classList.contains('reaction-pending'),mine:el.classList.contains('mine')})));
+}
+/* A safe touch point inside the bubble: not on text links, chips, or the reaction control. */
+async function safeBubblePoint(message) {
+  const point=await message.locator('.bubble').evaluate(bubble=>{
+    const box=bubble.getBoundingClientRect(),unsafe='a,button,input,textarea,[contenteditable],[data-reaction],[data-reaction-chips],.reaction-entry';
+    for(const fy of [0.5,0.35,0.65,0.2,0.8])for(const fx of [0.5,0.3,0.7,0.15,0.85]){
+      const x=box.left+box.width*fx,y=box.top+box.height*fy,el=document.elementFromPoint(x,y);
+      if(el&&bubble.contains(el)&&!el.closest(unsafe))return {x,y};
+    }
+    return null;
+  });
+  if(!point)throw Error('no safe touch point inside the bubble');
+  return point;
+}
+/* Proves that a tap at the center of the locator reaches that control inside the chat timeline. Playwright's
+   touchscreen.tap does not reveal coordinates, and a bubble clipped by the timeline still reports as visible.
+   Throws with the measured geometry rather than masking an unexpected overlay. */
+async function tapProbe(locator,selector,label) {
+  const probe=await locator.evaluate((el,selector)=>{
+    const box=el.getBoundingClientRect(),msgs=document.querySelector('#msgs').getBoundingClientRect();
+    const x=box.left+box.width/2,y=box.top+box.height/2,hit=document.elementFromPoint(x,y);
+    return {x,y,inTimeline:x>=msgs.left&&x<=msgs.right&&y>=msgs.top&&y<=msgs.bottom,receives:!!hit&&hit.closest(selector)===el,
+      target:{top:box.top,bottom:box.bottom,left:box.left,right:box.right},timeline:{top:msgs.top,bottom:msgs.bottom,left:msgs.left,right:msgs.right},
+      hit:hit?hit.tagName+'.'+String(hit.className).slice(0,120):null};
+  },selector);
+  if(!probe.inTimeline||!probe.receives)throw Error(label+' is not tappable: '+JSON.stringify(probe));
+  return probe;
+}
+async function chooseReactionFor(page,message,mode,emoji) {
+  const trigger=message.locator('[data-reaction-open]');
+  if(mode==='phone'){
+    // Tapping a bubble toggles its selection, and the trigger is visible only while it is selected.
+    // Select only when it is not selected yet, so a repeat operation never deselects it.
+    if(!(await message.evaluate(el=>el.classList.contains('bubble-selected')))){
+      await message.locator('.bubble').evaluate(el=>el.scrollIntoView({block:'center',inline:'nearest'}));
+      const point=await safeBubblePoint(message);await page.touchscreen.tap(point.x,point.y);
+    }
+  } else await message.locator('.bubble').hover();
+  await trigger.waitFor({state:'visible',timeout:30000});
+  // Reveal after any selection, whether it was just made or already present, and before the tap.
+  await trigger.evaluate(el=>el.scrollIntoView({block:'center',inline:'nearest'}));
+  const triggerProbe=await tapProbe(trigger,'[data-reaction-open]','reaction trigger');
+  if(mode==='phone')await page.touchscreen.tap(triggerProbe.x,triggerProbe.y);else await trigger.click();
+  const choice=message.locator('[data-reaction-choice="'+emoji+'"]');await choice.waitFor({state:'visible',timeout:10000});
+  // The choice keeps its existing reveal. The baseline comes after all intentional reveal scrolling and
+  // immediately before the emoji gesture, so later comparisons measure only what the reaction itself did.
+  await choice.scrollIntoViewIfNeeded();
+  const choiceProbe=await tapProbe(choice,'[data-reaction-choice]','reaction choice');
+  const baseline=await page.locator('#msgs').evaluate(el=>({top:el.scrollTop,fromEnd:el.scrollHeight-el.scrollTop-el.clientHeight}));
+  if(mode==='phone')await page.touchscreen.tap(choiceProbe.x,choiceProbe.y);else await choice.click();
+  return {scrollBefore:baseline.top,fromEnd:baseline.fromEnd};
+}
+async function openTimeline(page,id,mode) {
+  if(mode==='phone'&&await page.locator('#chatback').isVisible())await page.locator('#chatback').click();
+  await open(page,id);await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
+}
+async function stage2InstantReactions(mode,s) {
+  const {ownerSeat,observerSeat,readerSeat,otherSeat,share,key,owner,observer,reader}=s;
+  await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'},{seat:observerSeat.self,access:'write'},{seat:otherSeat.self,access:'read'}]});
+  await until(async()=>{const list=await observerSeat.api('/api/team/subscriptions');return list.subscriptions.find(item=>item.owner===ownerSeat.self&&item.chat===share.uid&&item.generation===share.generation&&item.access==='write');},30000,'instant reaction observer writable');
+  const received='team/'+key,ownNode=ownerSeat.node.id;
+  const gates={observer:await gateReactionWrites(observer),owner:await gateReactionWrites(owner)};
+  const reactionsOf=async seat=>(await seat.api('/api/team/subscriptions/'+key+'/reactions?after=0')).events.length;
+  const chipLabel=async(page,message,emoji)=>(await reactionChipsOf(message)).find(c=>c.emoji===emoji);
+  try {
+    await openTimeline(reader,received,mode);
+    const text='Instant reaction target '+mode;
+    await reader.locator('#prompt').fill(text);await reader.locator('#sendbtn').click();
+    const readerTarget=reader.locator('#msgs .gmsg').filter({hasText:text}).last();await readerTarget.waitFor({timeout:30000});
+    const seq=Number(await readerTarget.getAttribute('data-cseq'));
+    // Filler after the target keeps the reacted message away from the timeline end, outside the end-follow zone.
+    // The UI sends comments at the frontier anchor and the timeline sorts by anchor, then seq. The filler reuses the
+    // target's retained anchor, so each filler comment sorts after the target by its later seq.
+    const targetEntry=await until(async()=>(await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0')).entries.find(x=>x.text===text&&Number.isSafeInteger(x.anchor)),20000,'instant target retained');
+    for(let i=0;i<14;i++)await readerSeat.api('/api/team/subscriptions/'+key+'/comments','POST',{text:'Synthetic non-bottom filler '+mode+' '+i,anchor:targetEntry.anchor,key:(mode==='desktop'?'f11e4000':'f11e5000')+i.toString(16).padStart(8,'0')});
+    await openTimeline(observer,received,mode);await openTimeline(owner,ownNode,mode);
+    const observerMessage=observer.locator('#msgs .gmsg[data-cseq="'+seq+'"]'),ownerMessage=owner.locator('#msgs .gmsg[data-cseq="'+seq+'"]'),readerMessage=reader.locator('#msgs .gmsg[data-cseq="'+seq+'"]');
+    await observerMessage.waitFor({timeout:40000});await ownerMessage.waitFor({timeout:40000});await readerMessage.waitFor({timeout:40000});
+    // The baseline is taken only after the final filler is loaded in both observer and owner timelines.
+    const finalFiller='Synthetic non-bottom filler '+mode+' 13';
+    await observer.locator('#msgs').getByText(finalFiller,{exact:true}).waitFor({state:'attached',timeout:40000});
+    await owner.locator('#msgs').getByText(finalFiller,{exact:true}).waitFor({state:'attached',timeout:40000});
+
+    // Recipient reacts to another participant's comment; the write is held.
+    const observerDraft='Draft kept during reaction feedback '+mode;
+    await observer.locator('#prompt').fill(observerDraft);
+    const readerBefore=await reactionsOf(readerSeat),ownerBefore=await reactionsOf(ownerSeat);
+    const arrival=gates.observer.hold();
+    const first=await chooseReactionFor(observer,observerMessage,mode,'heart');
+    const scrollBefore=first.scrollBefore;
+    assertID('instant-recipient-baseline-outside-end-follow-'+mode,first.fromEnd>80);
+    await arrival;
+    // First choice only: measured right after its POST arrives and before any second picker interaction.
+    const scrollHeld=await observer.locator('#msgs').evaluate(el=>el.scrollTop);
+    assertID('instant-recipient-scroll-kept-while-pending-'+mode,Math.abs(scrollHeld-scrollBefore)<2);
+    assertID('instant-recipient-preview-before-post-'+mode,JSON.stringify(await reactionChipsOf(observerMessage))===JSON.stringify([{emoji:'heart',label:'❤️ 1, you reacted, pending confirmation',pending:true,mine:true}]));
+    assertID('instant-recipient-one-write-in-flight-'+mode,gates.observer.bodies.length===1);
+    // Repeat selection on the same pending heart: its own pre-choice baseline, no write.
+    const repeat=await chooseReactionFor(observer,observerMessage,mode,'heart');
+    const repeatBefore=repeat.scrollBefore;
+    assertID('instant-recipient-repeat-baseline-outside-end-follow-'+mode,repeat.fromEnd>80);
+    assertID('instant-recipient-repeat-selection-sends-nothing-'+mode,gates.observer.bodies.length===1);
+    assertID('instant-recipient-repeat-selection-scroll-kept-'+mode,Math.abs((await observer.locator('#msgs').evaluate(el=>el.scrollTop))-repeatBefore)<2);
+    assertID('instant-recipient-no-fabricated-state-'+mode,await reactionsOf(readerSeat)===readerBefore&&await reactionsOf(ownerSeat)===ownerBefore&&(await reactionChipsOf(readerMessage)).length===0&&(await reactionChipsOf(ownerMessage)).length===0);
+    assertID('instant-recipient-composer-kept-while-pending-'+mode,(await observer.locator('#prompt').innerText())===observerDraft);
+    await screenshot(observer,'instant-reaction-recipient-pending-'+mode+'.png');
+    // Final held position, immediately before the POST is released.
+    const scrollReleased=await observer.locator('#msgs').evaluate(el=>el.scrollTop);
+    const pendingChip=await reactionChipGeometry(observerMessage,'heart');
+    gates.observer.release('continue');
+    await until(async()=>{const c=await chipLabel(observer,observerMessage,'heart');return c&&!c.pending&&c.label==='❤️ 1, you reacted';},40000,'recipient confirmation');
+    assertID('instant-recipient-confirmed-once-'+mode,JSON.stringify(await reactionChipsOf(observerMessage))===JSON.stringify([{emoji:'heart',label:'❤️ 1, you reacted',pending:false,mine:true}]));
+    await until(async()=>(await chipLabel(owner,ownerMessage,'heart'))?.label==='❤️ 1',40000,'owner sees recipient reaction');
+    await until(async()=>(await chipLabel(reader,readerMessage,'heart'))?.label==='❤️ 1',40000,'reader sees recipient reaction');
+    const confirmedChip=await reactionChipGeometry(observerMessage,'heart');
+    assertID('instant-chip-geometry-same-pending-and-confirmed-'+mode,pendingChip.count==='1'&&confirmedChip.count==='1'&&Math.abs(pendingChip.height-confirmedChip.height)<0.5&&pendingChip.padding===confirmedChip.padding&&pendingChip.fontSize===confirmedChip.fontSize&&pendingChip.lineHeight===confirmedChip.lineHeight&&pendingChip.fontStyle===confirmedChip.fontStyle&&pendingChip.borderWidth===confirmedChip.borderWidth);
+    assertID('instant-chip-pending-dashed-confirmed-solid-'+mode,pendingChip.borderStyle==='dashed'&&confirmedChip.borderStyle==='solid');
+    assertID('instant-recipient-composer-and-scroll-kept-after-confirm-'+mode,(await observer.locator('#prompt').innerText())===observerDraft&&Math.abs((await observer.locator('#msgs').evaluate(el=>el.scrollTop))-scrollReleased)<2);
+    await observer.locator('#prompt').fill('');
+
+    // Owner reacts in the normal timeline: add, then remove with an explicit rejection.
+    const readerBeforeOwner=await reactionsOf(readerSeat),observerBeforeOwner=await reactionsOf(observerSeat);
+    const arrivalOwner=gates.owner.hold();
+    await chooseReactionFor(owner,ownerMessage,mode,'thumbs_up');
+    await arrivalOwner;
+    assertID('instant-owner-add-preview-before-post-'+mode,JSON.stringify(await reactionChipsOf(ownerMessage))===JSON.stringify([{emoji:'heart',label:'❤️ 1',pending:false,mine:false},{emoji:'thumbs_up',label:'👍 1, you reacted, pending confirmation',pending:true,mine:true}]));
+    assertID('instant-owner-add-no-fabricated-state-'+mode,await reactionsOf(readerSeat)===readerBeforeOwner&&await reactionsOf(observerSeat)===observerBeforeOwner&&(await reactionChipsOf(readerMessage)).every(c=>c.emoji!=='thumbs_up'));
+    await screenshot(owner,'instant-reaction-owner-pending-'+mode+'.png');
+    gates.owner.release('continue');
+    await until(async()=>{const c=await chipLabel(owner,ownerMessage,'thumbs_up');return c&&!c.pending&&c.label==='👍 1, you reacted';},40000,'owner confirmation');
+    assertID('instant-owner-add-confirmed-once-'+mode,JSON.stringify(await reactionChipsOf(ownerMessage))===JSON.stringify([{emoji:'heart',label:'❤️ 1',pending:false,mine:false},{emoji:'thumbs_up',label:'👍 1, you reacted',pending:false,mine:true}]));
+    await until(async()=>(await chipLabel(reader,readerMessage,'thumbs_up'))?.label==='👍 1',40000,'reader sees owner reaction');
+    await until(async()=>(await chipLabel(observer,observerMessage,'thumbs_up'))?.label==='👍 1',40000,'recipient sees owner reaction');
+
+    const heldRemoval=gates.owner.hold();
+    await chooseReactionFor(owner,ownerMessage,mode,'thumbs_up');
+    await heldRemoval;
+    assertID('instant-owner-removal-hides-sole-chip-while-pending-'+mode,JSON.stringify(await reactionChipsOf(ownerMessage))===JSON.stringify([{emoji:'heart',label:'❤️ 1',pending:false,mine:false}]));
+    assertID('instant-owner-removal-others-unchanged-'+mode,(await chipLabel(reader,readerMessage,'thumbs_up'))?.label==='👍 1'&&(await chipLabel(observer,observerMessage,'thumbs_up'))?.label==='👍 1');
+    const responded=owner.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/reactions?'),{timeout:30000});
+    gates.owner.release('reject');
+    await responded;
+    await until(async()=>(await owner.locator('#toast').textContent())==='Reaction was not saved.',10000,'explicit rejection feedback');
+    assertID('instant-rejection-restores-confirmed-display-'+mode,JSON.stringify(await reactionChipsOf(ownerMessage))===JSON.stringify([{emoji:'heart',label:'❤️ 1',pending:false,mine:false},{emoji:'thumbs_up',label:'👍 1, you reacted',pending:false,mine:true}]));
+    assertID('instant-rejection-is-not-a-stored-removal-'+mode,(await chipLabel(reader,readerMessage,'thumbs_up'))?.label==='👍 1');
+
+    // Uncertain delivery: the browser aborts the first write; the explicit retry reuses its body.
+    await owner.evaluate(()=>{const toast=document.querySelector('#toast');if(toast)toast.textContent='sentinel';});
+    const beforeUncertain=gates.owner.bodies.length;
+    gates.owner.next('abort');
+    await chooseReactionFor(owner,ownerMessage,mode,'laughing');
+    await until(async()=>{const c=await chipLabel(owner,ownerMessage,'laughing');return c&&c.pending&&c.label==='😂 1, you reacted, not confirmed';},40000,'uncertain laughing');
+    assertID('instant-uncertain-not-reported-as-failure-'+mode,(await owner.locator('#toast').textContent())==='sentinel');
+    gates.owner.next('continue');
+    await chooseReactionFor(owner,ownerMessage,mode,'laughing');
+    await until(async()=>{const c=await chipLabel(owner,ownerMessage,'laughing');return c&&!c.pending&&c.label==='😂 1, you reacted';},40000,'retained laughing');
+    assertID('instant-retry-reuses-exact-body-'+mode,gates.owner.bodies.length===beforeUncertain+2&&gates.owner.bodies[beforeUncertain]===gates.owner.bodies[beforeUncertain+1]);
+    await until(async()=>(await chipLabel(observer,observerMessage,'laughing'))?.label==='😂 1',40000,'recipient sees retained laughing');
+    assertID('instant-retry-confirmed-once-'+mode,(await reactionChipsOf(ownerMessage)).filter(c=>c.emoji==='laughing').length===1);
+
+    // Stale response after navigation: the write is held while the owner leaves the chat.
+    const arrivalNav=gates.owner.hold();
+    await chooseReactionFor(owner,ownerMessage,mode,'celebration');
+    await arrivalNav;
+    const sideNode=await node(ownerSeat,'codex','Owner side chat '+mode,'Synthetic side chat for navigation');
+    await openTimeline(owner,sideNode.id,mode);
+    const toastBeforeStale=await toastText(owner);
+    const staleResponse=owner.waitForResponse(r=>r.request().method()==='POST'&&r.url().includes('/reactions?'),{timeout:30000});
+    gates.owner.release('continue');
+    await staleResponse;
+    await openTimeline(owner,ownNode,mode);
+    await until(async()=>{const c=await chipLabel(owner,ownerMessage,'celebration');return c&&!c.pending&&c.label==='🎉 1, you reacted';},40000,'stale celebration confirmed on return');
+    assertID('instant-stale-response-no-toast-'+mode,(await toastText(owner))===toastBeforeStale);
+    assertID('instant-stale-response-leaves-no-pending-'+mode,!(await reactionChipsOf(ownerMessage)).some(c=>c.pending));
+    manifest['instant-reactions-'+mode]={seq,recipient:await reactionChipsOf(observerMessage),owner:await reactionChipsOf(ownerMessage)};
+  } finally {
+    gates.observer.release();gates.owner.release();
+    await observer.unrouteAll({behavior:'wait'});await owner.unrouteAll({behavior:'wait'});
+  }
 }
 
 async function stage2BookmarkPages(mode,ownerSeat,readerSeat) {
