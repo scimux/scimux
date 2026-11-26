@@ -268,7 +268,7 @@ the first Claude prompt is awaiting SessionStart or transcript confirmation,
 `restore_draft` with the original prompt; it does not open the terminal.
 
 For structured nodes (Codex app-server, ACP
-`pi`/`opencode`/`grok`/`cursor`/`dsh`/`vibe`,
+`pi`/`opencode`/`grok`/`cursor`/`dsh`/`vibe`/`copilot`,
 and Muse MSP), `source` is `acp` for compatibility across these transports;
 there is no pane fallback. Pending approval details are returned as
 `perm_title`, `perm_options`, `perm_tool_kind`, `perm_reason`, and — only
@@ -489,6 +489,24 @@ rest.
 offers (default) model and (default) thinking. Launching that pair sends no
 ACP model or thinking setter; Vibe chooses its own default.
 
+`copilot` is offered when the user-installed `copilot` binary is on `PATH`,
+the same presence-only rule. Its default launch is `copilot --acp --stdio
+--no-auto-update`, with Copilot's own default model and reasoning level.
+Startup, menu open, `GET /api/agents`, and an ordinary `GET /api/harnesses/latest`
+do not execute `copilot` beyond its version read, and publish an empty `models`
+list and no `efforts`.
+
+`POST /api/harnesses/latest` with JSON `{"inspect_copilot": true}` is a
+separate one-shot request that reads the model menu of one temporary ACP
+session (`initialize`, `session/new`, `session/close`, never `session/prompt`).
+It publishes the advertised models, and efforts only for the model the session
+reports as current. An option is offered only when it has no `copilotEnablement`
+key or its value is `"enabled"`; any other state is not offered, and an explicit
+choice of it is refused. A failed, timed-out, or empty inspection leaves the
+default launch. Closing the session does not prove Copilot deletes it from its
+own history. The field is case-sensitive and follows the same boolean rules as
+`inspect_vibe`; one body may name both keys.
+
 `POST /api/harnesses/latest` with JSON `{"inspect_vibe": true}` is the one
 request that runs the catalog probe. The field has to be the boolean `true`.
 A missing field, `false`, `null`, an empty body, and every GET — including a
@@ -571,7 +589,9 @@ that are surfaced on `GET …/chat` (`error`, `restore_draft`), not by blocking
 this response.
 
 Supported agents are `claude`, `codex`, `pi`, `opencode`, `grok`, `cursor`,
-`dsh`, `muse`, and `vibe`. `vibe` is offered when the user-installed
+`dsh`, `muse`, `vibe`, and `copilot`. `copilot` is offered when the user-installed
+`copilot` binary is on `PATH` and launches `copilot --acp --stdio --no-auto-update`.
+Model and effort travel as session options the CLI advertises, never on argv. `vibe` is offered when the user-installed
 `vibe-acp` binary is on `PATH`. It has no static model list: an empty
 `models` array means the chat launches Vibe's own default and sends no ACP
 model or thinking setter. An explicit model, then an explicit thinking
@@ -1232,7 +1252,9 @@ only — never a network call, because the menu reads it on every open.
 when false, the UI shows the installed version without implying that an
 upstream check failed. For every harness except Vibe, `installed` is the
 first version-shaped token of `<bin> --version`, empty when the output does
-not carry one. Vibe is detected through `PATH`, then its installed version is
+not carry one. For Copilot the read is `copilot --version --no-auto-update`,
+which reports the launched executable rather than a newer previously downloaded
+build; scimux never runs `copilot update` or `copilot version`. Vibe is detected through `PATH`, then its installed version is
 read from adjacent `mistral-vibe` package metadata when one unambiguous copy
 is present. Startup inventory, menu open, `GET /api/agents`, and an ordinary
 refresh do not execute `vibe-acp`; an unsupported or ambiguous install has an
@@ -1267,6 +1289,11 @@ same catalog the browser displays.
 
 ### `POST /api/harnesses/latest`
 
+This route accepts JSON `{"inspect_copilot": true}` as a one-shot request to
+read Copilot's advertised model menu from one temporary ACP session, under the
+same rules as `inspect_vibe` below; it is offered only when `copilot` is
+installed and launchable, and it is not stored consent.
+
 This route accepts JSON `{"inspect_vibe": true}` as a one-shot
 request to run Vibe's bounded catalog probe and return the models and
 per-model thinking levels it found. The browser checkbox that sends the field
@@ -1283,8 +1310,8 @@ scimux release check made by the browser, and the upstream requests run
 concurrently. Overlapping refresh requests (for example, from two tabs) reuse
 the completed in-flight local inventory and model probes instead of running
 the CLI commands again. An accepted Vibe inspection runs after that shared
-refresh, as its own bounded probe. There is no single upstream lane: four sources are npm
-packages (codex, pi, opencode and dsh), grok is a plain-text channel file,
+refresh, as its own bounded probe. There is no single upstream lane: five sources are npm
+packages (codex, pi, opencode, dsh and Copilot's `@github/copilot` `latest` tag), grok is a plain-text channel file,
 Vibe is a package version response, and Claude's depends on whether
 it was installed natively (compared against the installer's own `stable`, not
 the npm dist-tag, which it can never receive). Muse has a separate stable

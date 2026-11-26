@@ -66,6 +66,7 @@ tokens.
 | [Cursor CLI](https://docs.cursor.com/en/cli/installation) | ACP via `cursor-agent acp` | `cursor-agent` |
 | [dsh](https://github.com/deepseek-ai/deepseek-harness) | ACP via `dsh --profile acp` | `dsh` and an `acp` profile whose default model is usable |
 | [Mistral Vibe](https://github.com/mistralai/mistral-vibe) | ACP via `vibe-acp` | `vibe-acp`, installed and authenticated by you |
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server) | ACP via `copilot --acp --stdio --no-auto-update` | `copilot`, signed in with `copilot login`, on a Copilot plan or your own model provider |
 | [Muse Code](https://developer.meta.com/ai/products/muse-code/) | MSP via `muse serve` | `muse`; launch consent is off until the computer owner enables it |
 
 The new-activity dialog shows only harnesses that are launchable on the
@@ -105,6 +106,43 @@ leaves Vibe launchable on (default) model and (default) thinking, with no
 invented model or thinking level. When Vibe has no usable default, or its
 configuration or authentication cannot create a session or answer a prompt,
 scimux reports Vibe's own failure.
+
+scimux runs GitHub Copilot CLI as `copilot --acp --stdio --no-auto-update`,
+using the Copilot sign-in you already made with `copilot login`. scimux launches
+it on Copilot's own default
+model and default reasoning, and sends no model or effort setter unless you
+choose one. The burger menu's **Check for harness updates** reads the installed
+version with `copilot --version --no-auto-update`, which reports the executable
+that was launched, and compares it with the latest `@github/copilot` npm
+package version. It never runs `copilot update` or `copilot version`, and it
+installs nothing. Under Copilot's row, an unchecked box can include one
+inspection of the model menu that Copilot's ACP session advertises. The box
+resets when the action starts and appears only when `copilot` is installed and
+launchable. The inspection opens one temporary ACP session, sends no prompt,
+switches no model, and closes that session. Closing it does not prove that
+Copilot deletes the session from its own history. A failed, timed-out, or empty
+inspection leaves the default launch with no invented model or effort level.
+Copilot's ACP treats scimux as the person-driven client it names in
+`clientInfo`. Concurrent permission requests are shown one at a time in the
+order Copilot raised them, up to eight waiting behind the one shown. A request
+still held when its turn ends is released as cancelled.
+The context gauge for a Copilot chat is Copilot's streamed occupancy. Each
+turn's token total is recorded once as spend and is never shown as the gauge.
+
+Known limitation: in direct tests against Copilot CLI 1.0.115, a turn that
+used tools after an approved fetch ended with no final assistant text, while a
+plain question got its reply. scimux shows only what Copilot sends, so such a
+turn can end without a reply. The cause is not established.
+
+Your Copilot account decides what applies to your prompts and outputs. GitHub's
+[Terms of Service](https://docs.github.com/en/site-policy/github-terms/github-terms-of-service)
+and [Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement)
+govern a GitHub-hosted Copilot account. Individual plans may use prompts and
+outputs for model training unless you opt out in your Copilot settings;
+Business and Enterprise differ. If you run Copilot on your own model provider
+(bring your own key), that provider's terms and data handling apply to those
+requests. scimux cannot see which account setting or provider you use, so it
+does not state either one as the provider of a chat.
 
 scimux starts Claude Code with [`--remote-control`](https://code.claude.com/docs/en/remote-control),
 so the same local session can also be continued from `claude.ai` or the Claude
@@ -265,7 +303,8 @@ not verify or change that account setting. See the
 [privacy policy](PRIVACY.md#muse-contributor-data-use).
 
 scimux is independent and is not affiliated with or endorsed by Anthropic,
-OpenAI, xAI, Meta, Anysphere, DeepSeek, or the pi and opencode projects. Their
+OpenAI, xAI, Meta, Anysphere, DeepSeek, GitHub, Microsoft, or the pi and opencode
+projects. Their
 names and marks identify compatible tools only. Your use of each harness and
 model remains governed by its provider's terms.
 

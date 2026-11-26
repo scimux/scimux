@@ -91,7 +91,7 @@ can exceed the platform socket-path limit and produce unrelated failures.
   cleanup deletes, and the two helpers assert the removal rather than
   best-effort it — litter nobody is told about is litter nobody clears. Never
   run a real agent CLI (`claude`, `codex`, `pi`, `opencode`, `grok`,
-  `cursor-agent`, `dsh`, `muse`, `vibe-acp`) in tests — wrapped test commands are
+  `cursor-agent`, `dsh`, `muse`, `vibe-acp`, `copilot`) in tests — wrapped test commands are
   `bash --norc` or `cat`. The Claude question and plan interaction tests are
   offline and run in the `-short` lane. Their fixtures are synthetic protocol
   values, not live CLI captures.
