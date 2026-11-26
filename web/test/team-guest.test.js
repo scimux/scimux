@@ -432,7 +432,7 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
     const listeners = new Map();
     const el = { id, innerHTML: "", textContent: "", value: "", disabled: false, hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
       addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
-      focus() { doc.activeElement = el; }, contains(node) { return node === el; },
+      focus() { doc.activeElement = el; }, contains(node) { return node === el; }, getBoundingClientRect() { return {left:0, top:0, right:400, bottom:600, width:400, height:600}; },
       querySelector() { return null; }, querySelectorAll() { return []; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
     elements.set("#" + id, el);
   }
@@ -454,7 +454,10 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
     };
     doc.createElement = tag => {
       const node = {
-        tagName: String(tag).toUpperCase(), className: "", textContent: "", open: false, children: [], parentNode: null,
+        tagName: String(tag).toUpperCase(), className: "", textContent: "", open: false, children: [], parentNode: null, style: { setProperty(name, value) { this[name] = value; } },
+        classes: new Set(), attrs: {}, setAttribute(name, value) { node.attrs[name] = String(value); }, getAttribute(name) { return name in node.attrs ? node.attrs[name] : null; },
+        classList: { add(...names) { names.forEach(name => node.classes.add(name)); }, remove(...names) { names.forEach(name => node.classes.delete(name)); }, contains(name) { return node.classes.has(name); } },
+        focus() { doc.activeElement = node; }, contains(other) { return other === node; }, getBoundingClientRect() { return {left:0, top:0, right:160, bottom:90, width:160, height:90}; },
         appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
         remove() {
           const parent = this.parentNode;
@@ -479,7 +482,7 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
   doc.querySelectorAll = selector => {
     if (selector !== "#msgs [data-cseq]" && selector !== "#msgs [data-gkey]") return [];
     /* Chips contain nested spans, so the container match must consume whole chips. */
-    const html=body.innerHTML||"", matches=[...html.matchAll(/<span class="reaction-chips" data-reaction-chips>((?:<span class="reaction-chip[^"]*"[^>]*>[\s\S]*?<span>\d+<\/span><\/span>)*)<\/span>/g)];
+    const html=body.innerHTML||"", matches=[...html.matchAll(/<span class="reaction-chips" data-reaction-chips>((?:<(?:span|button) class="reaction-chip[^"]*"[^>]*>[\s\S]*?<span>\d+<\/span><\/(?:span|button)>)*)<\/span>/g)];
     return matches.map(match=>{
       const start=html.lastIndexOf('<div class="turn',match.index),head=html.slice(start,match.index),cseq=head.match(/data-cseq="(\d+)"/)?.[1],gkey=head.match(/data-gkey="([^"]+)"/)?.[1];
       const chips={get innerHTML(){return match[1];},set innerHTML(value){body.innerHTML=body.innerHTML.replace(match[0],'<span class="reaction-chips" data-reaction-chips>'+value+'</span>');}};
@@ -4390,7 +4393,7 @@ const INSTANT_COPY = "d".repeat(32);
 const instantFlush = () => new Promise(resolve => setImmediate(resolve));
 const instantEvent = (seq, fields = {}) => ({ v:1, t:"reaction", seq, key:"r/" + String(seq).padStart(16, "0"), target:1, target_author:"alice", emoji:"thumbs_up", active:true, author:"bob", mine:false, ...fields });
 const instantMine = (seq, key, fields = {}) => instantEvent(seq, { author:"me", mine:true, key:"r/" + key, ...fields });
-const instantChips = html => [...html.matchAll(/<span class="(reaction-chip[^"]*)" data-reaction="([^"]+)" aria-label="([^"]+)"/g)].map(match => ({ cls:match[1], emoji:match[2], label:match[3] }));
+const instantChips = html => [...html.matchAll(/<(?:span|button) class="(reaction-chip[^"]*)" data-reaction="([^"]+)" aria-label="([^"]+)"/g)].map(match => ({ cls:match[1], emoji:match[2], label:match[3] }));
 const instantRejected = (status, message = "{}") => Object.assign(new Error(message), { status });
 const instantPending = { cls:"reaction-chip mine reaction-pending", emoji:"thumbs_up", label:"👍 1, you reacted, pending confirmation" };
 const instantConfirmed = { cls:"reaction-chip mine", emoji:"thumbs_up", label:"👍 1, you reacted" };
@@ -4947,3 +4950,186 @@ for (const kind of ["received", "owner"]) {
     s.destroy();
   });
 }
+
+/* Participant disclosure through the real guest feature. The chip, turn and bubble are the
+   objects the controller reads (dataset, closest, rects, children); the panel is a fixture node. */
+function guestDisclosureDom(key, target, emoji) {
+  const bubble = { children: [], contains(node) { return this.children.includes(node); },
+    appendChild(node) { this.children.push(node); node.parentNode = this; return node; },
+    getBoundingClientRect() { return {left:100, top:200, right:300, bottom:340, width:200, height:140}; } };
+  const turn = { dataset: {gkey:key, cseq:String(target)}, closest(selector) { return selector === "[data-gkey]" ? turn : null; } };
+  const attrs = {};
+  const chip = { dataset: {reaction:emoji, rtarget:String(target)}, isConnected: true, focused: false, contains(node) { return node === chip; },
+    closest(selector) { return selector === ".reaction-chip" ? chip : selector === "[data-gkey]" ? turn : selector === ".bubble" ? bubble : null; },
+    setAttribute(name, value) { attrs[name] = String(value); }, getAttribute(name) { return name in attrs ? attrs[name] : null; },
+    focus() { this.focused = true; }, getBoundingClientRect() { return {left:110, top:300, right:150, bottom:320, width:40, height:20}; } };
+  return { chip, bubble, turn, attrs };
+}
+const disclosureClick = (f, target) => f.dispatchDocument("click", { target, preventDefault() {}, stopPropagation() {} });
+const reactionEvent = (seq, author, emoji, active, mine = false, target = 1) => ({ v:1, t:"reaction", seq, key:"r/" + seq.toString(16).padStart(16, "0"), target, target_author:"alice", emoji, active, author, mine });
+
+test("a received reaction chip opens a disclosure naming each participant by guest name rules, with you for your own reaction", async () => {
+  const copy = "d".repeat(32), view = {...base, access:"write", comments_last:1, people_copy_instance:copy};
+  const events = [reactionEvent(2, "bob", "thumbs_up", true), reactionEvent(3, "carol", "thumbs_up", true), reactionEvent(4, "dave", "thumbs_up", true), reactionEvent(5, "me", "thumbs_up", true, true)];
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view),
+    async () => commentsAnswer([{seq:1, anchor:0, author:"alice", mine:false, text:"source"}], 1, false, {alice:"Alice", bob:"Bob Server", carol:"Carol"}), undefined,
+    {people:() => ({"s/bob":"Bobby"}), reactionsApi:async () => ({copy_instance:copy, events, last:5, next:5, more:false})});
+  f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
+  const dom = guestDisclosureDom(guestKey(view), 1, "thumbs_up");
+  disclosureClick(f, dom.chip);
+  const panel = dom.bubble.children[0];
+  assert.ok(panel, "the chip click opens one disclosure in its own bubble");
+  assert.match(panel.innerHTML, /<li>Bobby<\/li><li>Carol<\/li><li>Unknown person<\/li><li>You<\/li>/, "local override, server name, unknown fallback and own participation");
+  assert.match(panel.innerHTML, /Bobby, Carol, Unknown person and you reacted with 👍/);
+  assert.doesNotMatch(panel.innerHTML, /r\/0000|author|"bob"/, "no raw identifiers are shown as names");
+  f.feature.destroy();
+});
+
+test("participants with the same display name stay separate in the disclosure", async () => {
+  const copy = "d".repeat(32), view = {...base, access:"write", comments_last:1, people_copy_instance:copy};
+  const events = [reactionEvent(2, "bob-1", "thumbs_up", true), reactionEvent(3, "bob-2", "thumbs_up", true)];
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view),
+    async () => commentsAnswer([{seq:1, anchor:0, author:"alice", mine:false, text:"source"}], 1, false, {"bob-1":"Bob", "bob-2":"Bob"}), undefined,
+    {reactionsApi:async () => ({copy_instance:copy, events, last:3, next:3, more:false})});
+  f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
+  const dom = guestDisclosureDom(guestKey(view), 1, "thumbs_up");
+  disclosureClick(f, dom.chip);
+  assert.equal(dom.bubble.children[0].innerHTML.match(/<li>Bob<\/li>/g)?.length, 2);
+  f.feature.destroy();
+});
+
+test("a pending own add reads 'You — pending confirmation' while its write is held, then settles from the retained readback", async () => {
+  const copy = "d".repeat(32), view = {...base, access:"write", comments_last:1, people_copy_instance:copy};
+  const events = [reactionEvent(2, "bob", "thumbs_up", true)];
+  const write = deferred(); const posts = [];
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view),
+    async () => commentsAnswer([{seq:1, anchor:0, author:"alice", mine:false, text:"source"}], 1, false, {bob:"Bob"}), n => new Uint8Array(n).fill(1),
+    {reactionsApi:async (path, opts) => {
+      if (opts?.method === "POST") { posts.push(JSON.parse(opts.body)); return write.promise; }
+      return {copy_instance:copy, events, last:events.length ? events[events.length - 1].seq : 0, next:events.length ? events[events.length - 1].seq : 0, more:false};
+    }});
+  f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
+  const key = guestKey(view);
+  const trigger = {setAttribute() {}, getBoundingClientRect:() => ({top:100, bottom:144}), closest:selector => selector === "[data-reaction-open], [data-reaction-choice]" ? trigger : entry, matches:() => false};
+  const chooser = {hidden:true, getBoundingClientRect:() => ({height:80})};
+  const entry = {dataset:{rkey:key, rtarget:"1", copyInstance:copy}, classList:{add(){}, remove(){}}, contains:() => true, querySelector:selector => selector === "[data-reaction-open]" ? trigger : selector === ".reaction-chooser" ? chooser : null};
+  const choice = {entry, dataset:{reactionChoice:"thumbs_up"}, matches:selector => selector === "[data-reaction-choice]", closest:selector => selector === "[data-reaction-open], [data-reaction-choice]" ? choice : entry};
+  const dom = guestDisclosureDom(key, 1, "thumbs_up");
+  disclosureClick(f, dom.chip);
+  disclosureClick(f, trigger);
+  disclosureClick(f, choice);
+  await f.feature.settled();
+  assert.deepEqual(posts, [{target:1, emoji:"thumbs_up", active:true, key:"0101010101010101"}]);
+  disclosureClick(f, dom.chip);
+  const pending = dom.bubble.children[0];
+  assert.match(pending.innerHTML, /<li>Bob<\/li><li>You — pending confirmation<\/li>/);
+  assert.match(pending.innerHTML, /Your reaction is pending confirmation\./);
+  events.push({...reactionEvent(3, "me", "thumbs_up", true, true), key:"r/0101010101010101"});
+  write.resolve({seq:3}); await f.feature.settled();
+  f.setTime(6000); f.feature.tick(); await f.feature.settled();
+  const confirmed = dom.bubble.children[0];
+  assert.equal(confirmed, pending, "the open disclosure is refreshed in place");
+  assert.match(confirmed.innerHTML, /<li>Bob<\/li><li>You<\/li>/);
+  assert.doesNotMatch(confirmed.innerHTML, /pending/);
+  f.feature.destroy();
+});
+
+test("inspection performs no write or read, leaves the selection and composer alone, and returns no reaction", async () => {
+  const copy = "d".repeat(32), view = {...base, access:"write", comments_last:1, people_copy_instance:copy};
+  const requests = [];
+  const f = nativeViewFixture(async (path, opts) => { requests.push([path, opts?.method || "GET"]); return path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view); },
+    async (path, opts) => { requests.push([path, opts?.method || "GET"]); return commentsAnswer([{seq:1, anchor:0, author:"alice", mine:false, text:"source"}], 1, false, {bob:"Bob"}); }, undefined,
+    {reactionsApi:async (path, opts) => { requests.push([path, opts?.method || "GET"]); return {copy_instance:copy, events:[reactionEvent(2, "bob", "thumbs_up", true)], last:2, next:2, more:false}; }});
+  f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
+  const before = JSON.stringify(requests), selected = f.selected(), html = f.get("msgs").innerHTML;
+  const dom = guestDisclosureDom(guestKey(view), 1, "thumbs_up");
+  disclosureClick(f, dom.chip);
+  assert.equal(dom.bubble.children.length, 1, "the first click opens the disclosure from memory");
+  disclosureClick(f, dom.chip);
+  assert.equal(dom.bubble.children.length, 0, "a second click on the same chip closes the pinned disclosure without a write");
+  assert.equal(JSON.stringify(requests), before, "no request is made by inspection");
+  assert.equal(f.selected(), selected, "the active chat is unchanged");
+  assert.equal(f.get("msgs").innerHTML, html, "the message list is not rebuilt by inspection");
+  assert.ok(!requests.some(([, method]) => method === "POST"));
+  f.feature.destroy();
+});
+
+test("names refresh while the disclosure is open, and a copy replacement closes it", async () => {
+  const copy = "d".repeat(32), replacement = "e".repeat(32), view = {...base, access:"write", comments_last:1, people_copy_instance:copy};
+  let replaced = false, people = {"s/bob":"Bob"};
+  const events = [reactionEvent(2, "bob", "thumbs_up", true)];
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view),
+    async () => commentsAnswer([{seq:1, anchor:0, author:"alice", mine:false, text:"source"}], 1, false, {bob:"Server Bob"}), undefined,
+    {people:() => people, reactionsApi:async () => ({copy_instance:replaced ? replacement : copy, events, last:2, next:2, more:false})});
+  f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
+  const dom = guestDisclosureDom(guestKey(view), 1, "thumbs_up");
+  disclosureClick(f, dom.chip);
+  assert.match(dom.bubble.children[0].innerHTML, /<li>Bob<\/li>/);
+  people = {"s/bob":"Robert"};
+  f.setTime(6000); f.feature.tick(); await f.feature.settled();
+  assert.match(dom.bubble.children[0].innerHTML, /<li>Robert<\/li>/, "a poll that changes a local name refreshes the open roster");
+  replaced = true;
+  f.setTime(12000); f.feature.tick(); await f.feature.settled();
+  assert.equal(dom.bubble.children.length, 0, "a replaced copy retires the disclosure with its controls");
+  f.feature.destroy();
+});
+
+test("owner timeline chips on your own messages inspect the owner copy, and navigating away closes the disclosure", async () => {
+  const copy = "d".repeat(32), view = {...base, access:"owner", state:"live", people_copy_instance:copy, local_order:0};
+  let node = "n1";
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view),
+    async () => commentsAnswer([{seq:1, anchor:0, author:"owner", mine:true, text:"my note"}], 1, false, {bob:"Bob"}), n => new Uint8Array(n),
+    {selectedNode:() => node, selectedUID:() => "c", reactionsApi:async () => ({copy_instance:copy, events:[{...reactionEvent(2, "bob", "laughing", true, false), target_author:"owner"}], last:2, next:2, more:false})});
+  f.feature.tick(); await f.feature.settled(); f.feature.setOwnerShare("n1", {node:"n1", uid:"c", server:"s", generation:"g", state:"active"}); await f.feature.settled();
+  const key = guestKey(view);
+  const dom = guestDisclosureDom(key, 1, "laughing");
+  disclosureClick(f, dom.chip);
+  assert.match(dom.bubble.children[0].innerHTML, /<li>Bob<\/li>/, "the owner copy names participants on your own message");
+  node = "local";
+  f.feature.ownerSnapshots();
+  assert.equal(dom.bubble.children.length, 0, "the owner timeline's next render, after the chat changes, closes the disclosure");
+  f.feature.destroy();
+});
+
+test("hover previews follow mouse pointers from the document, and destroy removes the handlers", async () => {
+  const copy = "d".repeat(32), view = {...base, access:"write", comments_last:1, people_copy_instance:copy};
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view),
+    async () => commentsAnswer([{seq:1, anchor:0, author:"alice", mine:false, text:"source"}], 1, false, {bob:"Bob"}), undefined,
+    {reactionsApi:async () => ({copy_instance:copy, events:[reactionEvent(2, "bob", "thumbs_up", true)], last:2, next:2, more:false})});
+  f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
+  const dom = guestDisclosureDom(guestKey(view), 1, "thumbs_up");
+  f.dispatchDocument("pointerover", {type:"pointerover", pointerType:"touch", target:dom.chip, relatedTarget:null});
+  assert.equal(dom.bubble.children.length, 0, "touch never reveals a hover preview");
+  f.dispatchDocument("pointerover", {type:"pointerover", pointerType:"mouse", target:dom.chip, relatedTarget:null});
+  assert.equal(dom.bubble.children.length, 1);
+  assert.match(dom.bubble.children[0].innerHTML, /Bob reacted with 👍/);
+  f.dispatchDocument("pointerout", {type:"pointerout", pointerType:"mouse", target:dom.chip, relatedTarget:dom.bubble.children[0]});
+  assert.equal(dom.bubble.children.length, 1, "the pointer may move onto the preview");
+  f.dispatchDocument("pointerout", {type:"pointerout", pointerType:"mouse", target:dom.bubble.children[0], relatedTarget:null});
+  assert.equal(dom.bubble.children.length, 0, "leaving the preview hides it");
+  f.feature.destroy();
+  f.dispatchDocument("pointerover", {type:"pointerover", pointerType:"mouse", target:dom.chip, relatedTarget:null});
+  assert.equal(dom.bubble.children.length, 0, "a destroyed feature ignores pointer events");
+});
+
+test("a guest chip is an inspection button whose markup names its target", () => {
+  const key = guestKey(base);
+  const html = guestMessageHTML({seq:4, anchor:0, author:"bob", mine:false, text:"hello", at:"now"}, {}, "", {}, key, "", "", undefined, "c".repeat(32), [{target:4, emoji:"thumbs_up", glyph:"👍", count:2, mine:false}]);
+  assert.match(html, /<button class="reaction-chip" data-reaction="thumbs_up" aria-label="👍 2" aria-description="Show who reacted" type="button" aria-haspopup="dialog" aria-expanded="false" data-rtarget="4">/);
+});
+
+test("read-only and ended copies show confirmed participants and inspect without any pending operation", async () => {
+  const copy = "d".repeat(32), events = [reactionEvent(2, "bob", "thumbs_up", true), reactionEvent(3, "me", "thumbs_up", true, true)];
+  for (const over of [{access:"read"}, {state:"ended"}]) {
+    const view = {...base, access:"write", comments_last:1, people_copy_instance:copy, ...over};
+    const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([view], [{id:"s", delivery:"ok"}]) : readAnswer([], 1, false, view),
+      async () => commentsAnswer([{seq:1, anchor:0, author:"alice", mine:false, text:"source"}], 1, false, {bob:"Bob"}), undefined,
+      {reactionsApi:async () => ({copy_instance:copy, events, last:3, next:3, more:false})});
+    f.feature.tick(); await f.feature.settled(); f.open(); await f.feature.settled();
+    const dom = guestDisclosureDom(guestKey(view), 1, "thumbs_up");
+    disclosureClick(f, dom.chip);
+    assert.match(dom.bubble.children[0].innerHTML, /<li>Bob<\/li><li>You<\/li>/, JSON.stringify(over));
+    assert.doesNotMatch(dom.bubble.children[0].innerHTML, /pending|not confirmed/, JSON.stringify(over));
+    f.feature.destroy();
+  }
+});

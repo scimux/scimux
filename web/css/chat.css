@@ -123,6 +123,9 @@ body.cards-open #msgs { overflow: hidden; }
 .reaction-chip.mine { color: var(--work); border-color: color-mix(in srgb, var(--work) 50%, var(--hairline)); background: color-mix(in srgb, var(--work) 11%, var(--surface)); }
 /* Local feedback awaiting confirmation: same box, quieter outline. */
 .reaction-chip.reaction-pending { border-style: dashed; opacity: .72; }
+/* The chip is a button: reset its UA margin, appearance and font so its size and look stay the same (base.css already sets border-box). */
+.reaction-chip { margin: 0; appearance: none; font-family: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+.reaction-chip:focus-visible { outline: 2px solid var(--work); outline-offset: 2px; }
 .reaction-entry { position: absolute; z-index: 4; right: -12px; top: -12px; display: flex; align-items: center; }
 .reaction-trigger { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 2px;
   border: 0; border-radius: 50%; color: var(--work); background: transparent; opacity: 0; pointer-events: none; }
@@ -150,6 +153,24 @@ body.cards-open #msgs { overflow: hidden; }
 @media (max-width: 480px) {
   .reaction-entry .reaction-chooser { display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, 44px); grid-template-columns: repeat(3, 44px); }
 }
+/* Participant disclosure: a panel beside the chip, or a compact sheet when the chat
+   has no room. The panel is a child of its bubble, so it moves and clears with it. */
+.reaction-disclosure { position: absolute; z-index: 5; top: 0; left: 0; width: max-content; max-width: 18rem; box-sizing: border-box;
+  padding: 8px 10px; border: 1px solid var(--hairline); border-radius: 12px; background: var(--surface); color: var(--ink);
+  box-shadow: 0 4px 14px rgba(0,0,0,.2); font-size: 13px; font-weight: 400; line-height: 1.35; text-align: left; overflow-wrap: anywhere; }
+.reaction-disclosure.above { transform: translateY(-100%); }
+.reaction-disclosure:focus { outline: none; }
+.reaction-disclosure:focus-visible { outline: 2px solid var(--work); outline-offset: 2px; }
+.reaction-disclosure-summary { margin: 0; }
+/* A brief preview is bounded to three lines; the full names stay in the DOM and in the expanded roster. */
+.reaction-disclosure.reaction-hover .reaction-disclosure-summary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.reaction-disclosure .reaction-roster { margin: 6px 0 0; padding: 0; list-style: none; max-height: 12rem; overflow-y: auto; overscroll-behavior: contain; }
+.reaction-roster li { padding: 2px 0; }
+.reaction-disclosure.reaction-sheet { position: fixed; top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 60vh;
+  z-index: 60; display: flex; flex-direction: column; border-radius: 16px; }
+.reaction-disclosure.reaction-sheet .reaction-roster { max-height: none; flex: 1 1 auto; }
+.reaction-disclosure-close { align-self: flex-end; min-width: 44px; min-height: 44px; margin-top: 8px; padding: 0 14px; border: 1px solid var(--hairline);
+  border-radius: 10px; background: var(--code-bg); color: inherit; font: inherit; }
 .bubblemarkers { display: flex; align-items: center; gap: 3px; margin: -5px 0 4px -6px; }
 .bmarker { position: relative; display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; padding: 0; border-radius: 14px; color: currentColor;
