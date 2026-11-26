@@ -159,8 +159,9 @@ func TestAT_FR_40_JoinRealManifestBootsRealBootstrap(t *testing.T) {
 		t.Errorf("%s: %d import maps installed; a blob: module cannot consult one",
 			at, res.ImportMapsInstalled)
 	}
-	if res.Stylesheets != 10 || res.Assets != 18 {
-		t.Errorf("%s: stylesheets=%d assets=%d, want 10 and 18", at, res.Stylesheets, res.Assets)
+	// 20 assets: the 18 agent badges plus the Copilot accent and mono pair.
+	if res.Stylesheets != 10 || res.Assets != 20 {
+		t.Errorf("%s: stylesheets=%d assets=%d, want 10 and 20", at, res.Stylesheets, res.Assets)
 	}
 }
 

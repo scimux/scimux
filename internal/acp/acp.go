@@ -174,13 +174,7 @@ func (m *Manager) Launch(nodeID, agent, dir, model, effort string) (string, erro
 	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
 	defer cancel()
 	// Be explicit about capabilities: we decline fs and terminal (plan §2).
-	initResp, err := s.conn.Initialize(ctx, sdk.InitializeRequest{
-		ProtocolVersion: sdk.ProtocolVersionNumber,
-		ClientCapabilities: sdk.ClientCapabilities{
-			Fs:       sdk.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
-			Terminal: false,
-		},
-	})
+	initResp, err := s.conn.Initialize(ctx, initializeRequest(agent))
 	if err != nil {
 		killAndReap(proc)
 		discardLog()
@@ -298,13 +292,7 @@ func (m *Manager) Clear(nodeID string) error {
 	s.conn = sdk.NewClientSideConnection(s, proc.Stdin(), proc.Stdout())
 	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
 	defer cancel()
-	initResp, err := s.conn.Initialize(ctx, sdk.InitializeRequest{
-		ProtocolVersion: sdk.ProtocolVersionNumber,
-		ClientCapabilities: sdk.ClientCapabilities{
-			Fs:       sdk.FileSystemCapabilities{ReadTextFile: false, WriteTextFile: false},
-			Terminal: false,
-		},
-	})
+	initResp, err := s.conn.Initialize(ctx, initializeRequest(s.agent))
 	if err != nil {
 		killAndReap(proc)
 		old.abortTurn()
@@ -568,7 +556,9 @@ type Session struct {
 	assistant        strings.Builder
 	assistantEntries []provEntry // source-located _meta contributions for the accumulator
 	pending          *pendingPermission
-	pendingSeq       uint64 // monotonic per-session; pairs with incarn in RequestID
+	// permQueue holds copilot requests admitted behind pending, in admission order.
+	permQueue  []*pendingPermission
+	pendingSeq uint64 // monotonic per-session; pairs with incarn in RequestID
 	// incarn is a collision-resistant identity for this Session value. Request
 	// IDs and prepared tokens include it so a post-/clear (or kill/relaunch)
 	// session cannot accept a stale decision from a prior incarnation that
@@ -677,6 +667,8 @@ type pendingPermission struct {
 	toolKind  string // ACP ToolKind string, or "" when unknown
 	options   []sdk.PermissionOption
 	ch        chan sdk.PermissionOptionId
+	// gone is closed when the turn ends and releases this request.
+	gone chan struct{}
 }
 
 var _ sdk.Client = (*Session)(nil)
@@ -763,6 +755,13 @@ func (s *Session) SessionUpdate(ctx context.Context, n sdk.SessionNotification) 
 // dispatch goroutine and blocks until a supervisor answers (via Resolve) or
 // the turn/session is cancelled. There is deliberately no timeout: an approval
 // may legitimately wait for a human.
+//
+// One request is shown at a time. Copilot may issue several at once, so its
+// further requests wait in a bounded FIFO behind the shown one; every other
+// harness keeps the single-slot contract, where a second request is an agent
+// error and is cancelled. A request takes its sequence number at admission,
+// queued or not, so a request admitted before an auto-approval enable can never
+// become eligible by being promoted later.
 func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermissionRequest) (sdk.RequestPermissionResponse, error) {
 	title := ""
 	if p.ToolCall.Title != nil {
@@ -772,36 +771,118 @@ func (s *Session) RequestPermission(ctx context.Context, p sdk.RequestPermission
 	if p.ToolCall.Kind != nil {
 		toolKind = string(*p.ToolCall.Kind)
 	}
-	ch := make(chan sdk.PermissionOptionId, 1)
+	entry := &pendingPermission{
+		toolID: string(p.ToolCall.ToolCallId), reqTitle: title, reqKind: toolKind,
+		options: p.Options, ch: make(chan sdk.PermissionOptionId, 1), gone: make(chan struct{}),
+	}
 	s.mu.Lock()
-	if s.pending != nil {
-		// One pending at a time; a second is an agent error → cancel it. The
-		// error record goes through appendLocked, never s.logw directly, so
-		// the /clear retire fence applies (R20.1): a straggler request on the
-		// dying connection must be dropped, not written after the seam into
-		// the fresh segment.
-		s.appendLocked(Event{T: "error", Error: "duplicate permission request ignored"})
+	if s.agent == "copilot" && !s.copilotAdmissibleLocked(ctx) {
+		// A copilot request outside a live, unretired turn is stale: it belongs
+		// to a turn that already ended, a dead or retired session, or a caller
+		// that has already gone. It is cancelled unpublished, so it can never
+		// become an approval that outlives the turn it was asked in.
 		s.mu.Unlock()
 		return cancelledPermission(), nil
 	}
-	reqTitle, reqKind := title, toolKind
-	title, toolKind = s.fillPermissionLocked(string(p.ToolCall.ToolCallId), title, toolKind)
+	if s.pending != nil {
+		if s.agent != "copilot" {
+			// One pending at a time; a second is an agent error → cancel it. The
+			// error record goes through appendLocked, never s.logw directly, so
+			// the /clear retire fence applies (R20.1): a straggler request on the
+			// dying connection must be dropped, not written after the seam into
+			// the fresh segment.
+			s.appendLocked(Event{T: "error", Error: "duplicate permission request ignored"})
+			s.mu.Unlock()
+			return cancelledPermission(), nil
+		}
+		if len(s.permQueue) >= copilotPermissionQueueCap {
+			s.appendLocked(Event{T: "error", Error: "permission queue full; request cancelled"})
+			s.mu.Unlock()
+			return cancelledPermission(), nil
+		}
+	}
+	entry.toolTitle, entry.toolKind = s.fillPermissionLocked(entry.toolID, title, toolKind)
 	s.pendingSeq++
-	s.pending = &pendingPermission{
-		seq: s.pendingSeq, toolID: string(p.ToolCall.ToolCallId), reqTitle: reqTitle,
-		reqKind: reqKind, toolTitle: title, toolKind: toolKind, options: p.Options, ch: ch,
+	entry.seq = s.pendingSeq
+	if s.pending == nil {
+		s.pending = entry
+	} else {
+		s.permQueue = append(s.permQueue, entry)
 	}
 	s.mu.Unlock()
 
-	defer s.clearPending()
+	defer s.releasePermission(entry)
 	select {
-	case id := <-ch:
+	case id := <-entry.ch:
 		return sdk.RequestPermissionResponse{Outcome: sdk.NewRequestPermissionOutcomeSelected(id)}, nil
 	case <-ctx.Done():
 		return cancelledPermission(), nil
 	case <-s.done:
 		return cancelledPermission(), nil
+	case <-entry.gone:
+		return cancelledPermission(), nil
 	}
+}
+
+// copilotAdmissibleLocked reports whether a copilot permission request may be
+// published now: an active turn, a live unretired process, and a context and
+// session that have not already ended. Callers hold s.mu.
+func (s *Session) copilotAdmissibleLocked(ctx context.Context) bool {
+	if !s.turnActive || s.retired || !s.procAlive || ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-s.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// releasePermission is this request's own cleanup. It removes this request
+// and nothing else: if this request is still the shown one, the next queued
+// request is promoted; if it is queued, it simply leaves the queue. A request
+// already delivered or released is not shown and not queued, so its deferred
+// cleanup finds nothing to erase and can never remove a successor.
+func (s *Session) releasePermission(entry *pendingPermission) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == entry {
+		s.pending = nil
+		s.promoteLocked()
+		return
+	}
+	for i, q := range s.permQueue {
+		if q == entry {
+			s.permQueue = append(s.permQueue[:i], s.permQueue[i+1:]...)
+			return
+		}
+	}
+}
+
+// promoteLocked shows the oldest queued request when nothing is shown. Callers
+// hold s.mu.
+func (s *Session) promoteLocked() {
+	if s.pending != nil || len(s.permQueue) == 0 {
+		return
+	}
+	s.pending = s.permQueue[0]
+	s.permQueue = s.permQueue[1:]
+}
+
+// releaseAllPermissionsLocked ends every held request as cancelled. It runs
+// when a copilot turn ends, because no decision can outlive its prompt. Callers
+// hold s.mu. A request released here is no longer shown or queued, so its own
+// cleanup is a no-op.
+func (s *Session) releaseAllPermissionsLocked() {
+	if s.pending != nil {
+		close(s.pending.gone)
+		s.pending = nil
+	}
+	for _, q := range s.permQueue {
+		close(q.gone)
+	}
+	s.permQueue = nil
 }
 
 func cancelledPermission() sdk.RequestPermissionResponse {
@@ -931,6 +1012,9 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 		if s.agent == "opencode" {
 			ev = applyOpencodeUsagePairing(ev, shellUsed, shellSize)
 		}
+		if s.agent == "copilot" {
+			ev = copilotTurnUsage(ev, shellUsed, shellSize)
+		}
 		if ev != nil {
 			s.appendLocked(Event{T: "usage", Usage: ev})
 		}
@@ -952,6 +1036,11 @@ func (s *Session) endTurn(resp sdk.PromptResponse, err error) {
 			}
 			s.appendLocked(Event{T: "error", Error: s.lastError})
 		}
+	}
+	if s.agent == "copilot" {
+		// No copilot decision outlives its prompt: anything still waiting ends
+		// as cancelled rather than blocking a dispatch goroutine forever.
+		s.releaseAllPermissionsLocked()
 	}
 	s.turnActive = false
 	if s.turnCancel != nil {
@@ -1161,7 +1250,7 @@ func (s *Session) prepareResolve(expectedRequestID, key string) (sdk.PermissionO
 // deliver hands the mapped option to the blocked RequestPermission goroutine.
 // It holds s.mu across the check-and-send and consumes the pending request
 // (pending = nil) atomically, closing the finding-53 race where a copy of
-// pending could be sent into a stale channel after clearPending had run. The
+// pending could be sent into a stale channel after an earlier cleanup had run. The
 // token's incarnation and sequence must still name the current pending request.
 func (s *Session) deliver(tok sdk.PermissionOptionId) error {
 	s.mu.Lock()
@@ -1184,7 +1273,8 @@ func (s *Session) deliver(tok sdk.PermissionOptionId) error {
 	if !valid {
 		return errors.New("pending permission changed before the answer was delivered")
 	}
-	s.pending = nil // consume; RequestPermission's deferred clearPending is now a no-op
+	s.pending = nil // consume; this request's own cleanup is now a no-op
+	s.promoteLocked()
 	select {
 	case p.ch <- optID: // buffered (cap 1) and empty: completes without blocking
 		return nil
@@ -1254,12 +1344,6 @@ func mapOptionKind(k sdk.PermissionOptionKind) string {
 	}
 }
 
-func (s *Session) clearPending() {
-	s.mu.Lock()
-	s.pending = nil
-	s.mu.Unlock()
-}
-
 // rememberToolLocked records non-empty title, kind, and command for id.
 // Empty fields do not wipe a previous value. Callers hold s.mu.
 func (s *Session) rememberToolLocked(id, title, kind string, raw any) {
@@ -1305,6 +1389,11 @@ func (s *Session) rememberToolLocked(id, title, kind string, raw any) {
 	// soon as that notification arrives. Unrelated tools cannot change it.
 	if s.pending != nil && s.pending.toolID == id {
 		s.pending.toolTitle, s.pending.toolKind = s.fillPermissionLocked(id, s.pending.reqTitle, s.pending.reqKind)
+	}
+	for _, q := range s.permQueue {
+		if q.toolID == id {
+			q.toolTitle, q.toolKind = s.fillPermissionLocked(id, q.reqTitle, q.reqKind)
+		}
 	}
 }
 
@@ -2054,7 +2143,7 @@ func (s *Session) applyOpencodeModel(ctx context.Context, model string, opts []s
 // for an absent provider to load; its effort stays tolerant. pi, grok and
 // cursor skip the ACP model setter and tolerate effort mismatches.
 func (s *Session) applyLaunchConfig(ctx context.Context, model, effort string, resp sdk.NewSessionResponse) error {
-	strict := s.agent == "dsh" || s.agent == "vibe"
+	strict := s.agent == "dsh" || s.agent == "vibe" || s.agent == "copilot"
 	opts := resp.ConfigOptions
 	var updated []sdk.SessionConfigOption
 	var err error
@@ -2090,6 +2179,9 @@ func (s *Session) applyEffort(ctx context.Context, effort string, modes *sdk.Ses
 	// option, and matching the level against a mode name would switch modes.
 	if s.agent == "vibe" {
 		return s.applyVibeThinking(ctx, effort, opts)
+	}
+	if s.agent == "copilot" {
+		return s.applyCopilotEffort(ctx, effort, opts)
 	}
 	if modes != nil {
 		for _, mode := range modes.AvailableModes {
@@ -2151,7 +2243,7 @@ func (s *Session) applyModel(ctx context.Context, model string, opts []sdk.Sessi
 			continue
 		}
 		val, ok := matchModelValue(sel, model)
-		if !ok {
+		if !ok || (s.agent == "copilot" && !copilotValueOffered(sel, val)) {
 			return nil, fmt.Errorf("%w: model %q is not one this agent offers", ErrConfigRejected, model)
 		}
 		resp, err := s.conn.SetSessionConfigOption(ctx, sdk.SetSessionConfigOptionRequest{
@@ -2170,7 +2262,7 @@ func (s *Session) applyModel(ctx context.Context, model string, opts []sdk.Sessi
 // exactly "model", so a nearby label that merely contains the word cannot
 // absorb the choice.
 func modelSelectMatches(agent string, sel *sdk.SessionConfigOptionSelect) bool {
-	if agent == "vibe" {
+	if agent == "vibe" || agent == "copilot" {
 		if sel.Category != nil && *sel.Category == sdk.SessionConfigOptionCategoryModel {
 			return true
 		}

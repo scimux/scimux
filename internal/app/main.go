@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/scimux/scimux/internal/acp"
 	"github.com/scimux/scimux/internal/remote"
 )
 
@@ -27,6 +28,7 @@ var version = "dev"
 // SetVersion supplies the build version owned by cmd/scimux.
 func SetVersion(v string) {
 	version = v
+	acp.SetClientVersion(v)
 }
 
 const appSummary = "scimux supervises agent chats from a local web page."

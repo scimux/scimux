@@ -473,9 +473,9 @@ func (a *app) resolveNode(n *Node) (int, error) {
 		n.Agent = "claude"
 	}
 	switch n.Agent {
-	case "claude", "codex", "pi", "opencode", "grok", "cursor", "dsh", "muse", "vibe":
+	case "claude", "codex", "pi", "opencode", "grok", "cursor", "dsh", "muse", "vibe", "copilot":
 	default:
-		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, cursor, dsh, muse, or vibe)", n.Agent)
+		return 400, fmt.Errorf("unknown agent %q (want claude, codex, pi, opencode, grok, cursor, dsh, muse, vibe, or copilot)", n.Agent)
 	}
 	// A client cannot pin the Muse transport onto a different agent, and a
 	// Muse node cannot run on any other transport. Stored records are not
@@ -489,7 +489,7 @@ func (a *app) resolveNode(n *Node) (int, error) {
 	// Transport are migrated to tmux by Node.transport, never rewritten here.
 	if n.Transport == "" {
 		switch n.Agent {
-		case "pi", "opencode", "grok", "cursor", "dsh", "vibe":
+		case "pi", "opencode", "grok", "cursor", "dsh", "vibe", "copilot":
 			n.Transport = "acp"
 		case "codex":
 			n.Transport = "codex"

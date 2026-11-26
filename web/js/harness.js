@@ -76,6 +76,7 @@ const HARNESS_TERMS = Object.freeze({
   cursor: `<a href="https://cursor.com/terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
   dsh: `<a href="https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html" target="_blank" rel="noopener">Terms of Use</a>`,
   muse: `<a href="https://dev.meta.ai/legal/terms-of-service" target="_blank" rel="noopener">Terms of Service &amp; data use</a>`,
+  copilot: `<a href="https://docs.github.com/en/site-policy/github-terms/github-terms-of-service" target="_blank" rel="noopener">Terms of Service</a>`,
 });
 
 const HARNESS_PRIVACY = Object.freeze({
@@ -85,7 +86,16 @@ const HARNESS_PRIVACY = Object.freeze({
   cursor: `<a href="https://cursor.com/data-use" target="_blank" rel="noopener noreferrer">Privacy</a>`,
   dsh: `<a href="https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html" target="_blank" rel="noopener noreferrer">Privacy</a>`,
   muse: `<a href="https://www.facebook.com/privacy/policy/" target="_blank" rel="noopener noreferrer">Privacy</a>`,
+  copilot: `<a href="https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement" target="_blank" rel="noopener noreferrer">Privacy</a>`,
 });
+
+/* Copilot is GitHub's agreement only for the GitHub account it signs in with.
+ * Its CLI can also run on the user's own model provider (BYOK), where that
+ * provider's terms and data handling apply and GitHub is not the inference
+ * party. Individual plans may use prompts and outputs for model training unless
+ * the user opts out in Copilot settings; Business and Enterprise differ. */
+const COPILOT_PROVIDER_NOTE =
+  "GitHub's terms and privacy cover your Copilot account. If Copilot runs on your own model provider, that provider's terms apply. Individual plans may use prompts and outputs for training unless you opt out in Copilot settings; Business and Enterprise differ.";
 
 const BYO_PROVIDER_NOTE =
   "Terms and privacy depend on your configured model provider — scimux cannot see which one you configured.";
@@ -102,7 +112,8 @@ const DSH_PROVIDER_NOTE =
 export function harnessTermsHTML(agent){
   const link = HARNESS_TERMS[agent];
   if (link){
-    const caveat = agent === "dsh" ? ` ${esc(DSH_PROVIDER_NOTE)}` : "";
+    const caveat = agent === "dsh" ? ` ${esc(DSH_PROVIDER_NOTE)}`
+      : agent === "copilot" ? ` ${esc(COPILOT_PROVIDER_NOTE)}` : "";
     return `<span class="hnote hterms">${link} · ${HARNESS_PRIVACY[agent]}${caveat}</span>`;
   }
   if (agent === "pi" || agent === "opencode"){
@@ -122,8 +133,12 @@ const FIXED_PROVIDER_VENDOR = Object.freeze({
   muse: "Meta",
 });
 
+/* dsh and copilot both route to providers other than their own, so neither is
+ * a single-provider attribution, even though each has a terms anchor. */
+const MULTI_PROVIDER_AGENTS = Object.freeze(["dsh", "copilot"]);
+
 function singleProviderAgent(agent) {
-  return Object.prototype.hasOwnProperty.call(HARNESS_TERMS, agent) && agent !== "dsh";
+  return Object.prototype.hasOwnProperty.call(HARNESS_TERMS, agent) && !MULTI_PROVIDER_AGENTS.includes(agent);
 }
 
 export function fixedProviderVendor(agent) {
@@ -424,6 +439,34 @@ export async function runUpdateChecks(checks = {}){
   return { harness, scimux };
 }
 
+export const COPILOT_INSPECT_LABEL =
+  "Inspect GitHub Copilot model choices on the next update check (opens a temporary local session).";
+
+export function copilotInspectAvailable(rows){
+  return Array.isArray(rows) && rows.some(r => r && r.agent === "copilot" && r.present && r.launchable);
+}
+
+export function updateCopilotInspectControl(rows, row, box){
+  const available = copilotInspectAvailable(rows);
+  if (row) row.hidden = !available;
+  if (!available && box) box.checked = false;
+  return available;
+}
+
+/* Under the Copilot harness's row, when the control is available. Detached
+ * first, so a rerender never leaves a stale mount behind. */
+export function placeCopilotRow(host, row){
+  if (!row) return;
+  row.remove();
+  if (row.hidden) return;
+  const copilot = host.querySelector('[data-agent="copilot"]');
+  if (copilot) copilot.appendChild(row);
+}
+
+export function clearCopilotInspectChoice(box){
+  if (box) box.checked = false;
+}
+
 export const VIBE_INSPECT_LABEL =
   "Inspect Mistral Vibe model and thinking choices on the next update check (opens a temporary local session).";
 
@@ -442,15 +485,18 @@ export function clearVibeInspectChoice(box){
   if (box) box.checked = false;
 }
 
-/* Ordinary checks stay GET. Only a strict true sends the server's opt-in. */
-export function harnessUpdateCall(inspect) {
-  if (inspect === true) {
-    return {
-      path: "/api/harnesses/latest",
-      opts: { method: "POST", body: JSON.stringify({ inspect_vibe: true }) },
-    };
-  }
-  return { path: "/api/harnesses/latest" };
+/* Ordinary checks stay GET. Only a strict true sends a server opt-in, and each
+ * harness's choice is its own key: a single POST names exactly the probes the
+ * user checked, and nothing else. */
+export function harnessUpdateCall(inspect, inspectCopilot = false) {
+  const body = {};
+  if (inspect === true) body.inspect_vibe = true;
+  if (inspectCopilot === true) body.inspect_copilot = true;
+  if (!Object.keys(body).length) return { path: "/api/harnesses/latest" };
+  return {
+    path: "/api/harnesses/latest",
+    opts: { method: "POST", body: JSON.stringify(body) },
+  };
 }
 
 /* One burger-menu check. Consume the checkbox when the request starts; the
@@ -459,6 +505,7 @@ export async function runHarnessMenuCheck(deps) {
   const button = deps.button;
   const scimuxButton = deps.scimuxButton;
   const box = deps.box;
+  const copilotBox = deps.copilotBox;
   if (button && button.disabled) return;
   if (button) {
     button.disabled = true;
@@ -466,14 +513,20 @@ export async function runHarnessMenuCheck(deps) {
     renderMenuCheck(button, true, button.textContent);
   }
   if (scimuxButton) scimuxButton.disabled = true;
-  const call = harnessUpdateCall(box && box.checked === true && !box.disabled);
+  const call = harnessUpdateCall(
+    box && box.checked === true && !box.disabled,
+    copilotBox && copilotBox.checked === true && !copilotBox.disabled,
+  );
   clearVibeInspectChoice(box);
+  clearCopilotInspectChoice(copilotBox);
   if (box) box.disabled = true;
+  if (copilotBox) copilotBox.disabled = true;
   const checked = await runUpdateChecks({
     harness: () => deps.api(call.path, call.opts),
     scimux: () => deps.scimux(),
   });
   if (box) box.disabled = false;
+  if (copilotBox) copilotBox.disabled = false;
   if (button) button.disabled = false;
   if (scimuxButton) scimuxButton.disabled = false;
   if (checked.harness.status === "fulfilled") {

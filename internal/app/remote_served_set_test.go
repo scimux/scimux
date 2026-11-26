@@ -127,7 +127,7 @@ func TestServedAssetInventoryIsDerivedAndNonEmpty(t *testing.T) {
 		"index": 1,
 		"js":    46,
 		"css":   10,
-		"asset": 18,
+		"asset": 20,
 	} {
 		if byKind[kind] != want {
 			t.Errorf("served inventory holds %d %s entries, want %d. If the web tree "+

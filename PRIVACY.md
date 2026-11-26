@@ -92,6 +92,24 @@ separate from the setting that permits Muse's quota-consuming approval judge.
 See Meta's terms:
 https://dev.meta.ai/legal/terms-of-service
 
+## GitHub Copilot CLI data use
+
+When you run a chat on GitHub Copilot CLI, the Copilot CLI sends prompts,
+files, and tool results to the model it runs for your Copilot account. GitHub
+is not affiliated with scimux. Individual plans may use prompts and outputs
+for model training unless you opt out in your personal Copilot settings.
+GitHub does not use Copilot Business or Enterprise customer data to train its
+models, and those plans' terms govern their data. scimux cannot see or change
+this account setting.
+
+If you run Copilot on your own model provider (bring your own key), that
+provider receives those requests under its own terms, and GitHub's terms do
+not describe its handling. scimux cannot see which provider you configured.
+
+See GitHub's terms and privacy statement:
+https://docs.github.com/en/site-policy/github-terms/github-terms-of-service
+https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement
+
 ## Network connections
 
 Checking for scimux or harness updates contacts GitHub or the relevant

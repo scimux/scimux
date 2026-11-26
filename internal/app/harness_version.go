@@ -111,7 +111,19 @@ func harnessSources() map[string]harnessSource {
 		"muse":     {URL: museStableChannel, Kind: "muse-stable", Label: "Meta stable channel"},
 		"dsh":      {URL: npmRegistry + "@deepseek-ai/dsh/latest", Kind: "npm", Label: "npm @deepseek-ai/dsh"},
 		"vibe":     {URL: vibePackageLatest, Kind: "pypi", Label: "PyPI mistral-vibe"},
+		"copilot":  {URL: npmRegistry + "@github/copilot/latest", Kind: "npm", Label: "npm @github/copilot"},
 	}
+}
+
+// versionArgs is the argv that reads an installed harness's version. Copilot
+// adds --no-auto-update so the read reports the launched executable, the same
+// build the chat runs, rather than a newer previously downloaded one; every
+// other harness uses plain --version.
+func versionArgs(agent string) []string {
+	if agent == "copilot" {
+		return []string{"--version", "--no-auto-update"}
+	}
+	return []string{"--version"}
 }
 
 // activeHarnessSources is the indirection tests replace; production reads
@@ -237,7 +249,7 @@ func probeHarnessVersions(hs []harness) []harnessRow {
 			defer cancel()
 			// CombinedOutput: some CLIs print their version on stderr, and a
 			// non-zero exit is not a reason to drop a version we can read.
-			b, _ := exec.CommandContext(ctx, bin, "--version").CombinedOutput()
+			b, _ := exec.CommandContext(ctx, bin, versionArgs(h.agentName())...).CombinedOutput()
 			row.Installed = parseHarnessVersion(string(b))
 			out[i] = row
 		}(i, h)
@@ -398,31 +410,46 @@ func (a *app) harnessSourcesSnapshot() map[string]harnessSource {
 	return activeHarnessSources()
 }
 
-// vibeInspectChoice is the server-side signal for the Vibe catalog probe.
-// A browser checkbox is not enough: only POST JSON {"inspect_vibe": true}
-// opts in. Any other POST body that is present and not that boolean is
-// malformed and must not refresh. An empty body, a false boolean, and every
-// GET are ordinary checks.
-func vibeInspectChoice(r *http.Request) (inspect bool, status int) {
+// harnessInspectChoices is the server-side signal for the explicit catalog
+// probes. A browser checkbox is not enough: only POST JSON with the boolean
+// {"inspect_vibe": true} or {"inspect_copilot": true} opts in. Any other POST
+// body that is present and not those booleans is malformed and must not
+// refresh. An empty body, a false or null value, and every GET are ordinary
+// checks. Both keys are read from one body, so a single POST can name both.
+func harnessInspectChoices(r *http.Request) (vibe, copilot bool, status int) {
 	if r.Method != http.MethodPost {
-		return false, 0
+		return false, false, 0
 	}
 	const maxBody = 1 << 20
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
-		return false, http.StatusBadRequest
+		return false, false, http.StatusBadRequest
 	}
 	if len(data) > maxBody {
-		return false, http.StatusRequestEntityTooLarge
+		return false, false, http.StatusRequestEntityTooLarge
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return false, 0
+		return false, false, 0
 	}
 	var body map[string]json.RawMessage
 	if err := json.Unmarshal(data, &body); err != nil {
-		return false, http.StatusBadRequest
+		return false, false, http.StatusBadRequest
 	}
-	raw, ok := body["inspect_vibe"]
+	vibe, status = inspectKeyChoice(body, "inspect_vibe")
+	if status != 0 {
+		return false, false, status
+	}
+	copilot, status = inspectKeyChoice(body, "inspect_copilot")
+	if status != 0 {
+		return false, false, status
+	}
+	return vibe, copilot, 0
+}
+
+// inspectKeyChoice reads one explicit boolean key. Absent and null are not a
+// choice; anything other than a boolean is malformed.
+func inspectKeyChoice(body map[string]json.RawMessage, key string) (bool, int) {
+	raw, ok := body[key]
 	if !ok || string(raw) == "null" {
 		return false, 0
 	}
@@ -438,9 +465,9 @@ func vibeInspectChoice(r *http.Request) (inspect bool, status int) {
 // Sources and local probes run independently: one dead registry costs its own
 // row, not the installed-harness or model-catalog answers. GET never starts
 // vibe-acp, and neither does the read-only version inventory. POST starts it only when
-// vibeInspectChoice accepts the body.
+// harnessInspectChoices accepts the body.
 func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
-	inspect, status := vibeInspectChoice(r)
+	inspectVibe, inspectCopilot, status := harnessInspectChoices(r)
 	if status != 0 {
 		http.Error(w, "invalid harness update", status)
 		return
@@ -470,8 +497,11 @@ func (a *app) handleHarnessLatest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		agents = refreshAgents()
-		if inspect {
+		if inspectVibe {
 			agents = inspectVibeCatalog()
+		}
+		if inspectCopilot {
+			agents = inspectCopilotCatalog()
 		}
 	}()
 	go func() {
