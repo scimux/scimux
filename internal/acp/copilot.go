@@ -14,9 +14,10 @@ import (
 
 // copilotClientName is how scimux identifies itself to Copilot. The installed
 // `copilot help acp` treats a client that names itself in clientInfo.name as
-// person-driven, and a client that sends no clientInfo as automation. scimux
-// is driven by a person in the browser, so it names itself and also states
-// interactive explicitly, which that help says takes precedence.
+// person-driven unless the client states otherwise in _meta; an explicit
+// interactive value takes precedence. scimux sends interactive false, following
+// that help. Its help describes false for scripts, bots and other automated
+// drivers that name themselves, so Copilot classifies scimux as non-interactive.
 const copilotClientName = "scimux"
 
 // clientVersion is the build version scimux reports in clientInfo. The
@@ -33,8 +34,8 @@ func SetClientVersion(v string) { clientVersion = v }
 var copilotServeArgs = []string{"--acp", "--stdio", "--no-auto-update"}
 
 // initializeRequest is the initialize every ACP launch and probe sends. Only
-// copilot names its client and opts into person-driven classification; every
-// other harness keeps the bare request it has always sent.
+// copilot names its client and sends interactive false; every other harness
+// keeps the bare request it has always sent.
 func initializeRequest(agent string) sdk.InitializeRequest {
 	req := sdk.InitializeRequest{
 		ProtocolVersion: sdk.ProtocolVersionNumber,
@@ -49,7 +50,7 @@ func initializeRequest(agent string) sdk.InitializeRequest {
 	title := copilotClientName
 	req.ClientInfo = &sdk.Implementation{Name: copilotClientName, Title: &title, Version: clientVersion}
 	req.ClientCapabilities.Meta = map[string]any{
-		"github.com/copilot": map[string]any{"interactive": true},
+		"github.com/copilot": map[string]any{"interactive": false},
 	}
 	return req
 }

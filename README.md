@@ -122,8 +122,11 @@ launchable. The inspection opens one temporary ACP session, sends no prompt,
 switches no model, and closes that session. Closing it does not prove that
 Copilot deletes the session from its own history. A failed, timed-out, or empty
 inspection leaves the default launch with no invented model or effort level.
-Copilot's ACP treats scimux as the person-driven client it names in
-`clientInfo`. Concurrent permission requests are shown one at a time in the
+scimux names itself in `clientInfo` and states `interactive: false` in Copilot's
+client metadata. The installed `copilot help acp` says that explicit value takes
+precedence and describes it for automated drivers that name themselves, so
+Copilot classifies scimux as non-interactive, not as a person-driven client.
+Concurrent permission requests are shown one at a time in the
 order Copilot raised them, up to eight waiting behind the one shown. A request
 still held when its turn ends is released as cancelled.
 The context gauge for a Copilot chat is Copilot's streamed occupancy. Each

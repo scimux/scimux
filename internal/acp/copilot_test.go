@@ -15,10 +15,10 @@ import (
 	sdk "github.com/coder/acp-go-sdk"
 )
 
-// Copilot's ACP initialize names scimux as a person-driven client, and states
-// the same thing in _meta, which the installed `copilot help acp` says takes
-// precedence. Other harnesses keep the bare initialize they always had, so
-// this table pins both sides of that boundary.
+// Copilot's ACP initialize names scimux in clientInfo and states interactive
+// false in _meta, which the installed `copilot help acp` says takes precedence.
+// Other harnesses keep the bare initialize they always had, so this table pins
+// both sides of that boundary.
 func TestInitializeClientInfoByAgent(t *testing.T) {
 	SetClientVersion("v1.2.3")
 	t.Cleanup(func() { SetClientVersion("dev") })
@@ -55,8 +55,13 @@ func TestInitializeClientInfoByAgent(t *testing.T) {
 			if info.Title == nil || *info.Title != "scimux" {
 				t.Fatalf("clientInfo title = %v, want scimux", info.Title)
 			}
-			if got, ok := interactive.(map[string]any); !ok || got["interactive"] != true {
-				t.Fatalf("copilot _meta = %v, want interactive true", interactive)
+			got, ok := interactive.(map[string]any)
+			if !ok {
+				t.Fatalf("copilot _meta = %v, want an object", interactive)
+			}
+			value, present := got["interactive"]
+			if !present || value != false {
+				t.Fatalf("copilot _meta interactive = %v (present %t), want an explicit boolean false", value, present)
 			}
 		})
 	}
