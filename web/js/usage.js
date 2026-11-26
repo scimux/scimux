@@ -59,6 +59,9 @@ export function agentLogo(agent, assetURL){
   case "muse":
     return `<img class="badge-mono" src="${assetURL('/assets/agents/meta-mono.svg')}" alt="" aria-hidden="true">` +
       `<img class="badge-accent" src="${assetURL('/assets/agents/meta.svg')}" alt="" aria-hidden="true">`;
+  case "copilot":
+    return `<img class="badge-mono" src="${assetURL('/assets/agents/copilot-mono.svg')}" alt="" aria-hidden="true">` +
+      `<img class="badge-accent" src="${assetURL('/assets/agents/copilot.svg')}" alt="" aria-hidden="true">`;
   case "cursor":
     return `<img class="badge-mono" src="${assetURL('/assets/agents/cursor-mono.svg')}" alt="" aria-hidden="true">` +
       `<img class="badge-accent" src="${assetURL('/assets/agents/cursor.svg')}" alt="" aria-hidden="true">`;
@@ -97,6 +100,7 @@ export function usageAgentDisplayName(agent){
   if (agent === "muse") return "Muse";
   if (agent === "cursor") return "Cursor";
   if (agent === "vibe") return "Mistral Vibe";
+  if (agent === "copilot") return "GitHub Copilot CLI";
   return String(agent || "");
 }
 

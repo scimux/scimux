@@ -87,6 +87,12 @@ func agentArgv(agent, model, effort string) ([]string, error) {
 		// rename, wrap, or substitute another binary for it. Model and
 		// thinking travel as session config options after connect.
 		return []string{"vibe-acp"}, nil
+	case "copilot":
+		// The user-installed Copilot CLI serves ACP on stdio. --no-auto-update
+		// keeps a background update from racing the JSON-RPC stream. Model and
+		// effort are session config options advertised at session/new, so they
+		// never reach argv.
+		return append([]string{"copilot"}, copilotServeArgs...), nil
 	}
 	return nil, fmt.Errorf("agent %q has no ACP transport", agent)
 }

@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import {
   harnessState, harnessRowsHTML, harnessCheckNote, harnessTermsHTML,
   fixedProviderVendor, sharingTermsAnchor,
+  copilotInspectAvailable, COPILOT_INSPECT_LABEL,
   museConsentNote, computerSettingOn, createSettingsController,
   openAttachmentSettings, applyExternalAttachmentChange,
   createScimuxUpdateCheck, runUpdateChecks,
@@ -1066,12 +1067,15 @@ test("provider privacy links accompany terms in the burger menu", () => {
 
 test("sharing notice vendors stay tied to the single-provider terms anchors", () => {
   const vendors = { claude: "Anthropic", codex: "OpenAI", grok: "xAI", cursor: "Anysphere", muse: "Meta" };
-  const agents = ["claude", "codex", "grok", "cursor", "muse", "dsh", "pi", "opencode", "vibe", "nope"];
+  const agents = ["claude", "codex", "grok", "cursor", "muse", "dsh", "copilot", "pi", "opencode", "vibe", "nope"];
   for (const agent of agents) {
     const terms = harnessTermsHTML(agent);
     const href = (terms.match(/href="(https:[^"]+)"/) || [])[1] || "";
     const vendor = fixedProviderVendor(agent);
-    assert.equal(vendor !== "", Boolean(href) && agent !== "dsh");
+    // dsh and copilot have terms links but no single provider: Copilot can be
+    // routed to the user's own model provider, so GitHub is never named as the
+    // provider of a shared chat.
+    assert.equal(vendor !== "", Boolean(href) && agent !== "dsh" && agent !== "copilot");
     assert.equal(vendor, vendors[agent] || "");
     const anchor = sharingTermsAnchor(agent, "provider terms");
     const hostile = sharingTermsAnchor(agent, '<x "y">');
@@ -1090,4 +1094,28 @@ test("sharing notice vendors stay tied to the single-provider terms anchors", ()
   }
   assert.equal(sharingTermsAnchor("dsh", "DeepSeek"), "");
   assert.equal(fixedProviderVendor("dsh"), "");
+});
+
+test("GitHub Copilot CLI row links GitHub's terms and privacy statement, with the account and provider caveats", () => {
+  const html = harnessRowsHTML([{ agent: "copilot", present: true, launchable: true, installed: "1.0.115", has_source: true }], null);
+  const at = html.indexOf('data-agent="copilot"');
+  assert.ok(at >= 0);
+  const row = html.slice(at, html.indexOf("</div>", at) + "</div>".length);
+  assert.match(row, / GitHub Copilot CLI</);
+  assert.match(row, /href="https:\/\/docs\.github\.com\/en\/site-policy\/github-terms\/github-terms-of-service"[^>]*>Terms of Service</);
+  assert.match(row, /href="https:\/\/docs\.github\.com\/en\/site-policy\/privacy-policies\/github-privacy-statement"[^>]*>Privacy</);
+  assert.match(row, /opt out/);
+  assert.match(row, /bring your own|your own model provider/);
+});
+
+test("Copilot's terms are never a provider attribution for shared chats", () => {
+  assert.equal(sharingTermsAnchor("copilot", "GitHub"), "");
+  assert.equal(fixedProviderVendor("copilot"), "");
+});
+
+test("Copilot model inspection is offered only for a present, launchable copilot", () => {
+  assert.equal(copilotInspectAvailable([{ agent: "copilot", present: true, launchable: true }]), true);
+  assert.equal(copilotInspectAvailable([{ agent: "copilot", present: false, launchable: false }]), false);
+  assert.equal(copilotInspectAvailable([{ agent: "vibe", present: true, launchable: true }]), false);
+  assert.match(COPILOT_INSPECT_LABEL, /GitHub Copilot model choices/);
 });

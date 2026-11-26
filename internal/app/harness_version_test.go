@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,7 @@ func TestParseHarnessVersion(t *testing.T) {
 		{"pi", "0.84.3\n", "0.84.3"},
 		{"opencode", "1.18.23\n", "1.18.23"},
 		{"grok", "grok 1.0.3 (1a29d5bc12) [stable]\n", "1.0.3"},
+		{"copilot", "GitHub Copilot CLI 1.0.115.\nRun 'copilot update' to check for updates.\n", "1.0.115"},
 		{"cursor", "2026.09.15-d2fe57e\n", "2026.09.15-d2fe57e"},
 		{"muse", "Muse Code 1.3.0 (1.3.0-R3057.1)\n", "1.3.0"},
 		// dsh prints a bare semver with a prerelease suffix and nothing else.
@@ -677,5 +679,83 @@ func TestMuseStableChannelIsExplicitCheckOnly(t *testing.T) {
 	}
 	if _, ok := got.Latest["muse"]; ok {
 		t.Fatalf("unresolved muse-stable shape leaked a version: %+v", got.Latest["muse"])
+	}
+}
+
+// GitHub publishes the Copilot CLI on npm as @github/copilot. The update check
+// reads that public metadata; the dist-tag "latest" is the channel scimux
+// compares against.
+func TestCopilotPublishesPublicVersion(t *testing.T) {
+	src, ok := harnessSources()["copilot"]
+	if !ok || src.URL != "https://registry.npmjs.org/@github/copilot/latest" || src.Kind != "npm" || src.Label != "npm @github/copilot" {
+		t.Fatalf("Copilot upstream source = %+v, want the npm @github/copilot latest tag", src)
+	}
+}
+
+// The installed version comes from `copilot --version --no-auto-update`: the
+// flag makes the read report the executable that was launched, not a newer
+// previously downloaded build. The update check reads metadata and never runs
+// `copilot update` (which downloads) or `copilot version` (which checks the
+// network). Any other recorded invocation is a failure.
+func TestCopilotLatestAndInstalledWithoutUpdateCommand(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(root, "invocations")
+	writeScript(t, binDir, "copilot", fmt.Sprintf(`printf '%%s\n' "$*" >> %q
+if [ "$1" = "--version" ]; then
+  printf '%%s\n' 'GitHub Copilot CLI 1.0.115.' "Run 'copilot update' to check for updates."
+  exit 0
+fi
+exit 2
+`, record))
+	t.Setenv("PATH", binDir)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"version":"1.0.116"}`))
+	}))
+	defer server.Close()
+	restore := setHarnessSourcesForTest(map[string]harnessSource{
+		"copilot": {URL: server.URL, Kind: "npm", Label: "npm @github/copilot"},
+	})
+	defer restore()
+	a := newTestApp(t, &fakeTmux{})
+	a.harnessInventory = func(bool) []harnessRow { return probeHarnessVersions(harnesses) }
+	rec := httptest.NewRecorder()
+	a.handleHarnessLatest(rec, httptest.NewRequest(http.MethodGet, "/api/harnesses/latest", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Latest    map[string]struct{ Version string } `json:"latest"`
+		Harnesses []harnessRow                        `json:"harnesses"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Latest["copilot"].Version != "1.0.116" {
+		t.Errorf("Copilot latest = %+v, want 1.0.116", got.Latest)
+	}
+	found := false
+	for _, row := range got.Harnesses {
+		if row.Agent == "copilot" {
+			found = true
+			if row.Installed != "1.0.115" || !row.HasSource {
+				t.Errorf("Copilot inventory = %+v, want 1.0.115 with an update source", row)
+			}
+		}
+	}
+	if !found {
+		t.Error("Copilot missing from inventory")
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "--version --no-auto-update" {
+			t.Fatalf("copilot was invoked with %q; the inventory allows only the pinned version read", line)
+		}
 	}
 }

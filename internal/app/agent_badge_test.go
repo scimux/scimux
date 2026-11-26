@@ -15,6 +15,7 @@ func TestAgentAssetsAreAccentTextBadges(t *testing.T) {
 		accent string
 	}{
 		"claude.svg":   {"Cld", "Claude", "#fb8c63"},
+		"copilot.svg":  {"CoP", "GitHub Copilot CLI", "#c9d6e6"},
 		"openai.svg":   {"Cdx", "Codex", "#79e9c4"},
 		"cursor.svg":   {"Cur", "Cursor", "#dfe1e5"},
 		"deepseek.svg": {"Dsh", "DeepSeek Harness", "#5c9df8"},

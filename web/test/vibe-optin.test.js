@@ -239,3 +239,32 @@ test("a missing checkbox and a missing catalog payload still finish the ordinary
   });
   assert.equal(rejected.harness.status, "rejected");
 });
+
+test("the Copilot checkbox sends its own explicit signal, alone or beside Vibe's", async () => {
+  const { harnessUpdateCall, runHarnessMenuCheck } = await loadHarnessUpdate();
+  const path = "/api/harnesses/latest";
+  assert.deepEqual(harnessUpdateCall(false, false), { path });
+  assert.deepEqual(harnessUpdateCall(false, true), {
+    path,
+    opts: { method: "POST", body: JSON.stringify({ inspect_copilot: true }) },
+  });
+  assert.deepEqual(harnessUpdateCall(true, true), {
+    path,
+    opts: { method: "POST", body: JSON.stringify({ inspect_vibe: true, inspect_copilot: true }) },
+  });
+
+  const calls = [];
+  const vibeBox = { checked: false };
+  const copilotBox = { checked: true };
+  const button = { disabled: false, textContent: "Check for updates" };
+  const scimuxButton = { disabled: false };
+  await runHarnessMenuCheck({
+    button, scimuxButton, box: vibeBox, copilotBox,
+    api: async (p, opts) => { calls.push(opts && opts.body); return { latest: {}, agents: {} }; },
+    scimux: async () => ({ available: false }),
+    apply: () => {},
+  });
+  assert.equal(calls[0], JSON.stringify({ inspect_copilot: true }));
+  assert.equal(copilotBox.checked, false, "the Copilot choice resets after the action");
+  assert.equal(vibeBox.checked, false);
+});

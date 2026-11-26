@@ -66,6 +66,13 @@ test("agentLogo routes each known agent through assetURL", () => {
   assert.match(agentLogo("claude", p => p), /<img class="badge-mono" src="\/assets\/agents\/claude-mono\.svg" alt="" aria-hidden="true">/);
 });
 
+test("GitHub Copilot CLI has its own neutral SVG text badge", () => {
+  const url = p => "U:" + p;
+  assert.match(agentLogo("copilot", url), /<img class="badge-mono" src="U:\/assets\/agents\/copilot-mono\.svg"/);
+  assert.match(agentLogo("copilot", url), /<img class="badge-accent" src="U:\/assets\/agents\/copilot\.svg"/);
+  assert.equal(usageAgentDisplayName("copilot"), "GitHub Copilot CLI");
+});
+
 test("Mistral Vibe uses its own SVG badge", () => {
   const logo = agentLogo("vibe", p => p);
   assert.match(logo, /<img class="badge-accent" src="\/assets\/agents\/mistral\.svg"/);
@@ -349,4 +356,13 @@ test("the off badge is reachable, the unavailable one is not", () => {
   const broken = usageBadge("claude", { available: false }, {});
   assert.doesNotMatch(broken, /data-usage-off/);
   assert.match(broken, /role="img"/);
+});
+
+test("a missing agent name gets the generic logo and an empty display name", () => {
+  const url = p => "U:" + p;
+  for (const missing of [undefined, null, ""]){
+    assert.match(agentLogo(missing, url), /<svg viewBox="0 0 24 24" aria-hidden="true">/, String(missing));
+    assert.doesNotMatch(agentLogo(missing, url), /<img/, String(missing));
+    assert.equal(usageAgentDisplayName(missing), "", String(missing));
+  }
 });

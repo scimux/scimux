@@ -119,6 +119,11 @@ export const DEFAULT_EFFORTS = {
      Empty, not absent: the generic three would name levels the model never
      offered, and a failed catalog must stay "harness default". */
   vibe:   [],
+  /* Copilot's effort levels come only from an explicit inspection of the
+     current model's menu. Empty, not absent, so no generic levels are offered.
+     This does not make Copilot present: only a successful presence payload
+     does that. */
+  copilot: [],
 };
 
 /* ---------- pure: catalogs / options ---------- */

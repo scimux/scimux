@@ -111,6 +111,7 @@ import {
   openAttachmentSettings, applyExternalAttachmentChange,
   createScimuxUpdateCheck, runHarnessMenuCheck, acceptHarnessMenuResult,
   updateVibeInspectControl, clearVibeInspectChoice,
+  updateCopilotInspectControl, clearCopilotInspectChoice, placeCopilotRow,
 } from "./harness.js";
 import { createMenuReleaseView } from "./burger-menu.js";
 import { createAssetPreview, bindAssetPreviewLinks } from "./asset-preview.js";
@@ -1253,7 +1254,11 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
     renderChatHead: () => renderChatHead(),
     renderMap: () => renderMap(),
     alert: msg => alert(msg),
-    onCloseSheets: owner => { clearVibeInspectChoice($("#m_vibe_inspect")); bubbleController.sheetClosed(owner); },
+    onCloseSheets: owner => {
+      clearVibeInspectChoice($("#m_vibe_inspect"));
+      clearCopilotInspectChoice($("#m_copilot_inspect"));
+      bubbleController.sheetClosed(owner);
+    },
   }));
 
   /* Device pairing + the list of who holds a grant — Packet S8.
@@ -2000,12 +2005,15 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
      channels, and checks scimux. Opening the menu itself phones nowhere. */
   let harnessRows = null, harnessLatest = null, usageChecks = false, museConsent = false;
   const vibeInspectRow = $("#m_vibe_inspect_row"), vibeInspectBox = $("#m_vibe_inspect");
+  const copilotInspectRow = $("#m_copilot_inspect_row"), copilotInspectBox = $("#m_copilot_inspect");
   function renderHarnesses(){
     if (!harnessRows) return;
     updateVibeInspectControl(harnessRows, vibeInspectRow, vibeInspectBox);
+    updateCopilotInspectControl(harnessRows, copilotInspectRow, copilotInspectBox);
     mountHarnessRows($("#m_harnesses"), harnessRowsHTML(harnessRows, harnessLatest, {
       agentLogo, usageChecks, museConsent,
     }), vibeInspectRow);
+    placeCopilotRow($("#m_harnesses"), copilotInspectRow);
     const note = harnessCheckNote(harnessRows, harnessLatest);
     $("#m_hnote").textContent = note;
     $("#m_hnote").hidden = !note;
@@ -2067,6 +2075,7 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
   void settingsCtl.load();
   $("#m_hcheck").addEventListener("click", () => void runHarnessMenuCheck({
     button: $("#m_hcheck"), scimuxButton: $("#m_check"), box: $("#m_vibe_inspect"),
+    copilotBox: $("#m_copilot_inspect"),
     api, scimux: scimuxUpdate.check,
     apply: (d) => acceptHarnessMenuResult(d, {
       latest: (v) => { harnessLatest = v; },

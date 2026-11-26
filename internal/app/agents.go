@@ -25,6 +25,69 @@ import (
 // the suite never executes a real vibe-acp binary.
 var probeVibeCatalog = acp.ProbeVibeCatalog
 
+// probeCopilotCatalog is the disposable Copilot ACP menu read. Tests replace
+// it so the suite never starts a real copilot binary.
+var probeCopilotCatalog = acp.ProbeCopilotCatalog
+
+// copilotInfoFromACP turns a probed catalog into the dialog's offer. Efforts
+// are attributed only where the catalog attributed them. The blank effort stays
+// Copilot's own default, so nothing is marked required or defaulted here.
+func copilotInfoFromACP(cat acp.CopilotCatalog) agentInfo {
+	info := agentInfo{Models: append([]string(nil), cat.Models...)}
+	for _, model := range cat.Models {
+		levels := cat.Efforts[model]
+		if len(levels) == 0 {
+			continue
+		}
+		if info.Efforts == nil {
+			info.Efforts = map[string]modelEffort{}
+		}
+		info.Efforts[model] = modelEffort{Levels: append([]string(nil), levels...)}
+	}
+	return info
+}
+
+// inspectCopilotCatalog runs the explicit, bounded Copilot catalog probe. It
+// publishes a menu only when the probe returns models; a missing binary, a
+// timeout, an error, or an empty menu leaves the launchable default in place
+// and invents nothing. Like inspectVibeCatalog, it is an overlay: it does not
+// advance the refresh generation.
+func inspectCopilotCatalog() map[string]agentInfo {
+	agentsProbeMu.Lock()
+	defer agentsProbeMu.Unlock()
+	agentsCacheMu.RLock()
+	current := agentsCache
+	agentsCacheMu.RUnlock()
+	if _, installed := current["copilot"]; !installed {
+		return current
+	}
+	if len(current["copilot"].Models) > 0 {
+		return current
+	}
+	bin, err := exec.LookPath("copilot")
+	if err != nil {
+		return current
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), copilotInspectBudget)
+	defer cancel()
+	cat, err := probeCopilotCatalog(ctx, bin)
+	if err != nil || len(cat.Models) == 0 {
+		return current
+	}
+	next := cloneAgentCatalog(current)
+	next["copilot"] = copilotInfoFromACP(cat)
+	agentsCacheMu.Lock()
+	agentsCache = next
+	agentsLoaded = true
+	agentsCacheMu.Unlock()
+	return next
+}
+
+// copilotInspectBudget bounds one explicit Copilot inspection. It is longer
+// than the probe's own total, so the probe's budget governs and this only
+// guards against a probe that ignores its context.
+const copilotInspectBudget = 15 * time.Second
+
 func vibeModelsFromACP(ctx context.Context, bin string) agentInfo {
 	cat, err := probeVibeCatalog(ctx, bin)
 	if err != nil || len(cat.Models) == 0 {
@@ -222,6 +285,11 @@ var harnesses = []harness{
 	// empty model list, and the dialog offers Vibe's own default. The
 	// catalog read is a separate explicit choice (inspectVibeCatalog).
 	{name: "vibe", bin: "vibe-acp"},
+	// copilot launches only when the user-installed `copilot` binary is on
+	// PATH; it serves ACP with `copilot --acp --stdio`. Presence is the whole
+	// ordinary probe, so the dialog offers Copilot's own default. The model menu
+	// is read only by an explicit inspection (inspectCopilotCatalog).
+	{bin: "copilot"},
 }
 
 var (

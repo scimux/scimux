@@ -14,10 +14,10 @@ const badges = {
   cursor: ["cursor", "Cur"], dsh: ["deepseek", "Dsh"],
   grok: ["grok", "Grk"], vibe: ["mistral", "Mst"],
   muse: ["meta", "Mus"], opencode: ["opencode", "OpC"],
-  pi: ["pi", "Pi."],
+  pi: ["pi", "Pi."], copilot: ["copilot", "CoP"],
 };
 
-test("all nine badges have matching accent and monochrome SVG artwork", () => {
+test("all ten badges have matching accent and monochrome SVG artwork", () => {
   for (const [agent, [file, label]] of Object.entries(badges)){
     const accent = readFileSync(join(web, "assets/agents", file + ".svg"), "utf8");
     const mono = readFileSync(join(web, "assets/agents", file + "-mono.svg"), "utf8");

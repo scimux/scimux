@@ -281,7 +281,7 @@ type Node struct {
 	// is a scimux decision, distinct from a *mechanical* process exit — a crash
 	// leaves the node live until /exit is invoked. Empty means not ended.
 	EndedAt    string `json:"ended_at,omitempty"`
-	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode" | "grok" | "cursor" | "dsh" | "muse" | "vibe"
+	Agent      string `json:"agent"` // "claude" | "codex" | "pi" | "opencode" | "grok" | "cursor" | "dsh" | "muse" | "vibe" | "copilot"
 	Model      string `json:"model,omitempty"`
 	Effort     string `json:"effort,omitempty"` // reasoning effort: launch id/flag or structured session config
 	Dir        string `json:"dir"`

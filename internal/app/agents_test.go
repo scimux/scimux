@@ -511,6 +511,10 @@ printf '%s\n' 'Available models' '' 'auto - Auto (current, default)' 'demo-high 
 	// vibe-acp is presence-only here: a script that exits is not an ACP peer.
 	// The harness stays offerable with an empty model list.
 	writeScript(t, binDir, "vibe-acp", `exit 0`)
+	// copilot is presence-only as well: a script that exits is not an ACP peer,
+	// and the default launch is the dialog's only offer until an explicit
+	// inspection publishes a menu.
+	writeScript(t, binDir, "copilot", `exit 0`)
 	t.Setenv("PATH", binDir)
 
 	cacheDir := filepath.Join(home, ".grok")
@@ -564,6 +568,9 @@ printf '%s\n' 'Available models' '' 'auto - Auto (current, default)' 'demo-high 
 	}
 	if got := agents["vibe"].Models; got == nil || len(got) != 0 {
 		t.Errorf("vibe models = %v, want empty with no static fallback", got)
+	}
+	if got := agents["copilot"].Models; got == nil || len(got) != 0 {
+		t.Errorf("copilot models = %v, want empty until an explicit inspection", got)
 	}
 	for name, info := range agents {
 		if info.Models == nil {

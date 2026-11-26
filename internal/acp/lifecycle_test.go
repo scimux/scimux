@@ -58,6 +58,12 @@ func TestAgentArgv(t *testing.T) {
 		{agent: "vibe", want: []string{"vibe-acp"}},
 		{agent: "vibe", model: "synthetic-model", effort: "high",
 			want: []string{"vibe-acp"}},
+		// copilot is the user-installed Copilot CLI's ACP server. Model and
+		// effort are session config options it advertises at session/new, so
+		// neither appears on argv, as with vibe.
+		{agent: "copilot", want: []string{"copilot", "--acp", "--stdio", "--no-auto-update"}},
+		{agent: "copilot", model: "auto", effort: "high",
+			want: []string{"copilot", "--acp", "--stdio", "--no-auto-update"}},
 		{agent: "claude", wantErr: true},
 		{agent: "", wantErr: true},
 	}

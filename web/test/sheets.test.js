@@ -3150,3 +3150,30 @@ test('sheet close forwards the action owner and backdrop closes without it', () 
  const seen=[],owner={};const ctx=createFeature({deps:{onCloseSheets:value=>seen.push(value)}});ctx.feature.bind();
  ctx.feature.closeSheets(owner);assert.equal(seen.at(-1),owner);ctx.byId.backdrop.dispatch('click');assert.notEqual(seen.at(-1),owner);ctx.feature.destroy();
 });
+
+test("the fallback effort catalog names Copilot with no invented levels", () => {
+  assert.deepEqual(DEFAULT_EFFORTS.copilot, []);
+});
+
+test("Copilot is offered only from a successful presence payload, as a default-only launch", () => {
+  const models = {}, efforts = {};
+  // Installed, with no model menu advertised: the dialog offers the default.
+  applyAgentsProbe(models, efforts, { copilot: { models: [] } });
+  assert.deepEqual(models.copilot, [""]);
+  assert.deepEqual(efforts.copilot, {});
+  // A later payload without copilot removes it: an absent harness is not offered.
+  applyAgentsProbe(models, efforts, { claude: { models: ["fable"] } });
+  assert.equal(Object.prototype.hasOwnProperty.call(models, "copilot"), false);
+});
+
+test("a failed or malformed probe does not invent a Copilot offer", () => {
+  const models = {}, efforts = {};
+  applyAgentsProbe(models, efforts, null);
+  assert.equal(Object.prototype.hasOwnProperty.call(models, "copilot"), false);
+});
+
+test("the new-activity dialog lists Copilot by its agent key, like the other ACP harnesses", () => {
+  const html = agentOptionsHTML({ copilot: [""], claude: [""] });
+  assert.match(html, /<option>copilot<\/option>/);
+  assert.match(html, /<option>claude<\/option>/);
+});

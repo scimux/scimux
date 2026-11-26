@@ -218,6 +218,7 @@ func TestResolveNodeRootTransportByAgent(t *testing.T) {
 		{"cursor", "acp"},
 		{"dsh", "acp"},
 		{"vibe", "acp"},
+		{"copilot", "acp"},
 		{"muse", "muse"},
 	}
 	for _, c := range cases {
@@ -792,7 +793,7 @@ func TestAgentCommandRejectsCodexAndUnknown(t *testing.T) {
 	// dsh has no tmux fallback on purpose: its ACP profile is the only launch
 	// path scimux knows, and a bare `dsh <prompt>` is a different, interactive
 	// program. Rejecting it here is the honest answer, not an omission.
-	for _, agent := range []string{"dsh", "vibe", "gemini", "", "Claude"} {
+	for _, agent := range []string{"dsh", "vibe", "copilot", "gemini", "", "Claude"} {
 		if _, err := agentCommand(&Node{Agent: agent, Prompt: "p"}, nil); err == nil {
 			t.Errorf("agentCommand must reject unknown agent %q", agent)
 		}
