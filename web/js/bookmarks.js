@@ -67,7 +67,7 @@
  *   - openNotes lazy (Notes › / workspace)
  *   - openSheet / closeSheets, setLevel, restartWorkPulse
  *   - toast, copyText, prompt focus targets
- *   - storage (localStorage), document, setTimeout/clearTimeout, CSS.escape
+ *   - storage (localStorage), document, setTimeout/clearTimeout
  *   - esc, md, fmtWhen, hashStr, icons, stripAssetRefs (format.js)
  *   - menu.js createPopoverMenu for the overflow (comment/copy/Delete)
  *
@@ -496,7 +496,6 @@ export function createBookmarksFeature(deps){
   const icons = d.icons || {};
   const setTimeoutFn = d.setTimeout || setTimeout;
   const clearTimeoutFn = d.clearTimeout || clearTimeout;
-  const CSSObj = d.CSS || (typeof CSS !== "undefined" ? CSS : { escape: s => String(s).replace(/"/g, '\\"') });
 
   const g = (name, fallback) => {
     if (typeof d[name] === "function") return d[name]();
@@ -650,6 +649,16 @@ export function createBookmarksFeature(deps){
     if (typeof d.restartWorkPulse === "function") d.restartWorkPulse();
   }
 
+  function bookmarkElement(t){
+    const list = roots.bookmarklist;
+    if (!list || typeof list.querySelectorAll !== "function") return null;
+    // Compare keys as data so quotes, backslashes and controls never enter CSS.
+    for (const el of list.querySelectorAll(".bookmark")){
+      if (el.dataset && el.dataset.t === t) return el;
+    }
+    return null;
+  }
+
   function openBookmark(t){
     const all = bookmarks();
     const target = all.find(nt => nt.t === t);
@@ -661,9 +670,7 @@ export function createBookmarksFeature(deps){
     openBookmarkT = t;
     setOpen(true);
     setTimeoutFn(() => {
-      const list = roots.bookmarklist;
-      const selector = `.bookmark[data-t="${CSSObj.escape(t)}"]`;
-      const el = list && typeof list.querySelector === "function" ? list.querySelector(selector) : null;
+      const el = bookmarkElement(t);
       if (!el) return;
       if (el.classList) el.classList.add("jump-target");
       if (typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -866,11 +873,8 @@ export function createBookmarksFeature(deps){
       render();
       /* same reveal as chat bubbles: the unfolded action row must be visible
          after the tap (re-query — the render above rebuilt the list DOM) */
-      if (openBookmarkT && doc && typeof doc.querySelector === "function"){
-        const escT = CSSObj.escape ? CSSObj.escape(openBookmarkT) : openBookmarkT;
-        const row = doc.querySelector(
-          `#bookmarklist .bookmark[data-t="${escT}"] .actionbar`,
-        );
+      if (openBookmarkT){
+        const row = bookmarkElement(openBookmarkT)?.querySelector?.(".actionbar");
         if (row && typeof row.scrollIntoView === "function")
           row.scrollIntoView({ block: "nearest", behavior: "smooth" });
       }
