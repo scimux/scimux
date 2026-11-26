@@ -796,6 +796,7 @@ async function stage2SharedActions(mode,ownerSeat,otherSeat,readerSeat,observerS
   assertID('stage2-own-source-no-dispatch-'+mode,counts(ownerSeat).attempted===beforeOwner.attempted+1&&counts(ownerSeat).controls===beforeOwner.controls);
   manifest['stage2-shared-'+mode]={key,seq,bookmark:saved.team,beforeReader,afterReader:counts(readerSeat),beforeOwner,afterOwner:counts(ownerSeat),beforeOther,afterOther:counts(otherSeat)};
   await stage2InstantReactions(mode,{ownerSeat,observerSeat,readerSeat,otherSeat,share,key,owner,observer,reader});
+  await stage2ParticipantDisclosure(mode,{ownerSeat,observerSeat,readerSeat,key,owner,observer,reader});
 }
 
 /* Route gate for People reaction writes on one page. Reads pass through; a POST
@@ -853,14 +854,14 @@ async function safeBubblePoint(message) {
 /* Proves that a tap at the center of the locator reaches that control inside the chat timeline. Playwright's
    touchscreen.tap does not reveal coordinates, and a bubble clipped by the timeline still reports as visible.
    Throws with the measured geometry rather than masking an unexpected overlay. */
-async function tapProbe(locator,selector,label) {
-  const probe=await locator.evaluate((el,selector)=>{
-    const box=el.getBoundingClientRect(),msgs=document.querySelector('#msgs').getBoundingClientRect();
+async function tapProbe(locator,selector,label,options={}) {
+  const probe=await locator.evaluate((el,args)=>{
+    const {selector,viewport}=args,box=el.getBoundingClientRect(),msgs=viewport?{left:0,top:0,right:innerWidth,bottom:innerHeight}:document.querySelector('#msgs').getBoundingClientRect();
     const x=box.left+box.width/2,y=box.top+box.height/2,hit=document.elementFromPoint(x,y);
     return {x,y,inTimeline:x>=msgs.left&&x<=msgs.right&&y>=msgs.top&&y<=msgs.bottom,receives:!!hit&&hit.closest(selector)===el,
       target:{top:box.top,bottom:box.bottom,left:box.left,right:box.right},timeline:{top:msgs.top,bottom:msgs.bottom,left:msgs.left,right:msgs.right},
       hit:hit?hit.tagName+'.'+String(hit.className).slice(0,120):null};
-  },selector);
+  },{selector,viewport:options.viewport===true});
   if(!probe.inTimeline||!probe.receives)throw Error(label+' is not tappable: '+JSON.stringify(probe));
   return probe;
 }
@@ -892,6 +893,176 @@ async function openTimeline(page,id,mode) {
   if(mode==='phone'&&await page.locator('#chatback').isVisible())await page.locator('#chatback').click();
   await open(page,id);await page.locator('#prompt[contenteditable=true]').waitFor({timeout:30000});
 }
+/* Participant disclosure acceptance (inside the protected stage2 journey). Real pointer and touch input,
+   three synthetic views, a local override with markup-like text, a held write, and read-only inspection. */
+async function stage2ParticipantDisclosure(mode,s) {
+  const {ownerSeat,observerSeat,readerSeat,key,owner,observer,reader}=s;
+  const received='team/'+key,ownNode=ownerSeat.node.id;
+  const gates={owner:await gateReactionWrites(owner),reader:await gateReactionWrites(reader)};
+  const reactionsOf=async()=>(await readerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0')).events.length;
+  const serverNames=async()=>(await readerSeat.api('/api/team/subscriptions/'+key+'/comments?after=0')).names||{};
+  const nameOf=(names,seat)=>names[seat]||'Unknown person';
+  const LOCAL='<img src=x onerror="window.__disclosureXSS=1">Local name';assert.ok(LOCAL.length<=64,'local name fits the rename limit');
+  const targetText='Disclosure target '+mode, ownerText='Disclosure owner comment '+mode;
+  // The observer's comment is the target; the owner's comment receives one reaction from the observer.
+  await openTimeline(observer,received,mode);
+  await observer.locator('#prompt').fill(targetText);await observer.locator('#sendbtn').click();
+  const seq=Number(await observer.locator('#msgs .gmsg').filter({hasText:targetText}).last().getAttribute('data-cseq'));
+  await openTimeline(owner,ownNode,mode);await owner.locator('#prompt').fill(ownerText);await owner.locator('#sendbtn').click();
+  const ownerSeq=Number(await owner.locator('#msgs .gmsg').filter({hasText:ownerText}).last().getAttribute('data-cseq'));
+  await openTimeline(reader,received,mode);
+  const msg=(page,n)=>page.locator('#msgs .gmsg[data-cseq="'+n+'"]');
+  for(const [page,n] of [[owner,seq],[owner,ownerSeq],[reader,seq],[reader,ownerSeq],[observer,seq],[observer,ownerSeq]]) await msg(page,n).waitFor({timeout:40000});
+  // Real writes through the existing picker: owner and reader react to the target; observer reacts to the owner's comment.
+  await chooseReactionFor(owner,msg(owner,seq),mode,'thumbs_up');
+  await msg(reader,seq).locator('[data-reaction="thumbs_up"]').waitFor({timeout:40000});
+  await chooseReactionFor(reader,msg(reader,seq),mode,'heart');
+  await msg(owner,seq).locator('[data-reaction="heart"]').waitFor({timeout:40000});
+  await chooseReactionFor(observer,msg(observer,ownerSeq),mode,'celebration');
+  await msg(reader,ownerSeq).locator('[data-reaction="celebration"]').waitFor({timeout:40000});
+  // Local override on the observer, saved from the reader's view. The text is markup-like and long.
+  // Select the renamed bubble only when it is not selected yet: a repeated click would deselect it and hide its actions.
+  const renamed=msg(reader,seq);
+  if(!(await renamed.evaluate(el=>el.classList.contains('bubble-selected')))){const p=await safeBubblePoint(renamed);if(mode==='phone')await reader.touchscreen.tap(p.x,p.y);else await reader.mouse.click(p.x,p.y);}
+  await renamed.evaluate(el=>el.classList.contains('bubble-selected')||(()=>{throw Error('renamed bubble is not selected');})());
+  await reader.locator('[data-gact=more]').click();await reader.locator('#sendto_list [data-choice="0"]').click();
+  await reader.locator('[data-grename]').fill(LOCAL);await reader.locator('[data-gact=name-save]').click();
+  await until(async()=>(await msg(reader,seq).locator('.gwho').innerText()).includes('Local name'),20000,'local rename reflected in the reader view');
+  assertID('disclosure-local-override-escaped-'+mode,await reader.evaluate(()=>window.__disclosureXSS===undefined)&&await reader.locator('#msgs img[src="x"]').count()===0);
+  const names=await serverNames();
+  const views={owner:owner,reader:reader,observer:observer};
+  const rosterOf=async(page,n,emoji)=>{
+    const chip=msg(page,n).locator('[data-reaction="'+emoji+'"]');await chip.scrollIntoViewIfNeeded();
+    if(mode==='phone'){const probe=await tapProbe(chip,'.reaction-chip','reaction chip');await page.touchscreen.tap(probe.x,probe.y);}else await chip.click();
+    const panel=msg(page,n).locator('.reaction-disclosure:not(.reaction-hover)');await panel.waitFor({state:'visible',timeout:10000});
+    const items=await panel.locator('li').allInnerTexts();
+    await page.keyboard.press('Escape');await panel.waitFor({state:'detached',timeout:10000});
+    return items;
+  };
+  // Three views, names accurate: the reader sees the local override for the observer and their own participation as You.
+  assertID('disclosure-owner-view-names-'+mode,JSON.stringify(await rosterOf(owner,seq,'thumbs_up'))===JSON.stringify(['You'])&&JSON.stringify(await rosterOf(owner,seq,'heart'))===JSON.stringify([nameOf(names,readerSeat.self)]));
+  assertID('disclosure-reader-view-names-'+mode,JSON.stringify(await rosterOf(reader,seq,'thumbs_up'))===JSON.stringify([nameOf(names,ownerSeat.self)])&&JSON.stringify(await rosterOf(reader,seq,'heart'))===JSON.stringify(['You']));
+  assertID('disclosure-reader-local-override-'+mode,JSON.stringify(await rosterOf(reader,ownerSeq,'celebration'))===JSON.stringify([LOCAL]));
+  assertID('disclosure-observer-own-message-names-'+mode,JSON.stringify(await rosterOf(observer,seq,'thumbs_up'))===JSON.stringify([nameOf(names,ownerSeat.self)])&&JSON.stringify(await rosterOf(observer,seq,'heart'))===JSON.stringify([nameOf(names,readerSeat.self)]));
+  assertID('disclosure-observer-own-reaction-you-'+mode,JSON.stringify(await rosterOf(observer,ownerSeq,'celebration'))===JSON.stringify(['You']));
+  assertID('disclosure-owner-own-message-names-'+mode,JSON.stringify(await rosterOf(owner,ownerSeq,'celebration'))===JSON.stringify([nameOf(names,observerSeat.self)]));
+  // Inspection performs no write, leaves the selection, draft and scroll alone.
+  await reader.locator('#prompt').fill('Reader draft kept '+mode);
+  // Setup scrolling and selection happen before the baseline: the chip is revealed, and the renamed bubble is deselected.
+  const isSelected=()=>msg(reader,seq).evaluate(el=>el.classList.contains('bubble-selected'));
+  await msg(reader,seq).locator('[data-reaction="thumbs_up"]').scrollIntoViewIfNeeded();
+  if(await isSelected()){const p=await safeBubblePoint(msg(reader,seq));if(mode==='phone')await reader.touchscreen.tap(p.x,p.y);else await reader.mouse.click(p.x,p.y);await until(async()=>!(await isSelected()),10000,'renamed bubble deselected before the baseline');}
+  const before={writes:await reactionsOf(),scroll:await reader.locator('#msgs').evaluate(el=>el.scrollTop),selected:await msg(reader,seq).evaluate(el=>el.classList.contains('bubble-selected'))};
+  const posted=gates.reader.bodies.length+gates.owner.bodies.length;
+  // Real pointer: hover preview is revealed, the pointer moves in steps onto it, and it stays until the pointer leaves both.
+  if(mode==='desktop'){
+    const chip=msg(reader,seq).locator('[data-reaction="thumbs_up"]');await chip.scrollIntoViewIfNeeded();
+    const box=await chip.boundingBox();const cx=box.x+box.width/2,cy=box.y+box.height/2;
+    await reader.mouse.move(cx,cy,{steps:4});
+    const preview=msg(reader,seq).locator('.reaction-disclosure.reaction-hover');await preview.waitFor({state:'visible',timeout:10000});
+    const pb=await preview.boundingBox();
+    await reader.mouse.move(pb.x+pb.width/2,pb.y+pb.height/2,{steps:12});
+    assertID('disclosure-hover-reached-panel-'+mode,await preview.isVisible());
+    const cw=await reader.locator('#msgs').evaluate(el=>el.getBoundingClientRect().toJSON());
+    assertID('disclosure-hover-inside-pane-'+mode,pb.x>=cw.left-1&&pb.x+pb.width<=cw.right+1&&pb.y>=cw.top-1&&pb.y+pb.height<=cw.bottom+1&&pb.x>=0&&pb.x+pb.width<=(await reader.evaluate(()=>innerWidth))+1);
+    await screenshot(reader,'disclosure-hover-'+mode+'.png');
+    await reader.mouse.move(5,5,{steps:12});
+    await preview.waitFor({state:'detached',timeout:10000});
+    assertID('disclosure-hover-leaves-dismiss-'+mode,true);
+  }
+  // Pinned panel: activation pins it; the pointer leaving does not dismiss it; outside activation does.
+  const chip=msg(reader,seq).locator('[data-reaction="thumbs_up"]');await chip.scrollIntoViewIfNeeded();
+  if(mode==='phone'){const probe=await tapProbe(chip,'.reaction-chip','reaction chip');await reader.touchscreen.tap(probe.x,probe.y);}else await chip.click();
+  const pinned=msg(reader,seq).locator('.reaction-disclosure:not(.reaction-hover)');await pinned.waitFor({state:'visible',timeout:10000});
+  assertID('disclosure-pinned-expanded-'+mode,await chip.getAttribute('aria-expanded')==='true');
+  if(mode==='phone'){
+    assertID('disclosure-compact-tap-uses-sheet-'+mode,await pinned.first().evaluate(el=>el.classList.contains('reaction-sheet')));
+    // The sheet keeps its declared 8px viewport margins; an anchored width must not survive into it.
+    const sheetBox=await pinned.first().boundingBox(),viewportWidth=await reader.evaluate(()=>innerWidth);
+    assertID('disclosure-compact-sheet-declared-margins-'+mode,Math.abs(sheetBox.x-8)<=1&&Math.abs(sheetBox.x+sheetBox.width-(viewportWidth-8))<=1);
+  }
+  if(mode==='desktop'){await reader.mouse.move(5,5,{steps:6});assertID('disclosure-pinned-survives-pointer-departure-'+mode,await pinned.isVisible());}
+  const draftBefore=await reader.locator('#prompt').innerText();
+  await reader.locator('#chattitle').click();
+  await pinned.waitFor({state:'detached',timeout:10000});
+  assertID('disclosure-outside-dismiss-'+mode,true);
+  // Escape closes a pinned panel and returns focus to its chip.
+  await chip.click();await pinned.waitFor({state:'visible',timeout:10000});
+  await reader.keyboard.press('Escape');await pinned.waitFor({state:'detached',timeout:10000});
+  assertID('disclosure-escape-focus-return-'+mode,await chip.evaluate(el=>document.activeElement===el));
+  const after={writes:await reactionsOf(),scroll:await reader.locator('#msgs').evaluate(el=>el.scrollTop),selected:await msg(reader,seq).evaluate(el=>el.classList.contains('bubble-selected'))};
+  assertID('disclosure-no-write-selection-scroll-draft-'+mode,after.writes===before.writes&&after.scroll===before.scroll&&after.selected===before.selected&&!after.selected&&(gates.reader.bodies.length+gates.owner.bodies.length)===posted&&(await reader.locator('#prompt').innerText())===draftBefore&&draftBefore==='Reader draft kept '+mode);
+  // Pending own add: the write is held, the chip and its roster say pending, then the retained readback settles it.
+  const arrival=gates.reader.hold();
+  await chooseReactionFor(reader,msg(reader,ownerSeq),mode,'laughing');
+  await arrival;
+  const pendingChip=msg(reader,ownerSeq).locator('[data-reaction="laughing"].reaction-pending');await pendingChip.waitFor({timeout:10000});
+  const pendingItems=await rosterOf(reader,ownerSeq,'laughing');
+  assertID('disclosure-pending-own-label-'+mode,JSON.stringify(pendingItems)===JSON.stringify(['You — pending confirmation']));
+  gates.reader.release('continue');
+  await msg(reader,ownerSeq).locator('[data-reaction="laughing"]:not(.reaction-pending)').waitFor({timeout:40000});
+  assertID('disclosure-pending-settles-confirmed-'+mode,JSON.stringify(await rosterOf(reader,ownerSeq,'laughing'))===JSON.stringify(['You']));
+  if(mode==='phone'){
+    // Narrow viewport: the disclosure stays inside the viewport, as a panel or as the compact sheet with its own close control.
+    const original=reader.viewportSize();await reader.setViewportSize({width:320,height:640});
+    await msg(reader,seq).locator('[data-reaction="thumbs_up"]').scrollIntoViewIfNeeded();
+    const narrow=msg(reader,seq).locator('[data-reaction="thumbs_up"]');const probe=await tapProbe(narrow,'.reaction-chip','narrow reaction chip');
+    await reader.touchscreen.tap(probe.x,probe.y);
+    const shown=msg(reader,seq).locator('.reaction-disclosure:not(.reaction-hover)');await shown.first().waitFor({state:'visible',timeout:10000});
+    const box=await shown.first().boundingBox(),sheet=await shown.first().evaluate(el=>el.classList.contains('reaction-sheet'));
+    assertID('disclosure-narrow-inside-viewport-'+mode,box.x>=0&&box.x+box.width<=320+1&&box.y>=0&&box.y+box.height<=640+1);
+    await screenshot(reader,'disclosure-narrow-320-'+mode+'.png');
+    assertID('disclosure-narrow-320-sheet-'+mode,sheet);
+    const close=msg(reader,seq).locator('[data-reaction-close]');const cp=await tapProbe(close,'[data-reaction-close]','sheet close',{viewport:true});await reader.touchscreen.tap(cp.x,cp.y);
+    await shown.first().waitFor({state:'detached',timeout:10000});assertID('disclosure-sheet-close-dismisses-'+mode,true);
+    // Focus on the sheet's close control survives a retained roster change made by another seat while the sheet is open.
+    const focusProbe=await tapProbe(msg(reader,seq).locator('[data-reaction="thumbs_up"]'),'.reaction-chip','focus chip');await reader.touchscreen.tap(focusProbe.x,focusProbe.y);
+    const openSheet=msg(reader,seq).locator('.reaction-disclosure.reaction-sheet');await openSheet.waitFor({state:'visible',timeout:10000});
+    const focusClose=openSheet.locator('[data-reaction-close]');await focusClose.focus();
+    const readerPage=await readerSeat.api('/api/team/subscriptions/'+key+'/reactions?after=0');
+    await readerSeat.api('/api/team/subscriptions/'+key+'/reactions?copy_instance='+encodeURIComponent(readerPage.copy_instance),'POST',{target:seq,emoji:'thumbs_up',active:true,key:'f0c0500000000001'});
+    await msg(reader,seq).locator('.reaction-disclosure.reaction-sheet li').nth(1).waitFor({timeout:40000});
+    assertID('disclosure-focus-kept-on-refresh-'+mode,await focusClose.evaluate(el=>document.activeElement===el));
+    const fcp=await tapProbe(focusClose,'[data-reaction-close]','focused sheet close',{viewport:true});await reader.touchscreen.tap(fcp.x,fcp.y);await shown.first().waitFor({state:'detached',timeout:10000});
+    // The test-owned reader contribution is removed through the same API, and the reader's readback confirms it before the owner's removal below.
+    await readerSeat.api('/api/team/subscriptions/'+key+'/reactions?copy_instance='+encodeURIComponent(readerPage.copy_instance),'POST',{target:seq,emoji:'thumbs_up',active:false,key:'f0c0500000000002'});
+    await until(async()=>(await msg(reader,seq).locator('[data-reaction="thumbs_up"]').innerText()).includes('1')&&!(await msg(reader,seq).locator('[data-reaction="thumbs_up"]').innerText()).includes('2'),40000,'test-owned reader reaction removed and read back');
+    await reader.setViewportSize(original);
+  }
+  if(mode==='desktop'){
+    // Short-bubble regression, in the owner's view: the observer's author label is still its short server name there,
+    // because the reader's local rename is private to the reader. Two confirmed participants are waited for on the exact
+    // sequence before the owner's chip is opened, and the timeline must not grow.
+    await observer.locator('#prompt').fill('OK');
+    const okPosted=observer.waitForResponse(r=>r.request().method()==='POST'&&new URL(r.url()).pathname.endsWith('/comments')&&(()=>{try{return JSON.parse(r.request().postData()||'{}').text==='OK';}catch{return false;}})(),{timeout:30000});
+    await observer.locator('#sendbtn').click();
+    const okSeq=Number((await (await okPosted).json()).seq);
+    assert.ok(Number.isSafeInteger(okSeq)&&okSeq>0,'the new OK comment has its own retained sequence');
+    await msg(owner,okSeq).waitFor({timeout:40000});await msg(reader,okSeq).waitFor({timeout:40000});
+    await chooseReactionFor(owner,msg(owner,okSeq),mode,'thumbs_up');
+    await chooseReactionFor(reader,msg(reader,okSeq),mode,'thumbs_up');
+    await msg(owner,okSeq).locator('[data-reaction="thumbs_up"] span').last().filter({hasText:'2'}).waitFor({timeout:40000});
+    const okChip=msg(owner,okSeq).locator('[data-reaction="thumbs_up"]');await okChip.scrollIntoViewIfNeeded();
+    const scrollBefore=await owner.locator('#msgs').evaluate(el=>el.scrollHeight);
+    await okChip.click();
+    const okPanel=msg(owner,okSeq).locator('.reaction-disclosure:not(.reaction-hover)');await okPanel.waitFor({state:'visible',timeout:10000});
+    const measured=await okPanel.evaluate(el=>{const b=el.closest('.bubble').getBoundingClientRect(),p=el.getBoundingClientRect(),m=document.querySelector('#msgs').getBoundingClientRect();return {panel:p.width,bubble:b.width,sheet:el.classList.contains('reaction-sheet'),inside:p.left>=m.left-1&&p.right<=m.right+1&&p.top>=m.top-1&&p.bottom<=m.bottom+1,items:[...el.querySelectorAll('li')].map(li=>li.textContent)};});
+    const author=await msg(owner,okSeq).locator('.gwho').innerText();
+    // Private diagnostic capture only: never copied into the public manifest.
+    console.error('SHORT_BUBBLE_PRIVATE '+JSON.stringify({mode,measured,author}));
+    assertID('disclosure-short-bubble-wide-panel-'+mode,!measured.sheet&&measured.panel>measured.bubble&&measured.items.length===2&&measured.inside);
+    assertID('disclosure-short-bubble-no-timeline-growth-'+mode,await owner.locator('#msgs').evaluate(el=>el.scrollHeight)===scrollBefore);
+    await screenshot(owner,'disclosure-short-bubble-'+mode+'.png');
+    await owner.locator('#chattitle').click();await okPanel.waitFor({state:'detached',timeout:10000});
+  }
+  // Removal: the owner removes its reaction; the target's thumbs_up chip leaves the reader's view.
+  await chooseReactionFor(owner,msg(owner,seq),mode,'thumbs_up');
+  await msg(reader,seq).locator('[data-reaction="thumbs_up"]').waitFor({state:'detached',timeout:40000});
+  assertID('disclosure-removal-reflected-'+mode,await msg(reader,seq).locator('[data-reaction="heart"]').count()===1);
+  await screenshot(owner,'disclosure-owner-'+mode+'.png');
+  manifest['disclosure-'+mode]={seq:'synthetic-target',ownerSeq:'synthetic-owner-comment',participants:Object.keys(names).length};
+}
+
 async function stage2InstantReactions(mode,s) {
   const {ownerSeat,observerSeat,readerSeat,otherSeat,share,key,owner,observer,reader}=s;
   await ownerSeat.api('/api/team/shares/'+ownerSeat.node.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'},{seat:observerSeat.self,access:'write'},{seat:otherSeat.self,access:'read'}]});
@@ -3614,4 +3785,6 @@ async function run() {
  assertID('native-authoritative-response',true);
  if(process.env.SCIMUX_E2E_FAIL_AFTER_NATIVE==='1')throw Error('controlled failure with native node');
 }
-(async()=>{try{await run();finishScenario(manifest,signalCode);}catch(e){if(!signalCode)manifest.result='fail';const failureCode=controlledFailureCode(e,controlledNativeCleanupFailure);if(failureCode&&!signalCode)manifest.failureCode=failureCode;manifest.error='scenario-failure';console.error('E2E scenario failed');if(!signalCode)process.exitCode=1;for(const {page,label} of [...pages].reverse()){try{if(!page.isClosed()){const name='failure-'+label+'.png';if((await captureEvidencePage({page,destination:artifacts(name),timeout:5000,register:captureRegistry.register})).ok)manifest.artifacts.push(name);}}catch{}}}finally{await cleanup();if(signalCode)process.exitCode=signalCode;}})();
+(async()=>{try{await run();finishScenario(manifest,signalCode);}catch(e){
+  /* Private lane log only: constant basename and line:column of the first failing frames, never messages, URLs or raw stack text. */
+  console.error('E2E failure locations '+[...new Set(String(e&&e.stack||'').match(/team-e2e\.cjs:\d+:\d+/g)||[])].slice(0,4).join(' '));if(!signalCode)manifest.result='fail';const failureCode=controlledFailureCode(e,controlledNativeCleanupFailure);if(failureCode&&!signalCode)manifest.failureCode=failureCode;manifest.error='scenario-failure';console.error('E2E scenario failed');if(!signalCode)process.exitCode=1;for(const {page,label} of [...pages].reverse()){try{if(!page.isClosed()){const name='failure-'+label+'.png';if((await captureEvidencePage({page,destination:artifacts(name),timeout:5000,register:captureRegistry.register})).ok)manifest.artifacts.push(name);}}catch{}}}finally{await cleanup();if(signalCode)process.exitCode=signalCode;}})();

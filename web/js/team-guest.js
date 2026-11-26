@@ -7,7 +7,7 @@ import { promptSourceKey } from "./storage.js";
 import { peoplePendingStorageKey, parsePeoplePendingSnapshot } from "./people-local-review.js";
 import { attachmentTileHTML, attachmentUnavailableHTML } from "./attachment-tile.js";
 import { activateBubbleKey, routeBubbleClick, renderBubbleTurn, renderActionRow, createBubbleActionController, dispatchBubbleAction } from "./menu.js";
-import { REACTIONS, reactionEligible, reactionControlHTML, reactionChipsHTML, replayReactionEvents, acceptedReactionEvents, projectReactionIntent, createReactionInteraction } from "./reactions.js";
+import { REACTIONS, reactionEligible, reactionControlHTML, reactionChipsHTML, replayReactionEvents, acceptedReactionEvents, projectReactionIntent, reactionParticipants, createReactionInteraction } from "./reactions.js";
 
 const LIST = "/api/team/subscriptions";
 
@@ -202,7 +202,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   const classificationCancels = new Set();
   const retentionCancels = new Set();
   let classificationActive = 0;
-  const reactionUI = createReactionInteraction({doc, onChoose:chooseReaction});
+  const reactionUI = createReactionInteraction({doc, onChoose:chooseReaction, roster:reactionRoster});
 
   function reactionComments(current) {
     const comments = new Map();
@@ -229,6 +229,26 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     const confirmed = reactionSummary(current);
     if (!reactionWritable(current)) return confirmed;
     return projectReactionIntent(confirmed, [...current.reactionPending.values()]);
+  }
+  /* The copy a disclosure reads: the open shared view, or a current owner copy. */
+  function reactionCopyFor(key) {
+    if (open && open.key === key) return open;
+    const copy = ownerCopies.get(key);
+    return copy && ownerCurrent(copy) ? copy : null;
+  }
+  /* Participants of one chip for its disclosure. Confirmed participants come from
+     the retained records; this viewer's pending operations apply only where the
+     copy accepts writes, so read-only, offline and ended copies show confirmed
+     state only. Names follow the guest rules; your own entries are labelled "You"
+     by the presentation, so they never carry a name. */
+  function reactionRoster(key, target, emoji) {
+    const current = reactionCopyFor(key);
+    if (!current || current.reactionRetired) return null;
+    const operations = reactionWritable(current) ? [...current.reactionPending.values()] : [];
+    return reactionParticipants(current.reactionEvents, reactionComments(current), {target, emoji, operations}).map(entry => ({
+      name: entry.mine ? "" : guestName(current.view.server, entry.author, current.names[entry.author], knownPeople),
+      mine: entry.mine, state: entry.state,
+    }));
   }
   /* A pending operation settles only on a validated retained record for the same
      key, target, emoji and direction, written by this viewer. A removal settles
@@ -266,6 +286,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
         turn.querySelector(".bubble")?.insertAdjacentHTML("beforeend", reactionControlHTML({target:entry.seq, key:current.key, copyInstance:current.reactionCopyInstance}));
       }
     }
+    reactionUI.sync();
   }
   function rememberReactionEvents(current, events) {
     let changed = false;
@@ -684,6 +705,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
       }
       if (open.row) open.row.capture = guestCapture(open.row.entry, open.view, open.names, knownPeople);
     }
+    reactionUI.sync();
     return changed;
   }
   function header(view) {
@@ -713,6 +735,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (bubbleController.current()?.kind === "shared") bubbleController.clear();
     open = null;
     readGeneration++;
+    reactionUI.close();
     $("msgs").innerHTML = "";
     clearDisclosure();
     invalidateCards();
@@ -1139,6 +1162,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     removeBubbleListeners = bubbleController.listen($("msgs"), {click:sharedClick, keydown:panelKeydown});
     const messages = $("msgs");
     const reactionClick = event => reactionUI.handle(event);
+    const reactionHover = event => reactionUI.hover(event);
     const reactionPointer = event => {
       const root = doc.body || doc.documentElement;
       if (!root?.classList || !event.pointerType) return;
@@ -1146,12 +1170,16 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     };
     if (typeof doc.addEventListener === "function") {
       doc.addEventListener("click", reactionClick, true);
+      doc.addEventListener("pointerover", reactionHover);
+      doc.addEventListener("pointerout", reactionHover);
       messages.addEventListener("pointermove", reactionPointer, {passive:true});
       messages.addEventListener("pointerdown", reactionPointer, {passive:true});
     }
     removeReactionListeners = () => {
       if (typeof doc.removeEventListener === "function") {
         doc.removeEventListener("click", reactionClick, true);
+        doc.removeEventListener("pointerover", reactionHover);
+        doc.removeEventListener("pointerout", reactionHover);
         messages.removeEventListener("pointermove", reactionPointer);
         messages.removeEventListener("pointerdown", reactionPointer);
       }
@@ -1349,6 +1377,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     }
   }
   function ownerSnapshots() {
+    reactionUI.sync();
     return [...ownerCopies.values()].filter(copy => ownerCurrent(copy)).sort((a,b) => (Number.isInteger(a.order) ? a.order : Infinity) - (Number.isInteger(b.order) ? b.order : Infinity) || a.key.localeCompare(b.key)).map(copy => {
       const frontier = copy.view.local_frontier;
       const missingStart = !copy.mirrors.some(entry => entry.t === "start");
