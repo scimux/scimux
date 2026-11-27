@@ -10517,6 +10517,15 @@ test("detached reads tolerate empty slices and stale around failures", async () 
   rejectAround(Object.assign(new Error("no_turn"),{status:404}));
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(toasts,[],"a stale around error cannot toast after returning to latest");stale.feature.destroy();
+
+  let resolveAround;
+  const staleSuccess=makeFeature({api:async path=>path.includes("page=around")?new Promise(resolve=>{resolveAround=resolve;}):{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"latest"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  staleSuccess.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});staleSuccess.feature.bind();await staleSuccess.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));staleSuccess.feature.jumpToNow();
+  resolveAround({segments:[],empty_segments:[],before_count:2,after_count:3,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(staleSuccess.roots.msgs.innerHTML,/latest/);assert.doesNotMatch(staleSuccess.roots.msgs.innerHTML,/show later turns/);
+  staleSuccess.feature.destroy();
 });
 
 test("an empty detached slice uses the sentinel record and a null page rejoins", async () => {
@@ -10538,6 +10547,15 @@ test("an empty detached slice uses the sentinel record and a null page rejoins",
   assert.ok(pollPaths.some(path=>/start=0/.test(path)),"an empty final page rejoins the live segment");
   assert.match(ctx.roots.msgs.innerHTML,/current/);
   ctx.feature.destroy();
+
+  const afterCalls=[];
+  const after=makeFeature({api:async path=>{afterCalls.push(path);if(path.includes("page=around"))return {segments:[{segment_index:2,log_uid:"u",decisions:[]}],empty_segments:[],before_count:1,after_count:2,assets:{}};return {segments:[],empty_segments:[],before_count:1,after_count:2,assets:{}};},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  after.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});after.feature.bind();await after.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  firstListener(after.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"later"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(afterCalls.find(path=>path.includes("page=after"))||"",/page=after&at=0&limit=100&log_uid=u/);
+  after.feature.destroy();
 });
 
 test("an addressed range that already reaches the live tail rejoins and flashes its live key", async () => {
