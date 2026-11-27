@@ -43,7 +43,8 @@ func chatTailWindow(turns []transcript.Turn, decisions []sessionlog.DecisionSurf
 		}
 	}
 
-	if window.start == len(turns) {
+	if window.start == 0 {
+		window.decisions = decisions
 		return window
 	}
 	firstRecord := turns[window.start].Record

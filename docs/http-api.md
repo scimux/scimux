@@ -308,8 +308,10 @@ with a tail request and counts the turns before the returned window. On a hard
 cut that starts in the middle of a cycle, `window_head` gives the durable
 `uid`, `segment`, and `record` address of that cycle's first assistant turn.
 `decisions` contains only decision records at or after the first returned
-turn. When a retained lease also has earlier omitted decisions, `lease_base`
-maps that lease ID to the number omitted so clients can continue its ordinal.
+turn when turns are omitted; when nothing is omitted, all decisions remain in
+the response. When a retained lease also has earlier omitted decisions,
+`lease_base` maps that lease ID to the number omitted so clients can continue
+its ordinal.
 The `?history=1` path takes precedence and ignores `tail`. Without `tail`, the
 polled response remains the full current segment.
 
