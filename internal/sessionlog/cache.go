@@ -88,6 +88,7 @@ type LogCache struct {
 	pageSegments []pageSegmentIndex
 	pageReads    int                            // test spy: record ReadAt operations in Page
 	pageOpen     func(string) (*os.File, error) // test seam for open failures
+	ingestReads  int                            // test spy: ingest-time ReadAt calls
 
 	walks       int   // test spy: times the file was actually parsed
 	bytesParsed int64 // test spy: bytes read from the file on the last parse
@@ -393,6 +394,7 @@ func (c *LogCache) consume(r io.Reader, baseOff int64) (newOff int64, nBytes int
 			payloadLen := len(rec)
 			if canReadAt && off >= 2 {
 				var prev [1]byte
+				c.ingestReads++
 				if n, readErr := readerAt.ReadAt(prev[:], baseOff+off-2); readErr == nil && n == 1 && prev[0] == '\r' {
 					payloadLen++
 				}
