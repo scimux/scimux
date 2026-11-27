@@ -10262,6 +10262,54 @@ test("forcePeek pins a scrolled-up reader while ordinary polls restore its bubbl
   assert.equal(await run(""),460,"ordinary polling restores the reader's 40px bubble offset");
 });
 
+test("addressed jump opens a detached around page and loads earlier and later slices", async () => {
+  const calls=[];let target=null;
+  const ctx=makeFeature({
+    api:async path=>{
+      calls.push(path);
+      if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:10,segment_turns:30,start:"T",seam:"S",turns:[40,50,60].map(record=>({role:"user",uid:"u",segment:3,record,text:record===50?"around target":`turn ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:9,current_segment:3,assets:{}};
+      if(path.includes("page=before"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,segment_turns:30,start:"T",seam:"S",turns:Array.from({length:10},(_,i)=>({role:"assistant",uid:"u",segment:3,record:20+i,text:`before ${20+i}`})),decisions:[]}],empty_segments:[{segment_index:2,log_uid:"u",turns:[],decisions:[]}],before_count:2,after_count:9,current_segment:3,assets:{before:{name:"before"}}};
+      if(path.includes("page=after"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:13,segment_turns:30,start:"T",seam:"S",turns:[70,80].map(record=>({role:"assistant",uid:"u",segment:3,record,text:`after ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:0,current_segment:3,assets:{after:{name:"after"}}};
+      return {};
+    },
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live current"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:0,prior_turns:0,assets:{}}}),
+  });
+  const msgs=ctx.roots.msgs,query=msgs.querySelector.bind(msgs);
+  const oldInner=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
+  Object.defineProperty(msgs,"innerHTML",{configurable:true,get:oldInner.get,set(value){
+    oldInner.set.call(msgs,value);
+    target=value.includes('data-bk="h:3:11"')?el("div",{className:"turn hist user",dataset:{bk:"h:3:11",uid:"u",segment:"3",record:"50"}}):null;
+  }});
+  msgs.querySelector=selector=>{
+    if(selector.includes('data-bk="h:3:11"'))return target;
+    return query(selector);
+  };
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});
+  ctx.feature.bind();await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=around"))||"",/page=around&at=50&limit=100&log_uid=u/);
+  assert.match(msgs.innerHTML,/around target/);
+  assert.match(msgs.innerHTML,/data-bk="h:3:11"/);
+  assert.doesNotMatch(msgs.innerHTML,/live current|data-i=/);
+  assert.match(msgs.innerHTML,/show earlier turns &middot; 12 turns/);
+  assert.match(msgs.innerHTML,/show later turns &middot; 9 turns/);
+  assert.equal(ctx.getPending(),null);
+  assert.ok(target?.classList.contains("jumpflash"),"the addressed turn is flashed");
+
+  firstListener(msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=40&limit=100&log_uid=u/);
+  assert.match(msgs.innerHTML,/data-bk="h:3:11"/);
+  assert.match(msgs.innerHTML,/show earlier turns &middot; 2 turns/);
+  assert.deepEqual(msgs.innerHTML.includes("live current"),false);
+
+  firstListener(msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"later"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=after"))||"",/page=after&at=60&limit=100&log_uid=u/);
+  assert.match(msgs.innerHTML,/after 80/);
+  assert.doesNotMatch(msgs.innerHTML,/live current|data-i=/);
+  ctx.feature.destroy();
+});
+
 test("reader bubble offset survives prepending a history page", async () => {
   let historyRead = 0;
   const ctx = makeFeature({
