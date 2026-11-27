@@ -9943,6 +9943,10 @@ test("history page merge handles empty input and joins turns and decisions by se
     segments:[{segment_index:9},{segment_index:10}], empty_segments:[],
   });
   assert.deepEqual(missing.segs.map(s=>s.segment_index),[9,10]);
+  const turnless=chatmod.mergeHistoryPage({segs:[{segment_index:11,turns:[{record:110}]}]}, {
+    segments:[{segment_index:11}],empty_segments:[],
+  });
+  assert.deepEqual(turnless.segs[0].turns,[{record:110}],"a decision-only slice keeps turns from the existing page");
 });
 
 test("earlier loader ignores zero counts and stale visits", async () => {
