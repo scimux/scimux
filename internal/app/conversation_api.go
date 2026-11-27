@@ -861,11 +861,8 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	for _, key := range chatETagExempt {
 		delete(etagResp, key)
 	}
-	etagBody, err := json.Marshal(etagResp)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
+	// The full response marshalled above, so this shallow subset cannot fail.
+	etagBody, _ := json.Marshal(etagResp)
 	h := fnv.New64a()
 	h.Write(etagBody)
 	etag := fmt.Sprintf(`"%x"`, h.Sum64())
