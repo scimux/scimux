@@ -9799,3 +9799,240 @@ test('common chat file retry is scoped to the active visit and never dispatches 
  ctx.setSel('n1');ctx.setSelGen(2);ctx.setSel('team/s/o/c/g');ctx.setSelGen(3);release('blob:verified');await new Promise(resolve=>setImmediate(resolve));
  assert.equal(replaced,0);assert.equal(clicked,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
 });
+
+test("anchored live window loads earlier turns, then merges bounded history pages", async () => {
+  const calls = [];
+  let page = 0;
+  const ctx = makeFeature({
+    api: async path => {
+      calls.push(path);
+      if (!path.includes("?page=before")) return {};
+      page++;
+      return page === 1 ? {
+        segments: [{
+          segment_index: 2, log_uid: "uid-a", start: "2026-01-02", seam: "2026-01-02",
+          segment_offset: 4, segment_turns: 6, turns: [{ role: "user", uid: "uid-a", segment: 2, record: 40, text: "older four" }],
+          decisions: [],
+        }],
+        empty_segments: [{ segment_index: 1, log_uid: "uid-a", start: "2026-01-01", seam: "seam-1", turns: [], decisions: [] }],
+        before_count: 8, after_count: 0, current_segment: 3, assets: { old: { name: "old" } },
+      } : {
+        segments: [{
+          segment_index: 2, log_uid: "uid-a", start: "2026-01-02", seam: "2026-01-02",
+          segment_offset: 2, segment_turns: 6,
+          turns: [{ role: "assistant", uid: "uid-a", segment: 2, record: 20, text: "older two" }],
+          decisions: [],
+        }],
+        empty_segments: [{ segment_index: 0, log_uid: "uid-a", start: "2025-12-31", seam: "seam-0", turns: [], decisions: [] }],
+        before_count: 6, after_count: 0, current_segment: 3, assets: { older: { name: "older" } },
+      };
+    },
+    chatConditional: async path => {
+      calls.push(path);
+      const anchored = /start=/.test(path);
+      return { status: 200, etag: `"${calls.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment: 3, record: 100, text: "live turn" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 3,
+        chat_started: "2026-01-03", prior_turns: 40,
+        omitted_turns: anchored && /start=20/.test(path) ? 20 : 0,
+        assets: {},
+      } };
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(calls[0], /tail=50/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 40 turns/);
+
+  const clickEarlier = () => firstListener(ctx.roots.msgs, "click")({
+    target: el("button", { className: "histload", dataset: { scope: "earlier" } }),
+  });
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.at(-1), /start=20/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 20 turns/);
+
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.at(-1), /start=0/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 40 turns/);
+
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.at(-1), /page=before&at=100&limit=100&log_uid=uid-a/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 8 turns/);
+  assert.match(ctx.roots.msgs.innerHTML, /data-bk="h:2:4"/);
+  assert.match(ctx.roots.msgs.innerHTML, /older four/);
+
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.at(-1), /page=before&at=40&limit=100&log_uid=uid-a/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 6 turns/);
+  assert.match(ctx.roots.msgs.innerHTML, /data-bk="h:2:2"/);
+  assert.ok(ctx.roots.msgs.innerHTML.indexOf("older two") < ctx.roots.msgs.innerHTML.indexOf("older four"));
+  assert.match(ctx.roots.msgs.innerHTML, /data-seam="seam-0"/);
+  assert.match(ctx.roots.msgs.innerHTML, /data-seam="seam-1"/);
+  ctx.feature.destroy();
+});
+
+test("scroll freezes the live window and idle top loads once; segment and visit reset to tail", async () => {
+  const timers = [];
+  const cleared = [];
+  const paths = [];
+  let segment = 3;
+  let omitted = 12;
+  const ctx = makeFeature({
+    chatConditional: async path => {
+      paths.push(path);
+      return { status: 200, etag: `"${paths.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment, record: 20, text: "turn" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: segment,
+        omitted_turns: omitted, prior_turns: 0, assets: {},
+      } };
+    },
+    deps: {
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+      clearTimeout: id => cleared.push(id),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  ctx.roots.msgs.scrollHeight = 2000;
+  ctx.roots.msgs.clientHeight = 400;
+  ctx.roots.msgs.scrollTop = 50;
+  firstListener(ctx.roots.msgs, "scroll")();
+  assert.equal(paths.length, 1, "freezing does not immediately poll");
+  assert.equal(timers.at(-1).ms, 150);
+  await ctx.feature.render();
+  assert.match(paths.at(-1), /start=12/);
+
+  omitted = 120;
+  firstListener(ctx.roots.msgs, "scroll")();
+  const idle = timers.at(-1);
+  assert.equal(idle.ms, 150);
+  idle.fn();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths.at(-1), /start=20/);
+
+  segment = 4;
+  await ctx.feature.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths.at(-1), /tail=50/);
+  ctx.feature.onSelectChange(); ctx.setSel("team/s/o/c/g"); ctx.setSelGen(2);
+  ctx.feature.onSelectChange(); ctx.setSel("n1"); ctx.setSelGen(3);
+  await ctx.feature.render();
+  assert.match(paths.at(-1), /tail=50/);
+  ctx.feature.destroy();
+  assert.ok(cleared.length > 0, "destroy clears the idle timer");
+});
+
+test("history compatibility uses start zero and the unified button counts prior turns", async () => {
+  const paths = [];
+  const ctx = makeFeature({
+    histSegs: [{ segment_index: 1, log_uid: "uid-a", start: "2026-01-01", turns: [{ role: "user", uid: "uid-a", segment: 1, record: 1, text: "old" }] }],
+    chatConditional: async path => {
+      paths.push(path);
+      return { status: 200, etag: `"${paths.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment: 2, record: 10, text: "current" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 2,
+        chat_started: "2026-01-02", prior_turns: 1, omitted_turns: 0, assets: {},
+      } };
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.loadHistory("n1", "");
+  assert.match(paths.at(-1), /start=0/);
+  assert.match(ctx.roots.msgs.innerHTML, /data-scope="earlier"/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 1 turn/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /show earlier history/);
+  ctx.feature.destroy();
+});
+
+test("history bubble keys use segment offsets and remain attached to the selected turn", async () => {
+  const ctx = makeFeature({
+    histSegs: [{
+      segment_index: 7, log_uid: "uid-a", segment_offset: 4, segment_turns: 9,
+      start: "2026-01-01", turns: [{ role: "user", uid: "uid-a", segment: 7, record: 40, text: "older target" }],
+    }],
+    chatPayload: {
+      turns: [{ role: "user", uid: "uid-a", segment: 8, record: 90, text: "current" }],
+      live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 8,
+      chat_started: "2026-01-02", prior_turns: 4, omitted_turns: 0, assets: {},
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.loadHistory("n1", "");
+  assert.match(ctx.roots.msgs.innerHTML, /data-bk="h:7:4"/);
+  const selected = tapBubbleTurn(ctx, "h:7:4");
+  assert.equal(bubActionRows(ctx).length, 1);
+  ctx.feature.destroy();
+  assert.equal(selected.dataset.bk, "h:7:4");
+});
+
+test("page conflict drops prior pages and returns the poll to tail mode", async () => {
+  const paths = [];
+  const ctx = makeFeature({
+    api: async path => {
+      if (path.includes("?page=before")) throw Object.assign(new Error("log_changed"), { status: 409 });
+      return {};
+    },
+    chatConditional: async path => {
+      paths.push(path);
+      return { status: 200, etag: `"${paths.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment: 3, record: 100, text: "live" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 3,
+        prior_turns: 4, omitted_turns: 0, assets: {},
+      } };
+    },
+  });
+  ctx.feature.bind(); await ctx.feature.render();
+  firstListener(ctx.roots.msgs, "click")({ target: el("button", { className: "histload", dataset: { scope: "earlier" } }) });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths.at(-1), /tail=50/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /older page/);
+  ctx.feature.destroy();
+});
+
+test("reader bubble offset survives a poll that adds live turns above its viewport", async () => {
+  let poll = 0;
+  const ctx = makeFeature({
+    chatConditional: async () => ({ status: 200, etag: `"${++poll}"`, data: {
+      turns: poll === 1
+        ? [{ role: "user", uid: "uid-a", segment: 3, record: 1, text: "visible" }]
+        : [
+          { role: "user", uid: "uid-a", segment: 3, record: 1, text: "visible" },
+          { role: "assistant", uid: "uid-a", segment: 3, record: 2, text: "new turn" },
+        ],
+      live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 3,
+      prior_turns: 0, omitted_turns: 0, assets: {},
+    } }),
+  });
+  const msgs = ctx.roots.msgs;
+  const oldInnerHTML = Object.getOwnPropertyDescriptor(msgs, "innerHTML");
+  let bubble = el("div", { className: "turn user", dataset: { bk: "i:0" } });
+  bubble.offsetTop = 240; bubble.offsetHeight = 40;
+  Object.defineProperty(msgs, "innerHTML", {
+    configurable: true,
+    get: oldInnerHTML.get,
+    set(value){
+      oldInnerHTML.set.call(msgs, value);
+      bubble = el("div", { className: "turn user", dataset: { bk: "i:0" } });
+      bubble.offsetTop = poll > 1 ? 500 : 240; bubble.offsetHeight = 40;
+    },
+  });
+  const queryAll = msgs.querySelectorAll.bind(msgs);
+  msgs.querySelectorAll = selector => selector === ".turn[data-bk]" ? [bubble] : queryAll(selector);
+  const query = msgs.querySelector.bind(msgs);
+  msgs.querySelector = selector => selector.includes('data-bk="i:0"') ? bubble : query(selector);
+  ctx.feature.bind(); await ctx.feature.render();
+  msgs.scrollHeight = 2000; msgs.clientHeight = 400; msgs.scrollTop = 200;
+  await ctx.feature.render();
+  assert.equal(msgs.scrollTop, 460, "the visible turn keeps its 40px viewport offset");
+  ctx.feature.destroy();
+});
