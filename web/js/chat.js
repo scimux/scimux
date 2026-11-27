@@ -2762,8 +2762,7 @@ export function createChatFeature(deps){
     el.innerHTML =
       (unplaced ? '<div class="chatnotice">Earlier comments: position unavailable</div>' + unplaced : "") +
       (earlier ? '<div class="chatnotice">Earlier discussion</div>' + earlier : "") +
-      (!hist && data.omitted_turns > 0 ? segmentLoadHTML(data.omitted_turns) :
-        (data.prior_turns > 0 && !hist ? histLoadHTML(data.prior_turns) : "")) +
+      (data.prior_turns > 0 && !hist && !(data.omitted_turns > 0) ? histLoadHTML(data.prior_turns) : "") +
       priorSegs.map((s, si) =>
         `<div class="chatseam histseam" data-seam="${escape(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${escape(whenFn(s.start))}</span></div>` +
         renderTimelineHTML(s.turns || [], s.decisions || [], {
@@ -2780,6 +2779,7 @@ export function createChatFeature(deps){
             ended: !!n.ended_at,
           })
         : "") +
+      (!hist && data.omitted_turns > 0 ? segmentLoadHTML(data.omitted_turns) : "") +
       renderTimelineHTML(turns, liveDecisions, {
         hist: false, nodeId: n.id, assets, discussion, emptySegment: {uid:data.log_uid, segment:data.segment_index},
         windowed: (data.omitted_turns || 0) > 0,

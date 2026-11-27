@@ -67,6 +67,7 @@ import {
    absence shows up as failures in exactly the cases that pin it. */
 import * as chatmod from "../js/chat.js";
 import { bubbleTitle, fmtBubbleTime } from "../js/format.js";
+import { readAwaitingForward, writeAwaitingForward } from "../js/storage.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const chatSrc = readFileSync(join(__dirname, "../js/chat.js"), "utf8");
@@ -292,6 +293,20 @@ test("Send-to confirmation uses address boundaries and keeps legacy numeric latc
     { text: "same", after: { uid: "u", segment: 0, record: 5 } }, [otherLog],
   ), otherLog);
   assert.equal(chatmod.matchingForwardDestinationTurn({ text: "same", afterTurns: 1 }, [oldTurn, later]), later);
+});
+
+test("malformed awaiting-forward boundary becomes legacy zero for chat matching", () => {
+  const data = new Map();
+  const storage = {
+    getItem: key => data.get(key) ?? null,
+    setItem: (key, value) => data.set(key, String(value)),
+  };
+  const written = writeAwaitingForward(storage, "n1", "same", {
+    uid: "u", segment: "bad", record: 4,
+  }, 100);
+  assert.deepEqual(written, { text: "same", afterTurns: 0, at: 100 });
+  const turn = { role: "user", uid: "u", segment: 0, record: 1, text: "same" };
+  assert.equal(chatmod.matchingForwardDestinationTurn(readAwaitingForward(storage, "n1", 101), [turn]), turn);
 });
 
 /* The server records what it delivered, and an attachment makes that the
