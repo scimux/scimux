@@ -1776,7 +1776,7 @@ export function createChatFeature(deps){
     }
   }
 
-  function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets, externalAllowed = false, discussion = null, emptySegment = null, windowed = false, leaseBase = null, leadFirstKey = "" } = {}){
+  function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, indexBase = 0, nodeId, assets, externalAllowed = false, discussion = null, emptySegment = null, windowed = false, leaseBase = null, leadFirstKey = "" } = {}){
     const anchored = (discussion || []).flatMap(copy => ownerCommentAnchors(copy.uid, turns, copy.mirrors, copy.comments, emptySegment).filter(item => !windowed || item.turn !== -1).map(item => ({...item, copy})));
     const commentsAfter = index => anchored.filter(item => item.turn === index).map(item => discussionHTML(item.comment, item.copy, nodeId)).join("");
     const items = mergeTimelineItems(turns, decisions, leaseBase);
@@ -1791,7 +1791,7 @@ export function createChatFeature(deps){
       foldTurnEntries.push(entry);
       if (!entry.canFold) continue;
       const item = items[entry.firstIndex];
-      const bk = hist ? histBk(segIndex, item.index) : liveBk(item.index);
+      const bk = hist ? histBk(segIndex, item.index) : liveBk(indexBase + item.index);
       foldByBK[bk] = entry;
     }
     if (view.canFoldAny) foldCanAny = true;
@@ -1809,7 +1809,7 @@ export function createChatFeature(deps){
         });
         continue;
       }
-      const bk = hist ? histBk(segIndex, item.index) : liveBk(item.index);
+      const bk = hist ? histBk(segIndex, item.index) : liveBk(indexBase + item.index);
       html += renderTurnHTML(item.turn, { bk, hist, nodeId, assets, externalAllowed, shared: (discussion || []).some(copy => copy.uid === item.turn.uid) });
       html += commentsAfter(item.index);
     }
@@ -2412,7 +2412,7 @@ export function createChatFeature(deps){
     const idx = matchPendingJumpInTurns(pendingJump, turns);
     if (idx >= 0){
       setPendingJump(null);
-      const target = q(el, `.turn[data-i="${idx}"]`);
+      const target = q(el, `.turn[data-i="${omittedTurns + idx}"]`);
       if (!target) return false;
       activeHighlight = pendingJump.uid && Number.isInteger(pendingJump.record)
         ? {node:sel, uid:pendingJump.uid, segment:pendingJump.segment || 0, record:pendingJump.record, expires:now + 1600} : null;
@@ -2781,7 +2781,7 @@ export function createChatFeature(deps){
         : "") +
       (!hist && data.omitted_turns > 0 ? segmentLoadHTML(data.omitted_turns) : "") +
       renderTimelineHTML(turns, liveDecisions, {
-        hist: false, nodeId: n.id, assets, discussion, emptySegment: {uid:data.log_uid, segment:data.segment_index},
+        hist: false, indexBase: data.omitted_turns || 0, nodeId: n.id, assets, discussion, emptySegment: {uid:data.log_uid, segment:data.segment_index},
         windowed: (data.omitted_turns || 0) > 0,
         leaseBase: data.lease_base || null,
         leadFirstKey: data.window_head ? `${data.window_head.segment}/${data.window_head.record}` : "",
@@ -2858,7 +2858,7 @@ export function createChatFeature(deps){
       const now = typeof d.now === "function" ? d.now() : Date.now();
       const sameLog = !data.log_uid || data.log_uid === previousHighlight.uid;
       const index = activeJumpTarget(previousHighlight, n.id, turns, now, data.log_uid);
-      let target = index < 0 ? null : q(el, `.turn[data-i="${index}"]`);
+      let target = index < 0 ? null : q(el, `.turn[data-i="${(data.omitted_turns || 0) + index}"]`);
       if (!target && sameLog && now < previousHighlight.expires && previousHighlight.node === n.id){
         const history = qa(el, '.turn.hist').map(t => ({...t.dataset, el:t}));
         target = matchPendingJumpInHist(previousHighlight, history)?.el || null;
