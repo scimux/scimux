@@ -2869,7 +2869,7 @@ export function createChatFeature(deps){
        Resolved before the write so we neither zero the offset nor bottom-pin
        when a pendingJump is aiming at this node. */
     const jumpAimed = !!(getPendingJump() && getPendingJump().node === g("sel", ""));
-    const preserveReader = !atBottom && !jumpAimed && !chatScrollBottom && !foldAnchor && !chatHist.scrollTo;
+    const preserveReader = !atBottom && !forcePeek && !jumpAimed && !chatScrollBottom && !foldAnchor && !chatHist.scrollTo;
     const readerAnchor = preserveReader ? captureReaderAnchor(el) : null;
     /* Zero any inherited offset before the write on a node switch so deferred
        momentum / a stale large scrollTop from the chat we left cannot land
