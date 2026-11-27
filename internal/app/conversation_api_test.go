@@ -1756,6 +1756,158 @@ func TestHandleChatTailValidationAndHistoryPrecedence(t *testing.T) {
 	}
 }
 
+func TestHandleChatStartWindowAndValidation(t *testing.T) {
+	a, node, _ := chatWindowTestApp(t)
+	for _, tc := range []struct {
+		query        string
+		omitted      int
+		turns        int
+		headRecord   int
+		wantHead     bool
+		leaseBase    map[string]int
+		decisionSize int
+	}{
+		{query: "start=0", omitted: 0, turns: 8, decisionSize: 4},
+		{query: "start=4", omitted: 4, turns: 4, headRecord: 3, wantHead: true, leaseBase: map[string]int{"lease-a": 1}, decisionSize: 2},
+		{query: "start=8", omitted: 8, turns: 0},
+		{query: "start=99", omitted: 8, turns: 0},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			rec := chatWindowRequest(a, node, tc.query)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+			}
+			var body struct {
+				Turns     []transcript.Turn            `json:"turns"`
+				Omitted   int                          `json:"omitted_turns"`
+				Head      *chatWindowHead              `json:"window_head"`
+				LeaseBase map[string]int               `json:"lease_base"`
+				Decisions []sessionlog.DecisionSurface `json:"decisions"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Omitted != tc.omitted || len(body.Turns) != tc.turns {
+				t.Errorf("omitted/turns=%d/%d, want %d/%d", body.Omitted, len(body.Turns), tc.omitted, tc.turns)
+			}
+			if tc.wantHead {
+				if body.Head == nil || body.Head.Record != tc.headRecord {
+					t.Errorf("window_head=%+v, want record %d", body.Head, tc.headRecord)
+				}
+			} else if body.Head != nil {
+				t.Errorf("window_head=%+v, want none", body.Head)
+			}
+			if !reflect.DeepEqual(body.LeaseBase, tc.leaseBase) || len(body.Decisions) != tc.decisionSize {
+				t.Errorf("lease_base/decisions=%v/%d, want %v/%d", body.LeaseBase, len(body.Decisions), tc.leaseBase, tc.decisionSize)
+			}
+		})
+	}
+	for _, query := range []string{"start=", "start=x", "start=-1", "start=1&start=2"} {
+		rec := chatWindowRequest(a, node, query)
+		if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != "bad start" {
+			t.Errorf("%s status/body=%d/%q, want 400 bad start", query, rec.Code, rec.Body.String())
+		}
+	}
+	conflict := chatWindowRequest(a, node, "tail=2&start=1")
+	if conflict.Code != http.StatusBadRequest || strings.TrimSpace(conflict.Body.String()) != "tail and start" {
+		t.Errorf("tail/start status/body=%d/%q", conflict.Code, conflict.Body.String())
+	}
+	history := chatWindowRequest(a, node, "history=1&start=invalid")
+	if history.Code != http.StatusOK || !strings.Contains(history.Body.String(), `"segments"`) {
+		t.Errorf("history precedence status/body=%d/%q", history.Code, history.Body.String())
+	}
+}
+
+func TestHandleChatPageValidationAndPrecedence(t *testing.T) {
+	a, node, _ := chatWindowTestApp(t)
+	uid := a.segment(node).UID
+	for _, query := range []string{
+		"page=sideways&at=1&log_uid=" + uid,
+		"page=before&log_uid=" + uid,
+		"page=before&at=x&log_uid=" + uid,
+		"page=before&at=-1&log_uid=" + uid,
+		"page=before&at=1&limit=0&log_uid=" + uid,
+		"page=before&at=1&limit=201&log_uid=" + uid,
+		"page=before&at=1&limit=x&log_uid=" + uid,
+		"page=before&page=after&at=1&log_uid=" + uid,
+		"page=before&at=1&at=2&log_uid=" + uid,
+		"page=before&at=1&limit=1&limit=2&log_uid=" + uid,
+		"page=before&at=1&log_uid=",
+		"page=before&at=1&log_uid=" + uid + "&log_uid=" + uid,
+		"page=before&at=1",
+		"page=before&at=1&log_uid=" + uid + "&tail=2",
+		"page=before&at=1&log_uid=" + uid + "&start=2",
+	} {
+		rec := chatWindowRequest(a, node, query)
+		if rec.Code != http.StatusBadRequest || len(strings.TrimSpace(rec.Body.String())) == 0 || len(rec.Body.String()) > 80 {
+			t.Errorf("invalid page query %q status/body=%d/%q", query, rec.Code, rec.Body.String())
+		}
+	}
+	changed := chatWindowRequest(a, node, "page=before&at=10&log_uid=other")
+	if changed.Code != http.StatusConflict || strings.TrimSpace(changed.Body.String()) != "log_changed" {
+		t.Errorf("log uid mismatch status/body=%d/%q", changed.Code, changed.Body.String())
+	}
+	missingTurn := chatWindowRequest(a, node, "page=around&at=1&log_uid="+uid)
+	if missingTurn.Code != http.StatusNotFound || strings.TrimSpace(missingTurn.Body.String()) != "no_turn" {
+		t.Errorf("around missing turn status/body=%d/%q", missingTurn.Code, missingTurn.Body.String())
+	}
+	history := chatWindowRequest(a, node, "history=1&page=around&at=x&log_uid=other")
+	if history.Code != http.StatusOK || !strings.Contains(history.Body.String(), `"segments"`) {
+		t.Errorf("history precedence status/body=%d/%q", history.Code, history.Body.String())
+	}
+	emptyApp := newTestApp(t, &fakeTmux{})
+	emptyApp.sessionsDir = ""
+	emptyNode := &Node{ID: "empty-pages", Agent: "pi"}
+	emptyApp.nodes, emptyApp.byID[emptyNode.ID] = []*Node{emptyNode}, emptyNode
+	empty := chatWindowRequest(emptyApp, emptyNode, "page=before&at=0&log_uid=nonempty")
+	if empty.Code != http.StatusOK || strings.TrimSpace(empty.Header().Get("ETag")) != "" {
+		t.Errorf("empty sessions page status/etag=%d/%q", empty.Code, empty.Header().Get("ETag"))
+	}
+}
+
+func TestHandleChatPageProjectsOnlyReturnedTurns(t *testing.T) {
+	a, node, log := chatWindowTestApp(t)
+	uid := sessionlog.ReadSegment(log).UID
+	for _, tc := range []struct {
+		mode, at  string
+		limit     int
+		wantText  string
+		wantAsset bool
+	}{
+		{mode: "before", at: "6", limit: 1, wantText: "turn 1"},
+		{mode: "after", at: "2", limit: 2, wantText: "turn 1"},
+		{mode: "around", at: "2", limit: 1, wantText: "scimux-asset:a_window_old", wantAsset: true},
+	} {
+		query := fmt.Sprintf("page=%s&at=%s&limit=%d&log_uid=%s", tc.mode, tc.at, tc.limit, uid)
+		rec := chatWindowRequest(a, node, query)
+		if rec.Code != http.StatusOK || rec.Header().Get("ETag") != "" {
+			t.Fatalf("%s status/etag=%d/%q body=%s", tc.mode, rec.Code, rec.Header().Get("ETag"), rec.Body.String())
+		}
+		var body struct {
+			Segments []sessionlog.HistorySlice   `json:"segments"`
+			Empty    []sessionlog.HistorySegment `json:"empty_segments"`
+			Before   int                         `json:"before_count"`
+			After    int                         `json:"after_count"`
+			Current  int                         `json:"current_segment"`
+			Assets   map[string]json.RawMessage  `json:"assets"`
+			External bool                        `json:"allow_external_attachments"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Segments) == 0 || len(body.Segments[0].Turns) == 0 || !strings.Contains(body.Segments[0].Turns[0].Text, tc.wantText) {
+			t.Errorf("%s returned turns=%+v", tc.mode, body.Segments)
+		}
+		_, hasAsset := body.Assets["a_window_old"]
+		if hasAsset != tc.wantAsset {
+			t.Errorf("%s assets=%v, want referenced=%v", tc.mode, body.Assets, tc.wantAsset)
+		}
+		if body.Current != 0 || body.Before+body.After < 0 || body.Empty == nil {
+			t.Errorf("%s page metadata=%+v", tc.mode, body)
+		}
+	}
+}
+
 func TestHandleChatTailWindowAndUntailedShape(t *testing.T) {
 	a, node, log := chatWindowTestApp(t)
 	base := chatWindowRequest(a, node, "")
