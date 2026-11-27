@@ -372,6 +372,26 @@ func TestPageRejectsIndexedRecordsWithUnexpectedShape(t *testing.T) {
 	})
 }
 
+func TestPageHandlesUnreadableDecisionInAuditOnlySlice(t *testing.T) {
+	path := pagingFixture(t)
+	c := &LogCache{}
+	want := ReadHistory(path)
+	_ = c.Segment(path)
+	anchor := want[0].Turns[len(want[0].Turns)-1].Record
+	c.mu.Lock()
+	decisions := c.pageSegments[0].decisions
+	if len(decisions) == 0 {
+		c.mu.Unlock()
+		t.Fatal("fixture has no first-segment decisions")
+	}
+	decisions[len(decisions)-1].ref.end += 10_000
+	c.mu.Unlock()
+	readsBefore := c.pageReads
+	if _, ok := c.Page(path, PageAfter, anchor, 1); ok || c.pageReads <= readsBefore {
+		t.Fatalf("unreadable audit page ok/read count=%v/%d (before %d)", ok, c.pageReads, readsBefore)
+	}
+}
+
 func mutateCachedLog(t *testing.T, path string, old, replacement []byte) {
 	t.Helper()
 	data, err := os.ReadFile(path)
