@@ -108,6 +108,24 @@ func TestLogCache_OneWalkPerChange(t *testing.T) {
 	}
 }
 
+func TestLogCacheColdParseDoesNotReadAtForNonPageEvents(t *testing.T) {
+	path := writeLog(t, []Event{
+		NewMeta("node", "codex", "", "", "/tmp"),
+		{T: "tool", Time: "2026-07-01T00:00:00Z", Tool: &ToolEvent{ID: "tool-1", Status: "completed"}},
+		{T: "usage", Time: "2026-07-01T00:00:01Z", Usage: &UsageEvent{Used: 4}},
+		NewMark(123),
+		{T: "station", Time: "2026-07-01T00:00:02Z", Station: &StationEvent{Seam: "s", Title: "stop"}},
+	})
+	c := &LogCache{}
+	_ = c.Segment(path)
+	if c.Walks() != 1 {
+		t.Fatalf("cold parse walks=%d, want one", c.Walks())
+	}
+	if c.ingestReads != 0 {
+		t.Fatalf("cold parse made %d ingest-time ReadAt calls for non-page events, want zero", c.ingestReads)
+	}
+}
+
 // A2. Product equivalence: each cached product deep-equals the standalone
 // path-taking function. Guard that Stage A changed nothing observable.
 func TestLogCache_ProductEquivalence(t *testing.T) {

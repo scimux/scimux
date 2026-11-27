@@ -301,20 +301,41 @@ fields remain in the 200 body. Attention, needs-input state, `ctx_pct`,
 hashed, so changes to them still invalidate the cache.
 
 The polled path may request a bounded recent-turn window with `?tail=N`, where
-`N` is an integer from 1 through 500. Invalid values return `400 bad tail`.
-The server includes at most `3*N` turns, starting at the latest user turn at or
-before the requested tail when that complete cycle fits under the cap; otherwise
-it uses a hard cut at the requested tail. `omitted_turns` is always present
-with a tail request and counts the turns before the returned window. On a hard
-cut that starts in the middle of a cycle, `window_head` gives the durable
-`uid`, `segment`, and `record` address of that cycle's first assistant turn.
-`decisions` contains only decision records at or after the first returned
-turn when turns are omitted; when nothing is omitted, all decisions remain in
-the response. When a retained lease also has earlier omitted decisions,
-`lease_base` maps that lease ID to the number omitted so clients can continue
-its ordinal.
-The `?history=1` path takes precedence and ignores `tail`. Without `tail`, the
-polled response remains the full current segment.
+`N` is an integer from 1 through 500, or an anchored window with `?start=I`,
+where `I` is a non-negative segment-absolute turn index. They cannot be used
+together. Invalid `tail` values return `400 bad tail`; invalid `start` values
+return `400 bad start`; both together return `400 tail and start`. A `start`
+greater than the segment length is clamped to its length, and the returned
+window begins exactly at that index without snapping.
+
+For `tail`, the server includes at most `3*N` turns, starting at the latest
+user turn at or before the requested tail when that complete cycle fits under
+the cap; otherwise it uses a hard cut at the requested tail. Both window modes
+include `omitted_turns`, the count before the returned window. When a window
+starts in the middle of a cycle, `window_head` gives the durable `uid`,
+`segment`, and `record` address of that cycle's first assistant turn. When
+turns are omitted, `decisions` contains records at or after the first returned
+turn; with no omitted turns all decisions remain. `lease_base` maps each
+retained lease with omitted decisions to the number omitted so clients can
+continue its ordinal. The `?history=1` path takes precedence and ignores
+`tail` and `start`. Without either window parameter, the polled response
+remains the full current segment.
+
+The bounded page path is `?page=before|after|around&at=R&log_uid=UID` with an
+optional `limit=N` (default 100, range 1–200). It is a read-only, non-polled
+response with no `ETag`. `before` returns up to N readable turns with record
+less than R; `after` returns up to N with record greater than R; `around`
+returns the addressed readable turn and its neighbours, up to N turns total.
+Pages can cross segment seams. The response contains `segments` of sliced
+history, `empty_segments`, `before_count`, `after_count`, `current_segment`,
+`assets`, and `allow_external_attachments`. Each slice includes its segment
+header and turns, plus `segment_offset`, `segment_turns`, and any applicable
+`window_head` and `lease_base`. Only assets referenced by returned turns are
+included. Missing or invalid parameters return `400`; a changed `log_uid`
+returns `409 log_changed`; `around` at a record that is not a readable turn
+returns `404 no_turn`. `?history=1` takes precedence over page parameters and
+keeps the existing complete-history response unchanged. Page reads use the
+cached log index and read only the selected records.
 
 For a strict scimux-owned Claude node, `compacting: true` (and optional
 `compact_trigger` of `manual` or `auto`) is set while a current

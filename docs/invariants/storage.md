@@ -304,7 +304,9 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     snapped to the prompt that starts their cycle and capped at 150); earlier
     segment turns and earlier segments are explicit reads. Sent echoes and
     awaiting-forward latches use turn addresses so their boundaries survive
-    the window moving.
+    the window moving. Earlier turns load in bounded pages from the session
+    log index, without re-parsing the log; jumps open a bounded range around
+    the addressed turn.
 - **An agent's Output is never passed off as the user's.** Two places can
   break this, and both are quiet. Send-to carries one agent's Output into
   another agent's Input, and the receiving node records the arrival as an

@@ -1832,6 +1832,7 @@ function el(tag, attrs = {}){
     children: [],
     parentNode: null,
     setAttribute(k, v){ this._attrs = this._attrs || {}; this._attrs[k] = v; },
+    removeAttribute(k){ if (this._attrs) delete this._attrs[k]; },
     getAttribute(k){ return (this._attrs || {})[k]; },
     addEventListener(type, fn, opts){
       if (!listeners.has(type)) listeners.set(type, []);
@@ -3431,6 +3432,7 @@ test("terminal toggle enable/disable and scrollend exist", async () => {
   // empty turns force peek → toggle disabled
   assert.equal(roots.termtoggle.disabled, true);
   assert.equal(roots.scrollend.innerHTML, "↓↓");
+  firstListener(roots.scrollend, "click")({ target: roots.scrollend });
   feature.destroy();
 });
 
@@ -6312,19 +6314,20 @@ test("P3C: use-as-description sets editor state from the turn", async () => {
   ctx.feature.destroy();
 });
 
-test("P3C: histload click fetches history API", async () => {
+test("earlier button fetches the bounded page API", async () => {
   const segs = [{
     start: "2025-12-31T00:00:00Z", seam: "2025-12-31T00:00:00Z",
     turns: [{ role: "user", text: "old", time: "2025-12-31T00:00:01Z" }],
   }];
   const chatPayload = {
-    turns: [{ role: "user", text: "now", time: "2026-01-01T00:00:00Z" }],
+    turns: [{ role: "user", uid: "uid-a", segment: 1, record: 8, text: "now", time: "2026-01-01T00:00:00Z" }],
     live: "quiet", delivery: "ok", source: "tmux",
-    chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, assets: {},
+    chat_started: "2026-01-01T00:00:00Z", prior_turns: 1, log_uid: "uid-a", segment_index: 1, assets: {},
   };
   const ctx = makeFeature({
     histSegs: segs,
     chatPayload,
+    api: async path => path.includes("?page=before") ? { segments: [], empty_segments: [], before_count: 0, assets: {} } : {},
     /* Production returns 304 once the live segment's ETag is held. Loading
        history changes only client state, so its repaint must omit that tag
        and obtain a body to rebuild from. */
@@ -6335,25 +6338,25 @@ test("P3C: histload click fetches history API", async () => {
   ctx.feature.bind();
   await ctx.feature.render();
   assert.match(ctx.roots.msgs.innerHTML, /histload/);
-  const before = ctx.apiCalls.filter(c => c.path.includes("/chat?history=1")).length;
-  const hl = el("button", { className: "histload" });
+  const before = ctx.apiCalls.filter(c => c.path.includes("?page=before")).length;
+  const hl = el("button", { className: "histload", dataset: { scope: "earlier" } });
   firstListener(ctx.roots.msgs, "click")({ target: hl });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
-  const histCalls = ctx.apiCalls.filter(c => c.path.includes("/chat?history=1"));
-  assert.equal(histCalls.length, before + 1);
-  assert.match(histCalls[histCalls.length - 1].path, /\/api\/nodes\/n1\/chat\?history=1$/);
+  const pageCalls = ctx.apiCalls.filter(c => c.path.includes("?page=before"));
+  assert.equal(pageCalls.length, before + 1);
+  assert.match(pageCalls.at(-1).path, /\/api\/nodes\/n1\/chat\?page=before&at=8&limit=100&log_uid=uid-a$/);
   const liveCalls = ctx.apiCalls.filter(c =>
     c.kind === "conditional" && c.path.includes("/chat") && !c.path.includes("history"));
   assert.equal(liveCalls.length, 2);
   assert.equal(liveCalls[1].etag, "", "local history expansion must bypass the held live ETag");
   assert.match(liveCalls[0].path, /tail=50$/);
-  assert.match(liveCalls[1].path, /\/chat$/);
-  assert.match(ctx.roots.msgs.innerHTML, /turn hist|data-bk="h:/);
+  assert.match(liveCalls[1].path, /start=0/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /show earlier history/);
   ctx.feature.destroy();
 });
 
-test("segment button switches the poll to the full current segment", async () => {
+test("earlier button anchors the current segment then reselect returns to tail", async () => {
   const payload = {
     turns: [{ role: "user", uid: "u", segment: 0, record: 5, text: "window" }],
     live: "quiet", delivery: "ok", source: "tmux", chat_started: "now",
@@ -6368,14 +6371,13 @@ test("segment button switches the poll to the full current segment", async () =>
   } });
   ctx.feature.bind(); await ctx.feature.render();
   assert.match(calls[0], /\/chat\?tail=50$/);
-  assert.match(ctx.roots.msgs.innerHTML, /3 turns/);
-  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /show earlier history/);
-  const button = el("button", { className: "histload", dataset: { scope: "segment" } });
+  assert.match(ctx.roots.msgs.innerHTML, /5 turns/);
+  const button = el("button", { className: "histload", dataset: { scope: "earlier" } });
   firstListener(ctx.roots.msgs, "click")({ target: button });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(calls.at(-1), /\/chat$/);
-  assert.match(ctx.roots.msgs.innerHTML, /show earlier history/);
+  assert.match(calls.at(-1), /start=0/);
+  assert.match(ctx.roots.msgs.innerHTML, /2 turns/);
   ctx.feature.onSelectChange(); ctx.setSel("team/s/o/c/g"); ctx.setSelGen(2);
   ctx.feature.onSelectChange(); ctx.setSel("n1"); ctx.setSelGen(3);
   await ctx.feature.render();
@@ -6390,7 +6392,7 @@ test("segment button follows the current-segment seam while history stays before
   } });
   windowed.feature.bind(); await windowed.feature.render();
   const windowHTML = windowed.roots.msgs.innerHTML;
-  assert.ok(windowHTML.indexOf("chat started start") < windowHTML.indexOf('data-scope="segment"'));
+  assert.ok(windowHTML.indexOf("chat started start") < windowHTML.indexOf('data-scope="earlier"'));
   windowed.feature.destroy();
 
   const full = makeFeature({ chatPayload: {
@@ -6399,7 +6401,7 @@ test("segment button follows the current-segment seam while history stays before
   } });
   full.feature.bind(); await full.feature.render();
   const fullHTML = full.roots.msgs.innerHTML;
-  assert.ok(fullHTML.indexOf("show earlier history") < fullHTML.indexOf("chat started start"));
+  assert.ok(fullHTML.indexOf("show earlier turns") < fullHTML.indexOf("chat started start"));
   assert.doesNotMatch(fullHTML, /data-scope="segment"/);
   full.feature.destroy();
 });
@@ -6478,24 +6480,25 @@ test("trace query is combined with the tail query", async () => {
   ctx.feature.destroy();
 });
 
-test("a jump outside the tail retries full and flashes the matching turn", async () => {
+test("an addressed jump outside the tail opens an around range and flashes the matching turn", async () => {
   const target = { role: "user", uid: "u", segment: 0, record: 2, text: "older" };
   const paths = [];
   const payload = { turns: [{ role: "assistant", uid: "u", segment: 0, record: 8, text: "new" }],
     live: "quiet", log_uid: "u", omitted_turns: 2, prior_turns: 0, assets: {} };
-  const ctx = makeFeature({ chatConditional: async path => {
+  const ctx = makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:0,log_uid:"u",segment_offset:0,turns:[target],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}:{},
+    chatConditional: async path => {
     paths.push(path);
-    return { status: 200, etag: `"${paths.length}"`, data: path.includes("tail=50") ? payload : { ...payload, turns: [target], omitted_turns: 0 } };
+    return { status: 200, etag: `"${paths.length}"`, data: { ...payload, segment_index:0 } };
   } });
-  const element = el("div", { className: "turn user", dataset: { i: "0" } });
+  const element = el("div", { className: "turn hist user", dataset: { bk:"h:0:0",uid:"u",segment:"0",record:"2" } });
   const query = ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
-  ctx.roots.msgs.querySelector = selector => selector === '.turn[data-i="0"]' ? element : query(selector);
+  ctx.roots.msgs.querySelector = selector => selector === '.turn[data-bk="h:0:0"]' ? element : query(selector);
   ctx.setPending({ node: "n1", uid: "u", segment: 0, record: 2, ts: 1_000_000 });
   await ctx.feature.render();
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(paths[0], /tail=50$/); assert.match(paths.at(-1), /\/chat$/);
-  await ctx.feature.render();
+  assert.ok(ctx.apiCalls.some(call=>call.path.includes("page=around&at=2&limit=100&log_uid=u")));
   assert.ok(element.classList.contains("jumpflash"));
   ctx.feature.destroy();
 });
@@ -6509,8 +6512,41 @@ test("a missing team-comment jump expands the current segment", async () => {
   } });
   ctx.setPending({ node: "n1", team: { server: "s", owner: "o", chat: "u", generation: "g", log: "comments", seq: 1 }, ts: 1_000_000 });
   await ctx.feature.render(); await new Promise(resolve => setImmediate(resolve));
-  assert.match(paths[0], /tail=50$/); assert.match(paths.at(-1), /\/chat$/);
+  assert.match(paths[0], /tail=50$/); assert.match(paths.at(-1), /\/chat\?start=0$/);
   ctx.feature.destroy();
+});
+
+test("partial prior pages reload complete history for older time jumps", async () => {
+  async function makePaged(beforeCount){
+    const paths=[],toasts=[];let poll=0,resolveHistory;
+    const ctx=makeFeature({
+      api:path=>{
+        paths.push(path);
+        if(path.includes("page=before"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:10,time:"partial-time",text:"partial"}],decisions:[]}],empty_segments:[],before_count:beforeCount,assets:{}};
+        if(path.includes("history=1"))return new Promise(resolve=>{resolveHistory=resolve;});
+      },
+      chatConditional:async()=>({status:200,etag:`"${++poll}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,time:`live-${poll}`,text:`live ${poll}`}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+      deps:{toast:message=>toasts.push(message)},
+    });
+    ctx.feature.bind();await ctx.feature.render();
+    firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    ctx.setPending({node:"n1",turnTime:"target-time",ts:1_000_000});
+    await ctx.feature.render();
+    await new Promise(resolve=>setImmediate(resolve));
+    return {ctx,paths,toasts,resolveHistory};
+  }
+  const partial=await makePaged(4);
+  assert.ok(partial.paths.some(path=>path.includes("page=before")));
+  assert.ok(partial.paths.some(path=>path.includes("history=1")),"incomplete paging must request full history");
+  assert.deepEqual(partial.toasts,[]);
+  partial.ctx.setSel("n2");partial.resolveHistory?.({segments:[],assets:{}});partial.ctx.feature.destroy();
+
+  const complete=await makePaged(0);
+  assert.ok(complete.paths.some(path=>path.includes("page=before")));
+  assert.equal(complete.paths.some(path=>path.includes("history=1")),false,"zero beforeCount is complete");
+  assert.deepEqual(complete.toasts,["Couldn't find that message in this chat."]);
+  complete.ctx.feature.destroy();
 });
 
 test("comments anchored before a window are hidden until the segment is full", async () => {
@@ -9798,4 +9834,942 @@ test('common chat file retry is scoped to the active visit and never dispatches 
  firstListener(ctx.roots.msgs,'click')({target:{closest:selector=>selector==='[data-attachment-retry]'?button:null}});assert.equal(button.disabled,true);
  ctx.setSel('n1');ctx.setSelGen(2);ctx.setSel('team/s/o/c/g');ctx.setSelGen(3);release('blob:verified');await new Promise(resolve=>setImmediate(resolve));
  assert.equal(replaced,0);assert.equal(clicked,0);assert.equal(ctx.apiCalls.length,0);ctx.feature.destroy();
+});
+
+test("anchored live window loads earlier turns, then merges bounded history pages", async () => {
+  const calls = [];
+  let page = 0;
+  const ctx = makeFeature({
+    api: async path => {
+      calls.push(path);
+      if (!path.includes("?page=before")) return {};
+      page++;
+      return page === 1 ? {
+        segments: [{
+          segment_index: 2, log_uid: "uid-a", start: "2026-01-02", seam: "2026-01-02",
+          segment_offset: 4, segment_turns: 6, turns: [{ role: "user", uid: "uid-a", segment: 2, record: 40, text: "older four" }],
+          decisions: [],
+        }],
+        empty_segments: [{ segment_index: 1, log_uid: "uid-a", start: "2026-01-01", seam: "seam-1", turns: [], decisions: [] }],
+        before_count: 8, after_count: 0, current_segment: 3, assets: { old: { name: "old" } },
+      } : {
+        segments: [{
+          segment_index: 2, log_uid: "uid-a", start: "2026-01-02", seam: "2026-01-02",
+          segment_offset: 2, segment_turns: 6,
+          turns: [{ role: "assistant", uid: "uid-a", segment: 2, record: 20, text: "older two" }],
+          decisions: [],
+        }],
+        empty_segments: [{ segment_index: 0, log_uid: "uid-a", start: "2025-12-31", seam: "seam-0", turns: [], decisions: [] }],
+        before_count: 6, after_count: 0, current_segment: 3, assets: { older: { name: "older" } },
+      };
+    },
+    chatConditional: async path => {
+      calls.push(path);
+      const anchored = /start=/.test(path);
+      return { status: 200, etag: `"${calls.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment: 3, record: 100, text: "live turn" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 3,
+        chat_started: "2026-01-03", prior_turns: 40,
+        omitted_turns: /tail=50/.test(path) ? 120 : anchored && /start=20/.test(path) ? 20 : 0,
+        assets: {},
+      } };
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(calls[0], /tail=50/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 160 turns/);
+
+  const clickEarlier = () => firstListener(ctx.roots.msgs, "click")({
+    target: el("button", { className: "histload", dataset: { scope: "earlier" } }),
+  });
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.at(-1), /start=20/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 60 turns/);
+
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.at(-1), /start=0/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 40 turns/);
+
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.find(path => path.includes("page=before")), /page=before&at=100&limit=100&log_uid=uid-a/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 8 turns/);
+  assert.match(ctx.roots.msgs.innerHTML, /data-bk="h:2:4"/);
+  assert.match(ctx.roots.msgs.innerHTML, /older four/);
+
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.filter(path => path.includes("page=before")).at(-1), /page=before&at=40&limit=100&log_uid=uid-a/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 6 turns/);
+  assert.match(ctx.roots.msgs.innerHTML, /data-bk="h:2:2"/);
+  assert.ok(ctx.roots.msgs.innerHTML.indexOf("older two") < ctx.roots.msgs.innerHTML.indexOf("older four"));
+  assert.deepEqual(chatmod.mergeHistoryPage(
+    chatmod.mergeHistoryPage({ node:"n1", segs:[], emptySegs:[], assets:{} }, {
+      segments:[], empty_segments:[{segment_index:1},{segment_index:2}], before_count:2,
+    }),
+    {segments:[], empty_segments:[{segment_index:0},{segment_index:1}], before_count:1},
+  ).emptySegs.map(s => s.segment_index), [0,1,2]);
+  ctx.feature.destroy();
+});
+
+test("history page merge handles empty input and joins turns and decisions by segment", () => {
+  assert.deepEqual(chatmod.mergeHistoryPage(null, null), {
+    node:"", segs:[], emptySegs:[], assets:{}, beforeCount:0, paged:true, scrollTo:"",
+    afterCount:0,
+  });
+  const joined = chatmod.mergeHistoryPage({
+    node:"n1", segs:[{segment_index:4,segment_offset:3,turns:[{record:30}],decisions:[{record:35}]}],
+    emptySegs:[{segment_index:1}], assets:{old:{name:"old"}}, beforeCount:11, afterCount:9,
+  }, {
+    segments:[
+      {segment_index:4,segment_offset:1,turns:[{record:10}],decisions:[{record:20},{record:15}]},
+      {segment_index:5,segment_offset:0,turns:[{record:50}]},
+    ], empty_segments:[{segment_index:1},{segment_index:2}], assets:{new:{name:"new"}}, before_count:7,
+  },"before");
+  assert.deepEqual(joined.segs[0].turns.map(t=>t.record),[10,30]);
+  assert.deepEqual(joined.segs[0].decisions.map(d=>d.record),[15,20,35]);
+  assert.equal(joined.segs[0].segment_offset,1);
+  assert.deepEqual(joined.emptySegs.map(s=>s.segment_index),[1,2]);
+  assert.deepEqual(Object.keys(joined.assets).sort(),["new","old"]);
+  assert.equal(joined.beforeCount,7);
+  assert.equal(joined.afterCount,9,"a before page must preserve the known later count");
+  const missing = chatmod.mergeHistoryPage({segs:[{segment_index:9}]}, {
+    segments:[{segment_index:9},{segment_index:10}], empty_segments:[],
+  });
+  assert.deepEqual(missing.segs.map(s=>s.segment_index),[9,10]);
+  const turnless=chatmod.mergeHistoryPage({segs:[{segment_index:11,turns:[{record:110}]}]}, {
+    segments:[{segment_index:11}],empty_segments:[],
+  });
+  assert.deepEqual(turnless.segs[0].turns,[{record:110}],"a decision-only slice keeps turns from the existing page");
+  const later=chatmod.mergeHistoryPage({beforeCount:6,segs:[{segment_index:12,segment_offset:2,turns:[{record:120}]}]}, {
+    segments:[{segment_index:12,segment_offset:3,turns:[{record:130}]}],empty_segments:[],after_count:4,before_count:99,
+  },"after");
+  assert.deepEqual(later.segs[0].turns.map(t=>t.record),[120,130]);
+  assert.equal(later.beforeCount,6,"an after page must preserve the known earlier count");
+  assert.equal(later.afterCount,4);
+});
+
+test("earlier loader ignores zero counts and stale visits", async () => {
+  const ctx=makeFeature({chatPayload:{turns:[{role:"user",uid:"u",segment:3,record:1,text:"turn"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}});
+  ctx.feature.bind();await ctx.feature.render();
+  const click=()=>firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  click();
+  ctx.feature.destroy();
+
+  const stale=makeFeature({chatPayload:{turns:[{role:"user",uid:"u",segment:3,record:1,text:"turn"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:20,assets:{}}});
+  stale.feature.bind();await stale.feature.render();
+  stale.setSel("");
+  firstListener(stale.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  stale.setSel("n2");
+  firstListener(stale.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  stale.setSel("n1");stale.setSelGen(3);
+  firstListener(stale.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  stale.feature.destroy();
+});
+
+test("a null earlier page response merges as an empty bounded result", async () => {
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=before")?null:{},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:77,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+  });
+  ctx.feature.bind();await ctx.feature.render();
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(ctx.apiCalls.some(call=>call.path.includes("page=before&at=77")));
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/data-scope="earlier"/);
+  ctx.feature.destroy();
+});
+
+test("earlier page uses the sentinel when the live surface has no addressed turn", async () => {
+  let requested="";
+  const ctx=makeFeature({
+    api:async path=>{requested=path;return {segments:[],empty_segments:[],before_count:0,assets:{}};},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",text:"unaddressed"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+  });
+  ctx.feature.bind();await ctx.feature.render();
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(requested,/page=before&at=2147483647/);
+  ctx.feature.destroy();
+});
+
+test("a changed or missing segment identity drops the anchored window", async () => {
+  let poll=0;
+  const paths=[];
+  const ctx=makeFeature({chatConditional:async path=>{
+    paths.push(path);poll++;
+    const data={turns:[{role:"user",text:`turn ${poll}`}],live:"quiet",prior_turns:0,omitted_turns:12,assets:{}};
+    if(poll===1){data.segment_index=3;data.log_uid="u";}
+    return {status:200,etag:`"${poll}"`,data};
+  }});
+  ctx.feature.bind();await ctx.feature.render();
+  ctx.roots.msgs.scrollTop=0;ctx.roots.msgs.scrollHeight=2000;ctx.roots.msgs.clientHeight=400;
+  firstListener(ctx.roots.msgs,"scroll")();await ctx.feature.render();
+  assert.match(paths[1],/start=12/);
+  assert.match(paths[2],/tail=50/);
+  assert.equal(poll,3);
+  ctx.feature.destroy();
+});
+
+test("page loading uses the live boundary and ignores a response after jumping to now", async () => {
+  let finish;
+  let pageCalls=0;
+  const ctx=makeFeature({
+    api:path=>path.includes("page=before")?(pageCalls++,new Promise(resolve=>finish=resolve)): {},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:77,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+  });
+  ctx.feature.bind();await ctx.feature.render();
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(pageCalls,1);
+  assert.ok(ctx.apiCalls.some(call=>call.path.includes("page=before&at=77")));
+  ctx.feature.jumpToNow();
+  finish({segments:[{segment_index:2,turns:[{role:"user",record:4,text:"stale page"}],decisions:[]}],empty_segments:[],before_count:1,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(pageCalls,1);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/stale page/);
+  ctx.feature.destroy();
+});
+
+test("empty prior slices fall back to the first readable live turn for the next page", async () => {
+  const requests=[];let page=0;
+  const ctx=makeFeature({
+    api:async path=>{requests.push(path);return {segments:[{segment_index:2,turns:[],decisions:[]}],empty_segments:[],before_count:2,assets:{},...(++page>1?{before_count:0}:{})};},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:77,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+  });
+  ctx.feature.bind();await ctx.feature.render();
+  const click=()=>firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  click();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  click();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(requests.length,2);
+  assert.match(requests[1],/page=before&at=77/);
+  ctx.feature.destroy();
+});
+
+test("scroll freezes the live window and idle top loads once; segment and visit reset to tail", async () => {
+  const timers = [];
+  const cleared = [];
+  const paths = [];
+  let segment = 3;
+  let omitted = 12;
+  const ctx = makeFeature({
+    chatConditional: async path => {
+      paths.push(path);
+      return { status: 200, etag: `"${paths.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment, record: 20, text: "turn" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: segment,
+        omitted_turns: omitted, prior_turns: 0, assets: {},
+      } };
+    },
+    deps: {
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+      clearTimeout: id => cleared.push(id),
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  ctx.roots.msgs.scrollHeight = 2000;
+  ctx.roots.msgs.clientHeight = 400;
+  ctx.roots.msgs.scrollTop = 50;
+  firstListener(ctx.roots.msgs, "scroll")();
+  assert.equal(paths.length, 1, "freezing does not immediately poll");
+  assert.equal(timers.filter(timer => timer.ms === 150).length, 1);
+  await ctx.feature.render();
+  assert.match(paths.at(-1), /start=12/);
+
+  omitted = 120;
+  await ctx.feature.render();
+  firstListener(ctx.roots.msgs, "scroll")();
+  const idle = timers.filter(timer => timer.ms === 150).at(-1);
+  assert.equal(idle.ms, 150);
+  idle.fn();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths.at(-1), /start=20/);
+
+  segment = 4;
+  await ctx.feature.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths.at(-1), /tail=50/);
+  ctx.feature.onSelectChange(); ctx.setSel("team/s/o/c/g"); ctx.setSelGen(2);
+  ctx.feature.onSelectChange(); ctx.setSel("n1"); ctx.setSelGen(3);
+  await ctx.feature.render();
+  assert.match(paths.at(-1), /tail=50/);
+  ctx.feature.destroy();
+  assert.ok(cleared.length > 0, "destroy clears the idle timer");
+});
+
+test("history compatibility uses start zero and the unified button counts prior turns", async () => {
+  const paths = [];
+  const ctx = makeFeature({
+    histSegs: [{ segment_index: 1, log_uid: "uid-a", start: "2026-01-01", turns: [{ role: "user", uid: "uid-a", segment: 1, record: 1, text: "old" }] }],
+    chatConditional: async path => {
+      paths.push(path);
+      return { status: 200, etag: `"${paths.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment: 2, record: 10, text: "current" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 2,
+        chat_started: "2026-01-02", prior_turns: 1, omitted_turns: 0, assets: {},
+      } };
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /data-scope="earlier"/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier turns &middot; 1 turn/);
+  await ctx.feature.loadHistory("n1", "");
+  assert.match(paths.at(-1), /start=0/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /show earlier history/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /data-scope="earlier"/);
+  ctx.feature.destroy();
+});
+
+test("history bubble keys use segment offsets and remain attached to the selected turn", async () => {
+  const ctx = makeFeature({
+    histSegs: [{
+      segment_index: 7, log_uid: "uid-a", segment_offset: 4, segment_turns: 9, window_head:{segment:7,record:35},
+      start: "2026-01-01", turns: [{ role: "user", uid: "uid-a", segment: 7, record: 40, text: "older target" }],
+    }],
+    chatPayload: {
+      turns: [{ role: "user", uid: "uid-a", segment: 8, record: 90, text: "current" }],
+      live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 8,
+      chat_started: "2026-01-02", prior_turns: 4, omitted_turns: 0, assets: {},
+    },
+  });
+  ctx.feature.bind();
+  await ctx.feature.loadHistory("n1", "");
+  assert.match(ctx.roots.msgs.innerHTML, /data-bk="h:7:4"/);
+  const selected = tapBubbleTurn(ctx, "h:7:4");
+  assert.equal(bubActionRows(ctx).length, 1);
+  ctx.feature.destroy();
+  assert.equal(selected.dataset.bk, "h:7:4");
+});
+
+test("an open prior bubble action follows its absolute key across a prepend", async () => {
+  let historyRead=0;
+  const ctx=makeFeature({api:async path=>path.includes("history=1")?{
+    segments:[{segment_index:7,log_uid:"uid-a",segment_offset:historyRead++===0?4:0,segment_turns:6,start:"2026-01-01",seam:"s7",
+      turns:historyRead===1
+        ?[{role:"user",uid:"uid-a",segment:7,record:40,text:"target"}]
+        :[20,25,30,35].map(record=>({role:"user",uid:"uid-a",segment:7,record,text:`earlier ${record}`})).concat([{role:"user",uid:"uid-a",segment:7,record:40,text:"target"}]),decisions:[]}],
+    empty_segments:[],assets:{},
+  }:{},chatPayload:{turns:[{role:"user",uid:"uid-a",segment:8,record:90,text:"current"}],live:"quiet",log_uid:"uid-a",segment_index:8,prior_turns:4,chat_started:"2026-01-02",assets:{}}});
+  const msgs=ctx.roots.msgs, old=Object.getOwnPropertyDescriptor(msgs,"innerHTML");let renderedTarget=null;
+  Object.defineProperty(msgs,"innerHTML",{configurable:true,get:old.get,set(value){
+    old.set.call(msgs,value);
+    renderedTarget=null;
+    if(value.includes('data-bk="h:7:4"')){renderedTarget=el("div",{className:"turn hist user",dataset:{bk:"h:7:4"}});msgs.appendChild(renderedTarget);}
+  }});
+  ctx.feature.bind();await ctx.feature.loadHistory("n1","");
+  assert.equal(renderedTarget.dataset.bk,"h:7:4");
+  tapBubbleTurn(ctx,"h:7:4");
+  assert.equal(renderedTarget.classList.contains("bubble-selected"),true);
+  assert.equal(bubActionRows(ctx).length,1);
+  await ctx.feature.loadHistory("n1","");
+  assert.equal(renderedTarget.dataset.bk,"h:7:4");
+  assert.equal(renderedTarget.classList.contains("bubble-selected"),true);
+  assert.equal(bubActionRows(ctx).length,1);
+  ctx.feature.destroy();
+});
+
+test("page conflict drops prior pages and returns the poll to tail mode", async () => {
+  const paths = [];
+  let pageCount = 0;
+  const ctx = makeFeature({
+    api: async path => {
+      if (path.includes("?page=before")){
+        if (++pageCount > 1) throw Object.assign(new Error("log_changed"), { status: 409 });
+        return {segments:[{segment_index:2,log_uid:"uid-a",segment_offset:2,segment_turns:4,start:"2026-01-01",turns:[{role:"user",uid:"uid-a",segment:2,record:40,text:"older page"}],decisions:[]}],empty_segments:[],before_count:3,assets:{}};
+      }
+    },
+    chatConditional: async path => {
+      paths.push(path);
+      return { status: 200, etag: `"${paths.length}"`, data: {
+        turns: [{ role: "user", uid: "uid-a", segment: 3, record: 100, text: "live" }],
+        live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 3,
+        prior_turns: 4, omitted_turns: 0, assets: {},
+      } };
+    },
+  });
+  ctx.feature.bind(); await ctx.feature.render();
+  const clickEarlier=()=>firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/older page/);
+  clickEarlier();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths.at(-1), /tail=50/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /older page/);
+  ctx.feature.destroy();
+});
+
+test("reader bubble offset survives a poll that adds live turns above its viewport", async () => {
+  let poll = 0;
+  const ctx = makeFeature({
+    chatConditional: async () => ({ status: 200, etag: `"${++poll}"`, data: {
+      turns: poll === 1
+        ? [{ role: "user", uid: "uid-a", segment: 3, record: 1, text: "visible" }]
+        : [
+          { role: "user", uid: "uid-a", segment: 3, record: 1, text: "visible" },
+          { role: "assistant", uid: "uid-a", segment: 3, record: 2, text: "new turn" },
+        ],
+      live: "quiet", source: "tmux", log_uid: "uid-a", segment_index: 3,
+      prior_turns: 0, omitted_turns: 0, assets: {},
+    } }),
+  });
+  const msgs = ctx.roots.msgs;
+  const oldInnerHTML = Object.getOwnPropertyDescriptor(msgs, "innerHTML");
+  let bubble = el("div", { className: "turn user", dataset: { bk: "i:0" } });
+  bubble.offsetTop = 240; bubble.offsetHeight = 40;
+  Object.defineProperty(msgs, "innerHTML", {
+    configurable: true,
+    get: oldInnerHTML.get,
+    set(value){
+      oldInnerHTML.set.call(msgs, value);
+      bubble = el("div", { className: "turn user", dataset: { bk: "i:0" } });
+      bubble.offsetTop = poll > 1 ? 500 : 240; bubble.offsetHeight = 40;
+    },
+  });
+  const queryAll = msgs.querySelectorAll.bind(msgs);
+  msgs.querySelectorAll = selector => selector === ".turn[data-bk]" ? [bubble] : queryAll(selector);
+  const query = msgs.querySelector.bind(msgs);
+  msgs.querySelector = selector => selector.includes('data-bk="i:0"') ? bubble : query(selector);
+  ctx.feature.bind(); await ctx.feature.render();
+  msgs.scrollHeight = 2000; msgs.clientHeight = 400; msgs.scrollTop = 200;
+  await ctx.feature.render();
+  assert.equal(msgs.scrollTop, 460, "the visible turn keeps its 40px viewport offset");
+  ctx.feature.destroy();
+});
+
+test("forcePeek pins a scrolled-up reader while ordinary polls restore its bubble anchor", async () => {
+  async function run(attention){
+    let poll=0;
+    const ctx=makeFeature({chatConditional:async()=>({status:200,etag:`"${++poll}"`,data:{
+      turns:[{role:"user",uid:"u",segment:3,record:1,text:`turn ${poll}`}],live:"quiet",source:"tmux",log_uid:"u",segment_index:3,
+      attention:poll>1?attention:"",prior_turns:0,omitted_turns:0,assets:{},
+    }})});
+    const msgs=ctx.roots.msgs, old=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
+    let bubble=el("div",{className:"turn user",dataset:{bk:"i:0"}});bubble.offsetTop=240;bubble.offsetHeight=40;
+    Object.defineProperty(msgs,"innerHTML",{configurable:true,get:old.get,set(value){
+      old.set.call(msgs,value);bubble=el("div",{className:"turn user",dataset:{bk:"i:0"}});
+      bubble.offsetTop=poll>1?500:240;bubble.offsetHeight=40;
+    }});
+    const queryAll=msgs.querySelectorAll.bind(msgs);
+    msgs.querySelectorAll=selector=>selector===".turn[data-bk]"?[bubble]:queryAll(selector);
+    const query=msgs.querySelector.bind(msgs);
+    msgs.querySelector=selector=>selector.includes('data-bk="i:0"')?bubble:query(selector);
+    ctx.feature.bind();await ctx.feature.render();
+    msgs.scrollHeight=2000;msgs.clientHeight=400;msgs.scrollTop=200;
+    await ctx.feature.render();
+    const result=msgs.scrollTop;ctx.feature.destroy();return result;
+  }
+  assert.equal(await run("approval"),1600,"forcePeek keeps the needs-input pane in view");
+  assert.equal(await run(""),460,"ordinary polling restores the reader's 40px bubble offset");
+});
+
+test("addressed jump opens a detached around page and loads earlier and later slices", async () => {
+  const calls=[];let target=null;
+  const ctx=makeFeature({
+    api:async path=>{
+      calls.push(path);
+      if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:10,segment_turns:30,start:"T",seam:"S",turns:[40,50,60].map(record=>({role:"user",uid:"u",segment:3,record,text:record===50?"around target":`turn ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:9,current_segment:3,assets:{}};
+      if(path.includes("page=before"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,segment_turns:30,start:"T",seam:"S",turns:Array.from({length:10},(_,i)=>({role:"assistant",uid:"u",segment:3,record:20+i,text:`before ${20+i}`})),decisions:[]}],empty_segments:[{segment_index:2,log_uid:"u",turns:[],decisions:[]}],before_count:2,after_count:12,current_segment:3,assets:{before:{name:"before"}}};
+      if(path.includes("page=after"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:13,segment_turns:30,start:"T",seam:"S",turns:[70,80].map(record=>({role:"assistant",uid:"u",segment:3,record,text:`after ${record}`})),decisions:[]}],empty_segments:[],before_count:15,after_count:4,current_segment:3,assets:{after:{name:"after"}}};
+    },
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live current"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:20,prior_turns:0,assets:{}}}),
+  });
+  const msgs=ctx.roots.msgs,query=msgs.querySelector.bind(msgs);
+  const oldInner=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
+  Object.defineProperty(msgs,"innerHTML",{configurable:true,get:oldInner.get,set(value){
+    oldInner.set.call(msgs,value);
+    target=value.includes('data-bk="h:3:11"')?el("div",{className:"turn hist user",dataset:{bk:"h:3:11",uid:"u",segment:"3",record:"50"}}):null;
+    if(target)msgs.appendChild(target);
+  }});
+  msgs.querySelector=selector=>{
+    if(selector.includes('data-bk="h:3:11"'))return target;
+    return query(selector);
+  };
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});
+  ctx.feature.bind();await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=around"))||"",/page=around&at=50&limit=100&log_uid=u/);
+  assert.match(msgs.innerHTML,/around target/);
+  assert.match(msgs.innerHTML,/data-bk="h:3:11"/);
+  assert.doesNotMatch(msgs.innerHTML,/live current|data-i=/);
+  assert.match(msgs.innerHTML,/show earlier turns &middot; 12 turns/);
+  assert.match(msgs.innerHTML,/show later turns &middot; 9 turns/);
+  assert.equal(ctx.getPending(),null);
+  assert.ok(target?.classList.contains("jumpflash"),"the addressed turn is flashed");
+  tapBubbleTurn(ctx,"h:3:11");
+  assert.equal(bubActionRows(ctx).length,1);
+
+  firstListener(msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=40&limit=100&log_uid=u/);
+  assert.match(msgs.innerHTML,/data-bk="h:3:11"/);
+  assert.match(msgs.innerHTML,/show earlier turns &middot; 2 turns/);
+  assert.match(msgs.innerHTML,/show later turns &middot; 9 turns/,"loading earlier turns keeps the detached later count");
+  assert.equal(bubActionRows(ctx).length,1,"the selected action remains on the addressed turn after an earlier page");
+  assert.deepEqual(msgs.innerHTML.includes("live current"),false);
+
+  firstListener(msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"later"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=after"))||"",/page=after&at=60&limit=100&log_uid=u/);
+  assert.match(msgs.innerHTML,/after 80/);
+  assert.match(msgs.innerHTML,/show earlier turns &middot; 2 turns/,"loading later turns keeps the detached earlier count");
+  assert.match(msgs.innerHTML,/show later turns &middot; 4 turns/);
+  assert.equal(bubActionRows(ctx).length,1,"the selected action remains on the addressed turn after a later page");
+  assert.doesNotMatch(msgs.innerHTML,/live current|data-i=/);
+  ctx.feature.onSelectChange();
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null,"changing selection clears detached chrome");
+  assert.equal(ctx.roots.scrollend.getAttribute("aria-label"),"scroll to latest message");
+  ctx.feature.destroy();
+});
+
+test("detached mode rejoins at the live boundary and scrollend returns to tail", async () => {
+  async function run(afterCount, currentSlice){
+    const paths=[];
+    const ctx=makeFeature({
+      api:async path=>path.includes("page=around")?{segments:[
+        ...(currentSlice?[{segment_index:3,log_uid:"u",segment_offset:10,segment_turns:40,turns:[{role:"user",uid:"u",segment:3,record:50,text:"target"},{role:"assistant",uid:"u",segment:3,record:51,text:"neighbor"}],decisions:[]}]:[]),
+        ...(!currentSlice?[{segment_index:2,log_uid:"u",segment_offset:0,segment_turns:4,turns:[{role:"assistant",uid:"u",segment:2,record:20,text:"older range"}],decisions:[]}]:[]),
+      ],empty_segments:[],before_count:5,after_count:afterCount,assets:{}}:{},
+      chatConditional:async path=>{paths.push(path);const start=Number(path.match(/start=(\d+)/)?.[1]||0);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:start===10?50:100,text:start===10?"rejoined window":"live latest"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:currentSlice?11:20,prior_turns:1,assets:{}}};},
+    });
+    ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    return {ctx,feature:ctx.feature,roots:ctx.roots,paths};
+  }
+  const reached=await run(4,true);
+  assert.ok(reached.paths.some(path=>/start=10/.test(path)),"the page covering omitted_turns re-joins at its segment offset");
+  assert.doesNotMatch(reached.roots.msgs.innerHTML,/data-bk="h:3:/);
+  assert.match(reached.roots.msgs.innerHTML,/rejoined window/);
+  assert.equal(reached.roots.scrollend.getAttribute("data-detached")||null,null);
+  reached.feature.destroy();
+
+  const ended=await run(0,false);
+  assert.ok(ended.paths.some(path=>/start=0/.test(path)),"after_count zero returns to live mode");
+  assert.match(ended.roots.msgs.innerHTML,/older range|live latest/);
+  assert.equal(ended.roots.scrollend.getAttribute("data-detached")||null,null);
+  ended.feature.destroy();
+
+  const detached=await run(3,false);
+  assert.equal(detached.roots.scrollend.getAttribute("data-detached"),"true");
+  assert.equal(detached.roots.scrollend.getAttribute("aria-label"),"jump to latest");
+  assert.equal(detached.roots.scrollend.title,"jump to latest");
+  detached.roots.msgs.scrollHeight=2000;detached.roots.msgs.clientHeight=400;detached.roots.msgs.scrollTop=100;
+  firstListener(detached.roots.scrollend,"click")({target:detached.roots.scrollend});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(detached.paths.at(-1),/tail=50/);
+  assert.equal(detached.roots.scrollend.getAttribute("data-detached")||null,null);
+  assert.equal(detached.roots.scrollend.getAttribute("aria-label"),"scroll to latest message");
+  assert.equal(detached.roots.scrollend.title,"scroll to latest");
+  assert.equal(detached.roots.msgs.scrollTop,1600);
+  detached.feature.destroy();
+});
+
+test("detached idle scrolling loads before near the top and after near the bottom", async () => {
+  const timers=[],requests=[];let pageCount=0;
+  const ctx=makeFeature({
+    api:async path=>{requests.push(path);if(path.includes("page=around"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:8,after_count:8,assets:{}};return {segments:[{segment_index:2,log_uid:"u",segment_offset:pageCount++?2:0,turns:[{role:"user",uid:"u",segment:2,record:pageCount?30:10,text:"page"}],decisions:[]}],empty_segments:[],before_count:pageCount?3:6,after_count:6,assets:{}};},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:20,prior_turns:0,assets:{}}}),
+    deps:{setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{}},
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  const msgs=ctx.roots.msgs;msgs.scrollHeight=2000;msgs.clientHeight=400;msgs.scrollTop=10;
+  firstListener(msgs,"scroll")();timers.filter(t=>t.ms===150).at(-1).fn();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(requests.find(path=>path.includes("page=before"))||"",/page=before&at=20/);
+  msgs.scrollTop=1500;firstListener(msgs,"scroll")();timers.filter(t=>t.ms===150).at(-1).fn();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(requests.find(path=>path.includes("page=after"))||"",/page=after&at=20/);
+  ctx.feature.destroy();
+});
+
+test("around failures toast on no_turn, reload history on log change, and mirror jumps use around", async () => {
+  const notFoundToasts=[];
+  const notFound=makeFeature({api:async()=>{throw Object.assign(new Error("no_turn"),{status:404});},chatConditional:async()=>({status:200,etag:'"x"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,live:"quiet",assets:{}}}),deps:{toast:m=>notFoundToasts.push(m)}});
+  notFound.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});notFound.feature.bind();await notFound.feature.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(notFoundToasts,["Couldn't find that message in this chat."]);notFound.feature.destroy();
+
+  const changedCalls=[];
+  const changed=makeFeature({api:async path=>{changedCalls.push(path);if(path.includes("page=around"))throw Object.assign(new Error("log_changed"),{status:409});if(path.includes("history=1"))return {segments:[],empty_segments:[],assets:{}};return {};},chatConditional:async()=>({status:200,etag:'"x"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,live:"quiet",assets:{}}})});
+  changed.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});changed.feature.bind();await changed.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(changedCalls.some(path=>path.includes("history=1")));changed.feature.destroy();
+
+  const mirrorCalls=[];const copy={key:"s/o/u/g",uid:"u",mirrors:[{seq:5,local_segment:3,local_record:50}],comments:[]};
+  const mirror=makeFeature({api:async path=>{mirrorCalls.push(path);return path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:10,turns:[{role:"user",uid:"u",segment:3,record:50,text:"mirror target"}],decisions:[]}],empty_segments:[],before_count:12,after_count:8,assets:{}}:{};},chatConditional:async()=>({status:200,etag:'"x"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:20,live:"quiet",assets:{}}}),deps:{ownerDiscussion:()=>[copy]}});
+  mirror.setPending({node:"n1",team:{server:"s",owner:"o",chat:"u",generation:"g",log:"mirror",seq:5},ts:1_000_000});mirror.feature.bind();await mirror.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(mirrorCalls.some(path=>path.includes("page=around&at=50&limit=100&log_uid=u")));mirror.feature.destroy();
+});
+
+test("detached page conflicts fall back to complete history in both directions", async () => {
+  for (const scope of ["earlier","later"]){
+    const mode=scope==="earlier"?"before":"after";
+    const paths=[];
+    const ctx=makeFeature({
+      api:async path=>{
+        paths.push(path);
+        if(path.includes("page=around"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"addressed"}],decisions:[]}],empty_segments:[],before_count:3,after_count:3,assets:{}};
+        if(path.includes(`page=${mode}`))throw Object.assign(new Error("log_changed"),{status:409});
+        if(path.includes("history=1"))return {segments:[{segment_index:1,log_uid:"u",turns:[{role:"assistant",uid:"u",segment:1,record:10,text:"complete history"}],decisions:[]}],empty_segments:[],assets:{}};
+      },
+      chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+    });
+    ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope}})});
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(paths.some(path=>path.includes("history=1")),`${scope} conflict requests full history: ${paths.join(" | ")}`);
+    assert.match(ctx.roots.msgs.innerHTML,/complete history/);
+    assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+    ctx.feature.destroy();
+  }
+});
+
+test("around jump flashes its target when the same response rejoins at the live segment", async () => {
+  let target=null;
+  const ctx=makeFeature({
+    api:async()=>({segments:[
+      {segment_index:2,log_uid:"u",segment_offset:7,turns:[{role:"user",uid:"u",segment:2,record:50,text:"prior target"}],decisions:[]},
+      {segment_index:3,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:3,record:60,text:"current edge"},{role:"assistant",uid:"u",segment:3,record:61,text:"current neighbor"}],decisions:[]},
+    ],empty_segments:[],before_count:4,after_count:2,assets:{}}),
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:61,text:"live boundary"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:1,assets:{}}}),
+  });
+  const msgs=ctx.roots.msgs,query=msgs.querySelector.bind(msgs),oldInner=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
+  Object.defineProperty(msgs,"innerHTML",{configurable:true,get:oldInner.get,set(value){
+    oldInner.set.call(msgs,value);
+    target=value.includes('data-bk="h:2:7"')?el("div",{className:"turn hist user",dataset:{bk:"h:2:7",uid:"u",segment:"2",record:"50"}}):null;
+    if(target)msgs.appendChild(target);
+  }});
+  msgs.querySelector=selector=>selector.includes('data-bk="h:2:7"')?target:query(selector);
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:50,ts:1_000_000});
+  ctx.feature.bind();await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(msgs.innerHTML,/data-bk="h:2:7"/);
+  assert.ok(target?.classList.contains("jumpflash"),"the prior segment target is flashed after the current range rejoins");
+  assert.equal(ctx.getPending(),null);
+  ctx.feature.destroy();
+});
+
+test("rejoined around range derives earlier count from live omitted turns", async () => {
+  let poll=0,zeroNext=false;const paths=[];
+  const ctx=makeFeature({
+    api:async()=>({segments:[{segment_index:3,log_uid:"u",segment_offset:40,turns:[
+      {role:"user",uid:"u",segment:3,record:50,text:"target at forty"},{role:"assistant",uid:"u",segment:3,record:51,text:"next"},
+    ],decisions:[]}],empty_segments:[],before_count:43,after_count:3,assets:{}}),
+    chatConditional:async path=>{
+      paths.push(path);
+      poll++;
+      const omitted=zeroNext?0:40,prior=zeroNext?0:3;
+      return {status:200,etag:`"${poll}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live turn"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:prior,omitted_turns:omitted,chat_started:"start",assets:{}}};
+    },
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  const html=ctx.roots.msgs.innerHTML;
+  assert.ok(html.indexOf("chat started") < html.indexOf("show earlier turns"),`the earlier button follows the chat-started seam when no prior page survived: ${html}`);
+  assert.match(html,/show earlier turns &middot; 43 turns/);
+  zeroNext=true;
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(paths.some(path=>/start=0/.test(path)),"one click lowers the live start to max(0, omitted - 100)");
+  await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/show earlier turns/,"zero omitted and prior turns leave no earlier button");
+  ctx.feature.destroy();
+});
+
+test("a detached poll rejoins when its current slice reaches the live boundary", async () => {
+  const paths=[];let poll=0;
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:10,turns:[{role:"user",uid:"u",segment:3,record:50,text:"target"},{role:"assistant",uid:"u",segment:3,record:51,text:"neighbor"}],decisions:[]}],empty_segments:[],before_count:2,after_count:4,assets:{}}:{},
+    chatConditional:async path=>{paths.push(path);const n=++poll;return {status:200,etag:`"${n}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:n>1?51:100,text:n>1?"current live boundary":"initial tail"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:n>1?11:20,prior_turns:0,assets:{}}};},
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(paths.some(path=>/start=10/.test(path)),"the poll rejoins at the detached segment offset");
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/data-bk="h:3:/);
+  assert.match(ctx.roots.msgs.innerHTML,/current live boundary/);
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+  ctx.feature.destroy();
+});
+
+test("a detached poll rejoins across a live segment change", async () => {
+  const paths=[];let poll=0;
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:4,log_uid:"u",segment_offset:2,turns:[{role:"user",uid:"u",segment:4,record:50,text:"target"},{role:"assistant",uid:"u",segment:4,record:51,text:"next"}],decisions:[]}],empty_segments:[],before_count:5,after_count:4,assets:{}}:{},
+    chatConditional:async path=>{paths.push(path);const n=++poll;return {status:200,etag:`"${n}"`,data:{turns:[{role:"user",uid:"u",segment:n>1?4:3,record:n>1?51:100,text:n>1?"new segment live":"old segment live"}],live:"quiet",log_uid:"u",segment_index:n>1?4:3,omitted_turns:n>1?3:20,prior_turns:0,assets:{}}};},
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:4,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(paths.some(path=>/start=2/.test(path)),"the changed segment rejoins at the covered page offset");
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/data-bk="h:4:/);
+  assert.match(ctx.roots.msgs.innerHTML,/new segment live/);
+  ctx.feature.destroy();
+});
+
+test("detached paging works when the conversation controls omit scrollend", async () => {
+  const roots=makeRoots();roots.scrollend=null;
+  const ctx=makeFeature({roots,api:async path=>path.includes("page=around")?{segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}:{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/target/);
+  ctx.feature.destroy();
+});
+
+test("detached paging serializes overlapping requests and ignores stale page results", async () => {
+  let releasePage, pageCalls=0;
+  const ctx=makeFeature({
+    api:path=>{
+      if(path.includes("page=around"))return Promise.resolve({segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:2,after_count:2,assets:{}});
+      if(path.includes("page=before")){pageCalls++;return new Promise(resolve=>{releasePage=resolve;});}
+    },
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  const click=scope=>firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope}})});
+  click("earlier");click("later");assert.equal(pageCalls,1,"earlier and later share one in-flight request");
+  ctx.feature.jumpToNow();
+  releasePage({segments:[],empty_segments:[],before_count:0,after_count:0,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/target/);
+  ctx.feature.destroy();
+});
+
+test("stale around response clears its loading flag so the pending jump can retry", async () => {
+  let resolveFirst,aroundCalls=0;
+  const ctx=makeFeature({
+    api:()=>++aroundCalls===1?new Promise(resolve=>{resolveFirst=resolve;}):Promise.resolve({segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"retried target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}),
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));
+  ctx.feature.onReselect();
+  ctx.setSelGen(2);
+  resolveFirst({segments:[],empty_segments:[],before_count:1,after_count:1,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(aroundCalls,2,"the still-pending jump retries the stale around request");
+  assert.match(ctx.roots.msgs.innerHTML,/retried target/);
+  ctx.feature.destroy();
+
+  let resolveGeneration;
+  const generation=makeFeature({api:()=>new Promise(resolve=>{resolveGeneration=resolve;}),chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  generation.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});generation.feature.bind();await generation.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));generation.setSelGen(2);
+  resolveGeneration({segments:[],empty_segments:[],before_count:1,after_count:1,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  generation.feature.destroy();
+});
+
+test("detached reads tolerate empty slices and stale around failures", async () => {
+  const empty=makeFeature({
+    api:async path=>{
+      if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,turns:[],decisions:[]}],empty_segments:[],before_count:1,after_count:0,assets:{}};
+    },
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+  });
+  empty.setPending({node:"n1",uid:"u",segment:3,record:20,ts:1_000_000});empty.feature.bind();await empty.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(empty.roots.msgs.innerHTML,/current/);assert.doesNotMatch(empty.roots.msgs.innerHTML,/data-bk="h:3:/);empty.feature.destroy();
+
+  let rejectAround;const toasts=[];
+  const stale=makeFeature({
+    api:async path=>path.includes("page=around")?new Promise((_,reject)=>{rejectAround=reject;}):{},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+    deps:{toast:m=>toasts.push(m)},
+  });
+  stale.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});stale.feature.bind();await stale.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));stale.feature.jumpToNow();
+  rejectAround(Object.assign(new Error("no_turn"),{status:404}));
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(toasts,[],"a stale around error cannot toast after returning to latest");stale.feature.destroy();
+
+  let resolveAround;
+  const staleSuccess=makeFeature({api:async path=>path.includes("page=around")?new Promise(resolve=>{resolveAround=resolve;}):{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"latest"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  staleSuccess.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});staleSuccess.feature.bind();await staleSuccess.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));staleSuccess.feature.jumpToNow();
+  resolveAround({segments:[],empty_segments:[],before_count:2,after_count:3,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(staleSuccess.roots.msgs.innerHTML,/latest/);assert.doesNotMatch(staleSuccess.roots.msgs.innerHTML,/show later turns/);
+  staleSuccess.feature.destroy();
+});
+
+test("an empty detached slice uses sentinel edges and a zero-count later page rejoins", async () => {
+  const calls=[],pollPaths=[];
+  const ctx=makeFeature({
+    api:async path=>{
+      calls.push(path);
+      if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,decisions:[]}],empty_segments:[],before_count:1,after_count:2,assets:{}};
+      if(path.includes("page=after"))return {segments:[],empty_segments:[],before_count:1,after_count:0,assets:{}};
+      if(path.includes("page=before"))return null;
+    },
+    chatConditional:async path=>{pollPaths.push(path);return {status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}};},
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=2147483647&limit=100&log_uid=u/);
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"later"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=after"))||"",/page=after&at=0&limit=100&log_uid=u/);
+  assert.ok(pollPaths.some(path=>/start=0/.test(path)),"an empty final page rejoins the live segment");
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  ctx.feature.destroy();
+
+  const afterCalls=[];
+  const after=makeFeature({api:async path=>{afterCalls.push(path);if(path.includes("page=around"))return {segments:[{segment_index:2,log_uid:"u",decisions:[]}],empty_segments:[],before_count:1,after_count:2,assets:{}};return {segments:[],empty_segments:[],before_count:1,after_count:2,assets:{}};},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  after.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});after.feature.bind();await after.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  firstListener(after.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"later"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(afterCalls.find(path=>path.includes("page=after"))||"",/page=after&at=0&limit=100&log_uid=u/);
+  after.feature.destroy();
+});
+
+test("an addressed range that already reaches the live tail rejoins and flashes its live key", async () => {
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:3,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:0,assets:{}}:{},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}}),
+    deps:{now:undefined},
+  });
+  const liveTarget=el("div",{className:"turn user",dataset:{bk:"i:0"}});
+  const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+  ctx.roots.msgs.querySelector=selector=>selector.includes('data-bk="i:0"')?liveTarget:query(selector);
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:20,ts:Date.now()});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  assert.ok(liveTarget.classList.contains("jumpflash"),"the rejoined target uses its live bubble key");
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+  ctx.feature.destroy();
+});
+
+test("a selection change drops an orphaned detached range before rendering another node", async () => {
+  const paths=[];
+  const ctx=makeFeature({nodes:[{id:"n1",title:"One"},{id:"n2",title:"Two"}],api:async path=>path.includes("page=around")?{segments:[{segment_index:2,log_uid:"u",turns:[{role:"user",uid:"u",segment:2,record:20,text:"old target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:2,assets:{}}:{},chatConditional:async path=>{paths.push(path);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"other node"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}};}});
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  ctx.setSel("n2");ctx.setSelGen(2);await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML,/other node/);
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+  ctx.feature.destroy();
+});
+
+test("an unaddressed jump still opens the full omitted window without paging around", async () => {
+  const paths=[];
+  const ctx=makeFeature({chatConditional:async path=>{paths.push(path);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:path.includes("start=0")?0:20,assets:{}}};}});
+  ctx.setPending({node:"n1",ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(paths.some(path=>/start=0/.test(path)));
+  assert.ok(paths.every(path=>!path.includes("page=around")));
+  ctx.feature.destroy();
+});
+
+test("an empty around response is tolerated without a scrollend control", async () => {
+  const roots=makeRoots();roots.scrollend=null;
+  const ctx=makeFeature({roots,api:async path=>path.includes("page=around")?null:{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  ctx.feature.destroy();
+});
+
+test("reader bubble offset survives prepending a history page", async () => {
+  let historyRead = 0;
+  const ctx = makeFeature({
+    api: async path => {
+      if (path.includes("history=1")) {
+        historyRead++;
+        return { segments:[{
+          segment_index:7, log_uid:"uid-a", segment_offset:historyRead === 1 ? 4 : 0,
+          segment_turns:6, start:"2026-01-01", seam:"s7",
+          turns:historyRead === 1
+            ? [{role:"user",uid:"uid-a",segment:7,record:40,text:"anchor"}]
+            : [20,25,30,35].map(record=>({role:"user",uid:"uid-a",segment:7,record,text:`prepend ${record}`})).concat([{role:"user",uid:"uid-a",segment:7,record:40,text:"anchor"}]),
+          decisions:[],
+        }], empty_segments:[], assets:{} };
+      }
+    },
+    chatConditional: async () => ({ status:200, etag:`"${historyRead}"`, data:{
+      turns:[{role:"user",uid:"uid-a",segment:8,record:90,text:"current"}],
+      live:"quiet",source:"tmux",log_uid:"uid-a",segment_index:8,
+      prior_turns:4,omitted_turns:0,chat_started:"2026-01-02",assets:{},
+    } }),
+  });
+  const msgs = ctx.roots.msgs;
+  const oldInnerHTML = Object.getOwnPropertyDescriptor(msgs, "innerHTML");
+  let bubble = el("div", { className:"turn hist", dataset:{bk:"h:7:4"} });
+  bubble.offsetTop=240; bubble.offsetHeight=40;
+  Object.defineProperty(msgs, "innerHTML", {
+    configurable:true, get:oldInnerHTML.get,
+    set(value){
+      oldInnerHTML.set.call(msgs,value);
+      bubble=el("div",{className:"turn hist",dataset:{bk:"h:7:4"}});
+      bubble.offsetTop=historyRead>1?500:240; bubble.offsetHeight=40;
+    },
+  });
+  const queryAll=msgs.querySelectorAll.bind(msgs);
+  msgs.querySelectorAll=selector=>selector===".turn[data-bk]"?[bubble]:queryAll(selector);
+  const query=msgs.querySelector.bind(msgs);
+  msgs.querySelector=selector=>selector.includes('data-bk="h:7:4"')?bubble:query(selector);
+  ctx.feature.bind(); await ctx.feature.loadHistory("n1","");
+  assert.match(msgs.innerHTML,/data-bk="h:7:4"/);
+  msgs.scrollHeight=2000;msgs.clientHeight=400;msgs.scrollTop=200;
+  await ctx.feature.loadHistory("n1","");
+  assert.match(msgs.innerHTML,/prepend/);
+  assert.equal(msgs.scrollTop,460);
+  ctx.feature.destroy();
+});
+
+test("reader anchoring tolerates zero geometry, missing keys, and removed bubbles", async () => {
+  let poll=0;
+  const ctx=makeFeature({chatConditional:async()=>({status:200,etag:`"${++poll}"`,data:{...defaultChatPayload(),turns:[{role:"user",text:`turn ${poll}`,time:`T${poll}`}],segment_index:3,log_uid:"u",omitted_turns:0,prior_turns:0}})});
+  const msgs=ctx.roots.msgs, old=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
+  let phase=0;
+  Object.defineProperty(msgs,"innerHTML",{configurable:true,get:old.get,set(value){old.set.call(msgs,value);phase++;}});
+  const zero=el("div",{className:"turn"});zero.offsetTop=0;zero.offsetHeight=0;
+  const noKey=el("div",{className:"turn"});noKey.offsetTop=1;noKey.offsetHeight=2;
+  const bubble=el("div",{className:"turn",dataset:{bk:"i:0"}});bubble.offsetTop=0;bubble.offsetHeight=30;
+  msgs.querySelectorAll=()=>phase===2?[zero,noKey,bubble]:[zero,bubble];
+  msgs.querySelector=selector=>phase>=2&&selector.includes('data-bk="i:0"')?null:bubble;
+  msgs.scrollHeight=2000;msgs.clientHeight=400;msgs.scrollTop=0;
+  ctx.feature.bind();await ctx.feature.render();
+  msgs.scrollTop=5;await ctx.feature.render();
+  msgs.scrollTop=10;await ctx.feature.render();
+  assert.equal(msgs.scrollTop,10,"a missing anchor falls back to the clamped reader offset");
+  ctx.feature.destroy();
+});
+
+test("idle earlier loading ignores a second trigger while its anchored poll is in flight", async () => {
+  const timers=[];const paths=[];let release;
+  const ctx=makeFeature({chatConditional:path=>{
+    paths.push(path);
+    if(path.includes("start=20"))return new Promise(resolve=>{release=resolve;});
+    return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"uid-a",segment:3,record:100,text:"turn"}],live:"quiet",log_uid:"uid-a",segment_index:3,omitted_turns:120,prior_turns:0,assets:{}}};
+  },deps:{setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{}}});
+  ctx.feature.bind();await ctx.feature.render();
+  ctx.roots.msgs.scrollHeight=2000;ctx.roots.msgs.clientHeight=400;ctx.roots.msgs.scrollTop=10;
+  firstListener(ctx.roots.msgs,"scroll")();
+  timers.filter(t=>t.ms===150).at(-1).fn();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(paths.filter(path=>path.includes("start=20")).length,1);
+  firstListener(ctx.roots.msgs,"scroll")();
+  timers.filter(t=>t.ms===150).at(-1).fn();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(paths.filter(path=>path.includes("start=20")).length,1);
+  release({status:200,etag:'"held"',data:{turns:[{role:"user",uid:"uid-a",segment:3,record:100,text:"turn"}],live:"quiet",log_uid:"uid-a",segment_index:3,omitted_turns:20,prior_turns:0,assets:{}}});
+  await new Promise(resolve=>setImmediate(resolve));ctx.feature.destroy();
 });

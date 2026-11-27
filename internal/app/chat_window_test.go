@@ -101,3 +101,58 @@ func TestChatTailWindowKeepsAllDecisionsWhenNothingIsOmitted(t *testing.T) {
 		}
 	})
 }
+
+func TestChatStartWindowBoundaries(t *testing.T) {
+	turns := addressedTurns("user", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant")
+	turns[1].UID, turns[1].Segment = "uid-a", 3
+	for _, tc := range []struct {
+		name      string
+		start     int
+		wantStart int
+		wantHead  int
+		hasHead   bool
+	}{
+		{name: "zero", start: 0, wantStart: 0},
+		{name: "negative clamps", start: -1, wantStart: 0},
+		{name: "mid-cycle", start: 4, wantStart: 4, wantHead: 2, hasHead: true},
+		{name: "at length", start: 8, wantStart: 8},
+		{name: "past length clamps", start: 99, wantStart: 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chatStartWindow(turns, nil, tc.start)
+			if got.start != tc.wantStart {
+				t.Errorf("start=%d, want %d", got.start, tc.wantStart)
+			}
+			if tc.hasHead {
+				if got.windowHead == nil || got.windowHead.Record != tc.wantHead || got.windowHead.UID != "uid-a" || got.windowHead.Segment != 3 {
+					t.Errorf("window_head=%+v, want uid-a/3/%d", got.windowHead, tc.wantHead)
+				}
+			} else if got.windowHead != nil {
+				t.Errorf("window_head=%+v, want none", got.windowHead)
+			}
+		})
+	}
+}
+
+func TestChatStartWindowDecisionsAndLeaseBase(t *testing.T) {
+	turns := addressedTurns("user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant")
+	decisions := []sessionlog.DecisionSurface{
+		{Record: 1, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
+		{Record: 5, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
+		{Record: 11, Decision: sessionlog.DecisionEvent{LeaseID: "dropped-only"}},
+		{Record: 12, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
+		{Record: 13, Decision: sessionlog.DecisionEvent{LeaseID: "lease-b"}},
+	}
+	got := chatStartWindow(turns, decisions, 6)
+	if !reflect.DeepEqual(got.decisions, decisions[3:]) || !reflect.DeepEqual(got.leaseBase, map[string]int{"lease-a": 2}) {
+		t.Errorf("start decisions/base=%+v/%v", got.decisions, got.leaseBase)
+	}
+	zero := chatStartWindow(turns, decisions, 0)
+	if !reflect.DeepEqual(zero.decisions, decisions) || len(zero.leaseBase) != 0 {
+		t.Errorf("zero start decisions/base=%+v/%v", zero.decisions, zero.leaseBase)
+	}
+	end := chatStartWindow(turns, decisions, len(turns))
+	if len(end.decisions) != 0 || end.windowHead != nil {
+		t.Errorf("end start retained decisions/head=%+v/%+v", end.decisions, end.windowHead)
+	}
+}

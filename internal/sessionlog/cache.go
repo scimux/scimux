@@ -83,8 +83,48 @@ type LogCache struct {
 	importAcc      []AssetImportEvent
 	importSeen     map[[2]int]bool
 
+	// Compact page index. It retains record locations and the fields needed to
+	// reconstruct history headers, never event text or raw events.
+	pageSegments []pageSegmentIndex
+	pageReads    int                            // test spy: record ReadAt operations in Page
+	pageOpen     func(string) (*os.File, error) // test seam for open failures
+	ingestReads  int                            // test spy: ingest-time ReadAt calls
+
 	walks       int   // test spy: times the file was actually parsed
 	bytesParsed int64 // test spy: bytes read from the file on the last parse
+}
+
+type recordRef struct {
+	end int64
+	len int // JSON payload length after trimming a CR when present
+}
+
+type pageTurnIndex struct {
+	ref     recordRef
+	record  int
+	offset  int
+	role    string
+	segment int
+	uid     string
+	agent   string
+}
+
+type pageDecisionIndex struct {
+	ref     recordRef
+	record  int
+	leaseID string
+}
+
+type pageSegmentIndex struct {
+	index         int
+	start         string
+	seam          string
+	reason        string
+	seamRecord    int
+	firstTurnTime string
+	uid           string
+	turns         []pageTurnIndex
+	decisions     []pageDecisionIndex
 }
 
 // rideSegAccum holds the per-segment time material for the v2 ride model.
@@ -334,6 +374,8 @@ func (c *LogCache) resetAccum() {
 	c.assetIdx = map[string]AssetEvent{}
 	c.importAcc = c.importAcc[:0]
 	c.importSeen = map[[2]int]bool{}
+	c.pageSegments = []pageSegmentIndex{{index: 0, seamRecord: -1}}
+	c.pageReads = 0
 }
 
 // consume reads newline-terminated records from r starting at baseOff,
@@ -345,10 +387,10 @@ func (c *LogCache) resetAccum() {
 // one of them skips and this one ingests is two readers showing the user two
 // different conversations -- and record ordinals that no longer line up.
 func (c *LogCache) consume(r io.Reader, baseOff int64) (newOff int64, nBytes int64, err error) {
-	n, err := forEachRecord(r, func(rec []byte, _ int64) bool {
+	n, err := forEachRecord(r, func(rec []byte, off int64) bool {
 		var ev Event
 		if json.Unmarshal(rec, &ev) == nil {
-			c.ingest(ev, c.recCount)
+			c.ingest(ev, c.recCount, recordRef{end: baseOff + off, len: len(rec)})
 			c.recCount++
 		}
 		return true
@@ -358,7 +400,51 @@ func (c *LogCache) consume(r io.Reader, baseOff int64) (newOff int64, nBytes int
 
 // ingest updates every accumulator for one successfully parsed event at
 // record index i (the durable ReadEvents index).
-func (c *LogCache) ingest(ev Event, i int) {
+func (c *LogCache) ingest(ev Event, i int, refs ...recordRef) {
+	var ref recordRef
+	if len(refs) > 0 {
+		ref = refs[0]
+	}
+	if ev.T == "meta" && ev.Meta != nil {
+		c.uid = ev.Meta.UID
+		if ev.Meta.Agent != "" {
+			c.agent = ev.Meta.Agent
+		}
+	}
+	if len(c.pageSegments) == 0 {
+		c.pageSegments = []pageSegmentIndex{{index: 0, seamRecord: -1}}
+	}
+	pageSeg := &c.pageSegments[len(c.pageSegments)-1]
+	if ev.T == "meta" && ev.Meta != nil {
+		pageSeg.uid = ev.Meta.UID
+	}
+	if pageSeg.start == "" && ev.Time != "" {
+		pageSeg.start, pageSeg.seam = ev.Time, ev.Time
+	}
+	if ev.T == "source" {
+		pageSeg = &pageSegmentIndex{index: c.recSeg + 1, start: ev.Time, seam: ev.Time, seamRecord: i, uid: c.uid}
+		if ev.Source != nil {
+			pageSeg.reason = ev.Source.Reason
+		}
+		c.pageSegments = append(c.pageSegments, *pageSeg)
+		pageSeg = &c.pageSegments[len(c.pageSegments)-1]
+	}
+	if ev.T == "meta" && ev.Meta != nil {
+		pageSeg.uid = ev.Meta.UID
+	}
+	switch ev.T {
+	case "user", "assistant":
+		if strings.TrimSpace(ev.Text) != "" {
+			if len(pageSeg.turns) == 0 {
+				pageSeg.firstTurnTime = ev.Time
+			}
+			pageSeg.turns = append(pageSeg.turns, pageTurnIndex{ref: ref, record: i, offset: len(pageSeg.turns), role: ev.T, segment: pageSeg.index, uid: c.uid, agent: c.agent})
+		}
+	case "decision":
+		if ev.Decision != nil {
+			pageSeg.decisions = append(pageSeg.decisions, pageDecisionIndex{ref: ref, record: i, leaseID: ev.Decision.LeaseID})
+		}
+	}
 	// --- segment (raw; backdating applied at snapshot) ---
 	if ev.T == "meta" && ev.Meta != nil {
 		c.uid = ev.Meta.UID
