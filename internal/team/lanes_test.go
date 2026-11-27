@@ -375,6 +375,7 @@ func TestDamagedLaneFileIsLeftUntouched(t *testing.T) {
 		{"member extra", func(m map[string]any) {
 			m["members"] = []any{map[string]any{"seat": fmt.Sprintf("%032x", 9), "access": "read", "token": secret}}
 		}},
+		{"uppercase color", func(m map[string]any) { m["color"] = "#AABBCC" }},
 	}
 	for _, tc := range edits {
 		t.Run(tc.name, func(t *testing.T) {
@@ -411,6 +412,27 @@ func laneObject(s LaneShare) map[string]any {
 		panic(err)
 	}
 	return m
+}
+
+func TestLaneShareUnreadableFileIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, LaneSharesFile)
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadLaneShares(dir)
+	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrLaneSharesDamaged) {
+		t.Fatalf("Load = %v", err)
+	}
+}
+
+func TestLaneShareNilExcludedIsRejected(t *testing.T) {
+	if validExcluded(nil) {
+		t.Fatal("nil excluded accepted")
+	}
 }
 
 func TestLaneShareReadOfADirectoryIsAnError(t *testing.T) {
