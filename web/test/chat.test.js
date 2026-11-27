@@ -10447,6 +10447,37 @@ test("detached paging works when the conversation controls omit scrollend", asyn
   ctx.feature.destroy();
 });
 
+test("detached paging serializes overlapping requests and ignores stale page results", async () => {
+  let releasePage, pageCalls=0;
+  const ctx=makeFeature({
+    api:path=>{
+      if(path.includes("page=around"))return Promise.resolve({segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:2,after_count:2,assets:{}});
+      if(path.includes("page=before")){pageCalls++;return new Promise(resolve=>{releasePage=resolve;});}
+      return Promise.resolve({});
+    },
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  const click=scope=>firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope}})});
+  click("earlier");click("later");assert.equal(pageCalls,1,"earlier and later share one in-flight request");
+  ctx.feature.jumpToNow();
+  releasePage({segments:[],empty_segments:[],before_count:0,after_count:0,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/target/);
+  ctx.feature.destroy();
+});
+
+test("an empty around response is tolerated without a scrollend control", async () => {
+  const roots=makeRoots();roots.scrollend=null;
+  const ctx=makeFeature({roots,api:async path=>path.includes("page=around")?null:{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  ctx.feature.destroy();
+});
+
 test("reader bubble offset survives prepending a history page", async () => {
   let historyRead = 0;
   const ctx = makeFeature({
