@@ -10202,6 +10202,32 @@ test("reader bubble offset survives a poll that adds live turns above its viewpo
   ctx.feature.destroy();
 });
 
+test("forcePeek pins a scrolled-up reader while ordinary polls restore its bubble anchor", async () => {
+  async function run(attention){
+    let poll=0;
+    const ctx=makeFeature({chatConditional:async()=>({status:200,etag:`"${++poll}"`,data:{
+      turns:[{role:"user",uid:"u",segment:3,record:1,text:`turn ${poll}`}],live:"quiet",source:"tmux",log_uid:"u",segment_index:3,
+      attention:poll>1?attention:"",prior_turns:0,omitted_turns:0,assets:{},
+    }})});
+    const msgs=ctx.roots.msgs, old=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
+    let bubble=el("div",{className:"turn user",dataset:{bk:"i:0"}});bubble.offsetTop=240;bubble.offsetHeight=40;
+    Object.defineProperty(msgs,"innerHTML",{configurable:true,get:old.get,set(value){
+      old.set.call(msgs,value);bubble=el("div",{className:"turn user",dataset:{bk:"i:0"}});
+      bubble.offsetTop=poll>1?500:240;bubble.offsetHeight=40;
+    }});
+    const queryAll=msgs.querySelectorAll.bind(msgs);
+    msgs.querySelectorAll=selector=>selector===".turn[data-bk]"?[bubble]:queryAll(selector);
+    const query=msgs.querySelector.bind(msgs);
+    msgs.querySelector=selector=>selector.includes('data-bk="i:0"')?bubble:query(selector);
+    ctx.feature.bind();await ctx.feature.render();
+    msgs.scrollHeight=2000;msgs.clientHeight=400;msgs.scrollTop=200;
+    await ctx.feature.render();
+    const result=msgs.scrollTop;ctx.feature.destroy();return result;
+  }
+  assert.equal(await run("approval"),1600,"forcePeek keeps the needs-input pane in view");
+  assert.equal(await run(""),460,"ordinary polling restores the reader's 40px bubble offset");
+});
+
 test("reader bubble offset survives prepending a history page", async () => {
   let historyRead = 0;
   const ctx = makeFeature({
