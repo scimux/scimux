@@ -10512,7 +10512,7 @@ test("detached reads tolerate empty slices and stale around failures", async () 
 });
 
 test("an empty detached slice uses the sentinel record and a null page rejoins", async () => {
-  const calls=[];
+  const calls=[],pollPaths=[];
   const ctx=makeFeature({
     api:async path=>{
       calls.push(path);
@@ -10520,14 +10520,14 @@ test("an empty detached slice uses the sentinel record and a null page rejoins",
       if(path.includes("page=before"))return null;
       return {};
     },
-    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}}),
+    chatConditional:async path=>{pollPaths.push(path);return {status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}};},
   });
   ctx.setPending({node:"n1",uid:"u",segment:3,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=2147483647&limit=100&log_uid=u/);
-  assert.ok(calls.some(path=>/start=0/.test(path)),"an empty final page rejoins the live segment");
+  assert.ok(pollPaths.some(path=>/start=0/.test(path)),"an empty final page rejoins the live segment");
   assert.match(ctx.roots.msgs.innerHTML,/current/);
   ctx.feature.destroy();
 });
