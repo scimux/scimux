@@ -2451,6 +2451,10 @@ export function createChatFeature(deps){
     return Math.max(0, live.omitted || 0) + Math.max(0, live.prior || 0);
   }
 
+  function historyComplete(sel){
+    return chatHist.node === sel && chatHist.segs && !(chatHist.paged && chatHist.beforeCount > 0);
+  }
+
   async function loadEarlier(){
     if (earlierLoading || !earlierCount()) return;
     const id = g("sel", ""), gen = g("selGen", 0);
@@ -2512,7 +2516,7 @@ export function createChatFeature(deps){
       const target = q(el, `[data-gkey="${CSSRef.escape(key)}"][data-cseq="${source.seq}"]`);
       if (target) { setPendingJump(null); scrollAndFlash(target); return true; }
       if (omittedTurns > 0){ setStartZero(sel); return false; }
-      if (priorTurns > 0 && !(chatHist.node === sel && chatHist.segs) && !pendingJump.histLoading) {
+      if (priorTurns > 0 && !historyComplete(sel) && !pendingJump.histLoading) {
         pendingJump.histLoading = true; setPendingJump(pendingJump); loadHistory(sel, "");
       }
       return false;
@@ -2529,7 +2533,7 @@ export function createChatFeature(deps){
     }
     if (omittedTurns > 0){ setStartZero(sel); return false; }
     if (priorTurns > 0 && (pendingJump.uid || pendingJump.turnTime)){
-      const histReady = chatHist.node === sel && chatHist.segs;
+      const histReady = historyComplete(sel);
       if (!histReady){
         if (!pendingJump.histLoading){
           pendingJump.histLoading = true;
