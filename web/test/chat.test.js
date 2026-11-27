@@ -6404,6 +6404,68 @@ test("segment button follows the current-segment seam while history stays before
   full.feature.destroy();
 });
 
+test("live bubble keys stay segment-absolute as a hard-cut window advances", async () => {
+  const turnsA = [20, 21, 22].map(record => ({
+    role: "user", uid: "u", segment: 0, record, text: `record ${record}`,
+  }));
+  const turnsB = [21, 22, 23].map(record => ({
+    role: "user", uid: "u", segment: 0, record, text: `record ${record}`,
+  }));
+  const payloadA = { turns: turnsA, omitted_turns: 10, live: "quiet", log_uid: "u", assets: {} };
+  const payloadB = { turns: turnsB, omitted_turns: 11, live: "quiet", log_uid: "u", assets: {} };
+  let poll = 0;
+  const ctx = makeFeature({ chatConditional: async () => ({
+    status: 200, etag: `"${++poll}"`, data: poll === 1 ? payloadA : payloadB,
+  }) });
+  ctx.feature.bind(); await ctx.feature.render();
+  const record21 = ctx.roots.msgs.innerHTML.match(/<div class="turn user" data-i="\d+" data-bk="([^"]+)">\s*<div class="bubble"[^>]*><p>record 21/);
+  assert.ok(record21, "record 21 is rendered as a live bubble");
+  const selected = tapBubbleTurn(ctx, record21[1]);
+  assert.equal(bubActionRows(ctx).length, 1);
+  await ctx.feature.render();
+  const record21After = ctx.roots.msgs.innerHTML.match(/<div class="turn user" data-i="\d+" data-bk="([^"]+)">\s*<div class="bubble"[^>]*><p>record 21/);
+  assert.ok(record21After, "record 21 remains in the advanced window");
+  assert.equal(selected.classList.contains("bubble-selected"), true);
+  assert.equal(selected.dataset.bk, record21After[1], "the open action row remains attached to record 21");
+  ctx.feature.destroy();
+});
+
+test("window live bubble keys and data-i values include omitted turns", async () => {
+  const ctx = makeFeature({ chatPayload: {
+    turns: [20, 21, 22].map(record => ({ role: "user", uid: "u", segment: 0, record, text: `record ${record}` })),
+    omitted_turns: 10, live: "quiet", log_uid: "u", assets: {},
+  } });
+  ctx.feature.bind(); await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /data-i="10"[^>]*data-bk="i:10"/);
+  ctx.feature.destroy();
+});
+
+test("a pending jump inside a hard-cut window targets the segment-absolute data-i", async () => {
+  const turns = [20, 21, 22].map(record => ({
+    role: "user", uid: "u", segment: 0, record, text: `record ${record}`,
+  }));
+  const ctx = makeFeature({ chatPayload: {
+    turns, omitted_turns: 10, live: "quiet", log_uid: "u", assets: {},
+  } });
+  const target = el("div", { className: "turn user", dataset: { i: "12" } });
+  const query = ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+  ctx.roots.msgs.querySelector = selector => selector === '.turn[data-i="12"]' ? target : query(selector);
+  ctx.setPending({ node: "n1", uid: "u", segment: 0, record: 22, ts: 1_000_000 });
+  await ctx.feature.render();
+  assert.equal(target.classList.contains("jumpflash"), true);
+  ctx.feature.destroy();
+});
+
+test("full-segment live bubble keys remain unchanged", async () => {
+  const ctx = makeFeature({ chatPayload: {
+    turns: [{ role: "user", uid: "u", segment: 0, record: 1, text: "full" }],
+    omitted_turns: 0, live: "quiet", log_uid: "u", assets: {},
+  } });
+  ctx.feature.bind(); await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML, /data-i="0"[^>]*data-bk="i:0"/);
+  ctx.feature.destroy();
+});
+
 test("trace query is combined with the tail query", async () => {
   const values = new Map([["scimux-prompt-flights:n1", JSON.stringify([{
     address: { uid: "u", segment: 2, record: 9 }, accepted: true,
