@@ -157,13 +157,13 @@ test("send payload and upload status helpers", () => {
   assert.equal(anyUploading([{ status: "up" }]), true);
 });
 
-test("buildSentEcho seen watermark depends on chatSig", () => {
+test("buildSentEcho stores the turn address only when the chat signature exists", () => {
   assert.deepEqual(
-    buildSentEcho({ node: "n1", text: "t", atts: [], at: 9, chatSig: "sig", turnsLength: 3 }),
-    { node: "n1", text: "t", atts: [], at: 9, seen: 3 },
+    buildSentEcho({ node: "n1", text: "t", atts: [], at: 9, chatSig: "sig", after: { uid: "u", segment: 2, record: 7 } }),
+    { node: "n1", text: "t", atts: [], at: 9, seen: { uid: "u", segment: 2, record: 7 } },
   );
   assert.deepEqual(
-    buildSentEcho({ node: "n1", text: "t", atts: [], at: 9, chatSig: "", turnsLength: 3 }),
+    buildSentEcho({ node: "n1", text: "t", atts: [], at: 9, chatSig: "", after: { uid: "u", segment: 2, record: 7 } }),
     { node: "n1", text: "t", atts: [], at: 9, seen: null },
   );
 });
@@ -745,14 +745,17 @@ test("pending Send-to cancels only after the empty destination is left", () => {
 test("successful edited Send-to waits for the real transcript turn; failure keeps it pending", async () => {
   const key = "scimux-sendto-pending:n1";
   const source = { node: "source", uid: "u1", segment: 2, record: 7, text: "source text" };
-  const success = makeFeature({ drafts: { [key]: JSON.stringify([source]), "scimux-draft:n1": "forwarded" } });
+  const success = makeFeature({
+    drafts: { [key]: JSON.stringify([source]), "scimux-draft:n1": "forwarded" },
+    lastTurns: [{ role: "user", uid: "dest-u", segment: 4, record: 12, text: "old" }],
+  });
   success.feature.onSelect();
   success.roots.prompt.innerText = "edited before send";
   await success.feature.sendPrompt();
   assert.deepEqual(JSON.parse(success.storage.getItem(key)), [source]);
   assert.equal(success.uiOps.length, 0);
   assert.deepEqual(JSON.parse(success.storage.getItem("scimux-sendto-awaiting:n1")), {
-    text: "edited before send", afterTurns: 1, at: 1_000_000,
+    text: "edited before send", after: { uid: "dest-u", segment: 4, record: 12 }, at: 1_000_000,
   });
 
   const failed = makeFeature({
@@ -783,11 +786,13 @@ test("a later send cannot replace a Send-to turn already awaiting confirmation",
   const awaitingKey = "scimux-sendto-awaiting:n1";
   const source = { node: "source", turnTime: "t" };
   const awaiting = JSON.stringify({ text: "first forwarded send", afterTurns: 1, at: 1_000_000 });
-  const ctx = makeFeature({ drafts: {
-    [key]: JSON.stringify([source]),
-    [awaitingKey]: awaiting,
-    "scimux-draft:n1": "ordinary follow-up",
-  } });
+  const ctx = makeFeature({
+    drafts: {
+      [key]: JSON.stringify([source]),
+      [awaitingKey]: awaiting,
+      "scimux-draft:n1": "ordinary follow-up",
+    },
+  });
   ctx.feature.onSelect();
   await ctx.feature.sendPrompt();
   assert.equal(ctx.storage.getItem(awaitingKey), awaiting);
@@ -797,17 +802,20 @@ test("an expired delivery latch never blocks the next Send-to", async () => {
   const key = "scimux-sendto-pending:n1";
   const awaitingKey = "scimux-sendto-awaiting:n1";
   const source = { node: "source", turnTime: "t" };
-  const ctx = makeFeature({ drafts: {
-    [key]: JSON.stringify([source]),
-    [awaitingKey]: JSON.stringify({ text: "never landed", afterTurns: 0, at: 1_000 }),
-    "scimux-draft:n1": "forwarded",
-  } });
+  const ctx = makeFeature({
+    lastTurns: [{ role: "user", uid: "dest-u", segment: 1, record: 6, text: "old" }],
+    drafts: {
+      [key]: JSON.stringify([source]),
+      [awaitingKey]: JSON.stringify({ text: "never landed", afterTurns: 0, at: 1_000 }),
+      "scimux-draft:n1": "forwarded",
+    },
+  });
   ctx.setNow(1_000 + AWAITING_FORWARD_TTL_MS + 1);
   ctx.feature.onSelect();
   ctx.roots.prompt.innerText = "sent much later";
   await ctx.feature.sendPrompt();
   assert.deepEqual(JSON.parse(ctx.storage.getItem(awaitingKey)), {
-    text: "sent much later", afterTurns: 1, at: 1_000 + AWAITING_FORWARD_TTL_MS + 1,
+    text: "sent much later", after: { uid: "dest-u", segment: 1, record: 6 }, at: 1_000 + AWAITING_FORWARD_TTL_MS + 1,
   });
 });
 
@@ -1622,11 +1630,11 @@ test("seen watermark null when chatSig empty", async () => {
   await ctx.feature.sendPrompt();
   assert.equal(ctx.echoes[0].seen, null);
 
-  const ctx2 = makeFeature({ chatSig: "yes", lastTurns: [{}, {}] });
+  const ctx2 = makeFeature({ chatSig: "yes", lastTurns: [{ uid: "u", segment: 0, record: 3 }] });
   ctx2.feature.bind();
   ctx2.roots.prompt.textContent = "y";
   await ctx2.feature.sendPrompt();
-  assert.equal(ctx2.echoes[0].seen, 2);
+  assert.deepEqual(ctx2.echoes[0].seen, { uid: "u", segment: 0, record: 3 });
   ctx.feature.destroy();
   ctx2.feature.destroy();
 });

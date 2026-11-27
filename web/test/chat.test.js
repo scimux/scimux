@@ -278,6 +278,22 @@ test("Send-to confirmation ignores matching turns before its send boundary", () 
   ), newTurn);
 });
 
+test("Send-to confirmation uses address boundaries and keeps legacy numeric latches", () => {
+  const oldTurn = { role: "user", uid: "u", segment: 0, record: 2, text: "same" };
+  const later = { role: "user", uid: "u", segment: 0, record: 8, text: "same" };
+  const otherLog = { role: "user", uid: "v", segment: 0, record: 1, text: "same" };
+  assert.equal(chatmod.matchingForwardDestinationTurn(
+    { text: "same", after: { uid: "u", segment: 0, record: 5 } }, [oldTurn, later],
+  ), later);
+  assert.equal(chatmod.matchingForwardDestinationTurn(
+    { text: "same", after: { uid: "u", segment: 0, record: 5 } }, [oldTurn],
+  ), null);
+  assert.equal(chatmod.matchingForwardDestinationTurn(
+    { text: "same", after: { uid: "u", segment: 0, record: 5 } }, [otherLog],
+  ), otherLog);
+  assert.equal(chatmod.matchingForwardDestinationTurn({ text: "same", afterTurns: 1 }, [oldTurn, later]), later);
+});
+
 /* The server records what it delivered, and an attachment makes that the
    prompt plus extendPrompt's appended reference. Equality alone would leave
    every attachment-bearing Send-to permanently unconfirmed. */
@@ -1647,7 +1663,7 @@ test("keyRowHTML: ACP still emits the hint unconditionally (CSS-only concealment
 });
 
 /* ---------- sentEcho ---------- */
-test("retireSentEcho: text match, seen index, base growth, timeout", () => {
+test("retireSentEcho uses turn addresses across a sliding window and keeps timeout", () => {
   const now = 1_000_000;
   const echo = { node: "n", text: "hello\nworld", at: now - 1000, seen: null };
 
@@ -1659,26 +1675,50 @@ test("retireSentEcho: text match, seen index, base growth, timeout", () => {
   assert.equal(match.retired, true);
 
   const bySeen = retireSentEcho(
-    { ...echo, seen: 1, text: "reshaped beyond recognition" },
-    [{ role: "user", text: "a" }, { role: "user", text: "b" }],
+    { ...echo, seen: { uid: "u", segment: 0, record: 8 }, text: "reshaped beyond recognition" },
+    [{ role: "user", uid: "u", segment: 0, record: 9, text: "new" }],
     now,
   );
   assert.equal(bySeen.retired, true);
 
+  const newLog = retireSentEcho(
+    { ...echo, seen: { uid: "old", segment: 0, record: 90 }, text: "different" },
+    [{ role: "user", uid: "new", segment: 0, record: 1, text: "new log" }], now,
+  );
+  assert.equal(newLog.retired, true, "a different UID is after the boundary");
+
   const base1 = retireSentEcho(
     { ...echo, seen: null, text: "reshaped" },
-    [{ role: "user", text: "only" }],
+    [],
     now,
   );
   assert.equal(base1.retired, false);
-  assert.equal(base1.echo.base, 1);
+  assert.deepEqual(base1.echo.base, { uid: "", record: -1 });
+
+  const baseExisting = retireSentEcho(
+    { ...echo, seen: null, text: "reshaped" },
+    [{ role: "user", uid: "u", segment: 1, record: 8, text: "already here" }], now,
+  );
+  assert.equal(baseExisting.retired, false);
+  assert.deepEqual(baseExisting.echo.base, { uid: "u", record: 8 });
+  assert.equal(retireSentEcho(
+    { ...baseExisting.echo },
+    [{ role: "user", uid: "u", record: 8, text: "already here" },
+      { role: "user", uid: "u", record: 9, text: "arrived later" }], now,
+  ).retired, true);
 
   const base2 = retireSentEcho(
-    { ...echo, seen: null, base: 1, text: "reshaped" },
-    [{ role: "user", text: "a" }, { role: "user", text: "b" }],
+    { ...echo, seen: null, base: base1.echo.base, text: "reshaped" },
+    [{ role: "user", uid: "u", segment: 0, record: 1, text: "later" }],
     now,
   );
   assert.equal(base2.retired, true);
+
+  const sameBase = retireSentEcho(
+    { ...echo, seen: null, base: { uid: "u", record: 8 }, text: "reshaped" },
+    [{ role: "user", uid: "u", record: 8, text: "same old turn" }], now,
+  );
+  assert.equal(sameBase.retired, false);
 
   const timeout = retireSentEcho(
     { ...echo, at: now - SENT_ECHO_TIMEOUT_MS - 1, text: "still waiting" },
