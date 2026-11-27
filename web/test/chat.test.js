@@ -9933,7 +9933,7 @@ test("history page merge handles empty input and joins turns and decisions by se
       {segment_index:4,segment_offset:1,turns:[{record:10}],decisions:[{record:20},{record:15}]},
       {segment_index:5,segment_offset:0,turns:[{record:50}]},
     ], empty_segments:[{segment_index:1},{segment_index:2}], assets:{new:{name:"new"}}, before_count:7,
-  });
+  },"before");
   assert.deepEqual(joined.segs[0].turns.map(t=>t.record),[10,30]);
   assert.deepEqual(joined.segs[0].decisions.map(d=>d.record),[15,20,35]);
   assert.equal(joined.segs[0].segment_offset,1);
