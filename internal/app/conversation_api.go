@@ -954,7 +954,7 @@ func (a *app) handleChatPage(w http.ResponseWriter, r *http.Request, n *Node) {
 			return
 		}
 		var ok bool
-		result, ok = a.sessionLogCache(n.ID).Page(a.sessionLogPath(n.ID), mode, at, limit)
+		result, ok = readChatPage(a.sessionLogCache(n.ID), a.sessionLogPath(n.ID), mode, at, limit)
 		if !ok {
 			http.Error(w, "page unavailable", http.StatusInternalServerError)
 			return
@@ -977,6 +977,10 @@ func (a *app) handleChatPage(w http.ResponseWriter, r *http.Request, n *Node) {
 		"current_segment": result.Current, "assets": assets,
 		"allow_external_attachments": a.settings().AllowExternalAttachments,
 	})
+}
+
+var readChatPage = func(cache *sessionlog.LogCache, path string, mode sessionlog.PageMode, at, limit int) (sessionlog.PageResult, bool) {
+	return cache.Page(path, mode, at, limit)
 }
 
 // chatETagExempt contains fields with no web/js reader that move every tick

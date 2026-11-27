@@ -113,6 +113,7 @@ func TestChatStartWindowBoundaries(t *testing.T) {
 		hasHead   bool
 	}{
 		{name: "zero", start: 0, wantStart: 0},
+		{name: "negative clamps", start: -1, wantStart: 0},
 		{name: "mid-cycle", start: 4, wantStart: 4, wantHead: 2, hasHead: true},
 		{name: "at length", start: 8, wantStart: 8},
 		{name: "past length clamps", start: 99, wantStart: 8},

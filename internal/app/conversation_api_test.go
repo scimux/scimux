@@ -1865,6 +1865,20 @@ func TestHandleChatPageValidationAndPrecedence(t *testing.T) {
 	}
 }
 
+func TestHandleChatPageUnavailable(t *testing.T) {
+	a, node, _ := chatWindowTestApp(t)
+	uid := a.segment(node).UID
+	oldReadChatPage := readChatPage
+	readChatPage = func(*sessionlog.LogCache, string, sessionlog.PageMode, int, int) (sessionlog.PageResult, bool) {
+		return sessionlog.PageResult{}, false
+	}
+	t.Cleanup(func() { readChatPage = oldReadChatPage })
+	rec := chatWindowRequest(a, node, "page=before&at=2&log_uid="+uid)
+	if rec.Code != http.StatusInternalServerError || strings.TrimSpace(rec.Body.String()) != "page unavailable" {
+		t.Errorf("page failure status/body=%d/%q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleChatPageProjectsOnlyReturnedTurns(t *testing.T) {
 	a, node, log := chatWindowTestApp(t)
 	uid := sessionlog.ReadSegment(log).UID
