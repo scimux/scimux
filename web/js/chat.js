@@ -297,6 +297,7 @@ export function buildChatSignature(parts){
     p.permDialogId || "",
     p.permManual ? "1" : "0",
     p.priorTurns || 0,
+    p.omittedTurns || 0,
     p.chatStarted || "",
     p.echoHash || "",
     p.histKey || "",
@@ -430,8 +431,12 @@ export function hashTurnAttrs(turns, hash = hashStr){
     s += "\n" + (t.agent || "") + "\0";
     const hasProv = Object.prototype.hasOwnProperty.call(t, "prov");
     s += hasProv ? "1" : "0";
-    try { s += JSON.stringify(hasProv ? t.prov : null); }
-    catch { s += "\0"; }
+    if (t.uid && Number.isInteger(t.record)) {
+      s += "\0" + t.uid + "/" + (Number(t.segment) || 0) + "/" + t.record;
+    } else {
+      try { s += JSON.stringify(hasProv ? t.prov : null); }
+      catch { s += "\0"; }
+    }
   }
   return hash(s);
 }
@@ -555,13 +560,17 @@ export function histLoadHTML(priorTurns){
   return `<div class="chatseam"><button class="histload">show earlier history &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
 }
 
+export function segmentLoadHTML(omitted){
+  const n = Number(omitted) || 0;
+  if (n <= 0) return "";
+  return `<div class="chatseam"><button class="histload" data-scope="segment">show earlier turns &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
+}
+
 export function pendingEmptyHTML({
   freshSurface, pending, supervision = "", delivering = false, ended = false,
 } = {}){
   if (freshSurface) return `<div class="pending">fresh chat \u2014 send a prompt</div>`;
   /* Ahead of the startup wording on purpose: by the time the prompt is being
-export function segmentLoadHTML(omitted){ return ""; }
-
      delivered, SessionStart has arrived, so "waiting for SessionStart" would
      name the one thing that already happened — which is how a healthy launch
      came to read as a stuck one. */
@@ -1224,7 +1233,7 @@ export function decisionsHash(decisions){
 }
 
 /* Merge turns and decision surfaces by durable record index. */
-export function mergeTimelineItems(turns, decisions){
+export function mergeTimelineItems(turns, decisions, leaseBase = null){
   const items = [];
   (turns || []).forEach((t, i) => {
     const rec = t && t.record != null ? Number(t.record) : i;
@@ -1249,7 +1258,7 @@ export function mergeTimelineItems(turns, decisions){
     const lease = item.decision && item.decision.decision &&
       String(item.decision.decision.lease_id || "");
     if (!lease) return;
-    const ordinal = (byLease.get(lease) || 0) + 1;
+    const ordinal = (byLease.get(lease) || Number(leaseBase?.[lease]) || 0) + 1;
     byLease.set(lease, ordinal);
     item.ordinal = ordinal;
   });
@@ -1413,6 +1422,7 @@ export function createChatFeature(deps){
 
   /* feature-owned state */
   let chatSig = "";
+  let fullSegment = { node: "", visit: -1 };
   let renderedNode = "";
   let activeHighlight = null;
   /* What this tab hides. Read again on every refresh; nothing here is sent. */
@@ -1757,12 +1767,13 @@ export function createChatFeature(deps){
     }
   }
 
-  function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets, externalAllowed = false, discussion = null, emptySegment = null } = {}){
-    const anchored = (discussion || []).flatMap(copy => ownerCommentAnchors(copy.uid, turns, copy.mirrors, copy.comments, emptySegment).map(item => ({...item, copy})));
+  function renderTimelineHTML(turns, decisions, { hist = false, segIndex = 0, nodeId, assets, externalAllowed = false, discussion = null, emptySegment = null, windowed = false, leaseBase = null, leadFirstKey = "" } = {}){
+    const anchored = (discussion || []).flatMap(copy => ownerCommentAnchors(copy.uid, turns, copy.mirrors, copy.comments, emptySegment).filter(item => !windowed || item.turn !== -1).map(item => ({...item, copy})));
     const commentsAfter = index => anchored.filter(item => item.turn === index).map(item => discussionHTML(item.comment, item.copy, nodeId)).join("");
-    const items = mergeTimelineItems(turns, decisions);
+    const items = mergeTimelineItems(turns, decisions, leaseBase);
     const view = foldPlan(items, {
       state: foldState,
+      leadFirstKey,
       isProtected(turn){ return agentBubbleProtected(turn, nodeId) || anchored.some(item => turns[item.turn] === turn); },
     });
     for (let i = 0; i < view.rows.length; i++) foldRows.push(view.rows[i]);
@@ -2094,6 +2105,7 @@ export function createChatFeature(deps){
     peekSig = "";
     activeHighlight = null;
     chatSig = "";
+    fullSegment = { node: "", visit: -1 };
     syncMuseSchemaWarning(null);
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
     chatETag = { node: "", etag: "" };
@@ -2144,6 +2156,8 @@ export function createChatFeature(deps){
   async function loadHistory(id, scrollTo, { preserveScroll = false } = {}){
     const savedScrollTop = preserveScroll && msgs ? msgs.scrollTop : null;
     const gen = g("selGen", 0);
+    fullSegment = { node: id, visit: gen };
+    chatSig = "";
     try {
       const data = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
       if (g("sel", "") !== id || g("selGen", 0) !== gen) return;
@@ -2350,7 +2364,13 @@ export function createChatFeature(deps){
     if (typeof d.setPendingJump === "function") d.setPendingJump(v);
   }
 
-  function consumePendingJump(el, turns, priorTurns){
+  function setFullSegment(id, visit = g("selGen", 0)){
+    fullSegment = { node: id, visit };
+    chatSig = "";
+    refreshChat();
+  }
+
+  function consumePendingJump(el, turns, priorTurns, omittedTurns = 0){
     const pendingJump = getPendingJump();
     const sel = g("sel", "");
     if (!pendingJump || pendingJump.node !== sel) return false;
@@ -2367,13 +2387,14 @@ export function createChatFeature(deps){
         setPendingJump(null); if (typeof d.toast === "function") d.toast("This shared message is unavailable — the saved bookmark remains."); return false;
       }
       setPendingJump({node:sel, uid:copy.uid, segment:entry.local_segment, record:entry.local_record, ts:pendingJump.ts, visit:pendingJump.visit});
-      return consumePendingJump(el, turns, priorTurns);
+      return consumePendingJump(el, turns, priorTurns, omittedTurns);
     }
     if (pendingJump.team?.log === "comments" && promptSourceKey(pendingJump.team)) {
       const source = pendingJump.team;
       const key = [source.server, source.owner, source.chat, source.generation].join("/");
       const target = q(el, `[data-gkey="${CSSRef.escape(key)}"][data-cseq="${source.seq}"]`);
       if (target) { setPendingJump(null); scrollAndFlash(target); return true; }
+      if (omittedTurns > 0){ setFullSegment(sel); return false; }
       if (priorTurns > 0 && !(chatHist.node === sel && chatHist.segs) && !pendingJump.histLoading) {
         pendingJump.histLoading = true; setPendingJump(pendingJump); loadHistory(sel, "");
       }
@@ -2389,6 +2410,7 @@ export function createChatFeature(deps){
       scrollAndFlash(target);
       return true;
     }
+    if (omittedTurns > 0){ setFullSegment(sel); return false; }
     if (priorTurns > 0 && (pendingJump.uid || pendingJump.turnTime)){
       const histReady = chatHist.node === sel && chatHist.segs;
       if (!histReady){
@@ -2451,8 +2473,10 @@ export function createChatFeature(deps){
     const endChatLoad = beginChatLoad(n.id, gen, !chatSig);
     const flights = readPromptFlights(d.storage, n.id);
     const traced = flights.find(flight => flight.accepted && !flight.terminalUnknown && promptSourceKey(flight.address));
-    const traceQuery = traced ? `?trace_uid=${encodeURIComponent(traced.address.uid)}&trace_segment=${traced.address.segment ?? 0}&trace_record=${traced.address.record}` : "";
-    const chatPath = `/api/nodes/${encodeURIComponent(n.id)}/chat${traceQuery}`;
+    const full = fullSegment.node === n.id && fullSegment.visit === gen;
+    const traceQuery = traced ? `trace_uid=${encodeURIComponent(traced.address.uid)}&trace_segment=${traced.address.segment ?? 0}&trace_record=${traced.address.record}` : "";
+    const query = [traceQuery, full ? "" : "tail=50"].filter(Boolean).join("&");
+    const chatPath = `/api/nodes/${encodeURIComponent(n.id)}/chat${query ? `?${query}` : ""}`;
     /* Use only this node's tag, and only while its local render remains valid.
        A local-state change can invalidate chatSig while the server's live
        segment stays unchanged (history expansion, terminal toggle, local
@@ -2649,6 +2673,7 @@ export function createChatFeature(deps){
       permDialogId: data.perm_dialog_id || "",
       permManual: !!data.perm_manual,
       priorTurns: data.prior_turns || 0,
+      omittedTurns: data.omitted_turns || 0,
       chatStarted: data.chat_started || "",
       echoHash: echo ? hash(echo.text) : "",
       histKey: hist ? "h" + priorSegs.length : "",
@@ -2676,7 +2701,7 @@ export function createChatFeature(deps){
       const wasAtBottom = !!(el && nearBottom(el.scrollHeight, el.scrollTop, el.clientHeight));
       renderPeekHost(n, paneState);
       if (el){
-        if (consumePendingJump(el, turns, data.prior_turns || 0)) { endChatLoad(); return; }
+        if (consumePendingJump(el, turns, data.prior_turns || 0, data.omitted_turns || 0)) { endChatLoad(); return; }
         if (chatScrollBottom){
           const decision = pinChatBottom(el);
           if (decision.action === "pin") chatScrollBottom = false;
@@ -2728,7 +2753,8 @@ export function createChatFeature(deps){
     el.innerHTML =
       (unplaced ? '<div class="chatnotice">Earlier comments: position unavailable</div>' + unplaced : "") +
       (earlier ? '<div class="chatnotice">Earlier discussion</div>' + earlier : "") +
-      (data.prior_turns > 0 && !hist ? histLoadHTML(data.prior_turns) : "") +
+      (!hist && data.omitted_turns > 0 ? segmentLoadHTML(data.omitted_turns) :
+        (data.prior_turns > 0 && !hist ? histLoadHTML(data.prior_turns) : "")) +
       priorSegs.map((s, si) =>
         `<div class="chatseam histseam" data-seam="${escape(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${escape(whenFn(s.start))}</span></div>` +
         renderTimelineHTML(s.turns || [], s.decisions || [], {
@@ -2747,6 +2773,9 @@ export function createChatFeature(deps){
         : "") +
       renderTimelineHTML(turns, liveDecisions, {
         hist: false, nodeId: n.id, assets, discussion, emptySegment: {uid:data.log_uid, segment:data.segment_index},
+        windowed: (data.omitted_turns || 0) > 0,
+        leaseBase: data.lease_base || null,
+        leadFirstKey: data.window_head ? `${data.window_head.segment}/${data.window_head.record}` : "",
         externalAllowed: !!data.allow_external_attachments,
       }) +
       /* A transport error describes the just-finished turn. Keep it at the
@@ -2807,7 +2836,7 @@ export function createChatFeature(deps){
         schedulePinReassert();
       }
     }
-    const jumpScrolled = !histScrolled && consumePendingJump(el, turns, data.prior_turns || 0);
+    const jumpScrolled = !histScrolled && consumePendingJump(el, turns, data.prior_turns || 0, data.omitted_turns || 0);
     if (!histScrolled && !jumpScrolled && (atBottom || forcePeek))
       pinChatBottom(el);
     /* Unconditional clamp backstop after every rebuild — overscroll from a
@@ -3191,7 +3220,8 @@ export function createChatFeature(deps){
     const hl = e.target.closest && e.target.closest(".histload");
     if (hl){
       const sel = g("sel", "");
-      if (sel) loadHistory(sel, "seam");
+      if (sel && hl.dataset?.scope === "segment") setFullSegment(sel);
+      else if (sel) loadHistory(sel, "seam");
       return;
     }
     const marker = e.target.closest && e.target.closest("[data-bmarker]");
