@@ -10544,14 +10544,26 @@ test("an addressed range that already reaches the live tail rejoins and flashes 
   const ctx=makeFeature({
     api:async path=>path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:3,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:0,assets:{}}:{},
     chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}}),
+    deps:{now:undefined},
   });
   const liveTarget=el("div",{className:"turn user",dataset:{bk:"i:0"}});
   const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
   ctx.roots.msgs.querySelector=selector=>selector.includes('data-bk="i:0"')?liveTarget:query(selector);
-  ctx.setPending({node:"n1",uid:"u",segment:3,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:20,ts:Date.now()});ctx.feature.bind();await ctx.feature.render();
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.match(ctx.roots.msgs.innerHTML,/current/);
   assert.ok(liveTarget.classList.contains("jumpflash"),"the rejoined target uses its live bubble key");
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+  ctx.feature.destroy();
+});
+
+test("a selection change drops an orphaned detached range before rendering another node", async () => {
+  const paths=[];
+  const ctx=makeFeature({nodes:[{id:"n1",title:"One"},{id:"n2",title:"Two"}],api:async path=>path.includes("page=around")?{segments:[{segment_index:2,log_uid:"u",turns:[{role:"user",uid:"u",segment:2,record:20,text:"old target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:2,assets:{}}:{},chatConditional:async path=>{paths.push(path);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"other node"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}};}});
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  ctx.setSel("n2");ctx.setSelGen(2);await ctx.feature.render();
+  assert.match(ctx.roots.msgs.innerHTML,/other node/);
   assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
   ctx.feature.destroy();
 });
