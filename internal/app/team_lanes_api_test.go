@@ -298,10 +298,10 @@ func TestLaneShareEdges(t *testing.T) {
 	}
 	rec = putLane(h, laneLocal, strings.Replace(body, teamServerID, teamOtherID, 1))
 	assertAPIError(t, rec, http.StatusNotFound, "not_found")
-	script.failPath = "/v1/hello"
-	rec = putLane(h, laneLocal, body)
+	unreachable := &shareScript{failPath: "/v1/hello"}
+	uh, _, _, _ := readySurface(t, unreachable)
+	rec = putLane(uh, laneLocal, body)
 	assertAPIError(t, rec, http.StatusBadGateway, "unreachable")
-	script.failPath = ""
 	script.helloID = teamOtherID
 	rec = putLane(h, laneLocal, body)
 	assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
