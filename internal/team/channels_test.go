@@ -287,8 +287,6 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		`{"seats":[{"id":"` + chOther + `","name":"` + strings.Repeat("a", 65) + `"}]}`,
 		`{"seats":[{"id":"` + chOther + `","name":"Ada` + "\n" + `"}]}`,
 		`{"seats":[{"id":"` + chOther + `","name":" Ada"}]}`,
-		`{"seats":[{"id":"` + chOther + `","name":"Ada"}],"extra":1}`,
-		`{"seats":[{"id":"` + chOther + `","name":"Ada","extra":1}]}`,
 		seatsObject() + `{"x":1}`,
 	}
 	channels := []string{
@@ -309,7 +307,6 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"owner"}]}`,
 		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"read"},{"seat":"` + chOther + `","access":"write"}]}`,
 		channelObject() + `{"x":1}`,
-		`{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[],"extra":1}`,
 	}
 	appends := []string{
 		`not-json`,
@@ -321,7 +318,6 @@ func TestChannelCallsRejectAMalformedSuccess(t *testing.T) {
 		`{"generation":"` + chGen + `","results":[{"key":"0/2","seq":1,"duplicate":false}],"last":1}`,
 		`{"generation":"` + chGen + `","results":[],"last":1}`,
 		appendObject() + `{"x":1}`,
-		`{"generation":"` + chGen + `","results":[{"key":"0/1","seq":1,"duplicate":false}],"last":1,"extra":1}`,
 	}
 	// net/http discards a 204 body, so only a RoundTripper can present one.
 	for _, tc := range []struct {
@@ -900,6 +896,57 @@ func mirrorPage(entries string, last int, more bool) string {
 	return `{"generation":"` + chGen + `","entries":[` + entries + `],"last":` + fmt.Sprintf("%d", last) + `,"more":` + flag + `}`
 }
 
+func TestServerAnswersAcceptUnknownFields(t *testing.T) {
+	seatBody := `{"seats":[{"id":"` + chOther + `","name":"Ada","extra":1}],"extra":1}`
+	channelBody := `{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"read","extra":1}],"extra":1}`
+	appendBody := `{"generation":"` + chGen + `","results":[{"key":"0/1","seq":1,"duplicate":false,"extra":1}],"last":1,"extra":1}`
+	listBody := `{"channels":[` + channelBody + `],"extra":1}`
+	pageBody := `{"generation":"` + chGen + `","entries":[{"seq":1,"key":"0/1","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1},"extra":1}],"last":1,"more":false,"extra":1}`
+	srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		body := seatBody
+		status := http.StatusOK
+		switch {
+		case r.URL.Path == "/v1/channels":
+			body = listBody
+		case strings.HasSuffix(r.URL.Path, "/members"):
+			body = channelBody
+		case strings.HasSuffix(r.URL.Path, "/mirror") && r.Method == http.MethodGet:
+			body = pageBody
+		case strings.HasSuffix(r.URL.Path, "/mirror"):
+			body = appendBody
+		case r.URL.Path != "/v1/seats":
+			status = http.StatusCreated
+			body = channelBody
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	})
+	c := clientOn(srv)
+	seats, err := c.Seats(context.Background(), srv.URL, chToken)
+	if err != nil || len(seats) != 1 || seats[0].ID != chOther || seats[0].Name != "Ada" {
+		t.Fatalf("seats = %+v err = %v", seats, err)
+	}
+	gen, created, err := c.PutChannel(context.Background(), srv.URL, chToken, chOwner, chChat, "Synthetic title")
+	if err != nil || !created || gen != chGen {
+		t.Fatalf("put gen = %q created = %v err = %v", gen, created, err)
+	}
+	if err := c.SetMembers(context.Background(), srv.URL, chToken, chOwner, chChat, []Member{{Seat: chOther, Access: "read"}}); err != nil {
+		t.Fatal(err)
+	}
+	gotGen, last, err := c.AppendMirror(context.Background(), srv.URL, chToken, chOwner, chChat, chGen, []MirrorEntry{{Key: "0/1", Body: json.RawMessage(`{"v":1}`)}})
+	if err != nil || gotGen != chGen || last != 1 {
+		t.Fatalf("append gen = %q last = %d err = %v", gotGen, last, err)
+	}
+	list, err := c.Channels(context.Background(), srv.URL, chToken, false)
+	if err != nil || len(list) != 1 || list[0].Chat != chChat || len(list[0].Members) != 1 || list[0].Members[0].Seat != chOther {
+		t.Fatalf("channels = %+v err = %v", list, err)
+	}
+	page, err := c.ReadMirror(context.Background(), srv.URL, chToken, chOwner, chChat, 0)
+	if err != nil || len(page.Entries) != 1 || page.Entries[0].Seq != 1 || string(page.Entries[0].Body) != `{"v":1}` {
+		t.Fatalf("page = %+v err = %v", page, err)
+	}
+}
+
 func TestChannelsListsTheThreeAccessValues(t *testing.T) {
 	body := `{"channels":[` + channelObject() + `,` + guestChannel(chOther, chChat, "read", 2, 0) + `,` + guestChannel(chThird, "fedcba9876543210", "write", 0, 4) + `]}`
 	var query string
@@ -1055,7 +1102,6 @@ func TestGuestCallsRejectWhatIsNotTheProtocol(t *testing.T) {
 		`{"channels":`,
 		`{}`,
 		`{"channels":[]}` + `{"x":1}`,
-		`{"channels":[],"extra":1}`,
 		`{"channels":["no"]}`,
 		`{"channels":[` + guestChannel(chOwner, "bad chat", "read", 0, 0) + `]}`,
 		`{"channels":[` + guestChannel("short", chChat, "read", 0, 0) + `]}`,
@@ -1075,7 +1121,6 @@ func TestGuestCallsRejectWhatIsNotTheProtocol(t *testing.T) {
 		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"short","access":"read"}]}]}`,
 		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"owner"}]}]}`,
 		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"read"},{"seat":"` + chOther + `","access":"write"}]}]}`,
-		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":[{"seat":"` + chOther + `","access":"read","extra":1}]}]}`,
 		`{"channels":[{"owner":"` + chOwner + `","chat":"` + strings.Repeat("a", 65) + `","title":"Synthetic title","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"read","mirror_last":0,"comments_last":0}]}`,
 		`{"channels":[{"owner":"` + chOwner + `","chat":"` + chChat + `","title":"` + strings.Repeat("a", 201) + `","generation":"` + chGen + `","created_at":"2026-11-14T09:30:00.000Z","access":"read","mirror_last":0,"comments_last":0}]}`,
 	}
@@ -1129,7 +1174,6 @@ func TestGuestCallsRejectWhatIsNotTheProtocol(t *testing.T) {
 		mirrorPage(mirrorLine(1, "0/1", `{"v":1}`)+","+mirrorLine(1, "0/2", `{"v":1}`), 1, false),
 		mirrorPage(mirrorLine(1, "0/1", `{"v":1}`)+","+mirrorLine(3, "0/3", `{"v":1}`)+","+mirrorLine(2, "0/2", `{"v":1}`), 2, false),
 		mirrorPage(mirrorLine(5, "0/5", `{"v":1}`), 4, true),
-		`{"generation":"` + chGen + `","entries":[` + mirrorLine(1, "0/1", `{"v":1}`) + `],"last":1,"more":false,"extra":1}`,
 		`{"generation":"` + chGen + `","entries":[{"seq":"1","key":"0/1","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,
 		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"bad key","author":"` + chOther + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,
 		`{"generation":"` + chGen + `","entries":[{"seq":1,"key":"0/1","author":"short","at":"2026-11-14T09:30:00.000Z","body":{"v":1}}],"last":1,"more":false}`,

@@ -185,6 +185,23 @@ func TestCopyGapStoresNothing(t *testing.T) {
 	}
 }
 
+func TestCopyLineRejectsAnUnknownField(t *testing.T) {
+	dir := t.TempDir()
+	id := sampleCopyID()
+	author := fmt.Sprintf("%032x", 9)
+	path := copyPathOf(dir, id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"seq":1,"key":"k-1","author":"` + author + `","at":"2026-11-14T09:30:00.000Z","body":{"v":1},"extra":1}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ReadCopy(dir, id, MirrorLog, 0, 256, 4<<20); !errors.Is(err, ErrCopyDamaged) {
+		t.Fatalf("Read = %v", err)
+	}
+}
+
 func TestCopyDamageIsLeftUntouched(t *testing.T) {
 	secret := strings.Repeat("ab", 32)
 	author := fmt.Sprintf("%032x", 9)
