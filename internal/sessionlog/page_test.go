@@ -1,7 +1,9 @@
 package sessionlog
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -43,6 +45,7 @@ func pagingFixture(t *testing.T) string {
 		}
 	}
 	appendRawEvent(t, &b, Event{T: "assistant", Time: "2025-01-01T00:02:00Z", Text: "   \t"}, "\n")
+	appendRawEvent(t, &b, NewDecision(DecisionEvent{LeaseID: "lease-a", RequestID: "d5"}), "\n")
 	appendRawEvent(t, &b, NewClearSource("s2"), "\n")                    // intentionally empty clear surface
 	appendRawEvent(t, &b, NewSource("/mirror/rebind.jsonl", "s3"), "\n") // mechanical seam after empty surface
 	appendRawEvent(t, &b, NewDecision(DecisionEvent{LeaseID: "lease-b", RequestID: "d3"}), "\n")
@@ -187,6 +190,13 @@ func TestPageModesAndBoundedRead(t *testing.T) {
 	if countPageTurns(lastAround) != 4 || lastAround.AfterCount != 0 {
 		t.Errorf("around at end did not fill available range: %+v", lastAround)
 	}
+	oneTurn := writeLog(t, []Event{{T: "assistant", Time: "2025-01-01T00:00:00Z", Text: "only"}})
+	oneCache := &LogCache{}
+	oneAll, _ := oneCache.Page(oneTurn, PageBefore, 100, 5)
+	oneAround, _ := oneCache.Page(oneTurn, PageAround, oneAll.Segments[0].Turns[0].Record, 5)
+	if countPageTurns(oneAround) != 1 || oneAround.BeforeCount != 0 || oneAround.AfterCount != 0 {
+		t.Errorf("around one-turn edge incorrect: %+v", oneAround)
+	}
 	cycleAssistant := all.Segments[0].Turns[3]
 	window, ok := c.Page(path, PageAfter, cycleAssistant.Record, 3)
 	if !ok || len(window.Segments) == 0 {
@@ -198,6 +208,13 @@ func TestPageModesAndBoundedRead(t *testing.T) {
 	}
 	if w.LeaseBase["lease-a"] != 1 || len(w.Decisions) != 1 || w.Decisions[0].Decision.RequestID != "d2" {
 		t.Errorf("window decision lease metadata=%+v lease_base=%v", w.Decisions, w.LeaseBase)
+	}
+	// A decision in the physical range after the last selected turn of one
+	// segment is returned as an audit-only slice when the page starts in the
+	// following segment.
+	audit, ok := c.Page(path, PageAfter, all.Segments[0].Turns[len(all.Segments[0].Turns)-1].Record, 1)
+	if !ok || len(audit.Segments) < 2 || len(audit.Segments[0].Turns) != 0 || len(audit.Segments[0].Decisions) != 1 {
+		t.Errorf("intervening decision surface missing: %+v", audit)
 	}
 }
 
@@ -292,6 +309,20 @@ func TestPageDefensiveInputsAndReaderErrors(t *testing.T) {
 	defer f.Close()
 }
 
+func TestPageOpenFailure(t *testing.T) {
+	path := pagingFixture(t)
+	c := &LogCache{}
+	_ = c.Segment(path)
+	openCalled := false
+	c.pageOpen = func(string) (*os.File, error) {
+		openCalled = true
+		return nil, errors.New("synthetic open failure")
+	}
+	if _, ok := c.Page(path, PageBefore, 1<<30, 5); ok || !openCalled {
+		t.Fatalf("page/open result ok/called=%v/%v", ok, openCalled)
+	}
+}
+
 func TestPageReturnsFalseWhenIndexedRecordCanNoLongerBeDecoded(t *testing.T) {
 	path := writeLog(t, []Event{{T: "user", Time: "2025-01-01T00:00:00Z", Text: "indexed"}})
 	c := &LogCache{}
@@ -314,6 +345,53 @@ func TestPageReturnsFalseWhenIndexedRecordCanNoLongerBeDecoded(t *testing.T) {
 	}
 	if _, ok := c.Page(path, PageBefore, 100, 5); ok || c.pageReads != 1 {
 		t.Fatalf("corrupt indexed record result ok/reads=%v/%d, want false/1", ok, c.pageReads)
+	}
+}
+
+func TestPageRejectsIndexedRecordsWithUnexpectedShape(t *testing.T) {
+	t.Run("wrong turn type", func(t *testing.T) {
+		path := writeLog(t, []Event{{T: "user", Time: "2025-01-01T00:00:00Z", Text: "indexed"}})
+		c := &LogCache{}
+		_ = c.Segment(path)
+		mutateCachedLog(t, path, []byte(`"user"`), []byte(`"tool"`))
+		if _, ok := c.Page(path, PageBefore, 100, 5); ok || c.pageReads != 1 {
+			t.Fatalf("wrong-role page result ok/reads=%v/%d", ok, c.pageReads)
+		}
+	})
+	t.Run("decision without payload", func(t *testing.T) {
+		path := writeLog(t, []Event{
+			{T: "user", Time: "2025-01-01T00:00:00Z", Text: "indexed"},
+			NewDecision(DecisionEvent{LeaseID: "lease", RequestID: "decision"}),
+		})
+		c := &LogCache{}
+		_ = c.Segment(path)
+		mutateCachedLog(t, path, []byte(`"decision":`), []byte(`"whatever":`))
+		if _, ok := c.Page(path, PageBefore, 100, 5); ok || c.pageReads < 2 {
+			t.Fatalf("missing-decision page result ok/reads=%v/%d", ok, c.pageReads)
+		}
+	})
+}
+
+func mutateCachedLog(t *testing.T, path string, old, replacement []byte) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtime, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := bytes.Index(data, old)
+	if index < 0 || len(old) != len(replacement) {
+		t.Fatalf("could not replace %q with same-length bytes", old)
+	}
+	copy(data[index:index+len(old)], replacement)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime.ModTime(), mtime.ModTime()); err != nil {
+		t.Fatal(err)
 	}
 }
 
