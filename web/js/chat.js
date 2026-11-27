@@ -560,6 +560,8 @@ export function pendingEmptyHTML({
 } = {}){
   if (freshSurface) return `<div class="pending">fresh chat \u2014 send a prompt</div>`;
   /* Ahead of the startup wording on purpose: by the time the prompt is being
+export function segmentLoadHTML(omitted){ return ""; }
+
      delivered, SessionStart has arrived, so "waiting for SessionStart" would
      name the one thing that already happened — which is how a healthy launch
      came to read as a stuck one. */

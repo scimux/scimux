@@ -27,6 +27,7 @@ import {
   histBk,
   turnRoleClass,
   histLoadHTML,
+  segmentLoadHTML,
   pendingEmptyHTML,
   workPulseShouldRun,
   histScrollTargetIndex,
@@ -51,6 +52,7 @@ import {
   isSafeElicitationURL,
   ELICITATION_OPEN_LABEL,
   hashTurnAttrs,
+  mergeTimelineItems,
 } from "../js/chat.js";
 /* P6: ASSET_REF_RE + stripAssetRefs live in format.js (one home for every
    send-to strip). Mechanical import-path move from chat.js. */
@@ -546,6 +548,40 @@ test("histLoadHTML and pendingEmptyHTML empty/loading states", () => {
   assert.match(pendingEmptyHTML({ freshSurface: true }), /fresh chat/);
   assert.match(pendingEmptyHTML({ freshSurface: false, pending: true }), /waiting for the agent's transcript/);
   assert.match(pendingEmptyHTML({ freshSurface: false, pending: false }), /no readable transcript/);
+});
+
+test("segmentLoadHTML names the omitted current-segment turns", () => {
+  assert.equal(segmentLoadHTML(0), "");
+  assert.match(segmentLoadHTML(1), /show earlier turns &middot; 1 turn</);
+  assert.match(segmentLoadHTML(3), /show earlier turns &middot; 3 turns/);
+});
+
+test("chat signature includes omitted turns", () => {
+  const base = { nodeId: "n1", turnsHash: "same" };
+  assert.notEqual(buildChatSignature({ ...base, omittedTurns: 0 }),
+    buildChatSignature({ ...base, omittedTurns: 3 }));
+});
+
+test("timeline decision ordinals continue from lease base", () => {
+  const items = mergeTimelineItems([], [
+    { record: 4, decision: { lease_id: "L" } },
+  ], { L: 2 });
+  assert.equal(items[0].ordinal, 3);
+});
+
+test("addressed turns hash their address without reading provenance", () => {
+  let reads = 0;
+  const addressed = { agent: "codex", uid: "u", segment: 2, record: 7 };
+  Object.defineProperty(addressed, "prov", { enumerable: true, get(){ reads++; return { x: 1 }; } });
+  hashTurnAttrs([addressed]);
+  assert.equal(reads, 0);
+  for (const change of [
+    { agent: "claude" }, { uid: "other" }, { segment: 3 }, { record: 8 },
+  ]) assert.notEqual(hashTurnAttrs([addressed]), hashTurnAttrs([{ ...addressed, ...change }]));
+  assert.notEqual(hashTurnAttrs([{ agent: "codex", prov: { x: 1 } }]),
+    hashTurnAttrs([{ agent: "codex", prov: { x: 2 } }]));
+  const cyclic = {}; cyclic.self = cyclic;
+  assert.doesNotThrow(() => hashTurnAttrs([{ prov: cyclic }]));
 });
 
 test("histScrollTargetIndex finds earliest seam at-or-after stop time", () => {
@@ -6256,8 +6292,105 @@ test("P3C: histload click fetches history API", async () => {
     c.kind === "conditional" && c.path.includes("/chat") && !c.path.includes("history"));
   assert.equal(liveCalls.length, 2);
   assert.equal(liveCalls[1].etag, "", "local history expansion must bypass the held live ETag");
+  assert.match(liveCalls[0].path, /tail=50$/);
+  assert.match(liveCalls[1].path, /\/chat$/);
   assert.match(ctx.roots.msgs.innerHTML, /turn hist|data-bk="h:/);
   ctx.feature.destroy();
+});
+
+test("segment button switches the poll to the full current segment", async () => {
+  const payload = {
+    turns: [{ role: "user", uid: "u", segment: 0, record: 5, text: "window" }],
+    live: "quiet", delivery: "ok", source: "tmux", chat_started: "now",
+    prior_turns: 2, omitted_turns: 3, log_uid: "u", assets: {},
+    window_head: { uid: "u", segment: 0, record: 2 },
+  };
+  const calls = [];
+  const ctx = makeFeature({ chatPayload: payload, chatConditional: async path => {
+    calls.push(path);
+    const data = path.includes("tail=50") ? payload : { ...payload, omitted_turns: 0 };
+    return { status: 200, etag: `"${calls.length}"`, data };
+  } });
+  ctx.feature.bind(); await ctx.feature.render();
+  assert.match(calls[0], /\/chat\?tail=50$/);
+  assert.match(ctx.roots.msgs.innerHTML, /3 turns/);
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /show earlier history/);
+  const button = el("button", { className: "histload", dataset: { scope: "segment" } });
+  firstListener(ctx.roots.msgs, "click")({ target: button });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(calls.at(-1), /\/chat$/);
+  assert.match(ctx.roots.msgs.innerHTML, /show earlier history/);
+  ctx.feature.onSelectChange(); ctx.setSel("team/s/o/c/g"); ctx.setSelGen(2);
+  ctx.feature.onSelectChange(); ctx.setSel("n1"); ctx.setSelGen(3);
+  await ctx.feature.render();
+  assert.match(calls.at(-1), /\/chat\?tail=50$/);
+  ctx.feature.destroy();
+});
+
+test("trace query is combined with the tail query", async () => {
+  const values = new Map([["scimux-prompt-flights:n1", JSON.stringify([{
+    address: { uid: "u", segment: 2, record: 9 }, accepted: true,
+    terminalUnknown: false, sources: [{ uid: "u", segment: 2, record: 9 }],
+  }])]]);
+  const storage = { getItem: key => values.get(key) || null };
+  const ctx = makeFeature({ storage }); ctx.feature.bind(); await ctx.feature.render();
+  assert.match(ctx.apiCalls.find(call => call.kind === "conditional").path,
+    /\/chat\?trace_uid=u&trace_segment=2&trace_record=9&tail=50$/);
+  ctx.feature.destroy();
+});
+
+test("a jump outside the tail retries full and flashes the matching turn", async () => {
+  const target = { role: "user", uid: "u", segment: 0, record: 2, text: "older" };
+  const paths = [];
+  const payload = { turns: [{ role: "assistant", uid: "u", segment: 0, record: 8, text: "new" }],
+    live: "quiet", log_uid: "u", omitted_turns: 2, prior_turns: 0, assets: {} };
+  const ctx = makeFeature({ chatConditional: async path => {
+    paths.push(path);
+    return { status: 200, etag: `"${paths.length}"`, data: path.includes("tail=50") ? payload : { ...payload, turns: [target], omitted_turns: 0 } };
+  } });
+  const element = el("div", { className: "turn user", dataset: { i: "0" } });
+  const query = ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+  ctx.roots.msgs.querySelector = selector => selector === '.turn[data-i="0"]' ? element : query(selector);
+  ctx.setPending({ node: "n1", uid: "u", segment: 0, record: 2, ts: 1_000_000 });
+  await ctx.feature.render();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths[0], /tail=50$/); assert.match(paths.at(-1), /\/chat$/);
+  await ctx.feature.render();
+  assert.ok(element.classList.contains("jumpflash"));
+  ctx.feature.destroy();
+});
+
+test("a missing team-comment jump expands the current segment", async () => {
+  const paths = [];
+  const payload = { turns: [{ role: "assistant", uid: "u", segment: 0, record: 8, text: "new" }],
+    live: "quiet", log_uid: "u", omitted_turns: 2, prior_turns: 0, assets: {} };
+  const ctx = makeFeature({ chatConditional: async path => {
+    paths.push(path); return { status: 200, etag: `"${paths.length}"`, data: path.includes("tail=50") ? payload : { ...payload, omitted_turns: 0 } };
+  } });
+  ctx.setPending({ node: "n1", team: { server: "s", owner: "o", chat: "u", generation: "g", log: "comments", seq: 1 }, ts: 1_000_000 });
+  await ctx.feature.render(); await new Promise(resolve => setImmediate(resolve));
+  assert.match(paths[0], /tail=50$/); assert.match(paths.at(-1), /\/chat$/);
+  ctx.feature.destroy();
+});
+
+test("comments anchored before a window are hidden until the segment is full", async () => {
+  const copy = { uid: "u", key: "s/o/u/g", view: { server: "s" }, names: {}, people: {},
+    mirrors: [{ seq: 1, local_segment: 0, local_record: 1 }],
+    comments: [{ seq: 2, anchor: 1, text: "earlier anchored comment", author: "o" }] };
+  const turns = [{ role: "user", uid: "u", segment: 0, record: 5, text: "window" }];
+  const ctx = makeFeature({ deps: { ownerDiscussion: () => [copy] }, chatPayload: {
+    turns, log_uid: "u", segment_index: 0, omitted_turns: 3, live: "quiet", assets: {},
+  } });
+  ctx.feature.bind(); await ctx.feature.render();
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML, /earlier anchored comment/);
+  ctx.feature.destroy();
+  const full = makeFeature({ deps: { ownerDiscussion: () => [copy] }, chatPayload: {
+    turns: [{ ...turns[0], record: 1 }, ...turns], log_uid: "u", segment_index: 0, omitted_turns: 0, live: "quiet", assets: {},
+  } });
+  full.feature.bind(); await full.feature.render();
+  assert.match(full.roots.msgs.innerHTML, /earlier anchored comment/); full.feature.destroy();
 });
 
 test("P3C: open-terminal when closed opens pane and never POSTs /key", async () => {

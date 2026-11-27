@@ -159,6 +159,29 @@ test("a prompt with three agent bubbles has one middle bubble", () => {
   assert.deepEqual(shownText(items, folded), ["user:u1", "agent:a2", "open:1:0/3", "agent:a4"]);
 });
 
+test("leadFirstKey folds the leading window group by its supplied key", () => {
+  const items = [agent(5), agent(6), agent(7), agent(8)];
+  const open = foldPlan(items, { state: empty(), leadFirstKey: "0/3" });
+  assert.equal(open.turns[0].firstKey, "0/3");
+  assert.equal(open.turns[0].canFold, true);
+  const folded = foldPlan(items, {
+    state: { all: false, turns: ["0/3"], open: [] },
+    leadFirstKey: "0/3",
+  });
+  assert.deepEqual(folded.shown, [false, false, false, true]);
+  assert.deepEqual(folded.rows.map(row => row.count), [3]);
+});
+
+test("leadFirstKey supports a single leading agent and ignores a user-led list", () => {
+  const one = foldPlan([agent(5)], { state: empty(), leadFirstKey: "0/3" });
+  assert.equal(one.turns[0].firstKey, "0/3");
+  assert.equal(one.turns[0].canFold, false);
+  const items = [user(1), agent(2), agent(3), agent(4)];
+  const ordinary = foldPlan(items, { state: empty() });
+  const withLead = foldPlan(items, { state: empty(), leadFirstKey: "8/99" });
+  assert.deepEqual(withLead, ordinary);
+});
+
 test("a prompt with twelve agent bubbles folds the ten in the middle", () => {
   const items = promptWithAgents(12);
   const folded = plan(items, { all: false, turns: ["0/2"], open: [] });
