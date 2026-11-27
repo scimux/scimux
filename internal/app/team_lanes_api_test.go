@@ -663,6 +663,41 @@ func TestLaneShareStoreEdges(t *testing.T) {
 		}
 	})
 
+	t.Run("index id", func(t *testing.T) {
+		h, _, _, _ := readySurface(t, &shareScript{})
+		asTeamHandler(t, h).mintChat = func() (string, error) { return "", errors.New("boom") }
+		rec := putLane(h, laneLocal, lanePutBody("all", "North", laneColor, []team.Member{}, []string{}))
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+	})
+
+	t.Run("unwritable remove", func(t *testing.T) {
+		h, dir, _, _ := readySurface(t, &shareScript{})
+		if err := team.SaveLaneShare(dir, team.LaneShare{
+			ID: shareUID, Lane: laneLocal, Server: teamOtherID, Scope: "all", Name: "North", Color: laneColor,
+			Members: []team.Member{}, Rev: 1, Starts: map[string]int{}, Excluded: []string{},
+			Generation: shareGen, IndexRev: 1, State: "active", SharedAt: "2026-11-12T09:30:00Z",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		denyDataWrites(t, dir)
+		rec := doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+	})
+
+	t.Run("damaged chats", func(t *testing.T) {
+		h, dir, _, _ := readySurface(t, &shareScript{})
+		seedLane(t, dir, laneLocal, shareUID)
+		if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rec := doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
+		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+		lanes, err := team.LoadLaneShares(dir)
+		if err != nil || lanes[0].State != "active" {
+			t.Fatalf("lane = %+v %v", lanes, err)
+		}
+	})
+
 	t.Run("helpers", func(t *testing.T) {
 		h, _, _, _ := readySurface(t, &shareScript{})
 		th := asTeamHandler(t, h)
