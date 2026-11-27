@@ -10472,6 +10472,31 @@ test("detached paging serializes overlapping requests and ignores stale page res
   ctx.feature.destroy();
 });
 
+test("detached reads tolerate empty slices and stale around failures", async () => {
+  const empty=makeFeature({
+    api:async path=>{
+      if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,turns:[],decisions:[]}],empty_segments:[],before_count:1,after_count:0,assets:{}};
+      return {};
+    },
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+  });
+  empty.setPending({node:"n1",uid:"u",segment:3,record:20,ts:1_000_000});empty.feature.bind();await empty.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(empty.roots.msgs.innerHTML,/current/);assert.doesNotMatch(empty.roots.msgs.innerHTML,/data-bk="h:3:/);empty.feature.destroy();
+
+  let rejectAround;const toasts=[];
+  const stale=makeFeature({
+    api:async path=>path.includes("page=around")?new Promise((_,reject)=>{rejectAround=reject;}):{},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+    deps:{toast:m=>toasts.push(m)},
+  });
+  stale.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});stale.feature.bind();await stale.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));stale.feature.jumpToNow();
+  rejectAround(Object.assign(new Error("no_turn"),{status:404}));
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(toasts,[],"a stale around error cannot toast after returning to latest");stale.feature.destroy();
+});
+
 test("an empty around response is tolerated without a scrollend control", async () => {
   const roots=makeRoots();roots.scrollend=null;
   const ctx=makeFeature({roots,api:async path=>path.includes("page=around")?null:{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
