@@ -551,7 +551,31 @@ export function pinDecision({ scrollTop = 0, scrollHeight = 0, clientHeight = 0,
 }
 
 export function liveBk(i){ return `i:${i}`; }
-export function histBk(si, ti){ return `h:${si}:${ti}`; }
+export function histBk(segmentIndex, absoluteIndex){ return `h:${segmentIndex}:${absoluteIndex}`; }
+
+export function mergeHistoryPage(current, page){
+  const segs = (current?.segs || []).map(s => ({...s, turns:[...(s.turns || [])], decisions:[...(s.decisions || [])]}));
+  for (const slice of page?.segments || []){
+    const i = segs.findIndex(s => s.segment_index === slice.segment_index);
+    if (i < 0) segs.push({...slice, turns:[...(slice.turns || [])], decisions:[...(slice.decisions || [])]});
+    else {
+      const old = segs[i];
+      segs[i] = {...old, ...slice,
+        segment_offset: slice.segment_offset,
+        turns:[...(slice.turns || []), ...old.turns],
+        decisions:[...(slice.decisions || []), ...old.decisions].sort((a,b) => a.record - b.record),
+      };
+    }
+  }
+  segs.sort((a,b) => a.segment_index - b.segment_index);
+  const empty = new Map((current?.emptySegs || []).map(s => [s.segment_index, s]));
+  for (const s of page?.empty_segments || []) empty.set(s.segment_index, s);
+  return {
+    node: current?.node || "", segs, emptySegs:[...empty.values()].sort((a,b) => a.segment_index - b.segment_index),
+    assets:Object.assign({}, current?.assets || {}, page?.assets || {}),
+    beforeCount: page?.before_count || 0, paged:true, scrollTo:"",
+  };
+}
 
 export function turnRoleClass(role, { hist = false, media = false, echo = false } = {}){
   const base = role === "user" ? "user" : "assistant";
@@ -573,6 +597,12 @@ export function segmentLoadHTML(omitted){
   const n = Number(omitted) || 0;
   if (n <= 0) return "";
   return `<div class="chatseam"><button class="histload" data-scope="segment">show earlier turns &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
+}
+
+function earlierLoadHTML(count){
+  const n = Math.max(0, Number(count) || 0);
+  if (!n) return "";
+  return `<div class="chatseam"><button class="histload" data-scope="earlier">show earlier turns &middot; ${n} turn${n === 1 ? "" : "s"}</button></div>`;
 }
 
 export function pendingEmptyHTML({
@@ -1431,7 +1461,7 @@ export function createChatFeature(deps){
 
   /* feature-owned state */
   let chatSig = "";
-  let fullSegment = { node: "", visit: -1 };
+  let live = { node: "", visit: -1, start: null, segment: null, omitted: 0, prior: 0, uid: "" };
   let renderedNode = "";
   let activeHighlight = null;
   /* What this tab hides. Read again on every refresh; nothing here is sent. */
@@ -1466,7 +1496,10 @@ export function createChatFeature(deps){
   let sentEcho = null;
   let suppressAttentionUntil = {};
   let dismissedAttention = {};
-  let chatHist = { node: "", segs: null, scrollTo: "", assets: {} };
+  let chatHist = { node: "", segs: null, emptySegs: [], scrollTo: "", assets: {}, beforeCount: 0, paged: false };
+  let earlierTimer = null;
+  let earlierLoading = false;
+  let earlierRequest = 0;
   let chatScrollBottom = false;
   let lastTurns = [];
   let bubbleTurns = {};
@@ -1555,6 +1588,11 @@ export function createChatFeature(deps){
     chatLoadTimer = null;
     if (msgwrap && msgwrap.classList) msgwrap.classList.remove("loading");
     if (chatloading) chatloading.hidden = true;
+  }
+
+  function clearEarlierTimer(){
+    if (earlierTimer !== null) clearTimeoutFn(earlierTimer);
+    earlierTimer = null;
   }
 
   function clearRenderedListeners(){
@@ -1791,7 +1829,7 @@ export function createChatFeature(deps){
       foldTurnEntries.push(entry);
       if (!entry.canFold) continue;
       const item = items[entry.firstIndex];
-      const bk = hist ? histBk(segIndex, item.index) : liveBk(indexBase + item.index);
+      const bk = hist ? histBk(segIndex, indexBase + item.index) : liveBk(indexBase + item.index);
       foldByBK[bk] = entry;
     }
     if (view.canFoldAny) foldCanAny = true;
@@ -1809,7 +1847,7 @@ export function createChatFeature(deps){
         });
         continue;
       }
-      const bk = hist ? histBk(segIndex, item.index) : liveBk(indexBase + item.index);
+      const bk = hist ? histBk(segIndex, indexBase + item.index) : liveBk(indexBase + item.index);
       html += renderTurnHTML(item.turn, { bk, hist, nodeId, assets, externalAllowed, shared: (discussion || []).some(copy => copy.uid === item.turn.uid) });
       html += commentsAfter(item.index);
     }
@@ -1871,6 +1909,21 @@ export function createChatFeature(deps){
     const node = findFoldAnchor(el, anchor);
     if (!node || node.offsetTop == null) return;
     el.scrollTop = node.offsetTop - anchor.distance;
+  }
+
+  function captureReaderAnchor(el){
+    const top = el.scrollTop || 0;
+    const turn = qa(el, ".turn[data-bk]").find(item => (item.offsetTop || 0) + (item.offsetHeight || 0) > top);
+    return turn && turn.dataset?.bk
+      ? { bk:turn.dataset.bk, distance:(turn.offsetTop || 0) - top }
+      : null;
+  }
+
+  function restoreReaderAnchor(el, anchor){
+    const turn = q(el, `.turn[data-bk="${anchor.bk}"]`);
+    if (!turn || turn.offsetTop == null) return false;
+    el.scrollTop = turn.offsetTop - anchor.distance;
+    return true;
   }
 
   function controlHasFocus(node){
@@ -2099,6 +2152,8 @@ export function createChatFeature(deps){
     interactionCard.retire();
     ++chatLoadToken;
     clearChatLoad();
+    clearEarlierTimer();
+    ++earlierRequest;
     setWorkPulse(false);
     if (typeof d.setComposerBusy === "function") d.setComposerBusy(false);
     if (keyrow) keyrow.innerHTML = "";
@@ -2114,7 +2169,7 @@ export function createChatFeature(deps){
     peekSig = "";
     activeHighlight = null;
     chatSig = "";
-    fullSegment = { node: "", visit: -1 };
+    live = { node: "", visit: -1, start: null, segment: null, omitted: 0, prior: 0, uid: "" };
     syncMuseSchemaWarning(null);
     /* Drop the per-node chat ETag so a tag from node A is never sent for B. */
     chatETag = { node: "", etag: "" };
@@ -2128,7 +2183,7 @@ export function createChatFeature(deps){
     chatScrollBottom = true;
     termOpen = false;
     tappedTurn = "";
-    chatHist = { node: "", segs: null, scrollTo: "", assets: {} };
+    chatHist = { node: "", segs: null, emptySegs: [], scrollTo: "", assets: {}, beforeCount: 0, paged: false };
     editingChatDesc = false;
     chatDetailSavedUntil = 0;
     permExpanded = { node: "", open: false };
@@ -2139,6 +2194,10 @@ export function createChatFeature(deps){
     descriptionEditor = null;
     editingChatDesc = false;
     chatDetailSavedUntil = 0;
+    live = { node: g("sel", ""), visit: g("selGen", 0), start: null, segment: live.segment, omitted: 0, prior: 0, uid: "" };
+    chatHist = { node: "", segs: null, emptySegs: [], scrollTo: "", assets: {}, beforeCount: 0, paged: false };
+    clearEarlierTimer();
+    ++earlierRequest;
     chatSig = "";
   }
 
@@ -2151,8 +2210,14 @@ export function createChatFeature(deps){
   }
 
   function jumpToNow(){
+    const hadRender = !!chatSig;
     chatHist.scrollTo = "";
-    if (chatSig){
+    chatHist = { node: "", segs: null, emptySegs: [], scrollTo: "", assets: {}, beforeCount: 0, paged: false };
+    live = { ...live, start: null, omitted: 0, prior: 0 };
+    clearEarlierTimer();
+    ++earlierRequest;
+    chatSig = "";
+    if (hadRender){
       const decision = pinChatBottom(msgs);
       /* No layout yet — keep the intent so a later re-assert can finish the job. */
       if (decision.pending) chatScrollBottom = true;
@@ -2160,17 +2225,18 @@ export function createChatFeature(deps){
     } else {
       chatScrollBottom = true;
     }
+    refreshChat();
   }
 
   async function loadHistory(id, scrollTo, { preserveScroll = false } = {}){
     const savedScrollTop = preserveScroll && msgs ? msgs.scrollTop : null;
     const gen = g("selGen", 0);
-    fullSegment = { node: id, visit: gen };
+    live = { node: id, visit: gen, start: 0, segment: live.segment, omitted: 0, prior: 0, uid: "" };
     chatSig = "";
     try {
       const data = await api(`/api/nodes/${encodeURIComponent(id)}/chat?history=1`);
       if (g("sel", "") !== id || g("selGen", 0) !== gen) return;
-      chatHist = { node: id, segs: data.segments || [], emptySegs: data.empty_segments || [], scrollTo: scrollTo || "", assets: data.assets || {} };
+      chatHist = { node: id, segs: data.segments || [], emptySegs: data.empty_segments || [], scrollTo: scrollTo || "", assets: data.assets || {}, beforeCount: 0, paged: false };
       chatScrollBottom = false;
       chatSig = "";
       await refreshChat();
@@ -2373,10 +2439,52 @@ export function createChatFeature(deps){
     if (typeof d.setPendingJump === "function") d.setPendingJump(v);
   }
 
-  function setFullSegment(id, visit = g("selGen", 0)){
-    fullSegment = { node: id, visit };
+  function setStartZero(id, visit = g("selGen", 0)){
+    live = { ...live, node: id, visit, start: 0 };
     chatSig = "";
     refreshChat();
+  }
+
+  function earlierCount(){
+    if (chatHist.node === g("sel", "") && chatHist.paged) return Math.max(0, chatHist.beforeCount || 0);
+    if (chatHist.node === g("sel", "") && chatHist.segs) return 0;
+    return Math.max(0, live.omitted || 0) + Math.max(0, live.prior || 0);
+  }
+
+  async function loadEarlier(){
+    if (earlierLoading || !earlierCount()) return;
+    const id = g("sel", ""), gen = g("selGen", 0);
+    if (!id || live.node !== id || live.visit !== gen) return;
+    if ((live.start == null ? live.omitted : live.start) > 0){
+      earlierLoading = true;
+      live.start = Math.max(0, live.omitted - 100);
+      chatSig = "";
+      try { await refreshChat(); }
+      finally { earlierLoading = false; }
+      return;
+    }
+    live.start = 0;
+    const firstPrior = (chatHist.segs || []).flatMap(s => s.turns)[0] || null;
+    const firstLive = lastTurns.find(t => Number.isInteger(t.record));
+    const at = firstPrior?.record ?? firstLive?.record ?? 2147483647;
+    earlierLoading = true;
+    const request = ++earlierRequest;
+    try {
+      const page = await api(`/api/nodes/${encodeURIComponent(id)}/chat?page=before&at=${at}&limit=100&log_uid=${encodeURIComponent(live.uid)}`);
+      if (request !== earlierRequest || g("sel", "") !== id || g("selGen", 0) !== gen) return;
+      chatHist = mergeHistoryPage({...chatHist, node:id}, page || {});
+      chatSig = "";
+      await refreshChat();
+    } catch (err){
+      if (err?.status === 409){
+        live = { ...live, start:null, omitted:0, prior:0 };
+        chatHist = { node:"", segs:null, emptySegs:[], scrollTo:"", assets:{}, beforeCount:0, paged:false };
+        chatSig = "";
+        await refreshChat();
+      }
+    } finally {
+      earlierLoading = false;
+    }
   }
 
   function consumePendingJump(el, turns, priorTurns, omittedTurns = 0){
@@ -2403,7 +2511,7 @@ export function createChatFeature(deps){
       const key = [source.server, source.owner, source.chat, source.generation].join("/");
       const target = q(el, `[data-gkey="${CSSRef.escape(key)}"][data-cseq="${source.seq}"]`);
       if (target) { setPendingJump(null); scrollAndFlash(target); return true; }
-      if (omittedTurns > 0){ setFullSegment(sel); return false; }
+      if (omittedTurns > 0){ setStartZero(sel); return false; }
       if (priorTurns > 0 && !(chatHist.node === sel && chatHist.segs) && !pendingJump.histLoading) {
         pendingJump.histLoading = true; setPendingJump(pendingJump); loadHistory(sel, "");
       }
@@ -2419,7 +2527,7 @@ export function createChatFeature(deps){
       scrollAndFlash(target);
       return true;
     }
-    if (omittedTurns > 0){ setFullSegment(sel); return false; }
+    if (omittedTurns > 0){ setStartZero(sel); return false; }
     if (priorTurns > 0 && (pendingJump.uid || pendingJump.turnTime)){
       const histReady = chatHist.node === sel && chatHist.segs;
       if (!histReady){
@@ -2479,12 +2587,14 @@ export function createChatFeature(deps){
     }
     renderChatHead();
     const gen = g("selGen", 0);
+    if (live.node !== n.id || live.visit !== gen)
+      live = { node:n.id, visit:gen, start:null, segment:null, omitted:0, prior:0, uid:"" };
     const endChatLoad = beginChatLoad(n.id, gen, !chatSig);
     const flights = readPromptFlights(d.storage, n.id);
     const traced = flights.find(flight => flight.accepted && !flight.terminalUnknown && promptSourceKey(flight.address));
-    const full = fullSegment.node === n.id && fullSegment.visit === gen;
     const traceQuery = traced ? `trace_uid=${encodeURIComponent(traced.address.uid)}&trace_segment=${traced.address.segment ?? 0}&trace_record=${traced.address.record}` : "";
-    const query = [traceQuery, full ? "" : "tail=50"].filter(Boolean).join("&");
+    const windowQuery = live.start == null ? "tail=50" : `start=${live.start}`;
+    const query = [traceQuery, windowQuery].filter(Boolean).join("&");
     const chatPath = `/api/nodes/${encodeURIComponent(n.id)}/chat${query ? `?${query}` : ""}`;
     /* Use only this node's tag, and only while its local render remains valid.
        A local-state change can invalidate chatSig while the server's live
@@ -2515,6 +2625,20 @@ export function createChatFeature(deps){
       }
     } catch { endChatLoad(); return; }
     if (gen !== g("selGen", 0) || g("sel", "") !== n.id) return;
+
+    if (live.segment != null && data.segment_index !== live.segment){
+      ++earlierRequest;
+      live = { node:n.id, visit:gen, start:null, segment:data.segment_index ?? null, omitted:0, prior:0, uid:data.log_uid || "" };
+      chatHist = { node:"", segs:null, emptySegs:[], scrollTo:"", assets:{}, beforeCount:0, paged:false };
+      chatSig = "";
+      endChatLoad();
+      await refreshChat();
+      return;
+    }
+    live.segment = data.segment_index ?? live.segment;
+    live.omitted = data.omitted_turns || 0;
+    live.prior = data.prior_turns || 0;
+    live.uid = data.log_uid || live.uid;
 
     let chromeChanged = false;
     if (data.live && n.live !== data.live){
@@ -2685,7 +2809,7 @@ export function createChatFeature(deps){
       omittedTurns: data.omitted_turns || 0,
       chatStarted: data.chat_started || "",
       echoHash: echo ? hash(echo.text) : "",
-      histKey: hist ? "h" + priorSegs.length : "",
+      histKey: hist ? priorSegs.map(s => `${s.segment_index}:${s.segment_offset || 0}:${hashTurns(s.turns || [])}`).join(";") : "",
       turnsHash: hashTurns(turns),
       turnAttrHash: hashTurnAttrs(turns, hash),
       markerHash: String(g("markerVersion", "")),
@@ -2745,11 +2869,16 @@ export function createChatFeature(deps){
        Resolved before the write so we neither zero the offset nor bottom-pin
        when a pendingJump is aiming at this node. */
     const jumpAimed = !!(getPendingJump() && getPendingJump().node === g("sel", ""));
+    const preserveReader = !atBottom && !jumpAimed && !chatScrollBottom && !foldAnchor && !chatHist.scrollTo;
+    const readerAnchor = preserveReader ? captureReaderAnchor(el) : null;
     /* Zero any inherited offset before the write on a node switch so deferred
        momentum / a stale large scrollTop from the chat we left cannot land
        outside the new content's range. */
     if (chatScrollBottom && !jumpAimed) el.scrollTop = 0;
     const unplaced = (discussion || []).flatMap(copy => ownerUnplacedComments(copy.mirrors, copy.comments).map(comment => discussionHTML(comment, copy, n.id))).join("");
+    const earlierHTML = earlierLoadHTML(earlierCount());
+    const hasPriorPages = chatHist.node === n.id && chatHist.paged;
+    const earlierBeforeHistory = earlierHTML && (hasPriorPages || !(data.omitted_turns > 0)) ? earlierHTML : "";
     // With no prior agent turns there is no history button. An accepted
     // comment can nevertheless precede the first native session seam.
     const earlier = !hist && !data.prior_turns && Number.isInteger(data.segment_index)
@@ -2762,16 +2891,21 @@ export function createChatFeature(deps){
     el.innerHTML =
       (unplaced ? '<div class="chatnotice">Earlier comments: position unavailable</div>' + unplaced : "") +
       (earlier ? '<div class="chatnotice">Earlier discussion</div>' + earlier : "") +
-      (data.prior_turns > 0 && !hist && !(data.omitted_turns > 0) ? histLoadHTML(data.prior_turns) : "") +
+      earlierBeforeHistory +
       priorSegs.map((s, si) =>
         `<div class="chatseam histseam" data-seam="${escape(s.seam || "")}"><span>${s.reason && s.reason !== "clear" ? "history from" : "chat started"} ${escape(whenFn(s.start))}</span></div>` +
         renderTimelineHTML(s.turns || [], s.decisions || [], {
-          hist: true, segIndex: si, nodeId: n.id, assets, discussion, emptySegment: {uid:s.log_uid, segment:s.segment_index},
+          hist: true, segIndex: Number.isInteger(s.segment_index) ? s.segment_index : si,
+          indexBase: s.segment_offset || 0, windowed: (s.segment_offset || 0) > 0,
+          leaseBase: s.lease_base || null,
+          leadFirstKey: s.window_head ? `${s.window_head.segment}/${s.window_head.record}` : "",
+          nodeId: n.id, assets, discussion, emptySegment: {uid:s.log_uid, segment:s.segment_index},
           externalAllowed: !!data.allow_external_attachments,
         })
       ).join("") +
       (data.chat_started
         ? `<div class="chatseam curseam"><span>chat started ${escape(whenFn(data.chat_started))}</span></div>` : "") +
+      (!hasPriorPages && data.omitted_turns > 0 ? earlierHTML : "") +
       (!turns.length && !liveDecisions.length
           ? pendingEmptyHTML({
             freshSurface, pending: data.pending, delivering,
@@ -2779,7 +2913,6 @@ export function createChatFeature(deps){
             ended: !!n.ended_at,
           })
         : "") +
-      (!hist && data.omitted_turns > 0 ? segmentLoadHTML(data.omitted_turns) : "") +
       renderTimelineHTML(turns, liveDecisions, {
         hist: false, indexBase: data.omitted_turns || 0, nodeId: n.id, assets, discussion, emptySegment: {uid:data.log_uid, segment:data.segment_index},
         windowed: (data.omitted_turns || 0) > 0,
@@ -2814,6 +2947,7 @@ export function createChatFeature(deps){
     renderPeekHost(n, paneState);
 
     renderBubbleActions();
+    const foldScrolled = !!foldAnchor;
     if (foldAnchor) restoreFoldAnchor(el);
     syncFoldAll();
 
@@ -2846,7 +2980,9 @@ export function createChatFeature(deps){
       }
     }
     const jumpScrolled = !histScrolled && consumePendingJump(el, turns, data.prior_turns || 0, data.omitted_turns || 0);
-    if (!histScrolled && !jumpScrolled && (atBottom || forcePeek))
+    if (!histScrolled && !jumpScrolled && !foldScrolled && readerAnchor)
+      restoreReaderAnchor(el, readerAnchor);
+    else if (!histScrolled && !jumpScrolled && !preserveReader && (atBottom || forcePeek))
       pinChatBottom(el);
     /* Unconditional clamp backstop after every rebuild — overscroll from a
        shrink or a stale offset never leaves a blank viewport. */
@@ -2991,8 +3127,15 @@ export function createChatFeature(deps){
   }
 
   function onMsgsScroll(){
-    if (!chathead || !msgs || !chathead.classList) return;
-    chathead.classList.toggle("compact", msgs.scrollTop > 30);
+    if (chathead?.classList) chathead.classList.toggle("compact", msgs.scrollTop > 30);
+    if (live.start == null && !nearBottom(msgs.scrollHeight, msgs.scrollTop, msgs.clientHeight))
+      live.start = live.omitted;
+    clearEarlierTimer();
+    earlierTimer = setTimeoutFn(() => {
+      earlierTimer = null;
+      if (msgs.scrollTop < msgs.clientHeight && earlierCount() > 0 && !earlierLoading)
+        void loadEarlier();
+    }, 150);
   }
 
   function onMsgsLoad(e){
@@ -3229,8 +3372,7 @@ export function createChatFeature(deps){
     const hl = e.target.closest && e.target.closest(".histload");
     if (hl){
       const sel = g("sel", "");
-      if (sel && hl.dataset?.scope === "segment") setFullSegment(sel);
-      else if (sel) loadHistory(sel, "seam");
+      if (sel && hl.dataset?.scope === "earlier") void loadEarlier();
       return;
     }
     const marker = e.target.closest && e.target.closest("[data-bmarker]");
@@ -3384,6 +3526,7 @@ export function createChatFeature(deps){
 
   function onScrollEnd(){
     if (!msgs) return;
+    jumpToNow();
     if (typeof msgs.scrollTo === "function")
       msgs.scrollTo({ top: msgs.scrollHeight, behavior: "smooth" });
     else msgs.scrollTop = msgs.scrollHeight;
@@ -3468,6 +3611,7 @@ export function createChatFeature(deps){
     }
     clearRenderedListeners();
     clearChatLoad();
+    clearEarlierTimer();
     clearPinObserver();
     clearPermMoreObserver();
     bound = false;
