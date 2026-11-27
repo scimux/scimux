@@ -698,6 +698,18 @@ func TestLaneShareStoreEdges(t *testing.T) {
 		}
 	})
 
+	t.Run("other chat", func(t *testing.T) {
+		h, dir, _, _ := readySurface(t, &shareScript{})
+		seedLane(t, dir, laneLocal, shareUID)
+		mustSaveShare(t, dir, team.Share{UID: shareUIDB, Node: shareNode, Lane: shareUID, Members: []team.Member{}})
+		mustSaveShare(t, dir, team.Share{UID: "0000000000000002", Node: "other", Lane: shareUIDC, Members: []team.Member{}})
+		rec := doTeam(h, http.MethodGet, "/api/team/lane-shares/"+laneLocal, "")
+		got := decodeLaneView(t, rec)
+		if rec.Code != http.StatusOK || got.Chats != 1 {
+			t.Fatalf("chats = %d %s", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("helpers", func(t *testing.T) {
 		h, _, _, _ := readySurface(t, &shareScript{})
 		th := asTeamHandler(t, h)
