@@ -83,8 +83,45 @@ type LogCache struct {
 	importAcc      []AssetImportEvent
 	importSeen     map[[2]int]bool
 
+	// Compact page index. It retains record locations and the fields needed to
+	// reconstruct history headers, never event text or raw events.
+	pageSegments []pageSegmentIndex
+	pageReads    int // test spy: record ReadAt operations in Page
+
 	walks       int   // test spy: times the file was actually parsed
 	bytesParsed int64 // test spy: bytes read from the file on the last parse
+}
+
+type recordRef struct {
+	end int64
+	len int // JSON payload length, including a trimmed CR when present
+}
+
+type pageTurnIndex struct {
+	ref     recordRef
+	record  int
+	role    string
+	segment int
+	uid     string
+	agent   string
+}
+
+type pageDecisionIndex struct {
+	ref     recordRef
+	record  int
+	leaseID string
+}
+
+type pageSegmentIndex struct {
+	index         int
+	start         string
+	seam          string
+	reason        string
+	seamRecord    int
+	firstTurnTime string
+	uid           string
+	turns         []pageTurnIndex
+	decisions     []pageDecisionIndex
 }
 
 // rideSegAccum holds the per-segment time material for the v2 ride model.
