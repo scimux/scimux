@@ -10511,6 +10511,27 @@ test("detached reads tolerate empty slices and stale around failures", async () 
   assert.deepEqual(toasts,[],"a stale around error cannot toast after returning to latest");stale.feature.destroy();
 });
 
+test("an empty detached slice uses the sentinel record and a null page rejoins", async () => {
+  const calls=[];
+  const ctx=makeFeature({
+    api:async path=>{
+      calls.push(path);
+      if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,decisions:[]}],empty_segments:[],before_count:1,after_count:2,assets:{}};
+      if(path.includes("page=before"))return null;
+      return {};
+    },
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}}),
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=2147483647&limit=100&log_uid=u/);
+  assert.ok(calls.some(path=>/start=0/.test(path)),"an empty final page rejoins the live segment");
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  ctx.feature.destroy();
+});
+
 test("an empty around response is tolerated without a scrollend control", async () => {
   const roots=makeRoots();roots.scrollend=null;
   const ctx=makeFeature({roots,api:async path=>path.includes("page=around")?null:{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
