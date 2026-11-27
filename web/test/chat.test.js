@@ -10438,6 +10438,15 @@ test("a detached poll rejoins when its current slice reaches the live boundary",
   ctx.feature.destroy();
 });
 
+test("detached paging works when the conversation controls omit scrollend", async () => {
+  const roots=makeRoots();roots.scrollend=null;
+  const ctx=makeFeature({roots,api:async path=>path.includes("page=around")?{segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}:{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/target/);
+  ctx.feature.destroy();
+});
+
 test("reader bubble offset survives prepending a history page", async () => {
   let historyRead = 0;
   const ctx = makeFeature({
