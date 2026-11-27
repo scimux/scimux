@@ -750,7 +750,16 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 		return
 	}
+	if r.URL.Query().Has("page") {
+		a.handleChatPage(w, r, n)
+		return
+	}
 	tailN, tailGiven := 0, false
+	startN, startGiven := 0, r.URL.Query().Has("start")
+	if r.URL.Query().Has("tail") && startGiven {
+		http.Error(w, "tail and start", http.StatusBadRequest)
+		return
+	}
 	if r.URL.Query().Has("tail") {
 		tailGiven = true
 		values := r.URL.Query()["tail"]
@@ -762,6 +771,19 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		tailN, err = strconv.Atoi(values[0])
 		if err != nil || tailN < 1 || tailN > 500 {
 			http.Error(w, "bad tail", http.StatusBadRequest)
+			return
+		}
+	}
+	if startGiven {
+		values := r.URL.Query()["start"]
+		if len(values) != 1 {
+			http.Error(w, "bad start", http.StatusBadRequest)
+			return
+		}
+		var err error
+		startN, err = strconv.Atoi(values[0])
+		if err != nil || startN < 0 {
+			http.Error(w, "bad start", http.StatusBadRequest)
 			return
 		}
 	}
@@ -777,6 +799,10 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	var window chatWindow
 	if tailGiven {
 		window = chatTailWindow(seg.Turns, seg.Decisions, tailN)
+	} else if startGiven {
+		window = chatStartWindow(seg.Turns, seg.Decisions, startN)
+	}
+	if tailGiven || startGiven {
 		turnsForProjection = seg.Turns[window.start:]
 		decisions = window.decisions
 	}
@@ -786,7 +812,7 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		"chat_started": seg.StartTime, "prior_turns": seg.PriorTurns,
 		"log_uid": seg.UID, "segment_index": seg.Index,
 	}
-	if tailGiven {
+	if tailGiven || startGiven {
 		resp["omitted_turns"] = window.start
 		if window.windowHead != nil {
 			resp["window_head"] = window.windowHead
@@ -873,6 +899,84 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+func (a *app) handleChatPage(w http.ResponseWriter, r *http.Request, n *Node) {
+	q := r.URL.Query()
+	if q.Has("tail") || q.Has("start") {
+		http.Error(w, "page conflicts with tail or start", http.StatusBadRequest)
+		return
+	}
+	pageValues := q["page"]
+	if len(pageValues) != 1 {
+		http.Error(w, "bad page", http.StatusBadRequest)
+		return
+	}
+	mode := sessionlog.PageMode(pageValues[0])
+	if mode != sessionlog.PageBefore && mode != sessionlog.PageAfter && mode != sessionlog.PageAround {
+		http.Error(w, "bad page", http.StatusBadRequest)
+		return
+	}
+	atValues := q["at"]
+	if len(atValues) != 1 {
+		http.Error(w, "bad at", http.StatusBadRequest)
+		return
+	}
+	at, err := strconv.Atoi(atValues[0])
+	if err != nil || at < 0 {
+		http.Error(w, "bad at", http.StatusBadRequest)
+		return
+	}
+	limit := 100
+	if q.Has("limit") {
+		values := q["limit"]
+		if len(values) != 1 {
+			http.Error(w, "bad limit", http.StatusBadRequest)
+			return
+		}
+		limit, err = strconv.Atoi(values[0])
+		if err != nil || limit < 1 || limit > 200 {
+			http.Error(w, "bad limit", http.StatusBadRequest)
+			return
+		}
+	}
+	uidValues := q["log_uid"]
+	if len(uidValues) != 1 || uidValues[0] == "" {
+		http.Error(w, "bad log_uid", http.StatusBadRequest)
+		return
+	}
+	result := sessionlog.PageResult{Segments: []sessionlog.HistorySlice{}, EmptySegments: []sessionlog.HistorySegment{}}
+	assets := map[string]any{}
+	if a.sessionsDir != "" {
+		seg := a.segment(n)
+		if uidValues[0] != seg.UID {
+			http.Error(w, "log_changed", http.StatusConflict)
+			return
+		}
+		var ok bool
+		result, ok = a.sessionLogCache(n.ID).Page(a.sessionLogPath(n.ID), mode, at, limit)
+		if !ok {
+			http.Error(w, "page unavailable", http.StatusInternalServerError)
+			return
+		}
+		if mode == sessionlog.PageAround && !result.Found {
+			http.Error(w, "no_turn", http.StatusNotFound)
+			return
+		}
+		for i := range result.Segments {
+			var found map[string]any
+			result.Segments[i].Turns, found = a.projectTurns(n.ID, result.Segments[i].Turns)
+			for id, value := range found {
+				assets[id] = value
+			}
+		}
+	}
+	writeJSON(w, map[string]any{
+		"segments": result.Segments, "empty_segments": result.EmptySegments,
+		"before_count": result.BeforeCount, "after_count": result.AfterCount,
+		"current_segment": result.Current, "assets": assets,
+		"allow_external_attachments": a.settings().AllowExternalAttachments,
+	})
 }
 
 // chatETagExempt contains fields with no web/js reader that move every tick

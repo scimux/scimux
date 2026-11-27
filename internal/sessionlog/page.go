@@ -36,23 +36,23 @@ type HistorySlice struct {
 
 // PageResult contains selected history surfaces and whole-log range counts.
 type PageResult struct {
-	Segments    []HistorySlice   `json:"segments"`
-	Empty       []HistorySegment `json:"empty_segments"`
-	BeforeCount int              `json:"before_count"`
-	AfterCount  int              `json:"after_count"`
-	Current     int              `json:"current_segment"`
-	Found       bool             `json:"-"`
+	Segments      []HistorySlice   `json:"segments"`
+	EmptySegments []HistorySegment `json:"empty_segments"`
+	BeforeCount   int              `json:"before_count"`
+	AfterCount    int              `json:"after_count"`
+	Current       int              `json:"current_segment"`
+	Found         bool             `json:"-"`
 }
 
 // Page returns a bounded turn range from the cached log.
 func (c *LogCache) Page(path string, mode PageMode, at, limit int) (PageResult, bool) {
 	if !c.ensure(path) {
-		return PageResult{Segments: []HistorySlice{}, Empty: []HistorySegment{}}, false
+		return PageResult{Segments: []HistorySlice{}, EmptySegments: []HistorySegment{}}, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	result := PageResult{
-		Segments: []HistorySlice{}, Empty: []HistorySegment{}, Current: c.recSeg,
+		Segments: []HistorySlice{}, EmptySegments: []HistorySegment{}, Current: c.recSeg,
 	}
 	if limit < 1 || limit > 200 || (mode != PageBefore && mode != PageAfter && mode != PageAround) {
 		return result, false
@@ -213,7 +213,7 @@ func (c *LogCache) Page(path string, mode PageMode, at, limit int) (PageResult, 
 		if len(seg.turns) != 0 || (!initialEmpty && seg.seamRecord < firstRecord) || seg.seamRecord > lastRecord {
 			continue
 		}
-		result.Empty = append(result.Empty, HistorySegment{
+		result.EmptySegments = append(result.EmptySegments, HistorySegment{
 			UID: seg.uid, Index: seg.index, Start: seg.start, Seam: seg.seam,
 			Reason: seg.reason, Turns: []transcript.Turn{}, Decisions: []DecisionSurface{},
 		})

@@ -110,7 +110,7 @@ func TestPageBeforeMatchesHistoryOracle(t *testing.T) {
 	}
 	var pageEmpty []HistorySegment
 	for _, p := range reversePages {
-		pageEmpty = append(pageEmpty, p.Empty...)
+		pageEmpty = append(pageEmpty, p.EmptySegments...)
 	}
 	if !reflect.DeepEqual(uniqueHistorySegments(pageEmpty), emptyTurnSurfaces(ReadHistoryIncludingEmpty(path))) {
 		t.Fatalf("empty surfaces across pages differ: got=%+v", pageEmpty)
