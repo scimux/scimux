@@ -75,3 +75,29 @@ func TestChatTailWindowDecisionsAndLeaseBase(t *testing.T) {
 		t.Errorf("empty decisions produced decisions=%v lease_base=%v", empty.decisions, empty.leaseBase)
 	}
 }
+
+func TestChatTailWindowKeepsAllDecisionsWhenNothingIsOmitted(t *testing.T) {
+	decisions := []sessionlog.DecisionSurface{
+		{Record: 2, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
+		{Record: 4, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
+	}
+	t.Run("empty segment", func(t *testing.T) {
+		got := chatTailWindow(nil, decisions, 50)
+		if !reflect.DeepEqual(got.decisions, decisions) {
+			t.Errorf("decisions = %+v, want both %+v", got.decisions, decisions)
+		}
+		if len(got.leaseBase) != 0 {
+			t.Errorf("lease_base = %#v, want empty", got.leaseBase)
+		}
+	})
+	t.Run("tail contains full segment", func(t *testing.T) {
+		turns := []transcript.Turn{{Role: "user", Record: 10}, {Role: "assistant", Record: 11}}
+		got := chatTailWindow(turns, decisions[:1], 50)
+		if !reflect.DeepEqual(got.decisions, decisions[:1]) {
+			t.Errorf("decision before first turn = %+v, want retained %+v", got.decisions, decisions[:1])
+		}
+		if len(got.leaseBase) != 0 {
+			t.Errorf("lease_base = %#v, want empty", got.leaseBase)
+		}
+	})
+}
