@@ -294,10 +294,11 @@ ETag short-circuiting.
 
 On the polled (non-history) path, responses carry an `ETag`; polling clients
 may send `If-None-Match` and receive `304 Not Modified` when the snapshot is
-unchanged. The tag hashes the fully marshalled body (turns *and* mechanics such
-as attention, `last_change`, delivery, and Claude `compacting` /
-`elicitation_waiting`), so a
-needs-input or compaction flip without a log write still invalidates the cache.
+unchanged. The tag hashes the marshalled response without `last_change`,
+`watermark`, `progress`, `pending_calls`, `waiting_on`, and `ctx_used`; these
+fields remain in the 200 body. Attention, needs-input state, `ctx_pct`,
+`ctx_window`, delivery, Claude `compacting`, and `elicitation_waiting` remain
+hashed, so changes to them still invalidate the cache.
 
 The polled path may request a bounded recent-turn window with `?tail=N`, where
 `N` is an integer from 1 through 500. Invalid values return `400 bad tail`.

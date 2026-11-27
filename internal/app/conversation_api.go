@@ -847,17 +847,27 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	} else {
 		a.tmuxChatInto(resp, n, seg)
 	}
-	// Polled path only: ETag short-circuit hashes the fully marshalled body
-	// (same as /api/state). Hashing log identity alone would miss needs-input,
-	// attention, last_change, and other mechanics that change without a log
-	// write — the trap that hides an unanswered approval dialog.
+	// Polled path only: response mechanics stay in the body, but the ETag below
+	// ignores fields the browser does not read and that change on every agent tick.
 	body, err := json.Marshal(resp)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	etagResp := make(map[string]any, len(resp))
+	for key, value := range resp {
+		etagResp[key] = value
+	}
+	for _, key := range chatETagExempt {
+		delete(etagResp, key)
+	}
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
 	h := fnv.New64a()
-	h.Write(body)
+	h.Write(etagBody)
 	etag := fmt.Sprintf(`"%x"`, h.Sum64())
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
@@ -866,6 +876,12 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+// chatETagExempt contains fields with no web/js reader that move every tick
+// while an agent works. Visible attention, needs-input and gauge fields remain hashed.
+var chatETagExempt = [...]string{
+	"last_change", "watermark", "progress", "pending_calls", "waiting_on", "ctx_used",
 }
 
 func (a *app) claudeWorkerChatInto(resp map[string]any, n *Node, state sessionworker.State, seg sessionlog.Segment) {
