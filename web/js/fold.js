@@ -250,7 +250,9 @@ export function foldPlan(items, options){
     }
     if (agents.length === 0) continue;
     const first = agents[0];
-    const firstKey = foldKey(first.item.turn);
+    const leading = g === 0 && itemRole(entries[0]?.item) === "agent" &&
+      isKey(options.leadFirstKey);
+    const firstKey = leading ? options.leadFirstKey : foldKey(first.item.turn);
     const bubbleKeys = [];
     for (let i = 0; i < agents.length; i++){
       const key = foldKey(agents[i].item.turn);
@@ -258,7 +260,7 @@ export function foldPlan(items, options){
     }
     const turnFolded = !!state.all || (firstKey !== "" && turnSet.has(firstKey));
     const middles = [];
-    for (let i = 1; i < agents.length - 1; i++){
+    for (let i = leading ? 0 : 1; i < agents.length - 1; i++){
       const entry = agents[i];
       const key = foldKey(entry.item.turn);
       const protectedBubble = !!isProtected(entry.item.turn);

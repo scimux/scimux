@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createStorage } from "../js/storage.js";
+import { createStorage, awaitingForwardKey, writeAwaitingForward, readAwaitingForward } from "../js/storage.js";
 import { installHost, identityAssetURL } from "./s2-helpers.js";
 
 /* A localStorage-shaped object whose named methods throw the way a browser
@@ -21,6 +21,31 @@ function refusing(parts, init = {}){
     _map: map,
   };
 }
+
+test("awaiting-forward latch preserves addresses, legacy counts, and degrades invalid addresses", () => {
+  const data = new Map();
+  const storage = {
+    getItem: key => data.get(key) ?? null,
+    setItem: (key, value) => data.set(key, String(value)),
+  };
+  const address = { uid: "u", segment: 3, record: 17 };
+  const written = writeAwaitingForward(storage, "n1", "forwarded", address, 100);
+  assert.deepEqual(written, { text: "forwarded", after: address, at: 100 });
+  assert.deepEqual(JSON.parse(data.get(awaitingForwardKey("n1"))), written);
+  assert.deepEqual(readAwaitingForward(storage, "n1", 101), written);
+  assert.equal(readAwaitingForward(storage, "missing", 101), null);
+
+  const legacy = writeAwaitingForward(storage, "n1", "legacy", 4.9, 200);
+  assert.deepEqual(legacy, { text: "legacy", afterTurns: 4, at: 200 });
+  assert.deepEqual(readAwaitingForward(storage, "n1", 201), legacy);
+
+  data.set(awaitingForwardKey("n1"), JSON.stringify({
+    text: "garbled", after: { uid: "u", segment: "bad", record: "bad" }, afterTurns: 8, at: 300,
+  }));
+  assert.deepEqual(readAwaitingForward(storage, "n1", 301), {
+    text: "garbled", afterTurns: 0, at: 300,
+  });
+});
 
 test("a working store is used, and says it will survive the tab", () => {
   const raw = refusing([]);

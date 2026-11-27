@@ -628,7 +628,7 @@ test('local node named team can read and send through the real app routing', asy
  const app=await (await import('../js/app.js?graph=successor')).createApp({fetchImpl,assetURL:identityAssetURL,document:host.document,window:host.window});
  try {await flush(200); await new Promise(r=>setTimeout(r,10));
   const prompt=host.byId.get('prompt'); prompt.innerText='hello'; prompt.dispatchEvent({type:'input',target:prompt}); await host.byId.get('sendbtn').click(); await flush(30);
-  assert.ok(calls.some(c=>c.path==='/api/nodes/team/chat')); assert.ok(calls.some(c=>c.path==='/api/nodes/team/send?chat_instance=team-generation' && c.method==='POST'));
+  assert.ok(calls.some(c=>c.path==='/api/nodes/team/chat?tail=50')); assert.ok(calls.some(c=>c.path==='/api/nodes/team/send?chat_instance=team-generation' && c.method==='POST'));
  } finally {app.retire()}
 });
 

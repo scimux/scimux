@@ -300,6 +300,11 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
     tap). Keep that split: history in the poll payload would ship the whole
     corpus every second, and it can repeat turns across mechanical seams
     because a rotation re-mirrors from turn zero.
+    The browser polls a tail window of the current segment (the last 50 turns,
+    snapped to the prompt that starts their cycle and capped at 150); earlier
+    segment turns and earlier segments are explicit reads. Sent echoes and
+    awaiting-forward latches use turn addresses so their boundaries survive
+    the window moving.
 - **An agent's Output is never passed off as the user's.** Two places can
   break this, and both are quiet. Send-to carries one agent's Output into
   another agent's Input, and the receiving node records the arrival as an

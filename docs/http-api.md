@@ -294,10 +294,27 @@ ETag short-circuiting.
 
 On the polled (non-history) path, responses carry an `ETag`; polling clients
 may send `If-None-Match` and receive `304 Not Modified` when the snapshot is
-unchanged. The tag hashes the fully marshalled body (turns *and* mechanics such
-as attention, `last_change`, delivery, and Claude `compacting` /
-`elicitation_waiting`), so a
-needs-input or compaction flip without a log write still invalidates the cache.
+unchanged. The tag hashes the marshalled response without `last_change`,
+`watermark`, `progress`, `pending_calls`, `waiting_on`, and `ctx_used`; these
+fields remain in the 200 body. Attention, needs-input state, `ctx_pct`,
+`ctx_window`, delivery, Claude `compacting`, and `elicitation_waiting` remain
+hashed, so changes to them still invalidate the cache.
+
+The polled path may request a bounded recent-turn window with `?tail=N`, where
+`N` is an integer from 1 through 500. Invalid values return `400 bad tail`.
+The server includes at most `3*N` turns, starting at the latest user turn at or
+before the requested tail when that complete cycle fits under the cap; otherwise
+it uses a hard cut at the requested tail. `omitted_turns` is always present
+with a tail request and counts the turns before the returned window. On a hard
+cut that starts in the middle of a cycle, `window_head` gives the durable
+`uid`, `segment`, and `record` address of that cycle's first assistant turn.
+`decisions` contains only decision records at or after the first returned
+turn when turns are omitted; when nothing is omitted, all decisions remain in
+the response. When a retained lease also has earlier omitted decisions,
+`lease_base` maps that lease ID to the number omitted so clients can continue
+its ordinal.
+The `?history=1` path takes precedence and ignores `tail`. Without `tail`, the
+polled response remains the full current segment.
 
 For a strict scimux-owned Claude node, `compacting: true` (and optional
 `compact_trigger` of `manual` or `auto`) is set while a current

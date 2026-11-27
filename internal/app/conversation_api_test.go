@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -1719,6 +1720,268 @@ func TestHandleChatCarriesDurableAddress(t *testing.T) {
 	}
 }
 
+func TestHandleChatTailValidationAndHistoryPrecedence(t *testing.T) {
+	a, node, log := chatWindowTestApp(t)
+	for _, tc := range []struct{ value string }{{""}, {"x"}, {"0"}, {"-1"}, {"501"}} {
+		t.Run("bad tail "+tc.value, func(t *testing.T) {
+			query := "tail=" + tc.value
+			rec := chatWindowRequest(a, node, query)
+			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != "bad tail" {
+				t.Errorf("tail=%q: status/body = %d/%q, want 400/\"bad tail\"", tc.value, rec.Code, rec.Body.String())
+			}
+		})
+	}
+	duplicate := chatWindowRequest(a, node, "tail=2&tail=3")
+	if duplicate.Code != http.StatusBadRequest || strings.TrimSpace(duplicate.Body.String()) != "bad tail" {
+		t.Errorf("duplicate tail: status/body = %d/%q, want 400/\"bad tail\"", duplicate.Code, duplicate.Body.String())
+	}
+
+	// history=1 owns its response shape and ignores even an invalid tail.
+	rec := chatWindowRequest(a, node, "history=1&tail=0")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history with tail status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var history map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := history["segments"]; !ok {
+		t.Errorf("history response missing segments: %s", rec.Body.String())
+	}
+	if _, ok := history["turns"]; ok {
+		t.Errorf("history response unexpectedly has polled turns: %s", rec.Body.String())
+	}
+	if got := len(sessionlog.ReadSegment(log).Turns); got != 8 {
+		t.Fatalf("test fixture turns = %d, want 8", got)
+	}
+}
+
+func TestHandleChatTailWindowAndUntailedShape(t *testing.T) {
+	a, node, log := chatWindowTestApp(t)
+	base := chatWindowRequest(a, node, "")
+	if base.Code != http.StatusOK {
+		t.Fatalf("untail status = %d: %s", base.Code, base.Body.String())
+	}
+	tailed := chatWindowRequest(a, node, "tail=2")
+	if tailed.Code != http.StatusOK {
+		t.Fatalf("tail status = %d: %s", tailed.Code, tailed.Body.String())
+	}
+	var full, window map[string]json.RawMessage
+	if err := json.Unmarshal(base.Body.Bytes(), &full); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tailed.Body.Bytes(), &window); err != nil {
+		t.Fatal(err)
+	}
+	var fullTurns, keptTurns []transcript.Turn
+	if err := json.Unmarshal(full["turns"], &fullTurns); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(window["turns"], &keptTurns); err != nil {
+		t.Fatal(err)
+	}
+	if len(fullTurns) != 8 || len(keptTurns) != 2 {
+		t.Errorf("turn counts untailed/tailed = %d/%d, want 8/2", len(fullTurns), len(keptTurns))
+	}
+	wantKeys := []string{"allow_external_attachments", "assets", "attention", "auto_approve", "chat_started", "ctx_pct", "ctx_used", "ctx_window", "decisions", "delivery", "fallback", "last_change", "live", "log_uid", "pending", "pending_calls", "prior_turns", "progress", "reason", "reply_ready", "segment_index", "source", "turn_in_flight", "turns", "waiting_on", "watermark"}
+	gotKeys := make([]string, 0, len(full))
+	for key := range full {
+		gotKeys = append(gotKeys, key)
+	}
+	sort.Strings(gotKeys)
+	if !reflect.DeepEqual(gotKeys, wantKeys) {
+		t.Errorf("untail response keys = %v, want %v", gotKeys, wantKeys)
+	}
+	if _, ok := full["omitted_turns"]; ok {
+		t.Errorf("untail response gained omitted_turns: %s", base.Body.String())
+	}
+	if _, ok := full["window_head"]; ok {
+		t.Errorf("untail response gained window_head: %s", base.Body.String())
+	}
+	if _, ok := full["lease_base"]; ok {
+		t.Errorf("untail response gained lease_base: %s", base.Body.String())
+	}
+
+	var omitted int
+	if err := json.Unmarshal(window["omitted_turns"], &omitted); err != nil {
+		t.Fatalf("omitted_turns missing or invalid: %v (%s)", err, tailed.Body.String())
+	}
+	if omitted != 6 {
+		t.Errorf("omitted_turns = %d, want 6", omitted)
+	}
+	var head map[string]json.RawMessage
+	if err := json.Unmarshal(window["window_head"], &head); err != nil {
+		t.Fatalf("window_head missing or invalid: %v (%s)", err, tailed.Body.String())
+	}
+	for _, key := range []string{"uid", "segment", "record"} {
+		if _, ok := head[key]; !ok {
+			t.Errorf("window_head missing %q: %s", key, tailed.Body.String())
+		}
+	}
+	if _, ok := window["assets"]; ok {
+		t.Errorf("assets from an omitted turn leaked into the window: %s", tailed.Body.String())
+	}
+	if keptTurns[0].Role != "assistant" || keptTurns[0].Record != 10 {
+		t.Errorf("first kept turn = %+v, want assistant record 10", keptTurns[0])
+	}
+	var decisions []sessionlog.DecisionSurface
+	if raw := window["decisions"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &decisions); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(decisions) != 2 || decisions[0].Decision.LeaseID != "lease-a" || decisions[1].Decision.LeaseID != "" {
+		t.Errorf("window decisions = %+v, want kept lease-a and empty-lease decisions", decisions)
+	}
+	var leaseBase map[string]int
+	if err := json.Unmarshal(window["lease_base"], &leaseBase); err != nil {
+		t.Fatalf("lease_base missing or invalid: %v (%s)", err, tailed.Body.String())
+	}
+	if !reflect.DeepEqual(leaseBase, map[string]int{"lease-a": 1}) {
+		t.Errorf("lease_base = %#v, want one dropped lease-a decision", leaseBase)
+	}
+	if got := len(sessionlog.ReadSegment(log).Turns); got != 8 {
+		t.Fatalf("fixture segment turns = %d, want 8", got)
+	}
+	wide := chatWindowRequest(a, node, "tail=500")
+	var wideBody map[string]json.RawMessage
+	if err := json.Unmarshal(wide.Body.Bytes(), &wideBody); err != nil {
+		t.Fatal(err)
+	}
+	var wideOmitted int
+	if err := json.Unmarshal(wideBody["omitted_turns"], &wideOmitted); err != nil || wideOmitted != 0 {
+		t.Errorf("tail=500 omitted_turns = %d, error %v; want 0", wideOmitted, err)
+	}
+	for _, key := range []string{"window_head", "lease_base"} {
+		if _, ok := wideBody[key]; ok {
+			t.Errorf("tail=500 unexpectedly has %s: %s", key, wide.Body.String())
+		}
+	}
+}
+
+func TestHandleChatTailOmitsFilteredDecisionSet(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "chat-window-empty-decisions", Agent: "pi"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home),
+		sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: "only-dropped"}),
+		{T: "user", Text: "earlier"},
+		{T: "user", Text: "latest"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := chatWindowRequest(a, n, "tail=1")
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["decisions"]; ok {
+		t.Errorf("all-dropped decisions leaked into window: %s", rec.Body.String())
+	}
+	if _, ok := body["lease_base"]; ok {
+		t.Errorf("lease only in dropped decisions appeared in lease_base: %s", rec.Body.String())
+	}
+}
+
+func TestHandleChatTailLargeLogPayload(t *testing.T) {
+	a, node, path := chatWindowTestApp(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath(node.ID)}
+	if err := w.Append(sessionlog.NewMeta(node.ID, node.Agent, "", "", a.home)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3000; i++ {
+		role := "assistant"
+		if i%2 == 0 {
+			role = "user"
+		}
+		if err := w.Append(sessionlog.Event{T: role, Text: strings.Repeat("synthetic conversation turn ", 20) + strconv.Itoa(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	full := chatWindowRequest(a, node, "")
+	window := chatWindowRequest(a, node, "tail=50")
+	if full.Code != http.StatusOK || window.Code != http.StatusOK {
+		t.Fatalf("full/window status = %d/%d", full.Code, window.Code)
+	}
+	var body struct {
+		Turns []transcript.Turn `json:"turns"`
+	}
+	if err := json.Unmarshal(window.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Turns) > 150 {
+		t.Errorf("tailed turns = %d, want <= 150", len(body.Turns))
+	}
+	if int64(window.Body.Len())*10 >= int64(full.Body.Len()) {
+		t.Errorf("tailed body = %d bytes, full body = %d bytes, want under one tenth", window.Body.Len(), full.Body.Len())
+	}
+}
+
+func chatWindowTestApp(t *testing.T) (*app, *Node, string) {
+	t.Helper()
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "chat-window", Title: "chat-window", Agent: "pi", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	path := a.sessionLogPath(n.ID)
+	w := &sessionlog.Writer{Path: path}
+	if err := w.Append(sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(sessionlog.NewAsset(sessionlog.AssetEvent{
+		ID: "a_window_old", Name: "old.png", Mime: "image/png", Size: 2,
+		Storage: "inline", Bytes: "aGk=", SourceKind: "upload", SourcePath: "/tmp/old.png",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(sessionlog.Event{T: "user", Text: "old [attached image: /tmp/old.png]"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < 8; i++ {
+		if err := w.Append(sessionlog.Event{T: "assistant", Text: fmt.Sprintf("turn %d", i)}); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			if err := w.Append(sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: "lease-a"})); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Append(sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: "dropped-only"})); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, lease := range []string{"lease-a", ""} {
+		if err := w.Append(sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: lease})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return a, n, path
+}
+
+func chatWindowRequest(a *app, n *Node, query string) *httptest.ResponseRecorder {
+	url := "/api/nodes/" + n.ID + "/chat"
+	if query != "" {
+		url += "?" + query
+	}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, url, nil)
+	r.SetPathValue("id", n.ID)
+	a.handleChat(rec, r)
+	return rec
+}
+
 func TestHandleChatCodexSourceACP(t *testing.T) {
 	// procChat must set source:"acp" so the browser renders the structured view.
 	rollout := filepath.Join(t.TempDir(), "rollout.jsonl")
@@ -2608,14 +2871,21 @@ func TestHandleChatReplyReadyFromClaudeEndTurn(t *testing.T) {
 }
 
 // ---------- P2: chat poll ETag / 304 ----------
-// Hash the fully marshalled response body (same shape as /api/state). A
-// validator keyed only on the session log would miss needs-input / attention /
-// last_change changes that leave size+mtime alone.
+// Poll validators ignore mechanics with no browser reader that change on each
+// agent tick, while keeping visible needs-input and gauge state hashed.
 
 func chatGET(t *testing.T, a *app, id, ifNoneMatch string) *httptest.ResponseRecorder {
+	return chatGETWithQuery(t, a, id, "", ifNoneMatch)
+}
+
+func chatGETWithQuery(t *testing.T, a *app, id, query, ifNoneMatch string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/nodes/"+id+"/chat", nil)
+	path := "/api/nodes/" + id + "/chat"
+	if query != "" {
+		path += "?" + query
+	}
+	r := httptest.NewRequest("GET", path, nil)
 	r.SetPathValue("id", id)
 	if ifNoneMatch != "" {
 		r.Header.Set("If-None-Match", ifNoneMatch)
@@ -2650,10 +2920,8 @@ func seedChatNodeWithLog(t *testing.T, a *app, id string, events ...sessionlog.E
 	return n
 }
 
-// TestHandleChatETagChangesWhenMechanicsChange is the trap-avoidance test:
-// the session log is untouched, but a needs-input/attention (or last_change)
-// field flips — the ETag must change and a conditional GET must return 200,
-// not a stale 304 that would hide an approval dialog.
+// TestHandleChatETagChangesWhenMechanicsChange keeps attention hashed so a
+// needs-input transition invalidates the poll, while last_change alone does not.
 func TestHandleChatETagChangesWhenMechanicsChange(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"m1": true}}
 	a := newTestApp(t, f)
@@ -2669,6 +2937,13 @@ func TestHandleChatETagChangesWhenMechanicsChange(t *testing.T) {
 	}
 	if rec1.Body.Len() == 0 {
 		t.Fatal("baseline body empty")
+	}
+	var baseline map[string]json.RawMessage
+	if err := json.Unmarshal(rec1.Body.Bytes(), &baseline); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := baseline["last_change"]; !ok {
+		t.Fatal("200 response body omitted last_change")
 	}
 
 	// Log unchanged; attention raised (needs-input machinery).
@@ -2694,18 +2969,237 @@ func TestHandleChatETagChangesWhenMechanicsChange(t *testing.T) {
 		t.Fatalf("attention = %q, want approval", body.Attention)
 	}
 
-	// Same trap for last_change (pane activity while the log is idle).
+	// last_change remains in the response body, but pane activity alone does
+	// not invalidate what the browser displays.
 	a.mu.Lock()
 	a.lastChg["m1"] = time.UnixMilli(1_700_000_000_123)
 	a.mu.Unlock()
 	rec3 := chatGET(t, a, "m1", etag2)
-	if rec3.Code != 200 {
-		t.Fatalf("after last_change: code = %d, want 200", rec3.Code)
+	if rec3.Code != http.StatusNotModified {
+		t.Fatalf("after last_change: code = %d, want 304", rec3.Code)
 	}
 	etag3 := rec3.Header().Get("ETag")
-	if etag3 == "" || etag3 == etag2 {
-		t.Fatalf("after last_change: ETag = %q, want different from %q", etag3, etag2)
+	if etag3 != etag2 {
+		t.Fatalf("after last_change: ETag = %q, want unchanged %q", etag3, etag2)
 	}
+}
+
+func TestHandleChatETagIgnoresMechanicsFields(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+		setup func(*testing.T) (*app, *Node, func())
+	}{
+		{
+			name: "watermark", field: "watermark",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				a, n, path := newETagTranscript(t, "etag-watermark", []string{etagUserLine, etagAssistantLine})
+				return a, n, func() { appendLines(t, path, `{"type":"progress","timestamp":"2026-07-14T01:02:00Z"}`) }
+			},
+		},
+		{
+			name: "progress", field: "progress",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				baseLine := padETagLine(`{"type":"progress","timestamp":"2026-07-14T01:02:00Z"}`, 400)
+				a, n, _ := newETagTranscript(t, "etag-progress", []string{etagUserLine, etagAssistantLine, baseLine})
+				return a, n, func() {
+					setETagTranscript(t, n, []string{etagUserLine, etagAssistantLine, padETagLine(etagToolResultLine("call-progress"), 400)})
+				}
+			},
+		},
+		{
+			name: "pending_calls", field: "pending_calls",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				baseLine := padETagLine(`{"type":"progress","timestamp":"2026-07-14T01:02:00Z"}`, 400)
+				a, n, _ := newETagTranscript(t, "etag-pending", []string{etagUserLine, etagAssistantLine, baseLine})
+				return a, n, func() {
+					call := etagToolCallLine("call-pending", "")
+					setETagTranscript(t, n, []string{etagUserLine, etagAssistantLine, padETagLine(call, 400)})
+				}
+			},
+		},
+		{
+			name: "waiting_on", field: "waiting_on",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				a, n, _ := newETagTranscript(t, "etag-waiting", []string{etagUserLine, padETagLine(etagToolCallLine("call-waiting", "Read"), 400)})
+				return a, n, func() {
+					setETagTranscript(t, n, []string{etagUserLine, padETagLine(etagToolCallLine("call-waiting", "Write"), 400)})
+				}
+			},
+		},
+		{
+			name: "ctx_used", field: "ctx_used",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				a := newTestApp(t, &fakeTmux{alive: map[string]bool{"etag-ctx-used": true}})
+				n := seedChatNodeWithLog(t, a, "etag-ctx-used", sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 1000, Size: 100000}})
+				a.mu.Lock()
+				a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_000)
+				a.mu.Unlock()
+				return a, n, func() {
+					w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+					if err := w.Append(sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 1001, Size: 100000}}); err != nil {
+						t.Fatal(err)
+					}
+					a.mu.Lock()
+					delete(a.logCache, n.ID)
+					a.mu.Unlock()
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, n, change := tc.setup(t)
+			baseline := chatGET(t, a, n.ID, "")
+			if baseline.Code != http.StatusOK {
+				t.Fatalf("baseline code = %d: %s", baseline.Code, baseline.Body.String())
+			}
+			etag := baseline.Header().Get("ETag")
+			before := decodeChatBody(t, baseline)
+			change()
+			updated := chatGET(t, a, n.ID, "")
+			if updated.Code != http.StatusOK {
+				t.Fatalf("unconditional update code = %d: %s", updated.Code, updated.Body.String())
+			}
+			after := decodeChatBody(t, updated)
+			if string(before[tc.field]) == string(after[tc.field]) {
+				t.Fatalf("%s did not change: %s", tc.field, after[tc.field])
+			}
+			beforeWithoutField, afterWithoutField := cloneChatBody(before), cloneChatBody(after)
+			delete(beforeWithoutField, tc.field)
+			delete(afterWithoutField, tc.field)
+			if !reflect.DeepEqual(beforeWithoutField, afterWithoutField) {
+				t.Errorf("body changed outside %s: before=%v after=%v", tc.field, beforeWithoutField, afterWithoutField)
+			}
+			if updated.Header().Get("ETag") != etag {
+				t.Errorf("ETag after only %s changed = %q, want unchanged %q", tc.field, updated.Header().Get("ETag"), etag)
+			}
+			conditional := chatGET(t, a, n.ID, etag)
+			if conditional.Code != http.StatusNotModified {
+				t.Errorf("If-None-Match after only %s change = %d, want 304", tc.field, conditional.Code)
+			}
+		})
+	}
+}
+
+func TestHandleChatETagKeepsGaugeAndNewTurnsVisible(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{"etag-gauge": true}})
+	n := seedChatNodeWithLog(t, a, "etag-gauge", sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 1000, Size: 10000}})
+	a.mu.Lock()
+	a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+	baseline := chatGET(t, a, n.ID, "")
+	var before struct {
+		Used int64 `json:"ctx_used"`
+		Pct  int   `json:"ctx_pct"`
+	}
+	if err := json.Unmarshal(baseline.Body.Bytes(), &before); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	if err := w.Append(sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 2000, Size: 10000}}); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	delete(a.logCache, n.ID)
+	a.mu.Unlock()
+	updated := chatGET(t, a, n.ID, baseline.Header().Get("ETag"))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("ctx_pct change code = %d, want 200", updated.Code)
+	}
+	var after struct {
+		Used int64 `json:"ctx_used"`
+		Pct  int   `json:"ctx_pct"`
+	}
+	if err := json.Unmarshal(updated.Body.Bytes(), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Used == before.Used || after.Pct == before.Pct {
+		t.Fatalf("usage gauge did not change: before=%+v after=%+v", before, after)
+	}
+	if updated.Header().Get("ETag") == baseline.Header().Get("ETag") {
+		t.Fatal("ctx_pct change kept the old ETag")
+	}
+}
+
+func TestHandleChatETagIgnoresLastChangeWithTail(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{"etag-tail": true}})
+	n := seedChatNodeWithLog(t, a, "etag-tail")
+	a.mu.Lock()
+	a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+	baseline := chatGETWithQuery(t, a, n.ID, "tail=50", "")
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(baseline.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["last_change"]; !ok {
+		t.Fatal("tailed 200 response body omitted last_change")
+	}
+	a.mu.Lock()
+	a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_123)
+	a.mu.Unlock()
+	updated := chatGETWithQuery(t, a, n.ID, "tail=50", baseline.Header().Get("ETag"))
+	if updated.Code != http.StatusNotModified || updated.Header().Get("ETag") != baseline.Header().Get("ETag") {
+		t.Fatalf("tailed last_change update = %d ETag %q, want 304 and unchanged %q", updated.Code, updated.Header().Get("ETag"), baseline.Header().Get("ETag"))
+	}
+}
+
+const (
+	etagUserLine      = `{"type":"user","timestamp":"2026-07-14T01:00:00Z","message":{"role":"user","content":"hello"}}`
+	etagAssistantLine = `{"type":"assistant","timestamp":"2026-07-14T01:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hello back"}]}}`
+)
+
+func etagToolCallLine(id, name string) string {
+	return fmt.Sprintf(`{"type":"assistant","timestamp":"2026-07-14T01:02:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":%q,"name":%q,"input":{}}]}}`, id, name)
+}
+
+func etagToolResultLine(id string) string {
+	return fmt.Sprintf(`{"type":"user","timestamp":"2026-07-14T01:03:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"ok"}]}}`, id)
+}
+
+func padETagLine(line string, size int) string {
+	if len(line) > size {
+		panic("ETag test line exceeds padding size")
+	}
+	return line[:len(line)-1] + strings.Repeat(" ", size-len(line)) + "}"
+}
+
+func setETagTranscript(t *testing.T, n *Node, lines []string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	appendLines(t, path, lines...)
+	n.Transcript = path
+}
+
+func newETagTranscript(t *testing.T, id string, lines []string) (*app, *Node, string) {
+	t.Helper()
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{id: true}})
+	n := seedChatNodeWithLog(t, a, id)
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	appendLines(t, path, lines...)
+	n.Transcript = path
+	a.mu.Lock()
+	a.lastChg[id] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+	return a, n, path
+}
+
+func decodeChatBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]json.RawMessage {
+	t.Helper()
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func cloneChatBody(body map[string]json.RawMessage) map[string]json.RawMessage {
+	clone := make(map[string]json.RawMessage, len(body))
+	for key, value := range body {
+		clone[key] = value
+	}
+	return clone
 }
 
 func TestHandleChatETagStableAnd304WhenUnchanged(t *testing.T) {
