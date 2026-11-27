@@ -252,17 +252,17 @@ export function anyUploading(items){
 }
 
 /**
- * Echo watermark: when chat has rendered for this node (chatSig set),
- * pass the current turn count as `seen`; otherwise null and rely on text
- * match / timeout inside chat.js.
+ * Echo boundary: when chat has rendered for this node (chatSig set),
+ * pass its last loaded turn address as `seen`; otherwise chat.js records
+ * the current last-user address on its first retirement check.
  */
-export function buildSentEcho({ node, text, atts, at, chatSig, turnsLength }){
+export function buildSentEcho({ node, text, atts, at, chatSig, after }){
   return {
     node,
     text: text || "",
     atts: atts || [],
     at: at || 0,
-    seen: chatSig ? (turnsLength || 0) : null,
+    seen: chatSig ? (after || null) : null,
   };
 }
 
@@ -2248,7 +2248,7 @@ export function createComposerFeature(deps){
       atts: refs,
       at: nowFn(),
       chatSig,
-      turnsLength: turns ? turns.length : 0,
+      after: boundary,
     });
     if (typeof d.setSentEcho === "function") d.setSentEcho(echo);
     if (typeof d.paintEcho === "function") d.paintEcho(dest);
@@ -2309,7 +2309,7 @@ export function createComposerFeature(deps){
          chat.js mints the permanent link only after this exact text appears
          beyond the pre-send transcript boundary. */
       if (pending.length && text && !readAwaitingForward(storage, dest, nowFn()))
-        writeAwaitingForward(storage, dest, text, turns?.length || 0, nowFn());
+        writeAwaitingForward(storage, dest, text, boundary || 0, nowFn());
       sendingDestinations.delete(identity);
       if (typeof d.invalidateChat === "function") d.invalidateChat();
       dispatchedItems.forEach(x => {

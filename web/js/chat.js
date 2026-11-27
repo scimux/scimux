@@ -184,16 +184,21 @@ export function retireSentEcho(sentEcho, turns, now = Date.now()){
   const iLast = list.reduce((a, t, i) => t.role === "user" ? i : a, -1);
   let landed = iLast >= 0 &&
     (norm(list[iLast].text) === norm(sentEcho.text) ||
-     (sentEcho.seen != null && iLast >= sentEcho.seen));
+     (sentEcho.seen != null && list.some(t => t.role === "user" && userTurnAfter(t, sentEcho.seen))));
   let next = sentEcho;
   if (!landed && sentEcho.seen == null){
-    const users = list.reduce((a, t) => a + (t.role === "user" ? 1 : 0), 0);
-    if (sentEcho.base == null) next = { ...sentEcho, base: users };
-    else if (users > sentEcho.base) landed = true;
+    if (sentEcho.base == null){
+      const last = iLast >= 0 ? list[iLast] : null;
+      next = { ...sentEcho, base: { uid: last?.uid || "", record: Number.isInteger(last?.record) ? last.record : -1 } };
+    } else if (list.some(t => t.role === "user" && userTurnAfter(t, sentEcho.base))) landed = true;
   }
   if (landed || now - sentEcho.at > SENT_ECHO_TIMEOUT_MS)
     return { echo: null, retired: true };
   return { echo: next, retired: false };
+}
+
+function userTurnAfter(turn, address){
+  return turn.uid !== address.uid || (Number.isInteger(turn.record) && turn.record > address.record);
 }
 
 /* Decide pane/terminal chrome from poll payload + local termOpen flag. */
@@ -382,14 +387,18 @@ export function matchingForwardDestinationTurn(expected, turns = []){
     ? { text: expected, afterTurns: 0 }
     : expected;
   if (!latch || !latch.text) return null;
+  const addressed = !!latch.after && typeof latch.after.uid === "string" &&
+    Number.isInteger(latch.after.record);
   const boundary = Math.max(0, Math.floor(Number(latch.afterTurns) || 0));
   const start = boundary <= turns.length ? boundary : 0;
   /* Attachments make the recorded turn the prompt plus extendPrompt's
      appended reference, so the seam is matched, not a loose prefix: an
      unrelated turn that merely starts with this text is a different send. */
   const extended = `${latch.text}\n\n`;
-  return turns.slice(start).find(turn =>
-    turn && turn.role === "user" &&
+  const candidates = addressed
+    ? turns.filter(turn => turn && turn.role === "user" && userTurnAfter(turn, latch.after))
+    : turns.slice(start);
+  return candidates.find(turn => turn && turn.role === "user" &&
     (turn.text === latch.text || String(turn.text || "").startsWith(extended))) || null;
 }
 

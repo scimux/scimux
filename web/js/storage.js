@@ -224,10 +224,22 @@ export function clearPendingForwards(storage, nodeId){
   return writePendingForwards(storage, nodeId, []);
 }
 
-export function writeAwaitingForward(storage, nodeId, text, afterTurns = 0, at = Date.now()){
+function awaitingAddress(value){
+  return !!value && typeof value === "object" && typeof value.uid === "string" &&
+    value.uid.length > 0 && Number.isInteger(value.segment) && value.segment >= 0 &&
+    Number.isInteger(value.record) && value.record >= 0;
+}
+
+function awaitingLegacyCount(value){
+  return Math.max(0, Math.floor(Number(value) || 0));
+}
+
+export function writeAwaitingForward(storage, nodeId, text, after = 0, at = Date.now()){
   const value = {
     text: String(text || ""),
-    afterTurns: Math.max(0, Math.floor(Number(afterTurns) || 0)),
+    ...(awaitingAddress(after)
+      ? { after: { uid: after.uid, segment: after.segment, record: after.record } }
+      : { afterTurns: typeof after === "number" ? awaitingLegacyCount(after) : 0 }),
     at: Number(at) || 0,
   };
   try { storage && storage.setItem(awaitingForwardKey(nodeId), JSON.stringify(value)); }
@@ -246,7 +258,9 @@ export function readAwaitingForward(storage, nodeId, now = Date.now()){
     if (parsed && typeof parsed === "object" && typeof parsed.text === "string"){
       value = {
         text: parsed.text,
-        afterTurns: Math.max(0, Math.floor(Number(parsed.afterTurns) || 0)),
+        ...(Object.prototype.hasOwnProperty.call(parsed, "after") && awaitingAddress(parsed.after)
+          ? { after: { uid: parsed.after.uid, segment: parsed.after.segment, record: parsed.after.record } }
+          : { afterTurns: Object.prototype.hasOwnProperty.call(parsed, "after") ? 0 : awaitingLegacyCount(parsed.afterTurns) }),
         at: Number(parsed.at) || 0,
       };
     }
