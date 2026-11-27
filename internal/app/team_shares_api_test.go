@@ -1116,13 +1116,13 @@ func TestStartSharingFailureStoresNothing(t *testing.T) {
 	})
 	t.Run("share list full", func(t *testing.T) {
 		b := setup(t, &shareScript{})
-		for i := 0; i < 256; i++ {
+		for i := 0; i < 1000; i++ {
 			mustSaveShare(t, b.dir, team.Share{UID: fmt.Sprintf("a%015x", i), Node: "parked"})
 		}
 		rec := putShare(b.h, shareNode, body)
 		assertClean(t, b, rec, http.StatusInsufficientStorage, "too_many", 1)
 		left, err := team.LoadShares(b.dir)
-		if err != nil || len(left) != 256 {
+		if err != nil || len(left) != 1000 {
 			t.Fatalf("left = %d err %v", len(left), err)
 		}
 	})
