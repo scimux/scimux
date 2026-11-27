@@ -750,6 +750,16 @@ func TestLaneOwnedShareStoresAnEmptyMemberList(t *testing.T) {
 			t.Fatalf("rev without a lane: %v", err)
 		}
 	})
+	t.Run("negative rev", func(t *testing.T) {
+		dir := t.TempDir()
+		bad := sampleShare(6)
+		bad.Lane = bad.UID
+		bad.LaneRev = -1
+		bad.Members = []Member{}
+		if err := SaveShare(dir, bad); !errors.Is(err, ErrSharesDamaged) {
+			t.Fatalf("negative rev: %v", err)
+		}
+	})
 	t.Run("lane id", func(t *testing.T) {
 		dir := t.TempDir()
 		bad := sampleShare(5)

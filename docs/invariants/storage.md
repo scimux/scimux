@@ -45,7 +45,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   A damaged file is never overwritten.
   It is untouched until a server is joined.
 - **Shared chats name a server and who may read them.** `team-shares.json`
-  holds each share's server, scope, members, and delivery cursor.
+  holds each share's server, scope, members, delivery cursor, and, when
+  the chat belongs to a lane, that lane share's id and the member revision
+  last applied. A lane-owned share stores an empty member list. The file
+  holds at most 1000 shares and 4 MiB.
   It holds no chat content and no token. Only the muxer reads and writes
   it. It is untouched until a share exists.
   The sharing UI selects people without a permission dropdown. Newly invited

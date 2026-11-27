@@ -16,8 +16,8 @@ import (
 const SharesFile = "team-shares.json"
 
 const (
-	maxShares       = 256
-	maxSharesFile   = 1 << 20
+	maxShares       = 1000
+	maxSharesFile   = 4 << 20
 	maxShareMembers = 200
 )
 
@@ -33,8 +33,8 @@ type Share struct {
 	Title      string   `json:"title"`
 	Generation string   `json:"generation"`
 	Members    []Member `json:"members"`
-	Lane       string   `json:"-"`
-	LaneRev    int      `json:"-"`
+	Lane       string   `json:"lane"`
+	LaneRev    int      `json:"lane_rev"`
 	State      string   `json:"state"`
 	SharedAt   string   `json:"shared_at"`
 }
@@ -64,6 +64,8 @@ type shareWire struct {
 	Title      string    `json:"title"`
 	Generation string    `json:"generation"`
 	Members    *[]Member `json:"members"`
+	Lane       string    `json:"lane"`
+	LaneRev    *int      `json:"lane_rev"`
 	State      string    `json:"state"`
 	SharedAt   string    `json:"shared_at"`
 }
@@ -182,11 +184,15 @@ func shareFromWire(w shareWire) (Share, bool) {
 	}
 	members := make([]Member, len(*w.Members))
 	copy(members, *w.Members)
+	laneRev := 0
+	if w.LaneRev != nil {
+		laneRev = *w.LaneRev
+	}
 	s := Share{
 		UID: w.UID, Node: w.Node, Server: w.Server, Scope: w.Scope,
 		Start: *w.Start, Next: *w.Next, StartSent: *w.StartSent,
 		Title: w.Title, Generation: w.Generation, Members: members,
-		State: w.State, SharedAt: w.SharedAt,
+		Lane: w.Lane, LaneRev: laneRev, State: w.State, SharedAt: w.SharedAt,
 	}
 	if !validShare(s) {
 		return Share{}, false
@@ -208,6 +214,9 @@ func validShare(s Share) bool {
 		return false
 	}
 	if !validShareMembers(s.Members) {
+		return false
+	}
+	if s.LaneRev < 0 || (s.Lane == "" && s.LaneRev != 0) || (s.Lane != "" && !validHex(s.Lane, 16)) || (s.Lane != "" && len(s.Members) != 0) {
 		return false
 	}
 	if s.State != "active" && s.State != "stopping" && s.State != "lost" && s.State != "full" {
