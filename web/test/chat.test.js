@@ -10396,6 +10396,48 @@ test("around failures toast on no_turn, reload history on log change, and mirror
   assert.ok(mirrorCalls.some(path=>path.includes("page=around&at=50&limit=100&log_uid=u")));mirror.feature.destroy();
 });
 
+test("detached page conflicts fall back to complete history in both directions", async () => {
+  for (const scope of ["earlier","later"]){
+    const mode=scope==="earlier"?"before":"after";
+    const paths=[];
+    const ctx=makeFeature({
+      api:async path=>{
+        paths.push(path);
+        if(path.includes("page=around"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"addressed"}],decisions:[]}],empty_segments:[],before_count:3,after_count:3,assets:{}};
+        if(path.includes(`page=${mode}`))throw Object.assign(new Error("log_changed"),{status:409});
+        if(path.includes("history=1"))return {segments:[{segment_index:1,log_uid:"u",turns:[{role:"assistant",uid:"u",segment:1,record:10,text:"complete history"}],decisions:[]}],empty_segments:[],assets:{}};
+        return {};
+      },
+      chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+    });
+    ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope}})});
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(paths.some(path=>path.includes("history=1")),`${scope} conflict requests full history: ${paths.join(" | ")}`);
+    assert.match(ctx.roots.msgs.innerHTML,/complete history/);
+    assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+    ctx.feature.destroy();
+  }
+});
+
+test("a detached poll rejoins when its current slice reaches the live boundary", async () => {
+  const paths=[];let poll=0;
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:10,turns:[{role:"user",uid:"u",segment:3,record:50,text:"target"},{role:"assistant",uid:"u",segment:3,record:51,text:"neighbor"}],decisions:[]}],empty_segments:[],before_count:2,after_count:4,assets:{}}:{},
+    chatConditional:async path=>{paths.push(path);const n=++poll;return {status:200,etag:`"${n}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:n>1?51:100,text:n>1?"current live boundary":"initial tail"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:n>1?11:20,prior_turns:0,assets:{}}};},
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(paths.some(path=>/start=10/.test(path)),"the poll rejoins at the detached segment offset");
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/data-bk="h:3:/);
+  assert.match(ctx.roots.msgs.innerHTML,/current live boundary/);
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+  ctx.feature.destroy();
+});
+
 test("reader bubble offset survives prepending a history page", async () => {
   let historyRead = 0;
   const ctx = makeFeature({
