@@ -96,7 +96,7 @@ type LogCache struct {
 
 type recordRef struct {
 	end int64
-	len int // JSON payload length, including a trimmed CR when present
+	len int // JSON payload length after trimming a CR when present
 }
 
 type pageTurnIndex struct {
