@@ -6514,6 +6514,40 @@ test("a missing team-comment jump expands the current segment", async () => {
   ctx.feature.destroy();
 });
 
+test("partial prior pages reload complete history for older time jumps", async () => {
+  async function makePaged(beforeCount){
+    const paths=[],toasts=[];let poll=0,resolveHistory;
+    const ctx=makeFeature({
+      api:path=>{
+        paths.push(path);
+        if(path.includes("page=before"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:10,time:"partial-time",text:"partial"}],decisions:[]}],empty_segments:[],before_count:beforeCount,assets:{}};
+        if(path.includes("history=1"))return new Promise(resolve=>{resolveHistory=resolve;});
+        return {};
+      },
+      chatConditional:async()=>({status:200,etag:`"${++poll}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,time:`live-${poll}`,text:`live ${poll}`}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
+      deps:{toast:message=>toasts.push(message)},
+    });
+    ctx.feature.bind();await ctx.feature.render();
+    firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    ctx.setPending({node:"n1",turnTime:"target-time",ts:1_000_000});
+    await ctx.feature.render();
+    await new Promise(resolve=>setImmediate(resolve));
+    return {ctx,paths,toasts,resolveHistory};
+  }
+  const partial=await makePaged(4);
+  assert.ok(partial.paths.some(path=>path.includes("page=before")));
+  assert.ok(partial.paths.some(path=>path.includes("history=1")),"incomplete paging must request full history");
+  assert.deepEqual(partial.toasts,[]);
+  partial.ctx.setSel("n2");partial.resolveHistory?.({segments:[],assets:{}});partial.ctx.feature.destroy();
+
+  const complete=await makePaged(0);
+  assert.ok(complete.paths.some(path=>path.includes("page=before")));
+  assert.equal(complete.paths.some(path=>path.includes("history=1")),false,"zero beforeCount is complete");
+  assert.deepEqual(complete.toasts,["Couldn't find that message in this chat."]);
+  complete.ctx.feature.destroy();
+});
+
 test("comments anchored before a window are hidden until the segment is full", async () => {
   const copy = { uid: "u", key: "s/o/u/g", view: { server: "s" }, names: {}, people: {},
     mirrors: [{ seq: 1, local_segment: 0, local_record: 1 }],
