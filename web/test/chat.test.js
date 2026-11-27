@@ -6368,6 +6368,27 @@ test("segment button switches the poll to the full current segment", async () =>
   ctx.feature.destroy();
 });
 
+test("segment button follows the current-segment seam while history stays before it", async () => {
+  const windowed = makeFeature({ chatPayload: {
+    turns: [{ role: "user", uid: "u", segment: 0, record: 5, text: "window" }],
+    live: "quiet", chat_started: "start", omitted_turns: 3, prior_turns: 2, assets: {},
+  } });
+  windowed.feature.bind(); await windowed.feature.render();
+  const windowHTML = windowed.roots.msgs.innerHTML;
+  assert.ok(windowHTML.indexOf("chat started start") < windowHTML.indexOf('data-scope="segment"'));
+  windowed.feature.destroy();
+
+  const full = makeFeature({ chatPayload: {
+    turns: [{ role: "user", uid: "u", segment: 0, record: 5, text: "full" }],
+    live: "quiet", chat_started: "start", omitted_turns: 0, prior_turns: 2, assets: {},
+  } });
+  full.feature.bind(); await full.feature.render();
+  const fullHTML = full.roots.msgs.innerHTML;
+  assert.ok(fullHTML.indexOf("show earlier history") < fullHTML.indexOf("chat started start"));
+  assert.doesNotMatch(fullHTML, /data-scope="segment"/);
+  full.feature.destroy();
+});
+
 test("trace query is combined with the tail query", async () => {
   const values = new Map([["scimux-prompt-flights:n1", JSON.stringify([{
     address: { uid: "u", segment: 2, record: 9 }, accepted: true,
