@@ -232,6 +232,7 @@ body.cards-open #msgs { overflow: hidden; }
 #convtools[hidden] { display: none; }
 .convtools-start { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto; }
 #convtools > #scrollend { flex: 0 0 auto; margin-left: auto; }
+#convtools > #scrollend[data-detached] { color: var(--surface); background: var(--work); box-shadow: 0 0 0 2px var(--hairline); }
 #convtools button { width: 34px; height: 34px; border-radius: 9px; color: var(--dim);
   display: flex; align-items: center; justify-content: center; }
 #convtools button:active { color: var(--work); }
