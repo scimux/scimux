@@ -9927,7 +9927,7 @@ test("history page merge handles empty input and joins turns and decisions by se
   });
   const joined = chatmod.mergeHistoryPage({
     node:"n1", segs:[{segment_index:4,segment_offset:3,turns:[{record:30}],decisions:[{record:35}]}],
-    emptySegs:[{segment_index:1}], assets:{old:{name:"old"}},
+    emptySegs:[{segment_index:1}], assets:{old:{name:"old"}}, beforeCount:11, afterCount:9,
   }, {
     segments:[
       {segment_index:4,segment_offset:1,turns:[{record:10}],decisions:[{record:20},{record:15}]},
@@ -9939,6 +9939,8 @@ test("history page merge handles empty input and joins turns and decisions by se
   assert.equal(joined.segs[0].segment_offset,1);
   assert.deepEqual(joined.emptySegs.map(s=>s.segment_index),[1,2]);
   assert.deepEqual(Object.keys(joined.assets).sort(),["new","old"]);
+  assert.equal(joined.beforeCount,7);
+  assert.equal(joined.afterCount,9,"a before page must preserve the known later count");
   const missing = chatmod.mergeHistoryPage({segs:[{segment_index:9}]}, {
     segments:[{segment_index:9},{segment_index:10}], empty_segments:[],
   });
@@ -9947,10 +9949,12 @@ test("history page merge handles empty input and joins turns and decisions by se
     segments:[{segment_index:11}],empty_segments:[],
   });
   assert.deepEqual(turnless.segs[0].turns,[{record:110}],"a decision-only slice keeps turns from the existing page");
-  const later=chatmod.mergeHistoryPage({segs:[{segment_index:12,segment_offset:2,turns:[{record:120}]}]}, {
-    segments:[{segment_index:12,segment_offset:3,turns:[{record:130}]}],empty_segments:[],
+  const later=chatmod.mergeHistoryPage({beforeCount:6,segs:[{segment_index:12,segment_offset:2,turns:[{record:120}]}]}, {
+    segments:[{segment_index:12,segment_offset:3,turns:[{record:130}]}],empty_segments:[],after_count:4,before_count:99,
   },"after");
   assert.deepEqual(later.segs[0].turns.map(t=>t.record),[120,130]);
+  assert.equal(later.beforeCount,6,"an after page must preserve the known earlier count");
+  assert.equal(later.afterCount,4);
 });
 
 test("earlier loader ignores zero counts and stale visits", async () => {
@@ -10279,8 +10283,8 @@ test("addressed jump opens a detached around page and loads earlier and later sl
     api:async path=>{
       calls.push(path);
       if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:10,segment_turns:30,start:"T",seam:"S",turns:[40,50,60].map(record=>({role:"user",uid:"u",segment:3,record,text:record===50?"around target":`turn ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:9,current_segment:3,assets:{}};
-      if(path.includes("page=before"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,segment_turns:30,start:"T",seam:"S",turns:Array.from({length:10},(_,i)=>({role:"assistant",uid:"u",segment:3,record:20+i,text:`before ${20+i}`})),decisions:[]}],empty_segments:[{segment_index:2,log_uid:"u",turns:[],decisions:[]}],before_count:2,after_count:9,current_segment:3,assets:{before:{name:"before"}}};
-      if(path.includes("page=after"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:13,segment_turns:30,start:"T",seam:"S",turns:[70,80].map(record=>({role:"assistant",uid:"u",segment:3,record,text:`after ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:4,current_segment:3,assets:{after:{name:"after"}}};
+      if(path.includes("page=before"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,segment_turns:30,start:"T",seam:"S",turns:Array.from({length:10},(_,i)=>({role:"assistant",uid:"u",segment:3,record:20+i,text:`before ${20+i}`})),decisions:[]}],empty_segments:[{segment_index:2,log_uid:"u",turns:[],decisions:[]}],before_count:2,after_count:12,current_segment:3,assets:{before:{name:"before"}}};
+      if(path.includes("page=after"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:13,segment_turns:30,start:"T",seam:"S",turns:[70,80].map(record=>({role:"assistant",uid:"u",segment:3,record,text:`after ${record}`})),decisions:[]}],empty_segments:[],before_count:15,after_count:4,current_segment:3,assets:{after:{name:"after"}}};
       return {};
     },
     chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live current"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:20,prior_turns:0,assets:{}}}),
@@ -10314,6 +10318,7 @@ test("addressed jump opens a detached around page and loads earlier and later sl
   assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=40&limit=100&log_uid=u/);
   assert.match(msgs.innerHTML,/data-bk="h:3:11"/);
   assert.match(msgs.innerHTML,/show earlier turns &middot; 2 turns/);
+  assert.match(msgs.innerHTML,/show later turns &middot; 9 turns/,"loading earlier turns keeps the detached later count");
   assert.equal(bubActionRows(ctx).length,1,"the selected action remains on the addressed turn after an earlier page");
   assert.deepEqual(msgs.innerHTML.includes("live current"),false);
 
@@ -10321,6 +10326,8 @@ test("addressed jump opens a detached around page and loads earlier and later sl
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.match(calls.find(path=>path.includes("page=after"))||"",/page=after&at=60&limit=100&log_uid=u/);
   assert.match(msgs.innerHTML,/after 80/);
+  assert.match(msgs.innerHTML,/show earlier turns &middot; 2 turns/,"loading later turns keeps the detached earlier count");
+  assert.match(msgs.innerHTML,/show later turns &middot; 4 turns/);
   assert.equal(bubActionRows(ctx).length,1,"the selected action remains on the addressed turn after a later page");
   assert.doesNotMatch(msgs.innerHTML,/live current|data-i=/);
   ctx.feature.onSelectChange();
@@ -10432,6 +10439,57 @@ test("detached page conflicts fall back to complete history in both directions",
   }
 });
 
+test("around jump flashes its target when the same response rejoins at the live segment", async () => {
+  let target=null;
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[
+      {segment_index:2,log_uid:"u",segment_offset:7,turns:[{role:"user",uid:"u",segment:2,record:50,text:"prior target"}],decisions:[]},
+      {segment_index:3,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:3,record:60,text:"current edge"},{role:"assistant",uid:"u",segment:3,record:61,text:"current neighbor"}],decisions:[]},
+    ],empty_segments:[],before_count:4,after_count:2,assets:{}}:{},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:61,text:"live boundary"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:1,assets:{}}}),
+  });
+  const msgs=ctx.roots.msgs,query=msgs.querySelector.bind(msgs),oldInner=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
+  Object.defineProperty(msgs,"innerHTML",{configurable:true,get:oldInner.get,set(value){
+    oldInner.set.call(msgs,value);
+    target=value.includes('data-bk="h:2:7"')?el("div",{className:"turn hist user",dataset:{bk:"h:2:7",uid:"u",segment:"2",record:"50"}}):null;
+    if(target)msgs.appendChild(target);
+  }});
+  msgs.querySelector=selector=>selector.includes('data-bk="h:2:7"')?target:query(selector);
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:50,ts:1_000_000});
+  ctx.feature.bind();await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(msgs.innerHTML,/data-bk="h:2:7"/);
+  assert.ok(target?.classList.contains("jumpflash"),"the prior segment target is flashed after the current range rejoins");
+  assert.equal(ctx.getPending(),null);
+  ctx.feature.destroy();
+});
+
+test("rejoined around range derives earlier count from live omitted turns", async () => {
+  let poll=0;const paths=[];
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:40,turns:[
+      {role:"user",uid:"u",segment:3,record:50,text:"target at forty"},{role:"assistant",uid:"u",segment:3,record:51,text:"next"},
+    ],decisions:[]}],empty_segments:[],before_count:43,after_count:3,assets:{}}:{},
+    chatConditional:async path=>{
+      paths.push(path);
+      poll++;
+      const omitted=poll<3?40:0,prior=poll<3?3:0;
+      return {status:200,etag:`"${poll}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live turn"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:prior,omitted_turns:omitted,chat_started:"start",assets:{}}};
+    },
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  const html=ctx.roots.msgs.innerHTML;
+  assert.ok(html.indexOf("chat started") < html.indexOf("show earlier turns"),"the earlier button follows the chat-started seam when no prior page survived");
+  assert.match(html,/show earlier turns &middot; 43 turns/);
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(paths.some(path=>/start=0/.test(path)),"one click lowers the live start to max(0, omitted - 100)");
+  await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/show earlier turns/,"zero omitted and prior turns leave no earlier button");
+  ctx.feature.destroy();
+});
+
 test("a detached poll rejoins when its current slice reaches the live boundary", async () => {
   const paths=[];let poll=0;
   const ctx=makeFeature({
@@ -10491,6 +10549,23 @@ test("detached paging serializes overlapping requests and ignores stale page res
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.match(ctx.roots.msgs.innerHTML,/current/);
   assert.doesNotMatch(ctx.roots.msgs.innerHTML,/target/);
+  ctx.feature.destroy();
+});
+
+test("stale around response clears its loading flag so the pending jump can retry", async () => {
+  let resolveFirst,aroundCalls=0;
+  const ctx=makeFeature({
+    api:path=>path.includes("page=around")?++aroundCalls===1?new Promise(resolve=>{resolveFirst=resolve;}):Promise.resolve({segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"retried target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}):Promise.resolve({}),
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));
+  ctx.feature.invalidate();
+  resolveFirst({segments:[],empty_segments:[],before_count:1,after_count:1,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(aroundCalls,2,"the still-pending jump retries the stale around request");
+  assert.match(ctx.roots.msgs.innerHTML,/retried target/);
   ctx.feature.destroy();
 });
 
