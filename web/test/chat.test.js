@@ -10315,6 +10315,9 @@ test("addressed jump opens a detached around page and loads earlier and later sl
   assert.match(msgs.innerHTML,/after 80/);
   assert.equal(bubActionRows(ctx).length,1,"the selected action remains on the addressed turn after a later page");
   assert.doesNotMatch(msgs.innerHTML,/live current|data-i=/);
+  ctx.feature.onSelectChange();
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null,"changing selection clears detached chrome");
+  assert.equal(ctx.roots.scrollend.getAttribute("aria-label"),"scroll to latest message");
   ctx.feature.destroy();
 });
 
