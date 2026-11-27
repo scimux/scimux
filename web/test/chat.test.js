@@ -9947,6 +9947,10 @@ test("history page merge handles empty input and joins turns and decisions by se
     segments:[{segment_index:11}],empty_segments:[],
   });
   assert.deepEqual(turnless.segs[0].turns,[{record:110}],"a decision-only slice keeps turns from the existing page");
+  const later=chatmod.mergeHistoryPage({segs:[{segment_index:12,segment_offset:2,turns:[{record:120}]}]}, {
+    segments:[{segment_index:12,segment_offset:3,turns:[{record:130}]}],empty_segments:[],
+  },"after");
+  assert.deepEqual(later.segs[0].turns.map(t=>t.record),[120,130]);
 });
 
 test("earlier loader ignores zero counts and stale visits", async () => {
@@ -10533,6 +10537,31 @@ test("an empty detached slice uses the sentinel record and a null page rejoins",
   assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=2147483647&limit=100&log_uid=u/);
   assert.ok(pollPaths.some(path=>/start=0/.test(path)),"an empty final page rejoins the live segment");
   assert.match(ctx.roots.msgs.innerHTML,/current/);
+  ctx.feature.destroy();
+});
+
+test("an addressed range that already reaches the live tail rejoins and flashes its live key", async () => {
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:3,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:0,assets:{}}:{},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}}),
+  });
+  const liveTarget=el("div",{className:"turn user",dataset:{bk:"i:0"}});
+  const query=ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
+  ctx.roots.msgs.querySelector=selector=>selector.includes('data-bk="i:0"')?liveTarget:query(selector);
+  ctx.setPending({node:"n1",uid:"u",segment:3,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(ctx.roots.msgs.innerHTML,/current/);
+  assert.ok(liveTarget.classList.contains("jumpflash"),"the rejoined target uses its live bubble key");
+  assert.equal(ctx.roots.scrollend.getAttribute("data-detached")||null,null);
+  ctx.feature.destroy();
+});
+
+test("an unaddressed jump still opens the full omitted window without paging around", async () => {
+  const paths=[];
+  const ctx=makeFeature({chatConditional:async path=>{paths.push(path);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:20,assets:{}}};}});
+  ctx.setPending({node:"n1",ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  assert.ok(paths.some(path=>/start=0/.test(path)));
+  assert.ok(paths.every(path=>!path.includes("page=around")));
   ctx.feature.destroy();
 });
 
