@@ -10441,6 +10441,20 @@ test("a detached poll rejoins when its current slice reaches the live boundary",
   ctx.feature.destroy();
 });
 
+test("a detached poll rejoins across a live segment change", async () => {
+  const paths=[];let poll=0;
+  const ctx=makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:4,log_uid:"u",segment_offset:2,turns:[{role:"user",uid:"u",segment:4,record:50,text:"target"},{role:"assistant",uid:"u",segment:4,record:51,text:"next"}],decisions:[]}],empty_segments:[],before_count:5,after_count:4,assets:{}}:{},
+    chatConditional:async path=>{paths.push(path);const n=++poll;return {status:200,etag:`"${n}"`,data:{turns:[{role:"user",uid:"u",segment:n>1?4:3,record:n>1?51:100,text:n>1?"new segment live":"old segment live"}],live:"quiet",log_uid:"u",segment_index:n>1?4:3,omitted_turns:n>1?3:20,prior_turns:0,assets:{}}};},
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:4,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(paths.some(path=>/start=2/.test(path)),"the changed segment rejoins at the covered page offset");
+  assert.doesNotMatch(ctx.roots.msgs.innerHTML,/data-bk="h:4:/);
+  assert.match(ctx.roots.msgs.innerHTML,/new segment live/);
+  ctx.feature.destroy();
+});
+
 test("detached paging works when the conversation controls omit scrollend", async () => {
   const roots=makeRoots();roots.scrollend=null;
   const ctx=makeFeature({roots,api:async path=>path.includes("page=around")?{segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}:{},chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
