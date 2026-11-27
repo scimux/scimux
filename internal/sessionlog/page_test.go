@@ -254,6 +254,15 @@ func TestPageReadsOnlySelectedRecordsFromLargeLog(t *testing.T) {
 	}
 }
 
+func TestPageReadsFirstRecordFromZeroOffset(t *testing.T) {
+	path := writeLog(t, []Event{{T: "user", Time: "2025-01-01T00:00:00Z", Text: "first record"}})
+	c := &LogCache{}
+	page, ok := c.Page(path, PageBefore, 100, 1)
+	if !ok || countPageTurns(page) != 1 || page.Segments[0].Turns[0].Text != "first record" {
+		t.Fatalf("page first record=%+v ok=%v", page, ok)
+	}
+}
+
 func TestPageIndexAppendAndColdReset(t *testing.T) {
 	path := richLog(t)
 	c := &LogCache{}

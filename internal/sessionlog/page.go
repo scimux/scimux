@@ -272,8 +272,11 @@ func turnByRecord(turns []pageTurnIndex, record int) int {
 
 func (c *LogCache) readIndexedEvent(f *os.File, ref recordRef) (Event, error) {
 	c.pageReads++
-	buf := make([]byte, ref.len)
-	start := ref.end - int64(ref.len) - 1 // exclude trailing newline
+	buf := make([]byte, ref.len+1)
+	start := ref.end - int64(len(buf)) - 1 // one byte before payload, ending before newline
+	if start < 0 {
+		start = 0
+	}
 	_, err := f.ReadAt(buf, start)
 	if err != nil {
 		return Event{}, err

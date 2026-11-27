@@ -387,19 +387,10 @@ func (c *LogCache) resetAccum() {
 // one of them skips and this one ingests is two readers showing the user two
 // different conversations -- and record ordinals that no longer line up.
 func (c *LogCache) consume(r io.Reader, baseOff int64) (newOff int64, nBytes int64, err error) {
-	readerAt, canReadAt := r.(io.ReaderAt)
 	n, err := forEachRecord(r, func(rec []byte, off int64) bool {
 		var ev Event
 		if json.Unmarshal(rec, &ev) == nil {
-			payloadLen := len(rec)
-			if canReadAt && off >= 2 {
-				var prev [1]byte
-				c.ingestReads++
-				if n, readErr := readerAt.ReadAt(prev[:], baseOff+off-2); readErr == nil && n == 1 && prev[0] == '\r' {
-					payloadLen++
-				}
-			}
-			c.ingest(ev, c.recCount, recordRef{end: baseOff + off, len: payloadLen})
+			c.ingest(ev, c.recCount, recordRef{end: baseOff + off, len: len(rec)})
 			c.recCount++
 		}
 		return true
