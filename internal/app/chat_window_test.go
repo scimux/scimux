@@ -52,16 +52,16 @@ func TestChatTailWindowDecisionsAndLeaseBase(t *testing.T) {
 	decisions := []sessionlog.DecisionSurface{
 		{Record: 1, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
 		{Record: 5, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
-		{Record: 9, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
-		{Record: 11, Decision: sessionlog.DecisionEvent{LeaseID: "lease-b"}},
-		{Record: 13, Decision: sessionlog.DecisionEvent{LeaseID: ""}},
-		{Record: 15, Decision: sessionlog.DecisionEvent{LeaseID: "lease-dropped-only"}},
+		{Record: 11, Decision: sessionlog.DecisionEvent{LeaseID: "lease-dropped-only"}},
+		{Record: 12, Decision: sessionlog.DecisionEvent{LeaseID: "lease-a"}},
+		{Record: 13, Decision: sessionlog.DecisionEvent{LeaseID: "lease-b"}},
+		{Record: 14, Decision: sessionlog.DecisionEvent{LeaseID: ""}},
 	}
 	got := chatTailWindow(turns, decisions, 2)
 	if got.start != 6 {
 		t.Fatalf("start = %d, want 6", got.start)
 	}
-	wantDecisions := decisions[2:5]
+	wantDecisions := decisions[3:]
 	if !reflect.DeepEqual(got.decisions, wantDecisions) {
 		t.Errorf("kept decisions = %+v, want %+v", got.decisions, wantDecisions)
 	}

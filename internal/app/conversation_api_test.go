@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -1717,6 +1718,219 @@ func TestHandleChatCarriesDurableAddress(t *testing.T) {
 			sameAddr(fmt.Sprintf("history[%d]", si), tn)
 		}
 	}
+}
+
+func TestHandleChatTailValidationAndHistoryPrecedence(t *testing.T) {
+	a, node, log := chatWindowTestApp(t)
+	for _, tc := range []struct{ value string }{{""}, {"x"}, {"0"}, {"-1"}, {"501"}} {
+		t.Run("bad tail "+tc.value, func(t *testing.T) {
+			query := "tail=" + tc.value
+			rec := chatWindowRequest(a, node, query)
+			if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != "bad tail" {
+				t.Errorf("tail=%q: status/body = %d/%q, want 400/\"bad tail\"", tc.value, rec.Code, rec.Body.String())
+			}
+		})
+	}
+
+	// history=1 owns its response shape and ignores even an invalid tail.
+	rec := chatWindowRequest(a, node, "history=1&tail=0")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history with tail status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var history map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := history["segments"]; !ok {
+		t.Errorf("history response missing segments: %s", rec.Body.String())
+	}
+	if _, ok := history["turns"]; ok {
+		t.Errorf("history response unexpectedly has polled turns: %s", rec.Body.String())
+	}
+	if got := len(sessionlog.ReadSegment(log).Turns); got != 8 {
+		t.Fatalf("test fixture turns = %d, want 8", got)
+	}
+}
+
+func TestHandleChatTailWindowAndUntailedShape(t *testing.T) {
+	a, node, log := chatWindowTestApp(t)
+	base := chatWindowRequest(a, node, "")
+	if base.Code != http.StatusOK {
+		t.Fatalf("untail status = %d: %s", base.Code, base.Body.String())
+	}
+	tailed := chatWindowRequest(a, node, "tail=2")
+	if tailed.Code != http.StatusOK {
+		t.Fatalf("tail status = %d: %s", tailed.Code, tailed.Body.String())
+	}
+	var full, window map[string]json.RawMessage
+	if err := json.Unmarshal(base.Body.Bytes(), &full); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(tailed.Body.Bytes(), &window); err != nil {
+		t.Fatal(err)
+	}
+	var fullTurns, keptTurns []transcript.Turn
+	if err := json.Unmarshal(full["turns"], &fullTurns); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(window["turns"], &keptTurns); err != nil {
+		t.Fatal(err)
+	}
+	if len(fullTurns) != 8 || len(keptTurns) != 2 {
+		t.Errorf("turn counts untailed/tailed = %d/%d, want 8/2", len(fullTurns), len(keptTurns))
+	}
+	wantKeys := []string{"allow_external_attachments", "assets", "attention", "auto_approve", "chat_started", "ctx_pct", "ctx_used", "ctx_window", "decisions", "delivery", "fallback", "last_change", "live", "log_uid", "pending", "pending_calls", "prior_turns", "progress", "reason", "reply_ready", "segment_index", "source", "turn_in_flight", "turns", "waiting_on", "watermark"}
+	gotKeys := make([]string, 0, len(full))
+	for key := range full {
+		gotKeys = append(gotKeys, key)
+	}
+	sort.Strings(gotKeys)
+	if !reflect.DeepEqual(gotKeys, wantKeys) {
+		t.Errorf("untail response keys = %v, want %v", gotKeys, wantKeys)
+	}
+	if _, ok := full["omitted_turns"]; ok {
+		t.Errorf("untail response gained omitted_turns: %s", base.Body.String())
+	}
+	if _, ok := full["window_head"]; ok {
+		t.Errorf("untail response gained window_head: %s", base.Body.String())
+	}
+	if _, ok := full["lease_base"]; ok {
+		t.Errorf("untail response gained lease_base: %s", base.Body.String())
+	}
+
+	var omitted int
+	if err := json.Unmarshal(window["omitted_turns"], &omitted); err != nil {
+		t.Fatalf("omitted_turns missing or invalid: %v (%s)", err, tailed.Body.String())
+	}
+	if omitted != 6 {
+		t.Errorf("omitted_turns = %d, want 6", omitted)
+	}
+	var head map[string]json.RawMessage
+	if err := json.Unmarshal(window["window_head"], &head); err != nil {
+		t.Fatalf("window_head missing or invalid: %v (%s)", err, tailed.Body.String())
+	}
+	for _, key := range []string{"uid", "segment", "record"} {
+		if _, ok := head[key]; !ok {
+			t.Errorf("window_head missing %q: %s", key, tailed.Body.String())
+		}
+	}
+	if _, ok := window["assets"]; ok {
+		t.Errorf("assets from an omitted turn leaked into the window: %s", tailed.Body.String())
+	}
+	if keptTurns[0].Role != "assistant" || keptTurns[0].Record != 8 {
+		t.Errorf("first kept turn = %+v, want assistant record 8", keptTurns[0])
+	}
+	var decisions []sessionlog.DecisionSurface
+	if raw := window["decisions"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &decisions); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(decisions) != 2 || decisions[0].Decision.LeaseID != "lease-a" || decisions[1].Decision.LeaseID != "" {
+		t.Errorf("window decisions = %+v, want kept lease-a and empty-lease decisions", decisions)
+	}
+	var leaseBase map[string]int
+	if err := json.Unmarshal(window["lease_base"], &leaseBase); err != nil {
+		t.Fatalf("lease_base missing or invalid: %v (%s)", err, tailed.Body.String())
+	}
+	if !reflect.DeepEqual(leaseBase, map[string]int{"lease-a": 1}) {
+		t.Errorf("lease_base = %#v, want one dropped lease-a decision", leaseBase)
+	}
+	if got := len(sessionlog.ReadSegment(log).Turns); got != 8 {
+		t.Fatalf("fixture segment turns = %d, want 8", got)
+	}
+}
+
+func TestHandleChatTailLargeLogPayload(t *testing.T) {
+	a, node, path := chatWindowTestApp(t)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath(node.ID)}
+	if err := w.Append(sessionlog.NewMeta(node.ID, node.Agent, "", "", a.home)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3000; i++ {
+		role := "assistant"
+		if i%2 == 0 {
+			role = "user"
+		}
+		if err := w.Append(sessionlog.Event{T: role, Text: strings.Repeat("synthetic conversation turn ", 20) + strconv.Itoa(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	full := chatWindowRequest(a, node, "")
+	window := chatWindowRequest(a, node, "tail=50")
+	if full.Code != http.StatusOK || window.Code != http.StatusOK {
+		t.Fatalf("full/window status = %d/%d", full.Code, window.Code)
+	}
+	var body struct {
+		Turns []transcript.Turn `json:"turns"`
+	}
+	if err := json.Unmarshal(window.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Turns) > 150 {
+		t.Errorf("tailed turns = %d, want <= 150", len(body.Turns))
+	}
+	if int64(window.Body.Len())*10 >= int64(full.Body.Len()) {
+		t.Errorf("tailed body = %d bytes, full body = %d bytes, want under one tenth", window.Body.Len(), full.Body.Len())
+	}
+}
+
+func chatWindowTestApp(t *testing.T) (*app, *Node, string) {
+	t.Helper()
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "chat-window", Title: "chat-window", Agent: "pi", CreatedAt: "2026-07-14T00:00:00Z"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	path := a.sessionLogPath(n.ID)
+	w := &sessionlog.Writer{Path: path}
+	if err := w.Append(sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(sessionlog.NewAsset(sessionlog.AssetEvent{
+		ID: "a_window_old", Name: "old.png", Mime: "image/png", Size: 2,
+		Storage: "inline", Bytes: "aGk=", SourceKind: "upload", SourcePath: "/tmp/old.png",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append(sessionlog.Event{T: "user", Text: "old [attached image: /tmp/old.png]"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < 8; i++ {
+		if err := w.Append(sessionlog.Event{T: "assistant", Text: fmt.Sprintf("turn %d", i)}); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			if err := w.Append(sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: "lease-a"})); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Append(sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: "dropped-only"})); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, lease := range []string{"lease-a", ""} {
+		if err := w.Append(sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: lease})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return a, n, path
+}
+
+func chatWindowRequest(a *app, n *Node, query string) *httptest.ResponseRecorder {
+	url := "/api/nodes/" + n.ID + "/chat"
+	if query != "" {
+		url += "?" + query
+	}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, url, nil)
+	r.SetPathValue("id", n.ID)
+	a.handleChat(rec, r)
+	return rec
 }
 
 func TestHandleChatCodexSourceACP(t *testing.T) {
