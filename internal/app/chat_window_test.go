@@ -23,14 +23,16 @@ func TestChatTailWindowTurnBoundaries(t *testing.T) {
 		n          int
 		start      int
 		windowHead int
+		hasHead    bool
 	}{
+		{name: "empty segment", turns: []transcript.Turn{}, n: 2, start: 0},
 		{name: "at or below tail", turns: addressedTurns("user", "assistant"), n: 2, start: 0},
 		{name: "snaps to user turn", turns: addressedTurns("user", "assistant", "user", "assistant", "user", "assistant"), n: 2, start: 4},
-		{name: "hard cut records leading assistant", turns: addressedTurns("user", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant"), n: 2, start: 10, windowHead: 2},
-		{name: "first assistant is inside window", turns: []transcript.Turn{{Role: "user", Record: 0}, {Role: "assistant", Record: 2}, {Role: "user", Record: 4}, {Role: "user", Record: 6}, {Role: "user", Record: 8}, {Role: "user", Record: 10}, {Role: "user", Record: 12}, {Role: "user", Record: 14}, {Role: "user", Record: 16}, {Role: "user", Record: 18}, {Role: "assistant", Record: 20}, {Role: "assistant", Record: 22}}, n: 2, start: 10},
-		{name: "no user turn", turns: addressedTurns("assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant"), n: 2, start: 6, windowHead: 0},
-		{name: "cycle exactly at cap snaps", turns: addressedTurns("user", "assistant", "assistant", "assistant", "assistant", "assistant", "user", "assistant"), n: 2, start: 6},
-		{name: "cycle one over cap hard cuts", turns: addressedTurns("user", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "user", "assistant"), n: 2, start: 7, windowHead: 0},
+		{name: "hard cut records leading assistant", turns: addressedTurns("user", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant"), n: 2, start: 10, windowHead: 2, hasHead: true},
+		{name: "first assistant is inside window", turns: []transcript.Turn{{Role: "user", Record: 0}, {Role: "tool", Record: 2}, {Role: "tool", Record: 4}, {Role: "tool", Record: 6}, {Role: "tool", Record: 8}, {Role: "tool", Record: 10}, {Role: "tool", Record: 12}, {Role: "tool", Record: 14}, {Role: "tool", Record: 16}, {Role: "tool", Record: 18}, {Role: "assistant", Record: 20}, {Role: "assistant", Record: 22}}, n: 2, start: 10},
+		{name: "no user turn", turns: addressedTurns("assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant"), n: 2, start: 6, windowHead: 0, hasHead: true},
+		{name: "cycle exactly at cap snaps", turns: addressedTurns("user", "assistant", "user", "assistant", "assistant", "assistant", "assistant", "assistant"), n: 2, start: 2},
+		{name: "cycle one over cap hard cuts", turns: addressedTurns("user", "assistant", "user", "assistant", "assistant", "assistant", "assistant", "assistant", "assistant"), n: 2, start: 7, windowHead: 6, hasHead: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,9 +40,9 @@ func TestChatTailWindowTurnBoundaries(t *testing.T) {
 			if got.start != tc.start {
 				t.Errorf("start = %d, want %d", got.start, tc.start)
 			}
-			if tc.windowHead == 0 && got.windowHead != nil {
+			if !tc.hasHead && got.windowHead != nil {
 				t.Errorf("window_head = %+v, want none", got.windowHead)
-			} else if tc.windowHead != 0 && (got.windowHead == nil || got.windowHead.Record != tc.windowHead) {
+			} else if tc.hasHead && (got.windowHead == nil || got.windowHead.Record != tc.windowHead) {
 				t.Errorf("window_head = %+v, want record %d", got.windowHead, tc.windowHead)
 			}
 		})

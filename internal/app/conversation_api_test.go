@@ -1731,6 +1731,10 @@ func TestHandleChatTailValidationAndHistoryPrecedence(t *testing.T) {
 			}
 		})
 	}
+	duplicate := chatWindowRequest(a, node, "tail=2&tail=3")
+	if duplicate.Code != http.StatusBadRequest || strings.TrimSpace(duplicate.Body.String()) != "bad tail" {
+		t.Errorf("duplicate tail: status/body = %d/%q, want 400/\"bad tail\"", duplicate.Code, duplicate.Body.String())
+	}
 
 	// history=1 owns its response shape and ignores even an invalid tail.
 	rec := chatWindowRequest(a, node, "history=1&tail=0")
@@ -1817,8 +1821,8 @@ func TestHandleChatTailWindowAndUntailedShape(t *testing.T) {
 	if _, ok := window["assets"]; ok {
 		t.Errorf("assets from an omitted turn leaked into the window: %s", tailed.Body.String())
 	}
-	if keptTurns[0].Role != "assistant" || keptTurns[0].Record != 8 {
-		t.Errorf("first kept turn = %+v, want assistant record 8", keptTurns[0])
+	if keptTurns[0].Role != "assistant" || keptTurns[0].Record != 10 {
+		t.Errorf("first kept turn = %+v, want assistant record 10", keptTurns[0])
 	}
 	var decisions []sessionlog.DecisionSurface
 	if raw := window["decisions"]; len(raw) > 0 {
@@ -1838,6 +1842,51 @@ func TestHandleChatTailWindowAndUntailedShape(t *testing.T) {
 	}
 	if got := len(sessionlog.ReadSegment(log).Turns); got != 8 {
 		t.Fatalf("fixture segment turns = %d, want 8", got)
+	}
+	wide := chatWindowRequest(a, node, "tail=500")
+	var wideBody map[string]json.RawMessage
+	if err := json.Unmarshal(wide.Body.Bytes(), &wideBody); err != nil {
+		t.Fatal(err)
+	}
+	var wideOmitted int
+	if err := json.Unmarshal(wideBody["omitted_turns"], &wideOmitted); err != nil || wideOmitted != 0 {
+		t.Errorf("tail=500 omitted_turns = %d, error %v; want 0", wideOmitted, err)
+	}
+	for _, key := range []string{"window_head", "lease_base"} {
+		if _, ok := wideBody[key]; ok {
+			t.Errorf("tail=500 unexpectedly has %s: %s", key, wide.Body.String())
+		}
+	}
+}
+
+func TestHandleChatTailOmitsFilteredDecisionSet(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{})
+	if err := os.MkdirAll(a.sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{ID: "chat-window-empty-decisions", Agent: "pi"}
+	a.nodes, a.byID[n.ID] = []*Node{n}, n
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	for _, ev := range []sessionlog.Event{
+		sessionlog.NewMeta(n.ID, n.Agent, "", "", a.home),
+		sessionlog.NewDecision(sessionlog.DecisionEvent{Source: "auto", LeaseID: "only-dropped"}),
+		{T: "user", Text: "earlier"},
+		{T: "user", Text: "latest"},
+	} {
+		if err := w.Append(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := chatWindowRequest(a, n, "tail=1")
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["decisions"]; ok {
+		t.Errorf("all-dropped decisions leaked into window: %s", rec.Body.String())
+	}
+	if _, ok := body["lease_base"]; ok {
+		t.Errorf("lease only in dropped decisions appeared in lease_base: %s", rec.Body.String())
 	}
 }
 

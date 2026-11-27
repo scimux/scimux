@@ -750,6 +750,21 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 		return
 	}
+	tailN, tailGiven := 0, false
+	if r.URL.Query().Has("tail") {
+		tailGiven = true
+		values := r.URL.Query()["tail"]
+		if len(values) != 1 {
+			http.Error(w, "bad tail", http.StatusBadRequest)
+			return
+		}
+		var err error
+		tailN, err = strconv.Atoi(values[0])
+		if err != nil || tailN < 1 || tailN > 500 {
+			http.Error(w, "bad tail", http.StatusBadRequest)
+			return
+		}
+	}
 	seg := a.segment(n)
 	a.mu.Lock()
 	var lastMS int64
@@ -757,11 +772,28 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		lastMS = t.UnixMilli()
 	}
 	a.mu.Unlock()
-	turns, assets := a.projectTurns(n.ID, seg.Turns)
+	turnsForProjection := seg.Turns
+	decisions := seg.Decisions
+	var window chatWindow
+	if tailGiven {
+		window = chatTailWindow(seg.Turns, seg.Decisions, tailN)
+		turnsForProjection = seg.Turns[window.start:]
+		decisions = window.decisions
+	}
+	turns, assets := a.projectTurns(n.ID, turnsForProjection)
 	resp := map[string]any{
 		"turns": turns, "last_change": lastMS,
 		"chat_started": seg.StartTime, "prior_turns": seg.PriorTurns,
 		"log_uid": seg.UID, "segment_index": seg.Index,
+	}
+	if tailGiven {
+		resp["omitted_turns"] = window.start
+		if window.windowHead != nil {
+			resp["window_head"] = window.windowHead
+		}
+		if len(window.leaseBase) > 0 {
+			resp["lease_base"] = window.leaseBase
+		}
 	}
 	resp["allow_external_attachments"] = a.settings().AllowExternalAttachments
 	if query := r.URL.Query(); query.Has("trace_uid") {
@@ -786,8 +818,8 @@ func (a *app) handleChat(w http.ResponseWriter, r *http.Request) {
 		resp["assets"] = assets
 	}
 	// Current-segment decision audit surfaces (P3); separate from turns.
-	if len(seg.Decisions) > 0 {
-		resp["decisions"] = seg.Decisions
+	if len(decisions) > 0 {
+		resp["decisions"] = decisions
 	}
 	workerClaude := !n.Adopted && a.workers != nil && n.Agent == "claude" && a.workers.manages(n.ID)
 	var workerState sessionworker.State
