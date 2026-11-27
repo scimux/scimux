@@ -10558,8 +10558,9 @@ test("an addressed range that already reaches the live tail rejoins and flashes 
 
 test("an unaddressed jump still opens the full omitted window without paging around", async () => {
   const paths=[];
-  const ctx=makeFeature({chatConditional:async path=>{paths.push(path);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:20,assets:{}}};}});
+  const ctx=makeFeature({chatConditional:async path=>{paths.push(path);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:path.includes("start=0")?0:20,assets:{}}};}});
   ctx.setPending({node:"n1",ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.ok(paths.some(path=>/start=0/.test(path)));
   assert.ok(paths.every(path=>!path.includes("page=around")));
   ctx.feature.destroy();
