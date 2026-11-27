@@ -579,7 +579,8 @@ export function mergeHistoryPage(current, page, direction = "before"){
   return {
     node: current?.node || "", segs, emptySegs:[...empty.values()].sort((a,b) => a.segment_index - b.segment_index),
     assets:Object.assign({}, current?.assets || {}, page?.assets || {}),
-    beforeCount: page?.before_count || 0, afterCount: page?.after_count || 0, paged:true, scrollTo:"",
+    beforeCount: direction === "after" ? (current?.beforeCount || 0) : (page?.before_count || 0),
+    afterCount: direction === "after" ? (page?.after_count || 0) : (current?.afterCount || 0), paged:true, scrollTo:"",
   };
 }
 
@@ -2497,12 +2498,12 @@ export function createChatFeature(deps){
       (s.segment_offset || 0) + (s.turns || []).length > omitted);
     if (detached.afterCount > 0 && !current) return false;
     const id = detached.node;
-    chatHist = {
-      node:id,
-      segs:detached.segs.filter(s => !Number.isInteger(segment) || s.segment_index < segment),
-      emptySegs:detached.emptySegs.filter(s => !Number.isInteger(segment) || s.segment_index < segment),
+    const priorSegs=detached.segs.filter(s => !Number.isInteger(segment) || s.segment_index < segment);
+    const emptySegs=detached.emptySegs.filter(s => !Number.isInteger(segment) || s.segment_index < segment);
+    chatHist = priorSegs.length || emptySegs.length ? {
+      node:id, segs:priorSegs, emptySegs,
       scrollTo:"", assets:{...detached.assets}, beforeCount:detached.beforeCount, paged:true,
-    };
+    } : {node:"",segs:null,emptySegs:[],scrollTo:"",assets:{},beforeCount:0,paged:false};
     live = {...live, node:id, visit:detached.visit, start:current?.segment_offset || 0, segment};
     detached = {node:"",visit:-1,segs:null,emptySegs:[],assets:{},beforeCount:0,afterCount:0};
     chatSig = "";
@@ -2535,14 +2536,23 @@ export function createChatFeature(deps){
     const id=pending.node, request=++earlierRequest;
     try {
       const page=await api(`/api/nodes/${encodeURIComponent(id)}/chat?page=around&at=${pending.record}&limit=100&log_uid=${encodeURIComponent(pending.uid)}`);
-      if (request !== earlierRequest || g("sel", "") !== id || g("selGen", 0) !== gen) return;
+      if (request !== earlierRequest){
+        const current=getPendingJump();
+        if (current?.node === id && current.uid === pending.uid && current.record === pending.record && current.aroundLoading){
+          current.aroundLoading=false;setPendingJump(current);
+        }
+        return;
+      }
+      if (g("sel", "") !== id || g("selGen", 0) !== gen) return;
       detached={node:id,visit:gen,segs:page?.segments || [],emptySegs:page?.empty_segments || [],assets:page?.assets || {},beforeCount:page?.before_count || 0,afterCount:page?.after_count || 0};
       chatHist={node:"",segs:null,emptySegs:[],scrollTo:"",assets:{},beforeCount:0,paged:false};
       setPendingJump(null);chatSig="";
       await refreshChat();
       const slice=page?.segments?.find(s=>s.segment_index===pending.segment && s.log_uid===pending.uid);
       const index=(slice?.turns || []).findIndex(t=>t.record===pending.record && t.uid===pending.uid);
-      const key=isDetached(id,gen)?histBk(pending.segment,(slice?.segment_offset || 0)+index):liveBk((slice?.segment_offset || 0)+index);
+      const key=!isDetached(id,gen) && pending.segment === live.segment
+        ? liveBk((slice?.segment_offset || 0)+index)
+        : histBk(pending.segment,(slice?.segment_offset || 0)+index);
       const target=index<0?null:q(msgs,`.turn[data-bk="${key}"]`);
       if (target){
         activeHighlight={node:id,uid:pending.uid,segment:pending.segment || 0,record:pending.record,expires:(typeof d.now === "function" ? d.now() : Date.now())+1600};

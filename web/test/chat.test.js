@@ -6524,7 +6524,6 @@ test("partial prior pages reload complete history for older time jumps", async (
         paths.push(path);
         if(path.includes("page=before"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:10,time:"partial-time",text:"partial"}],decisions:[]}],empty_segments:[],before_count:beforeCount,assets:{}};
         if(path.includes("history=1"))return new Promise(resolve=>{resolveHistory=resolve;});
-        return {};
       },
       chatConditional:async()=>({status:200,etag:`"${++poll}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,time:`live-${poll}`,text:`live ${poll}`}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
       deps:{toast:message=>toasts.push(message)},
@@ -10188,7 +10187,6 @@ test("page conflict drops prior pages and returns the poll to tail mode", async 
         if (++pageCount > 1) throw Object.assign(new Error("log_changed"), { status: 409 });
         return {segments:[{segment_index:2,log_uid:"uid-a",segment_offset:2,segment_turns:4,start:"2026-01-01",turns:[{role:"user",uid:"uid-a",segment:2,record:40,text:"older page"}],decisions:[]}],empty_segments:[],before_count:3,assets:{}};
       }
-      return {};
     },
     chatConditional: async path => {
       paths.push(path);
@@ -10285,7 +10283,6 @@ test("addressed jump opens a detached around page and loads earlier and later sl
       if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:10,segment_turns:30,start:"T",seam:"S",turns:[40,50,60].map(record=>({role:"user",uid:"u",segment:3,record,text:record===50?"around target":`turn ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:9,current_segment:3,assets:{}};
       if(path.includes("page=before"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,segment_turns:30,start:"T",seam:"S",turns:Array.from({length:10},(_,i)=>({role:"assistant",uid:"u",segment:3,record:20+i,text:`before ${20+i}`})),decisions:[]}],empty_segments:[{segment_index:2,log_uid:"u",turns:[],decisions:[]}],before_count:2,after_count:12,current_segment:3,assets:{before:{name:"before"}}};
       if(path.includes("page=after"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:13,segment_turns:30,start:"T",seam:"S",turns:[70,80].map(record=>({role:"assistant",uid:"u",segment:3,record,text:`after ${record}`})),decisions:[]}],empty_segments:[],before_count:15,after_count:4,current_segment:3,assets:{after:{name:"after"}}};
-      return {};
     },
     chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live current"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:20,prior_turns:0,assets:{}}}),
   });
@@ -10424,7 +10421,6 @@ test("detached page conflicts fall back to complete history in both directions",
         if(path.includes("page=around"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"addressed"}],decisions:[]}],empty_segments:[],before_count:3,after_count:3,assets:{}};
         if(path.includes(`page=${mode}`))throw Object.assign(new Error("log_changed"),{status:409});
         if(path.includes("history=1"))return {segments:[{segment_index:1,log_uid:"u",turns:[{role:"assistant",uid:"u",segment:1,record:10,text:"complete history"}],decisions:[]}],empty_segments:[],assets:{}};
-        return {};
       },
       chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,assets:{}}}),
     });
@@ -10442,10 +10438,10 @@ test("detached page conflicts fall back to complete history in both directions",
 test("around jump flashes its target when the same response rejoins at the live segment", async () => {
   let target=null;
   const ctx=makeFeature({
-    api:async path=>path.includes("page=around")?{segments:[
+    api:async()=>({segments:[
       {segment_index:2,log_uid:"u",segment_offset:7,turns:[{role:"user",uid:"u",segment:2,record:50,text:"prior target"}],decisions:[]},
       {segment_index:3,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:3,record:60,text:"current edge"},{role:"assistant",uid:"u",segment:3,record:61,text:"current neighbor"}],decisions:[]},
-    ],empty_segments:[],before_count:4,after_count:2,assets:{}}:{},
+    ],empty_segments:[],before_count:4,after_count:2,assets:{}}),
     chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:61,text:"live boundary"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:1,assets:{}}}),
   });
   const msgs=ctx.roots.msgs,query=msgs.querySelector.bind(msgs),oldInner=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
@@ -10464,15 +10460,15 @@ test("around jump flashes its target when the same response rejoins at the live 
 });
 
 test("rejoined around range derives earlier count from live omitted turns", async () => {
-  let poll=0;const paths=[];
+  let poll=0,zeroNext=false;const paths=[];
   const ctx=makeFeature({
-    api:async path=>path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:40,turns:[
+    api:async()=>({segments:[{segment_index:3,log_uid:"u",segment_offset:40,turns:[
       {role:"user",uid:"u",segment:3,record:50,text:"target at forty"},{role:"assistant",uid:"u",segment:3,record:51,text:"next"},
-    ],decisions:[]}],empty_segments:[],before_count:43,after_count:3,assets:{}}:{},
+    ],decisions:[]}],empty_segments:[],before_count:43,after_count:3,assets:{}}),
     chatConditional:async path=>{
       paths.push(path);
       poll++;
-      const omitted=poll<3?40:0,prior=poll<3?3:0;
+      const omitted=zeroNext?0:40,prior=zeroNext?0:3;
       return {status:200,etag:`"${poll}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live turn"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:prior,omitted_turns:omitted,chat_started:"start",assets:{}}};
     },
   });
@@ -10480,8 +10476,9 @@ test("rejoined around range derives earlier count from live omitted turns", asyn
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   const html=ctx.roots.msgs.innerHTML;
-  assert.ok(html.indexOf("chat started") < html.indexOf("show earlier turns"),"the earlier button follows the chat-started seam when no prior page survived");
+  assert.ok(html.indexOf("chat started") < html.indexOf("show earlier turns"),`the earlier button follows the chat-started seam when no prior page survived: ${html}`);
   assert.match(html,/show earlier turns &middot; 43 turns/);
+  zeroNext=true;
   firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.ok(paths.some(path=>/start=0/.test(path)),"one click lowers the live start to max(0, omitted - 100)");
@@ -10536,7 +10533,6 @@ test("detached paging serializes overlapping requests and ignores stale page res
     api:path=>{
       if(path.includes("page=around"))return Promise.resolve({segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:2,after_count:2,assets:{}});
       if(path.includes("page=before")){pageCalls++;return new Promise(resolve=>{releasePage=resolve;});}
-      return Promise.resolve({});
     },
     chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
   });
@@ -10555,25 +10551,33 @@ test("detached paging serializes overlapping requests and ignores stale page res
 test("stale around response clears its loading flag so the pending jump can retry", async () => {
   let resolveFirst,aroundCalls=0;
   const ctx=makeFeature({
-    api:path=>path.includes("page=around")?++aroundCalls===1?new Promise(resolve=>{resolveFirst=resolve;}):Promise.resolve({segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"retried target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}):Promise.resolve({}),
+    api:()=>++aroundCalls===1?new Promise(resolve=>{resolveFirst=resolve;}):Promise.resolve({segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"retried target"}],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}),
     chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
   });
   ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
   await new Promise(resolve=>setImmediate(resolve));
-  ctx.feature.invalidate();
+  ctx.feature.onReselect();
+  ctx.setSelGen(2);
   resolveFirst({segments:[],empty_segments:[],before_count:1,after_count:1,assets:{}});
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   await ctx.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.equal(aroundCalls,2,"the still-pending jump retries the stale around request");
   assert.match(ctx.roots.msgs.innerHTML,/retried target/);
   ctx.feature.destroy();
+
+  let resolveGeneration;
+  const generation=makeFeature({api:()=>new Promise(resolve=>{resolveGeneration=resolve;}),chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}})});
+  generation.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});generation.feature.bind();await generation.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));generation.setSelGen(2);
+  resolveGeneration({segments:[],empty_segments:[],before_count:1,after_count:1,assets:{}});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  generation.feature.destroy();
 });
 
 test("detached reads tolerate empty slices and stale around failures", async () => {
   const empty=makeFeature({
     api:async path=>{
       if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,turns:[],decisions:[]}],empty_segments:[],before_count:1,after_count:0,assets:{}};
-      return {};
     },
     chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,assets:{}}}),
   });
@@ -10603,14 +10607,14 @@ test("detached reads tolerate empty slices and stale around failures", async () 
   staleSuccess.feature.destroy();
 });
 
-test("an empty detached slice uses the sentinel record and a null page rejoins", async () => {
+test("an empty detached slice uses sentinel edges and a zero-count later page rejoins", async () => {
   const calls=[],pollPaths=[];
   const ctx=makeFeature({
     api:async path=>{
       calls.push(path);
       if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,decisions:[]}],empty_segments:[],before_count:1,after_count:2,assets:{}};
+      if(path.includes("page=after"))return {segments:[],empty_segments:[],before_count:1,after_count:0,assets:{}};
       if(path.includes("page=before"))return null;
-      return {};
     },
     chatConditional:async path=>{pollPaths.push(path);return {status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"current"}],live:"quiet",log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0}};},
   });
@@ -10619,6 +10623,9 @@ test("an empty detached slice uses the sentinel record and a null page rejoins",
   firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=2147483647&limit=100&log_uid=u/);
+  firstListener(ctx.roots.msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"later"}})});
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(calls.find(path=>path.includes("page=after"))||"",/page=after&at=0&limit=100&log_uid=u/);
   assert.ok(pollPaths.some(path=>/start=0/.test(path)),"an empty final page rejoins the live segment");
   assert.match(ctx.roots.msgs.innerHTML,/current/);
   ctx.feature.destroy();
@@ -10695,7 +10702,6 @@ test("reader bubble offset survives prepending a history page", async () => {
           decisions:[],
         }], empty_segments:[], assets:{} };
       }
-      return {};
     },
     chatConditional: async () => ({ status:200, etag:`"${historyRead}"`, data:{
       turns:[{role:"user",uid:"uid-a",segment:8,record:90,text:"current"}],
