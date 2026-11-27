@@ -190,9 +190,23 @@ func mapStatusError(raw []byte) error {
 	}
 }
 
+// decodeJSON reads one JSON value from a server answer. An unknown field is
+// ignored. A second value is an error.
 func decodeJSON(raw []byte, dest any) error {
+	return decodeValue(raw, dest, false)
+}
+
+// decodeStrictJSON reads one JSON value from local data. An unknown field
+// is an error, and so is a second value.
+func decodeStrictJSON(raw []byte, dest any) error {
+	return decodeValue(raw, dest, true)
+}
+
+func decodeValue(raw []byte, dest any, strict bool) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(dest); err != nil {
 		return err
 	}

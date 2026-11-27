@@ -436,7 +436,7 @@ func parseCopyLine(line []byte) (MirrorRecord, bool) {
 		At     string          `json:"at"`
 		Body   json.RawMessage `json:"body"`
 	}
-	if err := decodeJSON(line, &doc); err != nil || doc.Seq == nil {
+	if err := decodeStrictJSON(line, &doc); err != nil || doc.Seq == nil {
 		return MirrorRecord{}, false
 	}
 	if *doc.Seq == 0 || !validEntryKey(doc.Key) || !validHex(doc.Author, 32) || !validProtocolTime(doc.At) || len(doc.Body) == 0 {
