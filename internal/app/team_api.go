@@ -28,6 +28,11 @@ type teamHandler struct {
 	mu      sync.Mutex
 	// shareOps serializes share mutations with outbox work across network calls.
 	shareOps sync.Mutex
+	// kickShares wakes the outbox after a lane share change. Nil in tests
+	// that build the handler alone.
+	kickShares func()
+	// mintChat supplies the index channel id. Nil draws eight random bytes.
+	mintChat func() (string, error)
 	// statusBound is the time limit for one status check. Tests set it.
 	// Production sets eight seconds.
 	statusBound time.Duration
@@ -93,6 +98,10 @@ func (h *teamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeTeamError(w, http.StatusNotFound, "not_found")
 		}
+		return
+	}
+	if r.URL.Path == "/api/team/lane-shares" || strings.HasPrefix(r.URL.Path, "/api/team/lane-shares/") {
+		h.serveLaneShares(w, r)
 		return
 	}
 	if r.URL.Path == "/api/team/shares" || strings.HasPrefix(r.URL.Path, "/api/team/shares/") {

@@ -51,6 +51,7 @@ type teamShareView struct {
 	State      string        `json:"state"`
 	Delivery   string        `json:"delivery"`
 	Members    []team.Member `json:"members"`
+	Lane       string        `json:"lane,omitempty"`
 	SharedAt   string        `json:"shared_at"`
 }
 
@@ -178,11 +179,28 @@ func shareViewLess(a, b teamShareView) bool {
 }
 
 func (h *teamHandler) shareAPI(s team.Share) teamShareView {
+	members := s.Members
+	if s.Lane != "" {
+		members = h.membersOfLane(s.Lane)
+	}
 	return teamShareView{
 		UID: s.UID, Node: s.Node, Server: s.Server, Scope: s.Scope, Generation: s.Generation,
 		State: s.State, Delivery: h.deliveryOf(s.Server),
-		Members: s.Members, SharedAt: s.SharedAt,
+		Members: members, Lane: s.Lane, SharedAt: s.SharedAt,
 	}
+}
+
+func (h *teamHandler) membersOfLane(id string) []team.Member {
+	lanes, err := team.LoadLaneShares(h.dataDir)
+	if err != nil {
+		return []team.Member{}
+	}
+	for _, lane := range lanes {
+		if lane.ID == id {
+			return lane.Members
+		}
+	}
+	return []team.Member{}
 }
 
 func (h *teamHandler) deliveryOf(server string) string {
@@ -249,6 +267,10 @@ func (h *teamHandler) putShare(w http.ResponseWriter, r *http.Request, node stri
 		return
 	}
 	if existing, ok := shareByUID(shares, uid); ok {
+		if existing.Lane != "" {
+			writeTeamError(w, http.StatusConflict, "lane_share")
+			return
+		}
 		if req.MembershipOnly != nil {
 			if req.MembershipOnly.UID != existing.UID || req.MembershipOnly.Generation == "" || req.MembershipOnly.Generation != existing.Generation {
 				writeTeamError(w, http.StatusConflict, "share_changed")
@@ -419,6 +441,10 @@ func (h *teamHandler) stopShare(w http.ResponseWriter, r *http.Request, node str
 	share, ok := h.pickShare(shares, node)
 	if !ok {
 		writeTeamError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if share.Lane != "" {
+		writeTeamError(w, http.StatusConflict, "lane_share")
 		return
 	}
 	inst, err := identity.LoadInstallation(h.dataDir)

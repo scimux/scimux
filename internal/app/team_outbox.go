@@ -363,8 +363,10 @@ func (o *shareOutbox) readNodeBytes() ([]byte, error) {
 
 // nodeSnap is the latest node record in nodes.jsonl.
 type nodeSnap struct {
-	title string
-	live  bool
+	title     string
+	live      bool
+	lane      string
+	createdAt string
 }
 
 // parseNodeLog is the one parser for nodes.jsonl. A blank line, a line that
@@ -385,7 +387,7 @@ func parseNodeLog(raw []byte) map[string]nodeSnap {
 			if rec.Node == nil {
 				continue
 			}
-			nodes[rec.Node.ID] = nodeSnap{title: rec.Node.Title, live: true}
+			nodes[rec.Node.ID] = nodeSnap{title: rec.Node.Title, live: true, lane: rec.Node.LaneID, createdAt: rec.Node.CreatedAt}
 			continue
 		}
 		if rec.Type == "delete" {
@@ -971,6 +973,7 @@ func installShareOutbox(a *app, dataDir string, now func() time.Time) {
 		return n != nil && n.InstanceID != "" && n.InstanceID == instance && n.EndedAt == ""
 	}
 	box := &shareOutbox{dataDir: dataDir, now: now, client: client, files: &th.mu, shareOps: &th.shareOps}
+	th.kickShares = box.kick
 	th.shareDelivery = box.delivery
 	a.teamHandler = h
 	a.shareOutbox = box

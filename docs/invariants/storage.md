@@ -66,7 +66,9 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   It holds no chat content and no token. Only the muxer reads and writes
   it. A missing file is an empty list and is not created. At most 64 lane
   shares, one per local lane, and the file is at most 1 MiB. The index
-  channel id is never the local lane id.
+  channel id is never the local lane id. The index channel is titled
+  `Shared lane · ` plus the lane name. Its mirror holds the lane snapshot
+  and no chat text.
 - **Early native discussion stays accessible.** A comment accepted at an
   initial empty frontier can predate the first native seam. When there are no
   earlier agent turns and thus no history control, display that discussion in
