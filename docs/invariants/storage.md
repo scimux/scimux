@@ -57,6 +57,13 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   baseline members, and check UID and generation. Queued outbox work refreshes
   its share under the same gate before wire work; a missing, damaged or replaced
   identity cannot upload or alter another generation.
+- **A shared lane names one server and who may read its chats.** `team-lane-shares.json`
+  holds each lane share's index channel, local lane, server, scope, name,
+  color, members, start cursors, archived chats, and index snapshot cursor.
+  It holds no chat content and no token. Only the muxer reads and writes
+  it. A missing file is an empty list and is not created. At most 64 lane
+  shares, one per local lane, and the file is at most 1 MiB. The index
+  channel id is never the local lane id.
 - **Early native discussion stays accessible.** A comment accepted at an
   initial empty frontier can predate the first native seam. When there are no
   earlier agent turns and thus no history control, display that discussion in
