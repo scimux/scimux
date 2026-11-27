@@ -33,6 +33,8 @@ type Share struct {
 	Title      string   `json:"title"`
 	Generation string   `json:"generation"`
 	Members    []Member `json:"members"`
+	Lane       string   `json:"-"`
+	LaneRev    int      `json:"-"`
 	State      string   `json:"state"`
 	SharedAt   string   `json:"shared_at"`
 }
