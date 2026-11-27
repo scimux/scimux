@@ -178,6 +178,15 @@ func TestPageModesAndBoundedRead(t *testing.T) {
 	if len(around.Segments) == 0 || around.Segments[0].SegmentOffset != 2 || around.Segments[0].SegmentTurns != len(all.Segments[0].Turns) {
 		t.Errorf("around slice offset/total incorrect: %+v", around.Segments)
 	}
+	firstAround, _ := c.Page(path, PageAround, all.Segments[0].Turns[0].Record, 4)
+	if countPageTurns(firstAround) != 4 || firstAround.BeforeCount != 0 {
+		t.Errorf("around at beginning did not fill available range: %+v", firstAround)
+	}
+	lastTurn := all.Segments[len(all.Segments)-1].Turns[len(all.Segments[len(all.Segments)-1].Turns)-1]
+	lastAround, _ := c.Page(path, PageAround, lastTurn.Record, 4)
+	if countPageTurns(lastAround) != 4 || lastAround.AfterCount != 0 {
+		t.Errorf("around at end did not fill available range: %+v", lastAround)
+	}
 	cycleAssistant := all.Segments[0].Turns[3]
 	window, ok := c.Page(path, PageAfter, cycleAssistant.Record, 3)
 	if !ok || len(window.Segments) == 0 {
@@ -281,6 +290,31 @@ func TestPageDefensiveInputsAndReaderErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
+}
+
+func TestPageReturnsFalseWhenIndexedRecordCanNoLongerBeDecoded(t *testing.T) {
+	path := writeLog(t, []Event{{T: "user", Time: "2025-01-01T00:00:00Z", Text: "indexed"}})
+	c := &LogCache{}
+	_ = c.Segment(path) // establish the cache key and index
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt := append([]byte(nil), original...)
+	corrupt[0] = '!'
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Page(path, PageBefore, 100, 5); ok || c.pageReads != 1 {
+		t.Fatalf("corrupt indexed record result ok/reads=%v/%d, want false/1", ok, c.pageReads)
+	}
 }
 
 func mergePageSegments(pages []PageResult) []HistorySegment {

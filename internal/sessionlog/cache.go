@@ -86,7 +86,8 @@ type LogCache struct {
 	// Compact page index. It retains record locations and the fields needed to
 	// reconstruct history headers, never event text or raw events.
 	pageSegments []pageSegmentIndex
-	pageReads    int // test spy: record ReadAt operations in Page
+	pageReads    int                            // test spy: record ReadAt operations in Page
+	pageOpen     func(string) (*os.File, error) // test seam for open failures
 
 	walks       int   // test spy: times the file was actually parsed
 	bytesParsed int64 // test spy: bytes read from the file on the last parse
