@@ -2871,14 +2871,21 @@ func TestHandleChatReplyReadyFromClaudeEndTurn(t *testing.T) {
 }
 
 // ---------- P2: chat poll ETag / 304 ----------
-// Hash the fully marshalled response body (same shape as /api/state). A
-// validator keyed only on the session log would miss needs-input / attention /
-// last_change changes that leave size+mtime alone.
+// Poll validators ignore mechanics with no browser reader that change on each
+// agent tick, while keeping visible needs-input and gauge state hashed.
 
 func chatGET(t *testing.T, a *app, id, ifNoneMatch string) *httptest.ResponseRecorder {
+	return chatGETWithQuery(t, a, id, "", ifNoneMatch)
+}
+
+func chatGETWithQuery(t *testing.T, a *app, id, query, ifNoneMatch string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/nodes/"+id+"/chat", nil)
+	path := "/api/nodes/" + id + "/chat"
+	if query != "" {
+		path += "?" + query
+	}
+	r := httptest.NewRequest("GET", path, nil)
 	r.SetPathValue("id", id)
 	if ifNoneMatch != "" {
 		r.Header.Set("If-None-Match", ifNoneMatch)
@@ -2913,10 +2920,8 @@ func seedChatNodeWithLog(t *testing.T, a *app, id string, events ...sessionlog.E
 	return n
 }
 
-// TestHandleChatETagChangesWhenMechanicsChange is the trap-avoidance test:
-// the session log is untouched, but a needs-input/attention (or last_change)
-// field flips — the ETag must change and a conditional GET must return 200,
-// not a stale 304 that would hide an approval dialog.
+// TestHandleChatETagChangesWhenMechanicsChange keeps attention hashed so a
+// needs-input transition invalidates the poll, while last_change alone does not.
 func TestHandleChatETagChangesWhenMechanicsChange(t *testing.T) {
 	f := &fakeTmux{alive: map[string]bool{"m1": true}}
 	a := newTestApp(t, f)
@@ -2932,6 +2937,13 @@ func TestHandleChatETagChangesWhenMechanicsChange(t *testing.T) {
 	}
 	if rec1.Body.Len() == 0 {
 		t.Fatal("baseline body empty")
+	}
+	var baseline map[string]json.RawMessage
+	if err := json.Unmarshal(rec1.Body.Bytes(), &baseline); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := baseline["last_change"]; !ok {
+		t.Fatal("200 response body omitted last_change")
 	}
 
 	// Log unchanged; attention raised (needs-input machinery).
@@ -2957,18 +2969,237 @@ func TestHandleChatETagChangesWhenMechanicsChange(t *testing.T) {
 		t.Fatalf("attention = %q, want approval", body.Attention)
 	}
 
-	// Same trap for last_change (pane activity while the log is idle).
+	// last_change remains in the response body, but pane activity alone does
+	// not invalidate what the browser displays.
 	a.mu.Lock()
 	a.lastChg["m1"] = time.UnixMilli(1_700_000_000_123)
 	a.mu.Unlock()
 	rec3 := chatGET(t, a, "m1", etag2)
-	if rec3.Code != 200 {
-		t.Fatalf("after last_change: code = %d, want 200", rec3.Code)
+	if rec3.Code != http.StatusNotModified {
+		t.Fatalf("after last_change: code = %d, want 304", rec3.Code)
 	}
 	etag3 := rec3.Header().Get("ETag")
-	if etag3 == "" || etag3 == etag2 {
-		t.Fatalf("after last_change: ETag = %q, want different from %q", etag3, etag2)
+	if etag3 != etag2 {
+		t.Fatalf("after last_change: ETag = %q, want unchanged %q", etag3, etag2)
 	}
+}
+
+func TestHandleChatETagIgnoresMechanicsFields(t *testing.T) {
+	cases := []struct {
+		name  string
+		field string
+		setup func(*testing.T) (*app, *Node, func())
+	}{
+		{
+			name: "watermark", field: "watermark",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				a, n, path := newETagTranscript(t, "etag-watermark", []string{etagUserLine, etagAssistantLine})
+				return a, n, func() { appendLines(t, path, `{"type":"progress","timestamp":"2026-07-14T01:02:00Z"}`) }
+			},
+		},
+		{
+			name: "progress", field: "progress",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				baseLine := padETagLine(`{"type":"progress","timestamp":"2026-07-14T01:02:00Z"}`, 400)
+				a, n, _ := newETagTranscript(t, "etag-progress", []string{etagUserLine, etagAssistantLine, baseLine})
+				return a, n, func() {
+					setETagTranscript(t, n, []string{etagUserLine, etagAssistantLine, padETagLine(etagToolResultLine("call-progress"), 400)})
+				}
+			},
+		},
+		{
+			name: "pending_calls", field: "pending_calls",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				baseLine := padETagLine(`{"type":"progress","timestamp":"2026-07-14T01:02:00Z"}`, 400)
+				a, n, _ := newETagTranscript(t, "etag-pending", []string{etagUserLine, etagAssistantLine, baseLine})
+				return a, n, func() {
+					call := etagToolCallLine("call-pending", "")
+					setETagTranscript(t, n, []string{etagUserLine, etagAssistantLine, padETagLine(call, 400)})
+				}
+			},
+		},
+		{
+			name: "waiting_on", field: "waiting_on",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				a, n, _ := newETagTranscript(t, "etag-waiting", []string{etagUserLine, padETagLine(etagToolCallLine("call-waiting", "Read"), 400)})
+				return a, n, func() {
+					setETagTranscript(t, n, []string{etagUserLine, padETagLine(etagToolCallLine("call-waiting", "Write"), 400)})
+				}
+			},
+		},
+		{
+			name: "ctx_used", field: "ctx_used",
+			setup: func(t *testing.T) (*app, *Node, func()) {
+				a := newTestApp(t, &fakeTmux{alive: map[string]bool{"etag-ctx-used": true}})
+				n := seedChatNodeWithLog(t, a, "etag-ctx-used", sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 1000, Size: 100000}})
+				a.mu.Lock()
+				a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_000)
+				a.mu.Unlock()
+				return a, n, func() {
+					w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+					if err := w.Append(sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 1001, Size: 100000}}); err != nil {
+						t.Fatal(err)
+					}
+					a.mu.Lock()
+					delete(a.logCache, n.ID)
+					a.mu.Unlock()
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, n, change := tc.setup(t)
+			baseline := chatGET(t, a, n.ID, "")
+			if baseline.Code != http.StatusOK {
+				t.Fatalf("baseline code = %d: %s", baseline.Code, baseline.Body.String())
+			}
+			etag := baseline.Header().Get("ETag")
+			before := decodeChatBody(t, baseline)
+			change()
+			updated := chatGET(t, a, n.ID, "")
+			if updated.Code != http.StatusOK {
+				t.Fatalf("unconditional update code = %d: %s", updated.Code, updated.Body.String())
+			}
+			after := decodeChatBody(t, updated)
+			if string(before[tc.field]) == string(after[tc.field]) {
+				t.Fatalf("%s did not change: %s", tc.field, after[tc.field])
+			}
+			beforeWithoutField, afterWithoutField := cloneChatBody(before), cloneChatBody(after)
+			delete(beforeWithoutField, tc.field)
+			delete(afterWithoutField, tc.field)
+			if !reflect.DeepEqual(beforeWithoutField, afterWithoutField) {
+				t.Errorf("body changed outside %s: before=%v after=%v", tc.field, beforeWithoutField, afterWithoutField)
+			}
+			if updated.Header().Get("ETag") != etag {
+				t.Errorf("ETag after only %s changed = %q, want unchanged %q", tc.field, updated.Header().Get("ETag"), etag)
+			}
+			conditional := chatGET(t, a, n.ID, etag)
+			if conditional.Code != http.StatusNotModified {
+				t.Errorf("If-None-Match after only %s change = %d, want 304", tc.field, conditional.Code)
+			}
+		})
+	}
+}
+
+func TestHandleChatETagKeepsGaugeAndNewTurnsVisible(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{"etag-gauge": true}})
+	n := seedChatNodeWithLog(t, a, "etag-gauge", sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 1000, Size: 10000}})
+	a.mu.Lock()
+	a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+	baseline := chatGET(t, a, n.ID, "")
+	var before struct {
+		Used int64 `json:"ctx_used"`
+		Pct  int   `json:"ctx_pct"`
+	}
+	if err := json.Unmarshal(baseline.Body.Bytes(), &before); err != nil {
+		t.Fatal(err)
+	}
+	w := &sessionlog.Writer{Path: a.sessionLogPath(n.ID)}
+	if err := w.Append(sessionlog.Event{T: "usage", Usage: &sessionlog.UsageEvent{Used: 2000, Size: 10000}}); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	delete(a.logCache, n.ID)
+	a.mu.Unlock()
+	updated := chatGET(t, a, n.ID, baseline.Header().Get("ETag"))
+	if updated.Code != http.StatusOK {
+		t.Fatalf("ctx_pct change code = %d, want 200", updated.Code)
+	}
+	var after struct {
+		Used int64 `json:"ctx_used"`
+		Pct  int   `json:"ctx_pct"`
+	}
+	if err := json.Unmarshal(updated.Body.Bytes(), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Used == before.Used || after.Pct == before.Pct {
+		t.Fatalf("usage gauge did not change: before=%+v after=%+v", before, after)
+	}
+	if updated.Header().Get("ETag") == baseline.Header().Get("ETag") {
+		t.Fatal("ctx_pct change kept the old ETag")
+	}
+}
+
+func TestHandleChatETagIgnoresLastChangeWithTail(t *testing.T) {
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{"etag-tail": true}})
+	n := seedChatNodeWithLog(t, a, "etag-tail")
+	a.mu.Lock()
+	a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+	baseline := chatGETWithQuery(t, a, n.ID, "tail=50", "")
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(baseline.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["last_change"]; !ok {
+		t.Fatal("tailed 200 response body omitted last_change")
+	}
+	a.mu.Lock()
+	a.lastChg[n.ID] = time.UnixMilli(1_700_000_000_123)
+	a.mu.Unlock()
+	updated := chatGETWithQuery(t, a, n.ID, "tail=50", baseline.Header().Get("ETag"))
+	if updated.Code != http.StatusNotModified || updated.Header().Get("ETag") != baseline.Header().Get("ETag") {
+		t.Fatalf("tailed last_change update = %d ETag %q, want 304 and unchanged %q", updated.Code, updated.Header().Get("ETag"), baseline.Header().Get("ETag"))
+	}
+}
+
+const (
+	etagUserLine      = `{"type":"user","timestamp":"2026-07-14T01:00:00Z","message":{"role":"user","content":"hello"}}`
+	etagAssistantLine = `{"type":"assistant","timestamp":"2026-07-14T01:01:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hello back"}]}}`
+)
+
+func etagToolCallLine(id, name string) string {
+	return fmt.Sprintf(`{"type":"assistant","timestamp":"2026-07-14T01:02:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":%q,"name":%q,"input":{}}]}}`, id, name)
+}
+
+func etagToolResultLine(id string) string {
+	return fmt.Sprintf(`{"type":"user","timestamp":"2026-07-14T01:03:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"ok"}]}}`, id)
+}
+
+func padETagLine(line string, size int) string {
+	if len(line) > size {
+		panic("ETag test line exceeds padding size")
+	}
+	return line[:len(line)-1] + strings.Repeat(" ", size-len(line)) + "}"
+}
+
+func setETagTranscript(t *testing.T, n *Node, lines []string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	appendLines(t, path, lines...)
+	n.Transcript = path
+}
+
+func newETagTranscript(t *testing.T, id string, lines []string) (*app, *Node, string) {
+	t.Helper()
+	a := newTestApp(t, &fakeTmux{alive: map[string]bool{id: true}})
+	n := seedChatNodeWithLog(t, a, id)
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	appendLines(t, path, lines...)
+	n.Transcript = path
+	a.mu.Lock()
+	a.lastChg[id] = time.UnixMilli(1_700_000_000_000)
+	a.mu.Unlock()
+	return a, n, path
+}
+
+func decodeChatBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]json.RawMessage {
+	t.Helper()
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func cloneChatBody(body map[string]json.RawMessage) map[string]json.RawMessage {
+	clone := make(map[string]json.RawMessage, len(body))
+	for key, value := range body {
+		clone[key] = value
+	}
+	return clone
 }
 
 func TestHandleChatETagStableAnd304WhenUnchanged(t *testing.T) {
