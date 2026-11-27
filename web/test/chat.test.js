@@ -1832,6 +1832,7 @@ function el(tag, attrs = {}){
     children: [],
     parentNode: null,
     setAttribute(k, v){ this._attrs = this._attrs || {}; this._attrs[k] = v; },
+    removeAttribute(k){ if (this._attrs) delete this._attrs[k]; },
     getAttribute(k){ return (this._attrs || {})[k]; },
     addEventListener(type, fn, opts){
       if (!listeners.has(type)) listeners.set(type, []);
@@ -6479,24 +6480,25 @@ test("trace query is combined with the tail query", async () => {
   ctx.feature.destroy();
 });
 
-test("a jump outside the tail retries full and flashes the matching turn", async () => {
+test("an addressed jump outside the tail opens an around range and flashes the matching turn", async () => {
   const target = { role: "user", uid: "u", segment: 0, record: 2, text: "older" };
   const paths = [];
   const payload = { turns: [{ role: "assistant", uid: "u", segment: 0, record: 8, text: "new" }],
     live: "quiet", log_uid: "u", omitted_turns: 2, prior_turns: 0, assets: {} };
-  const ctx = makeFeature({ chatConditional: async path => {
+  const ctx = makeFeature({
+    api:async path=>path.includes("page=around")?{segments:[{segment_index:0,log_uid:"u",segment_offset:0,turns:[target],decisions:[]}],empty_segments:[],before_count:1,after_count:1,assets:{}}:{},
+    chatConditional: async path => {
     paths.push(path);
-    return { status: 200, etag: `"${paths.length}"`, data: path.includes("tail=50") ? payload : { ...payload, turns: [target], omitted_turns: 0 } };
+    return { status: 200, etag: `"${paths.length}"`, data: { ...payload, segment_index:0 } };
   } });
-  const element = el("div", { className: "turn user", dataset: { i: "0" } });
+  const element = el("div", { className: "turn hist user", dataset: { bk:"h:0:0",uid:"u",segment:"0",record:"2" } });
   const query = ctx.roots.msgs.querySelector.bind(ctx.roots.msgs);
-  ctx.roots.msgs.querySelector = selector => selector === '.turn[data-i="0"]' ? element : query(selector);
+  ctx.roots.msgs.querySelector = selector => selector === '.turn[data-bk="h:0:0"]' ? element : query(selector);
   ctx.setPending({ node: "n1", uid: "u", segment: 0, record: 2, ts: 1_000_000 });
   await ctx.feature.render();
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(paths[0], /tail=50$/); assert.match(paths.at(-1), /\/chat\?start=0$/);
-  await ctx.feature.render();
+  assert.ok(ctx.apiCalls.some(call=>call.path.includes("page=around&at=2&limit=100&log_uid=u")));
   assert.ok(element.classList.contains("jumpflash"));
   ctx.feature.destroy();
 });
@@ -9921,6 +9923,7 @@ test("anchored live window loads earlier turns, then merges bounded history page
 test("history page merge handles empty input and joins turns and decisions by segment", () => {
   assert.deepEqual(chatmod.mergeHistoryPage(null, null), {
     node:"", segs:[], emptySegs:[], assets:{}, beforeCount:0, paged:true, scrollTo:"",
+    afterCount:0,
   });
   const joined = chatmod.mergeHistoryPage({
     node:"n1", segs:[{segment_index:4,segment_offset:3,turns:[{record:30}],decisions:[{record:35}]}],
@@ -10269,16 +10272,17 @@ test("addressed jump opens a detached around page and loads earlier and later sl
       calls.push(path);
       if(path.includes("page=around"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:10,segment_turns:30,start:"T",seam:"S",turns:[40,50,60].map(record=>({role:"user",uid:"u",segment:3,record,text:record===50?"around target":`turn ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:9,current_segment:3,assets:{}};
       if(path.includes("page=before"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:0,segment_turns:30,start:"T",seam:"S",turns:Array.from({length:10},(_,i)=>({role:"assistant",uid:"u",segment:3,record:20+i,text:`before ${20+i}`})),decisions:[]}],empty_segments:[{segment_index:2,log_uid:"u",turns:[],decisions:[]}],before_count:2,after_count:9,current_segment:3,assets:{before:{name:"before"}}};
-      if(path.includes("page=after"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:13,segment_turns:30,start:"T",seam:"S",turns:[70,80].map(record=>({role:"assistant",uid:"u",segment:3,record,text:`after ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:0,current_segment:3,assets:{after:{name:"after"}}};
+      if(path.includes("page=after"))return {segments:[{segment_index:3,log_uid:"u",segment_offset:13,segment_turns:30,start:"T",seam:"S",turns:[70,80].map(record=>({role:"assistant",uid:"u",segment:3,record,text:`after ${record}`})),decisions:[]}],empty_segments:[],before_count:12,after_count:4,current_segment:3,assets:{after:{name:"after"}}};
       return {};
     },
-    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live current"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:0,prior_turns:0,assets:{}}}),
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live current"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:20,prior_turns:0,assets:{}}}),
   });
   const msgs=ctx.roots.msgs,query=msgs.querySelector.bind(msgs);
   const oldInner=Object.getOwnPropertyDescriptor(msgs,"innerHTML");
   Object.defineProperty(msgs,"innerHTML",{configurable:true,get:oldInner.get,set(value){
     oldInner.set.call(msgs,value);
     target=value.includes('data-bk="h:3:11"')?el("div",{className:"turn hist user",dataset:{bk:"h:3:11",uid:"u",segment:"3",record:"50"}}):null;
+    if(target)msgs.appendChild(target);
   }});
   msgs.querySelector=selector=>{
     if(selector.includes('data-bk="h:3:11"'))return target;
@@ -10294,20 +10298,102 @@ test("addressed jump opens a detached around page and loads earlier and later sl
   assert.match(msgs.innerHTML,/show later turns &middot; 9 turns/);
   assert.equal(ctx.getPending(),null);
   assert.ok(target?.classList.contains("jumpflash"),"the addressed turn is flashed");
+  tapBubbleTurn(ctx,"h:3:11");
+  assert.equal(bubActionRows(ctx).length,1);
 
   firstListener(msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"earlier"}})});
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.match(calls.find(path=>path.includes("page=before"))||"",/page=before&at=40&limit=100&log_uid=u/);
   assert.match(msgs.innerHTML,/data-bk="h:3:11"/);
   assert.match(msgs.innerHTML,/show earlier turns &middot; 2 turns/);
+  assert.equal(bubActionRows(ctx).length,1,"the selected action remains on the addressed turn after an earlier page");
   assert.deepEqual(msgs.innerHTML.includes("live current"),false);
 
   firstListener(msgs,"click")({target:el("button",{className:"histload",dataset:{scope:"later"}})});
   await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
   assert.match(calls.find(path=>path.includes("page=after"))||"",/page=after&at=60&limit=100&log_uid=u/);
   assert.match(msgs.innerHTML,/after 80/);
+  assert.equal(bubActionRows(ctx).length,1,"the selected action remains on the addressed turn after a later page");
   assert.doesNotMatch(msgs.innerHTML,/live current|data-i=/);
   ctx.feature.destroy();
+});
+
+test("detached mode rejoins at the live boundary and scrollend returns to tail", async () => {
+  async function run(afterCount, currentSlice){
+    const paths=[];
+    const ctx=makeFeature({
+      api:async path=>path.includes("page=around")?{segments:[
+        ...(currentSlice?[{segment_index:3,log_uid:"u",segment_offset:10,segment_turns:40,turns:[{role:"user",uid:"u",segment:3,record:50,text:"target"},{role:"assistant",uid:"u",segment:3,record:51,text:"neighbor"}],decisions:[]}]:[]),
+        ...(!currentSlice?[{segment_index:2,log_uid:"u",segment_offset:0,segment_turns:4,turns:[{role:"assistant",uid:"u",segment:2,record:20,text:"older range"}],decisions:[]}]:[]),
+      ],empty_segments:[],before_count:5,after_count:afterCount,assets:{}}:{},
+      chatConditional:async path=>{paths.push(path);const start=Number(path.match(/start=(\d+)/)?.[1]||0);return {status:200,etag:`"${paths.length}"`,data:{turns:[{role:"user",uid:"u",segment:3,record:start===10?50:100,text:start===10?"rejoined window":"live latest"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:currentSlice?11:20,prior_turns:1,assets:{}}};},
+    });
+    ctx.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+    await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+    return {ctx,feature:ctx.feature,roots:ctx.roots,paths};
+  }
+  const reached=await run(4,true);
+  assert.ok(reached.paths.some(path=>/start=10/.test(path)),"the page covering omitted_turns re-joins at its segment offset");
+  assert.doesNotMatch(reached.roots.msgs.innerHTML,/data-bk="h:3:/);
+  assert.match(reached.roots.msgs.innerHTML,/rejoined window/);
+  assert.equal(reached.roots.scrollend.getAttribute("data-detached")||null,null);
+  reached.feature.destroy();
+
+  const ended=await run(0,false);
+  assert.ok(ended.paths.some(path=>/start=0/.test(path)),"after_count zero returns to live mode");
+  assert.match(ended.roots.msgs.innerHTML,/older range|live latest/);
+  assert.equal(ended.roots.scrollend.getAttribute("data-detached")||null,null);
+  ended.feature.destroy();
+
+  const detached=await run(3,false);
+  assert.equal(detached.roots.scrollend.getAttribute("data-detached"),"true");
+  assert.equal(detached.roots.scrollend.getAttribute("aria-label"),"jump to latest");
+  assert.equal(detached.roots.scrollend.title,"jump to latest");
+  detached.roots.msgs.scrollHeight=2000;detached.roots.msgs.clientHeight=400;detached.roots.msgs.scrollTop=100;
+  firstListener(detached.roots.scrollend,"click")({target:detached.roots.scrollend});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(detached.paths.at(-1),/tail=50/);
+  assert.equal(detached.roots.scrollend.getAttribute("data-detached")||null,null);
+  assert.equal(detached.roots.scrollend.getAttribute("aria-label"),"scroll to latest message");
+  assert.equal(detached.roots.scrollend.title,"scroll to latest");
+  assert.equal(detached.roots.msgs.scrollTop,1600);
+  detached.feature.destroy();
+});
+
+test("detached idle scrolling loads before near the top and after near the bottom", async () => {
+  const timers=[],requests=[];let pageCount=0;
+  const ctx=makeFeature({
+    api:async path=>{requests.push(path);if(path.includes("page=around"))return {segments:[{segment_index:2,log_uid:"u",segment_offset:0,turns:[{role:"user",uid:"u",segment:2,record:20,text:"target"}],decisions:[]}],empty_segments:[],before_count:8,after_count:8,assets:{}};return {segments:[{segment_index:2,log_uid:"u",segment_offset:pageCount++?2:0,turns:[{role:"user",uid:"u",segment:2,record:pageCount?30:10,text:"page"}],decisions:[]}],empty_segments:[],before_count:pageCount?3:6,after_count:6,assets:{}};},
+    chatConditional:async()=>({status:200,etag:'"live"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],live:"quiet",log_uid:"u",segment_index:3,omitted_turns:20,prior_turns:0,assets:{}}}),
+    deps:{setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{}},
+  });
+  ctx.setPending({node:"n1",uid:"u",segment:2,record:20,ts:1_000_000});ctx.feature.bind();await ctx.feature.render();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  const msgs=ctx.roots.msgs;msgs.scrollHeight=2000;msgs.clientHeight=400;msgs.scrollTop=10;
+  firstListener(msgs,"scroll")();timers.filter(t=>t.ms===150).at(-1).fn();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(requests.find(path=>path.includes("page=before"))||"",/page=before&at=20/);
+  msgs.scrollTop=1500;firstListener(msgs,"scroll")();timers.filter(t=>t.ms===150).at(-1).fn();
+  await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.match(requests.find(path=>path.includes("page=after"))||"",/page=after&at=20/);
+  ctx.feature.destroy();
+});
+
+test("around failures toast on no_turn, reload history on log change, and mirror jumps use around", async () => {
+  const notFoundToasts=[];
+  const notFound=makeFeature({api:async()=>{throw Object.assign(new Error("no_turn"),{status:404});},chatConditional:async()=>({status:200,etag:'"x"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],log_uid:"u",segment_index:3,prior_turns:0,omitted_turns:0,live:"quiet",assets:{}}}),deps:{toast:m=>notFoundToasts.push(m)}});
+  notFound.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});notFound.feature.bind();await notFound.feature.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(notFoundToasts,["Couldn't find that message in this chat."]);notFound.feature.destroy();
+
+  const changedCalls=[];
+  const changed=makeFeature({api:async path=>{changedCalls.push(path);if(path.includes("page=around"))throw Object.assign(new Error("log_changed"),{status:409});if(path.includes("history=1"))return {segments:[],empty_segments:[],assets:{}};return {};},chatConditional:async()=>({status:200,etag:'"x"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:0,live:"quiet",assets:{}}})});
+  changed.setPending({node:"n1",uid:"u",segment:3,record:50,ts:1_000_000});changed.feature.bind();await changed.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(changedCalls.some(path=>path.includes("history=1")));changed.feature.destroy();
+
+  const mirrorCalls=[];const copy={key:"s/o/u/g",uid:"u",mirrors:[{seq:5,local_segment:3,local_record:50}],comments:[]};
+  const mirror=makeFeature({api:async path=>{mirrorCalls.push(path);return path.includes("page=around")?{segments:[{segment_index:3,log_uid:"u",segment_offset:10,turns:[{role:"user",uid:"u",segment:3,record:50,text:"mirror target"}],decisions:[]}],empty_segments:[],before_count:12,after_count:8,assets:{}}:{};},chatConditional:async()=>({status:200,etag:'"x"',data:{turns:[{role:"user",uid:"u",segment:3,record:100,text:"live"}],log_uid:"u",segment_index:3,prior_turns:1,omitted_turns:20,live:"quiet",assets:{}}}),deps:{ownerDiscussion:()=>[copy]}});
+  mirror.setPending({node:"n1",team:{server:"s",owner:"o",chat:"u",generation:"g",log:"mirror",seq:5},ts:1_000_000});mirror.feature.bind();await mirror.feature.render();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+  assert.ok(mirrorCalls.some(path=>path.includes("page=around&at=50&limit=100&log_uid=u")));mirror.feature.destroy();
 });
 
 test("reader bubble offset survives prepending a history page", async () => {
