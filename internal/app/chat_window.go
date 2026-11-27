@@ -68,3 +68,7 @@ func chatTailWindow(turns []transcript.Turn, decisions []sessionlog.DecisionSurf
 	}
 	return window
 }
+
+func chatStartWindow(turns []transcript.Turn, decisions []sessionlog.DecisionSurface, start int) chatWindow {
+	return chatWindow{}
+}
