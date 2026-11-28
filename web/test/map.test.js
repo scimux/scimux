@@ -5982,7 +5982,7 @@ function laneMap(opts = {}) {
     agentLogo: () => "",
     icons: {
       SHARE_ICON: "SHAREMARK",
-      ...(opts.users === false ? {} : { ICON_USERS: "USERMARK" }),
+      ...(opts.users === false ? {} : { ICON_USERS: opts.usersSvg || "USERMARK" }),
     },
     laneShare: opts.laneShare,
     openLaneShare: opts.open === false ? undefined : (id) => opened.push(id),
@@ -6139,6 +6139,18 @@ test("the phone full-screen map keeps the share row and the desktop wall does no
   assert.doesNotMatch(wall.mapwrap.innerHTML, /class="lshare"/);
   assert.doesNotMatch(wall.mapwrap.innerHTML, /class="lhead /);
   wall.feature.destroy();
+});
+
+test("the shared lane badge sizes its people icon", () => {
+  assert.match(mapCssSrc, /\.lheadrow \.lshared svg\s*\{[^}]*width:\s*16px/);
+  assert.match(mapCssSrc, /height:\s*13px/);
+  assert.match(mapCssSrc, /fill:\s*currentColor/);
+  const ui = laneMap({
+    laneShare: () => ({ state: "active", members: [{}, {}, {}] }),
+    usersSvg: '<svg viewBox="0 0 16 13"></svg>',
+  });
+  assert.match(ui.mapwrap.innerHTML, /class="lshared"[^>]*>│<svg viewBox="0 0 16 13"><\/svg>3/);
+  ui.feature.destroy();
 });
 
 test("the lane share button is a 44px round target beside the unchanged head rule", () => {
