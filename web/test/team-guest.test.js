@@ -5247,6 +5247,15 @@ function leaveLaneList() {
   return { copy, index, late, loose, views: [index, { ...base }, late, loose, { ...base, server: "other", owner: "p", chat: "late" }, { ...base, owner: "p", chat: "c" }] };
 }
 
+test("the sharing section explains lane sharing", () => {
+  const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  const section = readme.slice(readme.indexOf("Team sharing never gives"), readme.indexOf("When People file support"));
+  assert.match(section, /share a lane/);
+  assert.match(section, /archived chats in that lane stay private/);
+  assert.match(section, /new chat started in the lane is shared automatically/);
+  assert.match(section, /Leave lane/);
+});
+
 test("a plain chat keeps the single-chat leave label", async () => {
   const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer());
   f.feature.tick(); await f.feature.settled();
