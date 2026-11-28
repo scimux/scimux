@@ -5184,6 +5184,25 @@ test("an index subscription is not classified for unread comments", async () => 
   f.feature.destroy();
 });
 
+test("a lane chat notice names the shared lane", () => {
+  const html = guestModule.sharingNoticeHTML("Ada <b>", [], "<img src=x onerror=1>");
+  assert.match(html, /Part of Ada &lt;b&gt;'s shared lane &lt;img src=x onerror=1&gt;/);
+  assert.doesNotMatch(html, /<img|<b>/);
+  assert.doesNotMatch(guestModule.sharingNoticeHTML("Ada", []), /shared lane/);
+});
+
+test("opening a lane chat adds the lane to the sharing notice", async () => {
+  const index = laneIndex();
+  const zeta = { ...base, chat: "zdx", title: "Shared lane · zeta", lane: { name: "zeta", color: "#334455", chats: [{ chat: "c", created_at: "1" }] } };
+  const other = { ...base, server: "other", owner: "p", chat: "odx", owner_name: "Zed", server_name: "Other", title: "Shared lane · Other", lane: { name: "Other", color: "#abcdef", chats: [{ chat: "c", created_at: "1" }] } };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([index, zeta, other, { ...base }]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  assert.match(f.get("msgs").innerHTML, /Part of Owner's shared lane Protein/);
+  assert.doesNotMatch(f.get("msgs").innerHTML, /shared lane zeta|shared lane Other/);
+  f.feature.destroy();
+});
+
 test("a sharer with no lane has an empty lane list", () => {
   assert.deepEqual(guestGroups([{ ...base }], [])[0].lanes, []);
 });
