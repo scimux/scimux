@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,17 +51,19 @@ func TestInstalledShareOutboxOwnerInstanceTracksLiveNode(t *testing.T) {
 }
 
 type outboxScript struct {
-	helloStatus   int
-	helloID       string
-	putStatus     int
-	deleteStatus  int
-	deleteQueries []string
-	mirrorStatus  int
-	mirrorGen     string
-	channel       string
-	failPath      string
-	owner         string
-	mu            sync.Mutex
+	helloStatus    int
+	helloID        string
+	putStatus      int
+	deleteStatus   int
+	deleteQueries  []string
+	mirrorStatus   int
+	mirrorGen      string
+	channel        string
+	channelsBody   string
+	channelsStatus int
+	failPath       string
+	owner          string
+	mu             sync.Mutex
 	// mirrorArrived is closed when a mirror call is inside the server.
 	// mirrorGate holds that call until it is closed.
 	mirrorArrived chan struct{}
@@ -85,6 +89,8 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mirrorStatus := s.mirrorStatus
 	mirrorGen := s.mirrorGen
 	channel := s.channel
+	channelsBody := s.channelsBody
+	channelsStatus := s.channelsStatus
 	s.mu.Unlock()
 	if failPath != "" && r.URL.Path == failPath {
 		hj, ok := w.(http.Hijacker)
@@ -174,6 +180,19 @@ func (s *outboxScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Results    []map[string]any `json:"results"`
 			Last       int64            `json:"last"`
 		}{Generation: gen, Results: results, Last: int64(len(req.Entries))})
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/channels":
+		status := channelsStatus
+		if status == 0 {
+			if channelsBody == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = io.WriteString(w, channelsBody)
+		}
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -3000,4 +3019,751 @@ func TestOutboxWaitsForShareMutation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("outbox did not resume")
 	}
+}
+
+func laneBox(t *testing.T) (*shareOutbox, string, *[]shareCall, *outboxScript) {
+	t.Helper()
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	box.shareOps = &sync.Mutex{}
+	box.files = &sync.Mutex{}
+	return box, dir, calls, script
+}
+
+func saveLane(t *testing.T, dir string, lane team.LaneShare, checked string) {
+	t.Helper()
+	if lane.ID == "" {
+		lane.ID = shareUID
+	}
+	if lane.Lane == "" {
+		lane.Lane = laneLocal
+	}
+	if lane.Server == "" {
+		lane.Server = teamServerID
+	}
+	if lane.Scope == "" {
+		lane.Scope = "all"
+	}
+	if lane.Name == "" {
+		lane.Name = "North"
+	}
+	if lane.Color == "" {
+		lane.Color = laneColor
+	}
+	if lane.Members == nil {
+		lane.Members = []team.Member{}
+	}
+	if lane.Rev == 0 {
+		lane.Rev = 1
+	}
+	if lane.Starts == nil {
+		lane.Starts = map[string]int{}
+	}
+	if lane.Excluded == nil {
+		lane.Excluded = []string{}
+	}
+	if lane.Generation == "" {
+		lane.Generation = shareGen
+	}
+	if lane.IndexRev == 0 {
+		lane.IndexRev = lane.Rev
+	}
+	if lane.State == "" {
+		lane.State = "active"
+	}
+	if lane.SharedAt == "" {
+		lane.SharedAt = "2026-11-12T09:30:00Z"
+	}
+	lane.CheckedAt = checked
+	if err := team.SaveLaneShare(dir, lane); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func saveQuietChat(t *testing.T, dir, node, title, uid, laneID, gen, state, created string, rev int) {
+	t.Helper()
+	appendLaneNode(t, dir, node, title, laneLocal, created)
+	writeChatLog(t, dir, node, uid, 0)
+	share := team.Share{
+		UID: uid, Node: node, Title: title, LaneRev: rev, State: state,
+		StartSent: true, Next: 1, Members: []team.Member{},
+	}
+	if laneID != "" {
+		share.Lane = laneID
+	}
+	if gen != "" {
+		share.Generation = gen
+	}
+	mustSaveShare(t, dir, share)
+}
+
+func suffixCount(calls *[]shareCall, method, suffix string) int {
+	n := 0
+	for _, c := range snapshotCalls(calls) {
+		if c.method == method && strings.HasSuffix(c.path, suffix) {
+			n++
+		}
+	}
+	return n
+}
+
+func callCount(calls *[]shareCall, method, path string) int {
+	n := 0
+	for _, c := range snapshotCalls(calls) {
+		if c.method == method && c.path == path {
+			n++
+		}
+	}
+	return n
+}
+
+func pathCount(calls *[]shareCall, method, part string) int {
+	n := 0
+	for _, c := range snapshotCalls(calls) {
+		if c.method == method && strings.Contains(c.path, part) {
+			n++
+		}
+	}
+	return n
+}
+
+func shareForNode(t *testing.T, dir, node string) (team.Share, bool) {
+	t.Helper()
+	shares, err := team.LoadShares(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range shares {
+		if s.Node == node {
+			return s, true
+		}
+	}
+	return team.Share{}, false
+}
+
+func laneMirrors(t *testing.T, script *outboxScript) []string {
+	t.Helper()
+	var out []string
+	for _, raw := range script.keptMirrors() {
+		var req struct {
+			Entries []struct {
+				Key  string          `json:"key"`
+				Body json.RawMessage `json:"body"`
+			} `json:"entries"`
+		}
+		if json.Unmarshal([]byte(raw), &req) != nil {
+			continue
+		}
+		for _, e := range req.Entries {
+			if strings.HasPrefix(e.Key, "lane/") {
+				out = append(out, e.Key+" "+string(e.Body))
+			}
+		}
+	}
+	return out
+}
+
+func ownerChannels(owner string, parts ...string) string {
+	return `{"channels":[` + strings.Join(parts, ",") + `]}`
+}
+
+func ownerChannel(owner, chat, title, gen, members string) string {
+	return fmt.Sprintf(`{"owner":"%s","chat":"%s","title":%q,"generation":"%s","created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":0,"comments_last":0,"members":%s}`, owner, chat, title, gen, members)
+}
+
+func TestLaneReconcileStopsOwnedChats(t *testing.T) {
+	box, dir, calls, _ := laneBox(t)
+	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 1)
+	saveQuietChat(t, dir, "plain", "Plain", shareUIDC, "", shareGen, "active", "2026-11-12T09:00:00Z", 0)
+	saveLane(t, dir, team.LaneShare{State: "stopping"}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	if _, ok := storedShare(t, dir, shareUIDB); ok {
+		t.Fatal("owned chat still stored")
+	}
+	plain, ok := storedShare(t, dir, shareUIDC)
+	lanes, err := team.LoadLaneShares(dir)
+	if !ok || plain.Lane != "" || plain.State != "active" || err != nil || len(lanes) != 1 || lanes[0].State != "stopping" {
+		t.Fatalf("plain %+v lanes %+v %v", plain, lanes, err)
+	}
+	if suffixCount(calls, http.MethodDelete, "/"+shareUIDB) != 1 || suffixCount(calls, http.MethodDelete, "/"+shareUID) != 0 {
+		t.Fatalf("deletes = %+v", snapshotCalls(calls))
+	}
+	box.tick(context.Background())
+	lanes, err = team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 0 || suffixCount(calls, http.MethodDelete, "/"+shareUID) != 1 {
+		t.Fatalf("index lanes %+v deletes %+v %v", lanes, snapshotCalls(calls), err)
+	}
+}
+
+func TestLaneReconcileDeletesTheIndex(t *testing.T) {
+	for _, status := range []int{0, http.StatusNotFound, http.StatusUnauthorized, http.StatusConflict} {
+		box, dir, _, script := laneBox(t)
+		script.deleteStatus = status
+		saveLane(t, dir, team.LaneShare{State: "stopping"}, "2026-11-12T09:30:00Z")
+		box.tick(context.Background())
+		lanes, err := team.LoadLaneShares(dir)
+		if err != nil || len(lanes) != 0 {
+			t.Fatalf("status %d lanes %+v %v", status, lanes, err)
+		}
+	}
+}
+
+func TestLaneReconcileKeepsTheIndexWhenDeleteFails(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	script.deleteStatus = http.StatusInternalServerError
+	saveLane(t, dir, team.LaneShare{State: "stopping"}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 || lanes[0].State != "stopping" || suffixCount(calls, http.MethodDelete, "/"+shareUID) != 1 {
+		t.Fatalf("lanes %+v deletes %+v %v", lanes, snapshotCalls(calls), err)
+	}
+	script.deleteStatus = 0
+	script.failPath = "/v1/hello"
+	box.now = func() time.Time { return time.Date(2026, 11, 12, 9, 31, 0, 0, time.UTC) }
+	box.tick(context.Background())
+	lanes, err = team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 || lanes[0].State != "stopping" {
+		t.Fatalf("hello lanes %+v %v", lanes, err)
+	}
+}
+
+func TestLaneReconcileDropsAForgottenServer(t *testing.T) {
+	box, dir, calls, _ := laneBox(t)
+	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+	saveQuietChat(t, dir, "plain", "Plain", shareUIDC, "", shareGen, "active", "2026-11-12T09:00:00Z", 0)
+	saveLane(t, dir, team.LaneShare{Server: teamOtherID}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	lanes, err := team.LoadLaneShares(dir)
+	_, owned := storedShare(t, dir, shareUIDB)
+	plain, ok := storedShare(t, dir, shareUIDC)
+	if err != nil || len(lanes) != 0 || owned || !ok || plain.State != "active" || len(snapshotCalls(calls)) != 0 {
+		t.Fatalf("lanes %+v plain %+v calls %+v %v", lanes, plain, snapshotCalls(calls), err)
+	}
+}
+
+func TestLaneReconcileSkipsAWaitingServer(t *testing.T) {
+	box, dir, calls, _ := laneBox(t)
+	saveLane(t, dir, team.LaneShare{State: "stopping"}, "2026-11-12T09:30:00Z")
+	box.noteFailure(teamServerID, team.ErrUnreachable)
+	box.tick(context.Background())
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 || lanes[0].State != "stopping" || len(snapshotCalls(calls)) != 0 {
+		t.Fatalf("lanes %+v calls %+v %v", lanes, snapshotCalls(calls), err)
+	}
+}
+
+func TestLaneReconcileLeavesLostAndFull(t *testing.T) {
+	for _, state := range []string{"lost", "full"} {
+		box, dir, calls, script := laneBox(t)
+		script.putStatus = http.StatusCreated
+		appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+		writeChatLog(t, dir, "fresh", shareUIDB, 1)
+		saveLane(t, dir, team.LaneShare{State: state}, "2026-11-12T09:30:00Z")
+		box.tick(context.Background())
+		lanes, err := team.LoadLaneShares(dir)
+		_, created := shareForNode(t, dir, "fresh")
+		if err != nil || len(lanes) != 1 || lanes[0].State != state || created || pathCount(calls, http.MethodPut, "/v1/channels") != 0 {
+			t.Fatalf("%s lanes %+v calls %+v %v", state, lanes, snapshotCalls(calls), err)
+		}
+	}
+}
+
+func TestLaneReconcileEnrollsLiveChats(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	script.putStatus = http.StatusCreated
+	appendLaneNode(t, dir, "old", "Old", laneLocal, "2026-11-12T09:00:00Z")
+	appendDelete(t, dir, "old")
+	appendLaneNode(t, dir, "south", "South", "south", "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "south", "0000000000000004", 0)
+	appendLaneNode(t, dir, "skip", "Skip", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "skip", "0000000000000003", 0)
+	appendLaneNode(t, dir, "nolog", "Nolog", laneLocal, "2026-11-12T09:00:00Z")
+	appendLaneNode(t, dir, "users", "Users", laneLocal, "2026-11-12T09:00:00Z")
+	writeUserOnlyLog(t, dir, "users")
+	appendLaneNode(t, dir, "early", "Early", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "early", "0000000000000002", 1)
+	appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "fresh", shareUIDB, 1)
+	appendLaneNode(t, dir, "plain", "A\nB", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "plain", shareUIDC, 0)
+	saveLane(t, dir, team.LaneShare{
+		Members:  []team.Member{{Seat: shareSeat, Access: "write"}},
+		Starts:   map[string]int{"early": 2, "fresh": 1},
+		Excluded: []string{"skip"},
+	}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	for _, node := range []string{"old", "south", "skip", "nolog", "users", "early"} {
+		if _, ok := shareForNode(t, dir, node); ok {
+			t.Fatalf("created %s", node)
+		}
+	}
+	fresh, ok := shareForNode(t, dir, "fresh")
+	plain, plainOK := shareForNode(t, dir, "plain")
+	if !ok || fresh.Scope != "from_now" || fresh.Start != 1 || fresh.Lane != shareUID || len(fresh.Members) != 0 || fresh.Title != "Fresh" {
+		t.Fatalf("fresh %+v", fresh)
+	}
+	if !plainOK || plain.Scope != "all" || plain.Start != 0 || plain.Lane != shareUID || plain.Title != "AB" || len(plain.Members) != 0 {
+		t.Fatalf("plain %+v", plain)
+	}
+	saw := false
+	for _, c := range snapshotCalls(calls) {
+		if c.method == http.MethodPut && strings.HasSuffix(c.path, "/members") && strings.Contains(c.body, shareSeat) {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("channel members omitted the lane")
+	}
+}
+
+func TestLaneReconcileCreateFailureStoresNothing(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	script.putStatus = http.StatusInternalServerError
+	appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "fresh", shareUIDB, 0)
+	saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	_, ok := shareForNode(t, dir, "fresh")
+	lanes, err := team.LoadLaneShares(dir)
+	if ok || err != nil || lanes[0].State != "active" || pathCount(calls, http.MethodPut, "/v1/channels") == 0 {
+		t.Fatalf("stored %v lanes %+v calls %+v", ok, lanes, snapshotCalls(calls))
+	}
+}
+
+func TestLaneReconcileAdoptsASameServerShare(t *testing.T) {
+	box, dir, _, script := laneBox(t)
+	script.putStatus = http.StatusInternalServerError
+	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, "", "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+	saveLane(t, dir, team.LaneShare{Members: []team.Member{{Seat: shareSeat, Access: "write"}}, Rev: 4}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	stored, ok := storedShare(t, dir, shareUIDB)
+	if !ok || stored.Lane != shareUID || stored.LaneRev != 0 || len(stored.Members) != 0 || stored.Scope != "from_now" {
+		t.Fatalf("adopted %+v", stored)
+	}
+}
+
+func TestLaneReconcileAdoptStopsWhenTheStoreFails(t *testing.T) {
+	box, dir, _, script := laneBox(t)
+	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, "", "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+	saveLane(t, dir, team.LaneShare{Rev: 4}, "2026-11-12T09:30:00Z")
+	denyDataWrites(t, dir)
+	box.tick(context.Background())
+	stored, ok := storedShare(t, dir, shareUIDB)
+	if !ok || stored.Lane != "" || len(laneMirrors(t, script)) != 0 {
+		t.Fatalf("stored %+v", stored)
+	}
+}
+
+func TestLaneReconcileLeavesSharesItDoesNotOwn(t *testing.T) {
+	box, dir, _, script := laneBox(t)
+	script.deleteStatus = http.StatusInternalServerError
+	script.mirrorStatus = http.StatusInternalServerError
+	saveQuietChat(t, dir, "own", "Own", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 4)
+	saveQuietChat(t, dir, "stop", "Stop", "0000000000000002", "", "2222333344445555", "stopping", "2026-11-12T09:00:00Z", 0)
+	seedTeam(t, dir, labEntry(teamOtherID, "http://127.0.0.1:1", teamToken))
+	appendLaneNode(t, dir, "else", "Else", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "else", shareUIDC, 0)
+	mustSaveShare(t, dir, team.Share{
+		UID: shareUIDC, Node: "else", Server: teamOtherID, Title: "Else", StartSent: true, Next: 1,
+		Generation: "3333444455556666", Members: []team.Member{},
+	})
+	saveLane(t, dir, team.LaneShare{Rev: 4}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	own, ok := storedShare(t, dir, shareUIDB)
+	stopped, stopOK := storedShare(t, dir, "0000000000000002")
+	other, otherOK := storedShare(t, dir, shareUIDC)
+	if !ok || own.LaneRev != 4 || !stopOK || stopped.State != "stopping" || stopped.Lane != "" || !otherOK || other.Lane != "" || other.Server != teamOtherID {
+		t.Fatalf("own %+v stopped %+v other %+v", own, stopped, other)
+	}
+}
+
+func TestLaneReconcilePushesMembers(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	script.deleteStatus = http.StatusInternalServerError
+	members := []team.Member{{Seat: shareSeat, Access: "write"}, {Seat: shareSeatB, Access: "read"}}
+	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+	saveQuietChat(t, dir, "stop", "Stop", shareUIDC, shareUID, "2222333344445555", "stopping", "2026-11-12T09:00:00Z", 0)
+	saveLane(t, dir, team.LaneShare{Members: members, Rev: 3, IndexRev: 1}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	stored, ok := storedShare(t, dir, shareUIDB)
+	stopped, stopOK := storedShare(t, dir, shareUIDC)
+	lanes, err := team.LoadLaneShares(dir)
+	if !ok || stored.LaneRev != 3 || !stopOK || stopped.LaneRev != 0 || err != nil || lanes[0].IndexRev != 3 {
+		t.Fatalf("chat %+v stopped %+v lanes %+v", stored, stopped, lanes)
+	}
+	chat, index := 0, 0
+	for _, c := range snapshotCalls(calls) {
+		if c.method != http.MethodPut || !strings.HasSuffix(c.path, "/members") {
+			continue
+		}
+		if !strings.Contains(c.body, shareSeat) || !strings.Contains(c.body, shareSeatB) {
+			t.Fatalf("members %s", c.body)
+		}
+		if strings.HasSuffix(c.path, "/"+shareUIDB+"/members") {
+			chat++
+		}
+		if strings.HasSuffix(c.path, "/"+shareUID+"/members") {
+			index++
+		}
+	}
+	if chat != 1 || index != 1 {
+		t.Fatalf("chat %d index %d calls %+v", chat, index, snapshotCalls(calls))
+	}
+}
+
+func TestLaneReconcileMemberPushFailureLeavesTheRev(t *testing.T) {
+	t.Run("server", func(t *testing.T) {
+		box, dir, _, script := laneBox(t)
+		script.putStatus = http.StatusInternalServerError
+		saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+		saveLane(t, dir, team.LaneShare{Rev: 3, IndexRev: 1}, "2026-11-12T09:30:00Z")
+		box.tick(context.Background())
+		stored, _ := storedShare(t, dir, shareUIDB)
+		lanes, _ := team.LoadLaneShares(dir)
+		if stored.LaneRev != 0 || lanes[0].IndexRev != 1 {
+			t.Fatalf("chat %+v lane %+v", stored, lanes)
+		}
+	})
+	t.Run("hello", func(t *testing.T) {
+		box, dir, _, script := laneBox(t)
+		script.failPath = "/v1/hello"
+		saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+		saveLane(t, dir, team.LaneShare{Rev: 3, IndexRev: 1}, "2026-11-12T09:30:00Z")
+		box.tick(context.Background())
+		stored, _ := storedShare(t, dir, shareUIDB)
+		lanes, _ := team.LoadLaneShares(dir)
+		if stored.LaneRev != 0 || lanes[0].IndexRev != 1 {
+			t.Fatalf("chat %+v lane %+v", stored, lanes)
+		}
+	})
+	t.Run("store", func(t *testing.T) {
+		box, dir, _, _ := laneBox(t)
+		saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+		saveLane(t, dir, team.LaneShare{Rev: 3, IndexRev: 1}, "2026-11-12T09:30:00Z")
+		denyDataWrites(t, dir)
+		box.tick(context.Background())
+		_ = os.Chmod(dir, 0o700)
+		stored, _ := storedShare(t, dir, shareUIDB)
+		lanes, _ := team.LoadLaneShares(dir)
+		if stored.LaneRev != 0 || lanes[0].IndexRev != 1 {
+			t.Fatalf("chat %+v lane %+v", stored, lanes)
+		}
+	})
+	t.Run("ahead", func(t *testing.T) {
+		box, dir, calls, _ := laneBox(t)
+		saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 1)
+		saveLane(t, dir, team.LaneShare{Rev: 1, IndexRev: 2}, "")
+		box.tick(context.Background())
+		if callCount(calls, http.MethodGet, "/v1/channels") != 0 || pathCount(calls, http.MethodPut, "/members") != 0 {
+			t.Fatalf("calls %+v", snapshotCalls(calls))
+		}
+	})
+}
+
+func TestLaneReconcileNotesLeavers(t *testing.T) {
+	members := []team.Member{{Seat: shareSeat, Access: "write"}, {Seat: shareSeatB, Access: "read"}}
+	seatJSON := func(seats ...string) string {
+		parts := make([]string, len(seats))
+		for i, seat := range seats {
+			parts[i] = fmt.Sprintf(`{"seat":%q,"access":"write"}`, seat)
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	}
+	t.Run("left", func(t *testing.T) {
+		box, dir, calls, script := laneBox(t)
+		inst := installationOf(t, dir)
+		saveLane(t, dir, team.LaneShare{Members: members}, "")
+		script.channelsBody = ownerChannels(inst,
+			ownerChannel(inst, "0000000000000002", "Decoy", shareGen, seatJSON(shareSeat, shareSeatB)),
+			ownerChannel(inst, shareUID, "North", shareGen, seatJSON(shareSeat)),
+		)
+		box.tick(context.Background())
+		lanes, err := team.LoadLaneShares(dir)
+		if err != nil || lanes[0].Rev != 2 || len(lanes[0].Members) != 1 || lanes[0].Members[0].Seat != shareSeat || lanes[0].CheckedAt != "2026-11-12T09:30:00Z" {
+			t.Fatalf("lanes %+v %v", lanes, err)
+		}
+		if callCount(calls, http.MethodGet, "/v1/channels") != 1 {
+			t.Fatalf("gets %+v", snapshotCalls(calls))
+		}
+		appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+		writeChatLog(t, dir, "fresh", shareUIDB, 0)
+		script.putStatus = http.StatusCreated
+		lanes[0].Name = "Renamed"
+		lanes[0].Rev = 3
+		if err := team.SaveLaneShare(dir, lanes[0]); err != nil {
+			t.Fatal(err)
+		}
+		box.tick(context.Background())
+		lanes, err = team.LoadLaneShares(dir)
+		if err != nil || len(lanes[0].Members) != 1 || lanes[0].Members[0].Seat != shareSeat {
+			t.Fatalf("restored %+v %v", lanes, err)
+		}
+	})
+	t.Run("stayed", func(t *testing.T) {
+		box, dir, _, script := laneBox(t)
+		inst := installationOf(t, dir)
+		saveLane(t, dir, team.LaneShare{Members: members, CheckedAt: "2026-11-12T09:29:00Z"}, "2026-11-12T09:29:00Z")
+		script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUID, "North", shareGen, seatJSON(shareSeat, shareSeatB)))
+		box.tick(context.Background())
+		lanes, err := team.LoadLaneShares(dir)
+		if err != nil || lanes[0].Rev != 1 || len(lanes[0].Members) != 2 || lanes[0].CheckedAt != "2026-11-12T09:30:00Z" {
+			t.Fatalf("lanes %+v %v", lanes, err)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		box, dir, _, script := laneBox(t)
+		inst := installationOf(t, dir)
+		saveLane(t, dir, team.LaneShare{Members: members}, "2026-11-12T09:28:00Z")
+		script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUIDC, "Other", shareGen, seatJSON(shareSeat)))
+		box.tick(context.Background())
+		lanes, err := team.LoadLaneShares(dir)
+		if err != nil || lanes[0].Rev != 1 || len(lanes[0].Members) != 2 || lanes[0].CheckedAt != "2026-11-12T09:30:00Z" {
+			t.Fatalf("lanes %+v %v", lanes, err)
+		}
+	})
+	t.Run("not due", func(t *testing.T) {
+		box, dir, calls, script := laneBox(t)
+		inst := installationOf(t, dir)
+		saveLane(t, dir, team.LaneShare{Members: members}, "2026-11-12T09:30:00Z")
+		script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUID, "North", shareGen, seatJSON(shareSeat)))
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].Rev != 1 || callCount(calls, http.MethodGet, "/v1/channels") != 0 {
+			t.Fatalf("lanes %+v calls %+v", lanes, snapshotCalls(calls))
+		}
+	})
+	t.Run("list fails", func(t *testing.T) {
+		box, dir, calls, script := laneBox(t)
+		saveLane(t, dir, team.LaneShare{Members: members}, "")
+		script.channelsStatus = http.StatusInternalServerError
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].CheckedAt != "" || lanes[0].Rev != 1 || callCount(calls, http.MethodGet, "/v1/channels") != 1 {
+			t.Fatalf("lanes %+v calls %+v", lanes, snapshotCalls(calls))
+		}
+	})
+	t.Run("two lanes", func(t *testing.T) {
+		box, dir, calls, script := laneBox(t)
+		inst := installationOf(t, dir)
+		saveLane(t, dir, team.LaneShare{Members: members}, "")
+		saveLane(t, dir, team.LaneShare{ID: shareUIDB, Lane: "south", Members: members}, "")
+		body := seatJSON(shareSeat, shareSeatB)
+		script.channelsBody = ownerChannels(inst,
+			ownerChannel(inst, shareUID, "North", shareGen, body),
+			ownerChannel(inst, shareUIDB, "South", shareGen, body),
+		)
+		box.tick(context.Background())
+		if callCount(calls, http.MethodGet, "/v1/channels") != 1 {
+			t.Fatalf("gets %+v", snapshotCalls(calls))
+		}
+	})
+	t.Run("unwritable", func(t *testing.T) {
+		box, dir, _, script := laneBox(t)
+		inst := installationOf(t, dir)
+		saveLane(t, dir, team.LaneShare{Members: members}, "")
+		script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUID, "North", shareGen, seatJSON(shareSeat)))
+		denyDataWrites(t, dir)
+		box.tick(context.Background())
+		_ = os.Chmod(dir, 0o700)
+		lanes, err := team.LoadLaneShares(dir)
+		if err != nil || lanes[0].CheckedAt != "" || lanes[0].Rev != 1 {
+			t.Fatalf("lanes %+v %v", lanes, err)
+		}
+	})
+}
+
+func TestLaneReconcilePublishesTheSnapshot(t *testing.T) {
+	box, dir, _, script := laneBox(t)
+	saveQuietChat(t, dir, "bee", "Bee", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 1)
+	saveQuietChat(t, dir, "sea", "Sea", shareUIDC, shareUID, "2222333344445555", "active", "2026-11-12T09:00:00Z", 1)
+	mustSaveShare(t, dir, team.Share{
+		UID: "0000000000000002", Node: "missing", Lane: shareUID, Title: "Missing", State: "active",
+		StartSent: true, Next: 1, Members: []team.Member{}, SharedAt: "2026-11-12T08:00:00Z",
+		Generation: "3333444455556666",
+	})
+	saveQuietChat(t, dir, "stop", "Stop", "0000000000000003", shareUID, "4444555566667777", "stopping", "2026-11-12T07:00:00Z", 1)
+	saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	type snapChat struct {
+		Chat string `json:"chat"`
+		At   string `json:"created_at"`
+	}
+	want, err := json.Marshal(struct {
+		V     int        `json:"v"`
+		T     string     `json:"t"`
+		Name  string     `json:"name"`
+		Color string     `json:"color"`
+		Chats []snapChat `json:"chats"`
+	}{1, "lane", "North", laneColor, []snapChat{
+		{"0000000000000002", "2026-11-12T08:00:00Z"},
+		{shareUIDC, "2026-11-12T09:00:00Z"},
+		{shareUIDB, "2026-11-12T09:00:00Z"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := laneMirrors(t, script)
+	sum := sha256.Sum256(want)
+	lanes, lerr := team.LoadLaneShares(dir)
+	if lerr != nil || len(got) != 1 || got[0] != "lane/1 "+string(want) || lanes[0].IndexKey != 1 || lanes[0].IndexHash != hex.EncodeToString(sum[:]) || lanes[0].State != "active" {
+		t.Fatalf("mirrors %v lanes %+v", got, lanes)
+	}
+}
+
+func TestLaneReconcileSnapshotFailures(t *testing.T) {
+	prep := func(t *testing.T) (*shareOutbox, string, *outboxScript) {
+		t.Helper()
+		box, dir, _, script := laneBox(t)
+		saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
+		return box, dir, script
+	}
+	t.Run("hello", func(t *testing.T) {
+		box, dir, script := prep(t)
+		script.failPath = "/v1/hello"
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].State != "active" || lanes[0].IndexHash != "" || len(laneMirrors(t, script)) != 0 {
+			t.Fatalf("lanes %+v", lanes)
+		}
+	})
+	t.Run("missing", func(t *testing.T) {
+		box, dir, script := prep(t)
+		script.mirrorStatus = http.StatusNotFound
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].State != "lost" || box.confirmed(teamServerID) {
+			t.Fatalf("lanes %+v confirmed %v", lanes, box.confirmed(teamServerID))
+		}
+	})
+	t.Run("stale", func(t *testing.T) {
+		box, dir, script := prep(t)
+		inst := installationOf(t, dir)
+		script.channel = channelJSON(inst, shareUID, "North", "9999888877776666")
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].State != "lost" {
+			t.Fatalf("lanes %+v", lanes)
+		}
+	})
+	t.Run("quota", func(t *testing.T) {
+		box, dir, script := prep(t)
+		script.mirrorStatus = http.StatusInsufficientStorage
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].State != "full" {
+			t.Fatalf("lanes %+v", lanes)
+		}
+	})
+	t.Run("other", func(t *testing.T) {
+		box, dir, script := prep(t)
+		script.mirrorStatus = http.StatusInternalServerError
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].State != "active" || lanes[0].IndexHash != "" {
+			t.Fatalf("lanes %+v", lanes)
+		}
+	})
+	t.Run("generation", func(t *testing.T) {
+		box, dir, script := prep(t)
+		script.mirrorGen = "1111222233334444"
+		box.tick(context.Background())
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].State != "lost" || lanes[0].IndexHash != "" {
+			t.Fatalf("lanes %+v", lanes)
+		}
+	})
+	t.Run("unwritable", func(t *testing.T) {
+		box, dir, script := prep(t)
+		denyDataWrites(t, dir)
+		box.tick(context.Background())
+		_ = os.Chmod(dir, 0o700)
+		lanes, _ := team.LoadLaneShares(dir)
+		if lanes[0].State != "active" || lanes[0].IndexHash != "" || len(laneMirrors(t, script)) != 1 {
+			t.Fatalf("lanes %+v mirrors %v", lanes, laneMirrors(t, script))
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		box, dir, script := prep(t)
+		box.tick(context.Background())
+		box.tick(context.Background())
+		got := laneMirrors(t, script)
+		if len(got) != 1 || !strings.Contains(got[0], `"chats":[]`) {
+			t.Fatalf("mirrors %v", got)
+		}
+		lanes, err := team.LoadLaneShares(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lanes[0].Name = "Renamed"
+		if err := team.SaveLaneShare(dir, lanes[0]); err != nil {
+			t.Fatal(err)
+		}
+		box.tick(context.Background())
+		got = laneMirrors(t, script)
+		if len(got) != 2 || !strings.HasPrefix(got[1], "lane/2 ") || !strings.Contains(got[1], `"name":"Renamed"`) {
+			t.Fatalf("renamed %v", got)
+		}
+	})
+}
+
+func TestLaneReconcileMarkStopsWhenTheStoreFails(t *testing.T) {
+	box, dir, _, _ := laneBox(t)
+	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 1)
+	saveLane(t, dir, team.LaneShare{State: "stopping"}, "2026-11-12T09:30:00Z")
+	denyDataWrites(t, dir)
+	box.tick(context.Background())
+	_ = os.Chmod(dir, 0o700)
+	stored, ok := storedShare(t, dir, shareUIDB)
+	lanes, err := team.LoadLaneShares(dir)
+	if !ok || stored.State != "active" || err != nil || lanes[0].State != "stopping" {
+		t.Fatalf("chat %+v lanes %+v %v", stored, lanes, err)
+	}
+}
+
+func TestOutboxDeliversPastADamagedLaneFile(t *testing.T) {
+	script := &outboxScript{}
+	box, dir, calls, _ := newShareBox(t, script)
+	appendNode(t, dir, shareNode, "North")
+	seedOneUser(t, dir)
+	mustSaveShare(t, dir, team.Share{UID: shareUID, Node: shareNode, Title: "North"})
+	if err := os.WriteFile(filepath.Join(dir, team.LaneSharesFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	raw, err := os.ReadFile(filepath.Join(dir, team.LaneSharesFile))
+	stored, ok := storedShare(t, dir, shareUID)
+	if string(raw) != "{" || err != nil || !ok || len(snapshotCalls(calls)) == 0 {
+		t.Fatalf("lane %q share %+v calls %d %v", raw, stored, len(snapshotCalls(calls)), err)
+	}
+}
+
+func TestLaneReconcileRacesTheTick(t *testing.T) {
+	script := &outboxScript{}
+	box, h, _, _ := newRaceBox(t, script)
+	th := asTeamHandler(t, h)
+	box.shareOps = &th.shareOps
+	script.putStatus = http.StatusCreated
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 12; i++ {
+			box.tick(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		body := lanePutBody("all", "North", laneColor, []team.Member{{Seat: shareSeat, Access: "write"}}, []string{})
+		for i := 0; i < 6; i++ {
+			rec := putLane(h, laneLocal, body)
+			if rec.Code != http.StatusCreated && rec.Code != http.StatusOK && rec.Code != http.StatusConflict {
+				t.Errorf("put = %d %s", rec.Code, rec.Body.String())
+			}
+			rec = doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
+			if rec.Code != http.StatusAccepted && rec.Code != http.StatusNotFound {
+				t.Errorf("delete = %d %s", rec.Code, rec.Body.String())
+			}
+		}
+	}()
+	wg.Wait()
 }
