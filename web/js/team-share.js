@@ -30,10 +30,12 @@ const ERROR_TEXT = {
 };
 
 export function laneCountLine(open, archived){
-  const head = "Shares " + (open || 0) + " chats now";
+  const n = open || 0;
+  const head = n === 1 ? "Shares 1 chat now" : "Shares " + n + " chats now";
   const tail = "new chats in this lane are shared automatically";
   if (!archived) return head + " · " + tail;
-  return head + " · " + archived + " archived chats stay private · " + tail;
+  const mid = archived === 1 ? "1 archived chat stays private" : archived + " archived chats stay private";
+  return head + " · " + mid + " · " + tail;
 }
 
 export function shareStatusText(view, serverName) {

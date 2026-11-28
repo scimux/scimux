@@ -2044,7 +2044,7 @@ test("a new lane sheet shares the lane and lowercases its color", async () => {
   ui.feature.openLane("north");
   await ui.feature.settled();
   assert.equal(ui.apply.textContent, "Share lane");
-  assert.match(ui.body.innerHTML, /Shares 2 chats now · 1 archived chats stay private/);
+  assert.match(ui.body.innerHTML, /Shares 2 chats now · 1 archived chat stays private/);
   assert.equal(ui.stop.hidden, true);
   const row = selects(ui.body)[0];
   row.checked = true;
@@ -2072,7 +2072,7 @@ test("saving lane people sends membership_only for the index", async () => {
   await ui.feature.settled();
   ui.feature.openLane("north");
   await ui.feature.settled();
-  assert.match(ui.body.innerHTML, /Shares 1 chats now/);
+  assert.match(ui.body.innerHTML, /Shares 1 chat now/);
   assert.doesNotMatch(ui.body.innerHTML, /archived chats stay private/);
   const row = selects(ui.body)[1];
   row.checked = true;
