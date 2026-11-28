@@ -1350,7 +1350,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function ownerUnread(id) { return !!id && ownerUnreadStatus(id) === "unread"; }
   function groups() { return sharedGroups(); }
-  function sharedGroups() { return guestGroups(activities(), answer.servers, knownPeople); }
+  function sharedGroups() { return guestGroups(answer.subscriptions.filter(view => view.access !== "owner").map(presented), answer.servers, knownPeople); }
   function openActivity(id) {
     const view = activities().find(item => "team/" + guestKey(item) === id);
     if (!view) return;
