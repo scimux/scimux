@@ -721,6 +721,40 @@ test("stack and wall signatures change on fare/fold/selection fields", () => {
   assert.match(w1, /^wall\|/);
 });
 
+test("the stack signature changes when a lane share or its member count changes", () => {
+  const n = {
+    id: "a", title: "T", description: "d", agent: "x", model: "m", effort: "",
+    lane_id: "L", parent: "", ended_at: "", live: "quiet", attention: "",
+    created_at: "2026-01-01T00:00:00Z", stops: [],
+  };
+  const rows = stopsOf(n).sort(newestFirst);
+  const blocks = [{ lane: { id: "L", name: "Lane" }, rows }];
+  const base = { mapFold: new Set(), focusLane: null, mapTab: "all", mapFull: false, lm: { color: () => "#00f" } };
+  const plain = stackMapSignature(blocks, base);
+  const active = stackMapSignature(blocks, { ...base, shares: { L: { state: "active", members: [{}, {}] } } });
+  assert.notEqual(plain, active);
+  const more = stackMapSignature(blocks, { ...base, shares: { L: { state: "active", members: [{}, {}, {}] } } });
+  assert.notEqual(active, more);
+  const quiet = stackMapSignature(blocks, { ...base, shares: { L: { state: "stopping", members: [{}] } } });
+  assert.notEqual(plain, quiet);
+  assert.equal(stackMapSignature(blocks, base), plain);
+  const missing = stackMapSignature(blocks, { ...base, shares: { L: { state: "active" } } });
+  assert.notEqual(missing, active);
+});
+
+test("a lane share change rebuilds the header badge", () => {
+  let share = null;
+  const ui = laneMap({ laneShare: () => share });
+  assert.doesNotMatch(ui.mapwrap.innerHTML, /class="lshared"/);
+  share = { state: "active", members: [{}, {}] };
+  ui.feature.render();
+  assert.match(ui.mapwrap.innerHTML, /aria-label="Shared with 2 people"/);
+  share = { state: "active", members: [{}, {}, {}] };
+  ui.feature.render();
+  assert.match(ui.mapwrap.innerHTML, /aria-label="Shared with 3 people"/);
+  ui.feature.destroy();
+});
+
 /* ---------- fake-DOM factory lifecycle ---------- */
 
 /* B7/#11: stubs must not silently return null for selectors they do not
