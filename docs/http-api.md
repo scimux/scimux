@@ -1853,6 +1853,11 @@ A view contains `server`, `server_name`, `owner`, `owner_name`, `chat`,
 sighting. Access is `read`, `write` or `owner`; state is `live` or `ended`.
 Unread means the subscription is live and comments are unseen, or, for a
 guest, mirror entries are unseen. The owner's own mirror entries do not count.
+A view whose title starts with `Shared lane · ` and whose local copy contains a
+valid lane snapshot gains `lane` (`name`, `color`, `chats`). An invalid snapshot
+leaves the field absent, so the chat stays a plain subscription. The list reads
+at most one unseen mirror page per candidate, including an owner's index, and
+does not use the unread flag.
 `truncated` says the 4096-entry
 limit prevented a new subscription from being stored. Delivery is `ok`,
 `offline`, `refused` or `changed` as in the share view, and starts at `ok`.
