@@ -6,6 +6,8 @@ import {
   laneOptionsHTML,
   laneSelectHTML,
   readLaneChoiceFromValues,
+  laneShareNotice,
+  paintLaneShareNotice,
 } from "../js/lane-picker.js";
 
 test("laneOptionsHTML: unset, missing selected, lanes, and New lane option", () => {
@@ -54,4 +56,30 @@ test("readLaneChoiceFromValues: existing id, new lane, and empty-name error", ()
     readLaneChoiceFromValues(NEW_LANE_VALUE, "  Trip  ", { makeLane }),
     { laneID: "new-Trip", lane: { id: "new-Trip", name: "Trip", color: "#000" } },
   );
+});
+
+test("laneShareNotice names one person, many people, and stays quiet otherwise", () => {
+  const sentence = (n, server) =>
+    "This lane is shared with " + (n === 1 ? "1 person" : n + " people") +
+    " on " + server + ". This chat will be shared as soon as it starts.";
+  const active = (n) => ({ state: "active", members: Array.from({ length: n }, (_, i) => ({ seat: "s" + i })) });
+  assert.equal(laneShareNotice(active(1), "Lab"), sentence(1, "Lab"));
+  assert.equal(laneShareNotice(active(3), "Dept"), sentence(3, "Dept"));
+  assert.equal(laneShareNotice(active(0), "Lab"), sentence(0, "Lab"));
+  assert.equal(laneShareNotice({ state: "active" }, "Lab"), sentence(0, "Lab"));
+  assert.equal(laneShareNotice(null, "Lab"), "");
+  assert.equal(laneShareNotice({ state: "stopping", members: [{ seat: "a" }] }, "Lab"), "");
+  assert.equal(laneShareNotice({ state: "lost", members: [{ seat: "a" }] }, "Lab"), "");
+});
+
+test("paintLaneShareNotice fills the element next to the select and hides an empty one", () => {
+  const note = { textContent: "old", hidden: false };
+  const pick = { querySelector: (sel) => sel === "[data-lane-share]" ? note : null };
+  assert.equal(paintLaneShareNotice(pick, "This lane is shared with 1 person on Lab. This chat will be shared as soon as it starts."), true);
+  assert.equal(note.textContent, "This lane is shared with 1 person on Lab. This chat will be shared as soon as it starts.");
+  assert.equal(note.hidden, false);
+  assert.equal(paintLaneShareNotice(pick, ""), true);
+  assert.equal(note.hidden, true);
+  assert.equal(paintLaneShareNotice({ querySelector: () => null }, "x"), false);
+  assert.equal(paintLaneShareNotice(null, "x"), false);
 });

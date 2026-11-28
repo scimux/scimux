@@ -48,3 +48,13 @@ export function readLaneChoiceFromValues(val, name, {
   }
   return { laneID: v };
 }
+
+/** Notice under a lane picker. Empty when the lane is not shared. */
+export function laneShareNotice(){
+  return "";
+}
+
+/** Write the notice into the picker. False when the element is absent. */
+export function paintLaneShareNotice(){
+  return false;
+}
