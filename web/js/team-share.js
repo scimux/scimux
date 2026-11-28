@@ -29,9 +29,11 @@ const ERROR_TEXT = {
   lane_share: "This chat is shared through its lane.",
 };
 
-export function laneCountLine(open, archived){
+export function laneCountLine(open, archived, shared){
   const n = open || 0;
-  const head = n === 1 ? "Shares 1 chat now" : "Shares " + n + " chats now";
+  const head = shared
+    ? (n === 1 ? "1 chat shared" : n + " chats shared")
+    : (n === 1 ? "Shares 1 chat now" : "Shares " + n + " chats now");
   const tail = "new chats in this lane are shared automatically";
   if (!archived) return head + " · " + tail;
   const mid = archived === 1 ? "1 archived chat stays private" : archived + " archived chats stay private";
@@ -337,8 +339,9 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     title.textContent = sheetKind === "lane" ? "Share lane" : "Share chat";
   }
 
-  function countHTML() {
+  function countHTML(sharedView) {
     if (sheetKind !== "lane") return "";
+    if (sharedView) return "<p>" + esc(laneCountLine(sharedView.chats, sharedView.excluded, true)) + "</p>";
     const facts = laneFacts(laneTarget);
     return "<p>" + esc(laneCountLine(facts.open || 0, facts.archived.length)) + "</p>";
   }
@@ -357,7 +360,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
       "<p>" + esc(nameOf(current.server)) + "</p>" +
       "<p>" + scope + "</p>" +
       "<p>To change the server or the scope, stop sharing and share again.</p>" +
-      countHTML() +
+      countHTML(current) +
       '<div id="sh_people">Loading people…</div>' +
       "<p>Members keep what they already received.</p>";
     setApply("Save people", false, true);

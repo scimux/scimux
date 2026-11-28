@@ -2028,6 +2028,14 @@ test("laneCountLine names archived chats only when some are archived", () => {
     laneCountLine(2, 2),
     "Shares 2 chats now · 2 archived chats stay private · new chats in this lane are shared automatically",
   );
+  assert.equal(
+    laneCountLine(0, 0),
+    "Shares 0 chats now · new chats in this lane are shared automatically",
+  );
+  assert.equal(
+    laneCountLine(0, 0, true),
+    "0 chats shared · new chats in this lane are shared automatically",
+  );
 });
 
 test("an active lane share counts the chats on the view", async () => {
@@ -2103,7 +2111,7 @@ test("saving lane people sends membership_only for the index", async () => {
   await ui.feature.settled();
   ui.feature.openLane("north");
   await ui.feature.settled();
-  assert.match(ui.body.innerHTML, /Shares 1 chat now/);
+  assert.match(ui.body.innerHTML, /1 chat shared/);
   assert.doesNotMatch(ui.body.innerHTML, /archived chats stay private/);
   const row = selects(ui.body)[1];
   row.checked = true;
@@ -2137,7 +2145,7 @@ test("a lane-owned chat offers the lane sheet and no member controls", async () 
   ui.body.querySelector("#sh_lane").click();
   await ui.feature.settled();
   assert.equal(ui.apply.textContent, "Save people");
-  assert.match(ui.body.innerHTML, /Shares 0 chats now/);
+  assert.match(ui.body.innerHTML, /1 chat shared/);
 });
 
 test("the share tick renames a lane once and skips a put already in flight", async () => {
