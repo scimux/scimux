@@ -1820,10 +1820,12 @@ and the members, and increases `rev` when the members change. `excluded`
 stays as stored at create. Any other state is `409` `not_active`.
 
 `DELETE /api/team/lane-shares/{lane}` marks the lane share and each chat
-share it owns `stopping`, then deletes the index channel the way
-`DELETE /api/team/shares/{node}` deletes a chat. Success is `204`. When
-the server cannot be reached, or Hello names another server, the answer
-is `202` and the view with state `stopping`.
+share it owns stopping, kicks the outbox, and answers `202` and the view
+with state `stopping`. An unknown lane is `404` `not_found`. The outbox
+deletes the index channel and then the lane share. A server that is no
+longer in the server file is removed locally, with its chat shares, and
+no call is made. The answer is never `204`. DELETE does not call the team
+server, so it does not answer 502.
 
 | Status | Code | When |
 | --- | --- | --- |

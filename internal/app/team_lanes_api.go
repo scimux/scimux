@@ -65,7 +65,7 @@ func (h *teamHandler) serveLaneShares(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		h.shareOps.Lock()
 		defer h.shareOps.Unlock()
-		h.deleteLane(w, r, lane)
+		h.deleteLane(w, lane)
 	default:
 		writeTeamError(w, http.StatusNotFound, "not_found")
 	}
@@ -218,8 +218,8 @@ func (h *teamHandler) openLane(w http.ResponseWriter, r *http.Request, entry tea
 	writeJSONStatus(w, http.StatusCreated, h.laneView(share, nil))
 }
 
-func (h *teamHandler) deleteLane(w http.ResponseWriter, r *http.Request, lane string) {
-	lanes, err := h.readLanes()
+func (h *teamHandler) deleteLane(w http.ResponseWriter, lane string) {
+	lanes, shares, err := h.laneSnapshot()
 	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
@@ -233,54 +233,13 @@ func (h *teamHandler) deleteLane(w http.ResponseWriter, r *http.Request, lane st
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
-	inst, err := identity.LoadInstallation(h.dataDir)
-	if err != nil {
-		writeTeamError(w, http.StatusInternalServerError, "identity_unavailable")
-		return
-	}
-	entry, err := h.serverByID(existing.Server)
-	if err != nil {
-		if errors.Is(err, team.ErrNotFound) {
-			h.finishLaneStop(w, existing)
-			return
-		}
-		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
-		return
-	}
 	existing.State = "stopping"
 	if err := h.writeLane(existing); err != nil {
-		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
-		return
-	}
-	if err := h.confirmed(r.Context(), entry); err != nil {
-		if errors.Is(err, team.ErrUnreachable) || errors.Is(err, errHelloMismatch) {
-			h.kickSharesNow()
-			writeJSONStatus(w, http.StatusAccepted, h.laneView(existing, nil))
-			return
-		}
-		writeTeamError(w, http.StatusBadGateway, "bad_server")
-		return
-	}
-	err = h.client.DeleteChannel(r.Context(), entry.URL, entry.Token, string(inst), existing.ID, existing.Generation)
-	if err == nil || errors.Is(err, team.ErrNoChannel) || errors.Is(err, team.ErrStaleGeneration) || errors.Is(err, team.ErrUnauthorized) {
-		h.finishLaneStop(w, existing)
-		return
-	}
-	if errors.Is(err, team.ErrUnreachable) {
-		h.kickSharesNow()
-		writeJSONStatus(w, http.StatusAccepted, h.laneView(existing, nil))
-		return
-	}
-	writeTeamError(w, http.StatusBadGateway, "bad_server")
-}
-
-func (h *teamHandler) finishLaneStop(w http.ResponseWriter, lane team.LaneShare) {
-	if err := h.removeLane(lane.ID); err != nil {
-		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
+		writeLaneSaveError(w, err)
 		return
 	}
 	h.kickSharesNow()
-	w.WriteHeader(http.StatusNoContent)
+	writeJSONStatus(w, http.StatusAccepted, h.laneView(existing, shares))
 }
 
 func (h *teamHandler) laneView(lane team.LaneShare, shares []team.Share) laneShareView {

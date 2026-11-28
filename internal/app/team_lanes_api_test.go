@@ -217,10 +217,12 @@ func TestLaneShareDeleteAnswersLikeAChatShare(t *testing.T) {
 	save("active")
 	mustSaveShare(t, dir, team.Share{UID: shareUIDB, Node: shareNode, Lane: shareUID, Members: []team.Member{}})
 	rec := doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
+	view := decodeLaneView(t, rec)
+	if rec.Code != http.StatusAccepted || view.State != "stopping" || view.Chats != 1 {
+		t.Fatalf("delete = %d %+v %s", rec.Code, view, rec.Body.String())
 	}
-	if lanes, err := team.LoadLaneShares(dir); err != nil || len(lanes) != 0 {
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 || lanes[0].State != "stopping" {
 		t.Fatalf("lanes = %+v %v", lanes, err)
 	}
 	stored, ok := storedShare(t, dir, shareUIDB)
@@ -233,7 +235,7 @@ func TestLaneShareDeleteAnswersLikeAChatShare(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("unreachable = %d %s", rec.Code, rec.Body.String())
 	}
-	lanes, err := team.LoadLaneShares(dir)
+	lanes, err = team.LoadLaneShares(dir)
 	if err != nil || len(lanes) != 1 || lanes[0].State != "stopping" {
 		t.Fatalf("stopping = %+v %v", lanes, err)
 	}
@@ -352,11 +354,11 @@ func TestLaneShareEdges(t *testing.T) {
 	}
 	script.deleteStatus = http.StatusNotFound
 	rec = doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-	if rec.Code != http.StatusNoContent {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("missing channel = %d %s", rec.Code, rec.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(dir, team.LaneSharesFile)); err != nil {
-		t.Fatal(err)
+	if lanes, err = team.LoadLaneShares(dir); err != nil || lanes[0].State != "stopping" {
+		t.Fatalf("kept = %+v %v", lanes, err)
 	}
 	gone := doTeam(h, http.MethodDelete, "/api/team/lane-shares/absent", "")
 	assertAPIError(t, gone, http.StatusNotFound, "not_found")
@@ -368,8 +370,18 @@ func TestLaneShareEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = doTeam(h, http.MethodDelete, "/api/team/lane-shares/gone", "")
-	if rec.Code != http.StatusNoContent {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("forgotten = %d %s", rec.Code, rec.Body.String())
+	}
+	lanes, err = team.LoadLaneShares(dir)
+	kept := false
+	for _, lane := range lanes {
+		if lane.Lane == "gone" && lane.State == "stopping" {
+			kept = true
+		}
+	}
+	if err != nil || !kept {
+		t.Fatalf("forgotten stored = %+v %v", lanes, err)
 	}
 	th.mintChat = func() (string, error) { return "0123456789abcdef", nil }
 	if _, err := th.freshIndexID("0123456789abcdef"); err == nil {
@@ -537,67 +549,55 @@ func TestLaneShareStoreEdges(t *testing.T) {
 	})
 
 	t.Run("delete ladder", func(t *testing.T) {
-		script := &shareScript{}
-		h, dir, _, _ := readySurface(t, script)
+		h, dir, _, _ := readySurface(t, &shareScript{})
 		seedLane(t, dir, laneLocal, shareUID)
 		if err := os.Remove(filepath.Join(dir, identity.InstallationFile)); err != nil {
 			t.Fatal(err)
 		}
 		rec := doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-		assertAPIError(t, rec, http.StatusInternalServerError, "identity_unavailable")
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("no installation = %d %s", rec.Code, rec.Body.String())
+		}
 		if _, err := identity.LoadOrCreateInstallation(dir); err != nil {
 			t.Fatal(err)
 		}
+		seedLane(t, dir, laneLocal, shareUID)
 		if err := os.WriteFile(filepath.Join(dir, team.File), []byte("{"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		rec = doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-		assertAPIError(t, rec, http.StatusInternalServerError, "store_unavailable")
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("damaged servers = %d %s", rec.Code, rec.Body.String())
+		}
 		lanes, err := team.LoadLaneShares(dir)
-		if err != nil || lanes[0].State != "active" {
-			t.Fatalf("still active = %+v %v", lanes, err)
+		if err != nil || lanes[0].State != "stopping" {
+			t.Fatalf("stopping = %+v %v", lanes, err)
 		}
 	})
 
 	t.Run("delete answers", func(t *testing.T) {
 		script := &shareScript{}
 		h, dir, _, inst := readySurface(t, script)
-		reset := func() {
-			t.Helper()
+		for _, setup := range []struct {
+			name  string
+			apply func()
+		}{
+			{"hello", func() { script.helloStatus = http.StatusInternalServerError }},
+			{"delete", func() { script.deleteStatus = http.StatusInternalServerError }},
+			{"unauthorized", func() { script.deleteStatus = http.StatusUnauthorized }},
+			{"conflict", func() { script.deleteStatus = http.StatusConflict }},
+			{"dropped", func() { script.failPath = channelBase(inst, shareUID) }},
+		} {
 			seedLane(t, dir, laneLocal, shareUID)
-		}
-		reset()
-		script.helloStatus = http.StatusInternalServerError
-		rec := doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-		assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
-		script.helloStatus = 0
-		lanes, err := team.LoadLaneShares(dir)
-		if err != nil || lanes[0].State != "stopping" {
-			t.Fatalf("hello = %+v %v", lanes, err)
-		}
-		reset()
-		script.deleteStatus = http.StatusInternalServerError
-		rec = doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-		assertAPIError(t, rec, http.StatusBadGateway, "bad_server")
-		script.deleteStatus = 0
-		for _, status := range []int{http.StatusUnauthorized, http.StatusConflict} {
-			reset()
-			script.deleteStatus = status
-			rec = doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-			if rec.Code != http.StatusNoContent {
-				t.Fatalf("delete %d = %d %s", status, rec.Code, rec.Body.String())
+			script.helloStatus = 0
+			script.deleteStatus = 0
+			script.failPath = ""
+			setup.apply()
+			rec := doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
+			lanes, err := team.LoadLaneShares(dir)
+			if rec.Code != http.StatusAccepted || err != nil || len(lanes) != 1 || lanes[0].State != "stopping" {
+				t.Fatalf("%s = %d %+v %v %s", setup.name, rec.Code, lanes, err, rec.Body.String())
 			}
-		}
-		script.deleteStatus = 0
-		reset()
-		script.failPath = channelBase(inst, shareUID)
-		rec = doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("dropped delete = %d %s", rec.Code, rec.Body.String())
-		}
-		lanes, err = team.LoadLaneShares(dir)
-		if err != nil || lanes[0].State != "stopping" {
-			t.Fatalf("dropped = %+v %v", lanes, err)
 		}
 	})
 
@@ -608,8 +608,9 @@ func TestLaneShareStoreEdges(t *testing.T) {
 		mustSaveShare(t, dir, team.Share{UID: shareUIDC, Node: "other", Members: []team.Member{}})
 		mustSaveShare(t, dir, team.Share{UID: "0000000000000002", Node: "third", Lane: shareUID, State: "stopping", Members: []team.Member{}})
 		rec := doTeam(h, http.MethodDelete, "/api/team/lane-shares/"+laneLocal, "")
-		if rec.Code != http.StatusNoContent {
-			t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
+		lanes, err := team.LoadLaneShares(dir)
+		if rec.Code != http.StatusAccepted || err != nil || len(lanes) != 1 || lanes[0].State != "stopping" {
+			t.Fatalf("delete = %d %+v %v %s", rec.Code, lanes, err, rec.Body.String())
 		}
 		matched, ok := storedShare(t, dir, shareUIDB)
 		plain, plainOK := storedShare(t, dir, shareUIDC)
