@@ -82,4 +82,5 @@ test("paintLaneShareNotice fills the element next to the select and hides an emp
   assert.equal(note.hidden, true);
   assert.equal(paintLaneShareNotice({ querySelector: () => null }, "x"), false);
   assert.equal(paintLaneShareNotice(null, "x"), false);
+  assert.equal(paintLaneShareNotice({}, "x"), false);
 });

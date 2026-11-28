@@ -50,11 +50,20 @@ export function readLaneChoiceFromValues(val, name, {
 }
 
 /** Notice under a lane picker. Empty when the lane is not shared. */
-export function laneShareNotice(){
-  return "";
+export function laneShareNotice(share, serverName){
+  if (!share || share.state !== "active") return "";
+  const n = Array.isArray(share.members) ? share.members.length : 0;
+  const people = n === 1 ? "1 person" : n + " people";
+  return "This lane is shared with " + people + " on " + serverName +
+    ". This chat will be shared as soon as it starts.";
 }
 
 /** Write the notice into the picker. False when the element is absent. */
-export function paintLaneShareNotice(){
-  return false;
+export function paintLaneShareNotice(root, text){
+  if (!root || typeof root.querySelector !== "function") return false;
+  const note = root.querySelector("[data-lane-share]");
+  if (!note) return false;
+  note.textContent = text;
+  note.hidden = text === "";
+  return true;
 }
