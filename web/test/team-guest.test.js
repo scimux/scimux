@@ -5237,6 +5237,9 @@ test("lane chats form ordered sub-groups and a chat joins only the first", () =>
   assert.equal(guestModule.laneForChat(protein, [protein]), null);
   assert.equal(guestModule.laneForChat(null, null), null);
   assert.equal(guestModule.laneForChat(early, [protein]), null);
+  assert.equal(guestModule.laneForChat(chat, null), null);
+  const uncolored = { ...base, chat: "bdx", lane: { name: "alpha", color: 4, chats: [{ chat: "c", created_at: "1" }] } };
+  assert.equal(guestModule.laneForChat(chat, [uncolored]).color, "");
 });
 
 function leaveLaneList() {
