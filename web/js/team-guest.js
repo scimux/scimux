@@ -118,6 +118,11 @@ function compare(a, b) {
   return a.localeCompare(b, undefined, { sensitivity: "base" });
 }
 
+function isLaneIndex(view) {
+  const lane = view.lane;
+  return !!lane && typeof lane === "object" && !Array.isArray(lane);
+}
+
 export function guestGroups(subs, servers, people = {}) {
   const groups = new Map();
   for (const view of subs) {
@@ -167,6 +172,7 @@ export function guestGroups(subs, servers, people = {}) {
       if (order) return order;
       return a.first_seen.localeCompare(b.first_seen);
     });
+    group.items = group.items.filter(view => !isLaneIndex(view));
   }
   return result;
 }
@@ -522,6 +528,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function classifyList(views) {
     for (const view of views) {
+      if (isLaneIndex(view)) continue;
       if (view.state !== "live" || !view.unread || view.comments_last <= view.seen_comments || (view.access !== "owner" && view.mirror_last > view.seen_mirror)) continue;
       const key = classificationKey(view);
       const result = classificationResults.get(key);
@@ -1217,7 +1224,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   async function settled() {
     while (pending.size) await Promise.all([...pending]);
   }
-  function activities() { return answer.subscriptions.filter(view => view.access !== "owner").map(presented); }
+  function activities() { return answer.subscriptions.filter(view => view.access !== "owner" && !isLaneIndex(view)).map(presented); }
   function mineUnread() { return answer.subscriptions.some(view => view.access === "owner" && unreadState(view) === "unread"); }
   function mineUnknown() { return answer.subscriptions.some(view => view.access === "owner" && unreadState(view) === "unknown"); }
   function ownerUnreadStatus(id) {
@@ -1237,7 +1244,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!source || !promptSourceKey(source) || !["mirror", "comments"].includes(source.log)) return false;
     const key = guestKey(source);
     const view = answer.subscriptions.find(item => guestKey(item) === key);
-    if (!view) return false;
+    if (!view || isLaneIndex(view)) return false;
     bubbleController.clear();
     if (view.access === "owner") {
       if (!view.local_node || view.local_node.startsWith("team/") || !panel.ownerJump) return false;
@@ -1911,7 +1918,7 @@ export function sharedActivityGroups(views, servers, people) {
   return guestGroups((views || []).filter(view => view.access !== "owner"), servers || [], people || {});
 }
 export function sharedPinnedOrder(nodes, views, pinned) {
-  const shares = (views || []).filter(view => view.access !== "owner").map(view => ({id:sharedActivityId(view), shared:view}));
+  const shares = (views || []).filter(view => view.access !== "owner" && !isLaneIndex(view)).map(view => ({id:sharedActivityId(view), shared:view}));
   return pinnedOrder([...(nodes || []), ...shares].filter(item => (pinned || []).includes(item.id)), pinned);
 }
 export function readActivityFolds(storage) {
