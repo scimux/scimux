@@ -6141,6 +6141,12 @@ test("the phone full-screen map keeps the share row and the desktop wall does no
   wall.feature.destroy();
 });
 
+test("the lane hairline runs across the header row", () => {
+  assert.match(mapCssSrc, /\.lblock \+ \.lblock \.lheadrow\s*\{[^}]*border-top:\s*1px solid var\(--hairline\)/);
+  assert.doesNotMatch(mapCssSrc, /\.lblock \+ \.lblock \.lhead\s*\{/);
+  assert.match(mapCssSrc, /\.lhead \{ display: flex; align-items: center; gap: 8px; width: 100%;/);
+});
+
 test("the shared lane badge sizes its people icon", () => {
   assert.match(mapCssSrc, /\.lheadrow \.lshared svg\s*\{[^}]*width:\s*16px/);
   assert.match(mapCssSrc, /height:\s*13px/);
