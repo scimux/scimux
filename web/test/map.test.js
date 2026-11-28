@@ -5964,6 +5964,12 @@ test("an outside tap clears one revealed header and keeps a name that says lhead
   firstListener(ui.doc, "click")({ target: { closest(){ return null; } } });
   assert.match(ui.mapwrap.innerHTML, /Keep lheadrow revealed please/);
   assert.doesNotMatch(ui.mapwrap.innerHTML, /class="lheadrow revealed"/);
+  firstListener(ui.mapwrap, "click")({
+    target: fakeTarget({ fold: "L", laneHead: "L" }, ["[data-lane-head]", "[data-fold]"]),
+  });
+  ui.mapwrap.innerHTML = ui.mapwrap.innerHTML.replace('class="lheadrow revealed"', 'class="lheadrow"');
+  firstListener(ui.doc, "click")({ target: { closest(){ return null; } } });
+  assert.doesNotMatch(ui.mapwrap.innerHTML, /class="lheadrow revealed"/);
 });
 
 test("a stack lane header offers share and keeps the fold button", () => {

@@ -2277,7 +2277,10 @@ export function createMapFeature(deps){
   function clearRevealed(target){
     if (target && typeof target.closest === "function" && target.closest(".lheadrow")) return;
     revealedLane = "";
-    if (mapwrap) mapwrap.innerHTML = mapwrap.innerHTML.replaceAll("lheadrow revealed", "lheadrow");
+    if (!mapwrap) return;
+    const row = mapwrap.querySelector(".lheadrow.revealed");
+    if (!row) return;
+    row.classList.remove("revealed");
   }
 
   function onLayersDocClick(e){
