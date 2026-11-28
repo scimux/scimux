@@ -5280,6 +5280,36 @@ test("a live lane keeps the chats an ended index also lists", async () => {
   f.feature.destroy();
 });
 
+test("ended indexes alone leave no sharer group", async () => {
+  const chats = [{ chat: "a", created_at: "1" }];
+  const oldIndex = laneIndex({ chat: "old", state: "ended", owner_name: "Ada", server_name: "lab", title: "Shared lane · old", lane: { name: "old", color: "#111111", chats } });
+  const olderIndex = laneIndex({ chat: "older", state: "ended", owner_name: "Ada", server_name: "lab", title: "Shared lane · older", lane: { name: "older", color: "#222222", chats } });
+  const plain = { ...base, server: "t", owner: "p", chat: "plain", owner_name: "Bea", server_name: "desk", title: "Plain" };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([oldIndex, olderIndex, plain]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(f.feature.tab.activities().map(view => view.chat), ["plain"], "activities stay index-free");
+  const groups = f.feature.tab.groups();
+  assert.deepEqual(groups.map(group => group.key), ["t/p"]);
+  const listEl = { innerHTML: "", querySelectorAll() { return []; } };
+  const cards = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll() { return []; } }, list: listEl },
+    document: { title: "", querySelector() { return null; } },
+    CSS: { escape: value => value },
+    sharedTab: f.feature.tab,
+    nodes: () => [], pinned: () => [], archived: () => [],
+    cardTab: () => "current", expanded: () => new Set(),
+    setInterval: () => 0, clearInterval() {},
+  });
+  cards.render();
+  const html = listEl.innerHTML;
+  assert.doesNotMatch(html, /data-activity-group="owner\/s\/o"|foldlabel">Ada/);
+  assert.match(html, /data-activity-group="owner\/t\/p"/);
+  assert.match(html, /foldlabel">Bea · desk/);
+  cards.destroy();
+  assert.deepEqual(guestGroups([laneIndex()], []), []);
+  f.feature.destroy();
+});
+
 test("a lane chat notice names the shared lane", () => {
   const html = guestModule.sharingNoticeHTML("Ada <b>", [], "<img src=x onerror=1>");
   assert.match(html, /Part of Ada &lt;b&gt;'s shared lane &lt;img src=x onerror=1&gt;/);
