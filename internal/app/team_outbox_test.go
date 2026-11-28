@@ -3952,6 +3952,80 @@ func TestLaneReconcileSkipsUnchangedLogs(t *testing.T) {
 	}
 }
 
+func TestLaneReconcileEnrollsAgainAfterStop(t *testing.T) {
+	box, dir, _, script := laneBox(t)
+	script.putStatus = http.StatusCreated
+	script.channelsBody = `{"channels":[]}`
+	appendLaneNode(t, dir, "loose-notes", "Loose", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "loose-notes", shareUIDB, 0)
+	appendLaneNode(t, dir, "other", "Other", laneLocal, "2026-11-12T09:01:00Z")
+	writeChatLog(t, dir, "other", shareUIDC, 0)
+	saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	loose, lok := shareForNode(t, dir, "loose-notes")
+	other, ook := shareForNode(t, dir, "other")
+	if !lok || loose.Lane != shareUID || !ook || other.Lane != shareUID {
+		t.Fatalf("first loose %+v %v other %+v %v", loose, lok, other, ook)
+	}
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 {
+		t.Fatalf("lanes %+v %v", lanes, err)
+	}
+	lanes[0].State = "stopping"
+	if err := team.SaveLaneShare(dir, lanes[0]); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	box.tick(context.Background())
+	lanes, err = team.LoadLaneShares(dir)
+	shares, serr := team.LoadShares(dir)
+	if err != nil || serr != nil || len(lanes) != 0 || len(shares) != 0 {
+		t.Fatalf("stopped lanes %+v shares %+v %v %v", lanes, shares, err, serr)
+	}
+	saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	loose, lok = shareForNode(t, dir, "loose-notes")
+	other, ook = shareForNode(t, dir, "other")
+	if !lok || loose.Lane != shareUID || !ook || other.Lane != shareUID {
+		t.Fatalf("reenrolled loose %+v %v other %+v %v", loose, lok, other, ook)
+	}
+}
+
+func TestLaneReconcileRetriesAFailedProvision(t *testing.T) {
+	retry := func(t *testing.T, prime func(*outboxScript, string)) {
+		t.Helper()
+		box, dir, _, script := laneBox(t)
+		script.channelsBody = `{"channels":[]}`
+		script.putStatus = http.StatusCreated
+		appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+		writeChatLog(t, dir, "fresh", shareUIDB, 0)
+		saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
+		prime(script, installationOf(t, dir))
+		box.tick(context.Background())
+		if _, ok := shareForNode(t, dir, "fresh"); ok {
+			t.Fatal("stored a failed provision")
+		}
+		script.putStatus = http.StatusCreated
+		script.failPath = ""
+		box.now = func() time.Time { return time.Date(2026, 11, 12, 9, 30, 5, 0, time.UTC) }
+		box.tick(context.Background())
+		got, ok := shareForNode(t, dir, "fresh")
+		if !ok || got.Lane != shareUID || got.UID != shareUIDB {
+			t.Fatalf("retried %+v %v", got, ok)
+		}
+	}
+	t.Run("unavailable", func(t *testing.T) {
+		retry(t, func(script *outboxScript, _ string) {
+			script.putStatus = http.StatusServiceUnavailable
+		})
+	})
+	t.Run("unreachable", func(t *testing.T) {
+		retry(t, func(script *outboxScript, inst string) {
+			script.failPath = "/v1/channels/" + inst + "/" + shareUIDB
+		})
+	})
+}
+
 func laneRead(reads []string, node string) bool {
 	for _, id := range reads {
 		if id == node {
