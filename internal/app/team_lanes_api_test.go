@@ -755,7 +755,10 @@ func TestLaneLeaveSurvivesAMemberEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, shareGen, "active", "2026-11-12T09:00:00Z", 1)
-	script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUID, "North", shareGen, `[{"seat":"`+shareSeat+`","access":"write"}]`))
+	script.channelsBody = ownerChannels(inst,
+		ownerChannel(inst, shareUIDB, "Other", shareGen, `[{"seat":"`+shareSeatB+`","access":"read"}]`),
+		ownerChannel(inst, shareUID, "North", shareGen, `[{"seat":"`+shareSeat+`","access":"write"}]`),
+	)
 	raw, err := json.Marshal(map[string]any{
 		"server": teamServerID, "scope": "all", "name": "North", "color": laneColor, "excluded": []string{},
 		"members": []team.Member{
