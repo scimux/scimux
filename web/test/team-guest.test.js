@@ -432,6 +432,7 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
     const listeners = new Map();
     const el = { id, innerHTML: "", textContent: "", value: "", disabled: false, hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
       addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
+      attrs: {}, title: "", setAttribute(name, value) { this.attrs[name] = String(value); }, getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; },
       focus() { doc.activeElement = el; }, contains(node) { return node === el; }, getBoundingClientRect() { return {left:0, top:0, right:400, bottom:600, width:400, height:600}; },
       querySelector() { return null; }, querySelectorAll() { return []; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
     elements.set("#" + id, el);
@@ -5236,4 +5237,135 @@ test("lane chats form ordered sub-groups and a chat joins only the first", () =>
   assert.equal(guestModule.laneForChat(protein, [protein]), null);
   assert.equal(guestModule.laneForChat(null, null), null);
   assert.equal(guestModule.laneForChat(early, [protein]), null);
+});
+
+function leaveLaneList() {
+  const copy = "a".repeat(32);
+  const index = laneIndex({ lane: { name: "Protein", color: "#11aa22", chats: [null, { chat: "" }, { chat: "c", created_at: "1" }, { chat: "late", created_at: "2" }, { chat: "missing", created_at: "3" }] } });
+  const late = { ...base, chat: "late", title: "Late", people_copy_instance: copy };
+  const loose = { ...base, chat: "loose", title: "Loose" };
+  return { copy, index, late, loose, views: [index, { ...base }, late, loose] };
+}
+
+test("a plain chat keeps the single-chat leave label", async () => {
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  assert.equal(f.get("guestremove").getAttribute("aria-label"), "Leave shared chat and remove local copy");
+  assert.equal(f.get("guestremove").title, "Leave shared chat and remove local copy");
+  f.feature.destroy();
+});
+
+test("a lane chat offers leave lane and deletes the lane after one confirm", async () => {
+  const { copy, views } = leaveLaneList();
+  const deleted = [];
+  let message = "";
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") {
+      deleted.push(path);
+      if (path.includes("/late/")) throw Object.assign(new Error("missing"), { status: 404 });
+      return {};
+    }
+    return readAnswer();
+  }, undefined, undefined, { confirm: text => { message = text; return true; } });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  assert.equal(f.get("guestremove").getAttribute("aria-label"), "Leave lane");
+  assert.equal(f.get("guestremove").title, "Leave lane");
+  f.click("guestremove");
+  await f.feature.settled();
+  assert.equal(message, "Leave the shared lane Protein and remove its saved chats from this computer? The owner's chats will not be deleted.");
+  assert.deepEqual(deleted, [
+    "/api/team/subscriptions/s/o/c/g",
+    "/api/team/subscriptions/s/o/late/g?copy_instance=" + copy,
+    "/api/team/subscriptions/s/o/idx/g",
+  ]);
+  assert.equal(f.feature.tab.activities().some(view => view.chat === "c" || view.chat === "late" || view.chat === "idx"), false);
+  assert.equal(f.feature.tab.activities().some(view => view.chat === "loose"), true);
+  f.feature.destroy();
+});
+
+test("a lane leave stops on the first failed removal and keeps the local list", async () => {
+  for (const [error, note] of [
+    [Object.assign(new Error(JSON.stringify({ error: "unreachable" })), { status: 503 }), "The server could not be reached. Try again later."],
+    [new Error("not json"), "That did not work. Try again."],
+  ]) {
+    const { views } = leaveLaneList();
+    const deleted = [];
+    const f = nativeViewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list(views);
+      if (opts?.method === "DELETE") {
+        deleted.push(path);
+        if (path.includes("/late/")) throw error;
+        return {};
+      }
+      return readAnswer();
+    });
+    f.feature.tick(); await f.feature.settled();
+    f.open(); await f.feature.settled();
+    f.click("guestremove");
+    await f.feature.settled();
+    assert.deepEqual(deleted, ["/api/team/subscriptions/s/o/c/g", "/api/team/subscriptions/s/o/late/g?copy_instance=" + "a".repeat(32)]);
+    assert.equal(f.get("guestnote").textContent, note);
+    assert.equal(f.get("guestremove").disabled, false);
+    assert.equal(f.doc.activeElement, f.get("guestremove"));
+    assert.equal(f.feature.tab.activities().some(view => view.chat === "c"), true);
+    f.feature.destroy();
+  }
+});
+
+test("a lane leave that fails after the reader moves on leaves the new view alone", async () => {
+  const { views, loose } = leaveLaneList();
+  const pending = deferred();
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") return pending.promise;
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  f.click("guestremove");
+  f.open("team/" + guestKey(loose));
+  pending.reject(new Error(JSON.stringify({ error: "unreachable" })));
+  await f.feature.settled();
+  assert.equal(f.feature.tab.selected(), "team/" + guestKey(loose));
+  assert.equal(f.get("guestnote").textContent, "");
+  assert.equal(f.feature.tab.activities().some(view => view.chat === "c"), true);
+  f.feature.destroy();
+});
+
+test("a lane leave that finishes after destroy does not refresh the list", async () => {
+  const { views } = leaveLaneList();
+  const pending = deferred();
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") return pending.promise;
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  const before = f.invalidations();
+  f.click("guestremove");
+  f.feature.destroy();
+  pending.resolve({});
+  await f.feature.settled();
+  assert.equal(f.invalidations(), before);
+});
+
+test("cancelling a lane leave deletes nothing", async () => {
+  const { views } = leaveLaneList();
+  let message = "", deletes = 0;
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") deletes++;
+    return readAnswer();
+  }, undefined, undefined, { confirm: text => { message = text; return false; } });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  f.click("guestremove");
+  assert.equal(message, "Leave the shared lane Protein and remove its saved chats from this computer? The owner's chats will not be deleted.");
+  assert.equal(deletes, 0);
+  assert.equal(f.doc.activeElement, f.get("guestremove"));
+  f.feature.destroy();
 });
