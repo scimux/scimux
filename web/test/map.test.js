@@ -836,7 +836,7 @@ function stubDocument(body, extra = {}){
 function fakeEl(id){
   const listeners = new Map(); // event -> Set of handlers
   const attrs = {};
-  return {
+  const el = {
     id,
     innerHTML: "",
     classList: {
@@ -874,6 +874,25 @@ function fakeEl(id){
       return n;
     },
   };
+  el.querySelector = stubQuerySelector(sel => {
+    if (sel !== ".lheadrow.revealed") return undefined;
+    const html = String(el.innerHTML);
+    const token = 'class="lheadrow revealed"';
+    const at = html.indexOf(token);
+    if (at < 0) return null;
+    return {
+      classList: {
+        remove(name){
+          if (name !== "revealed") return;
+          const cur = String(el.innerHTML);
+          const i = cur.indexOf(token);
+          if (i < 0) return;
+          el.innerHTML = cur.slice(0, i) + 'class="lheadrow"' + cur.slice(i + token.length);
+        },
+      },
+    };
+  });
+  return el;
 }
 
 function memoryStorage(seed = {}){
@@ -5897,13 +5916,14 @@ function laneMap(opts = {}) {
   const name = opts.name === undefined ? "Lane" : opts.name;
   const mapwrap = fakeEl("mapwrap");
   const body = { classList: { _set: new Set(), toggle(){}, contains(){ return false; }, add(){}, remove(){} } };
+  const doc = layersDoc(body);
   const opened = [];
   const feature = createMapFeature({
     roots: {
       mapwrap, mapscroll: fakeEl("mapscroll"), maptoolbar: fakeEl("tb"),
       lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
     },
-    document: layersDoc(body),
+    document: doc,
     storage: memoryStorage({
       [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
       [MAP_FOLD_KEY]: JSON.stringify([]),
@@ -5932,8 +5952,19 @@ function laneMap(opts = {}) {
   feature.bind();
   feature.restoreChrome();
   feature.render();
-  return { feature, mapwrap, opened, storage: null };
+  return { feature, mapwrap, opened, doc, storage: null };
 }
+
+test("an outside tap clears one revealed header and keeps a name that says lheadrow revealed", () => {
+  const ui = laneMap({ name: "Keep lheadrow revealed please" });
+  firstListener(ui.mapwrap, "click")({
+    target: fakeTarget({ fold: "L", laneHead: "L" }, ["[data-lane-head]", "[data-fold]"]),
+  });
+  assert.match(ui.mapwrap.innerHTML, /class="lheadrow revealed"/);
+  firstListener(ui.doc, "click")({ target: { closest(){ return null; } } });
+  assert.match(ui.mapwrap.innerHTML, /Keep lheadrow revealed please/);
+  assert.doesNotMatch(ui.mapwrap.innerHTML, /class="lheadrow revealed"/);
+});
 
 test("a stack lane header offers share and keeps the fold button", () => {
   const ui = laneMap();
