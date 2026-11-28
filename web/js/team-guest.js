@@ -124,13 +124,17 @@ function isLaneIndex(view) {
   return !!lane && typeof lane === "object" && !Array.isArray(lane);
 }
 
+function liveLaneIndex(view) {
+  return isLaneIndex(view) && view.state === "live";
+}
+
 function laneLabel(index) {
   const name = index.lane.name;
   return typeof name === "string" ? name : "";
 }
 
 function sortedLaneIndexes(views) {
-  return views.filter(isLaneIndex).sort((a, b) => {
+  return views.filter(liveLaneIndex).sort((a, b) => {
     const order = compare(laneLabel(a), laneLabel(b));
     if (order) return order;
     return String(a.chat).localeCompare(String(b.chat));
@@ -1080,7 +1084,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   async function removeLane(current) {
     const lane = laneForChat(current.view, answer.subscriptions);
-    const index = answer.subscriptions.find(view => isLaneIndex(view) && view.server === current.view.server && view.owner === current.view.owner && view.chat === lane.index);
+    const index = answer.subscriptions.find(view => liveLaneIndex(view) && view.server === current.view.server && view.owner === current.view.owner && view.chat === lane.index);
     const targets = [];
     for (const entry of index.lane.chats) {
       const id = entry && entry.chat;

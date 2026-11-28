@@ -725,12 +725,12 @@ export function createCardsFeature(deps){
       for (const group of groups) {
         const key = "owner/" + group.key;
         html += header(key, group.label, group.items.some(item => item.unread), group.items.some(item => item.unreadUnknown));
-        if (!activityFolds.has(key)) html += group.items.map(view => cardHTML({id:sharedActivityId(view),shared:view})).join("");
         for (const lane of group.lanes || []) {
           const laneKey = "owner/" + lane.key;
           html += header(laneKey, lane.label, lane.items.some(item => item.unread), lane.items.some(item => item.unreadUnknown), lane);
           if (!activityFolds.has(laneKey)) html += lane.items.map(view => cardHTML({id:sharedActivityId(view), shared:view, laneColor:lane.color, laneIndent:true})).join("");
         }
+        if (!activityFolds.has(key)) html += group.items.map(view => cardHTML({id:sharedActivityId(view),shared:view})).join("");
       }
       list.innerHTML = html || '<div class="empty">No shared activities yet.</div>';
     }, { document: doc, syncLanePicker: d.syncLanePicker });

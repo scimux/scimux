@@ -5239,7 +5239,7 @@ test("a live lane keeps the chats an ended index also lists", async () => {
       deleted.push(path);
       return {};
     }
-    return readAnswer();
+    return readAnswer([], 0, false, liveA);
   }, undefined, undefined, { confirm: () => true });
   f.feature.tick(); await f.feature.settled();
   assert.deepEqual(f.feature.tab.activities().map(view => view.chat).sort(), ["a", "a", "b"], "activities stay index-free");
