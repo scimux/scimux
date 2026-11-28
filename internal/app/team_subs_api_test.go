@@ -5267,3 +5267,36 @@ func TestLaneSnapshotEdges(t *testing.T) {
 		}
 	})
 }
+
+func TestLaneSnapshotSurvivesAFatPrefix(t *testing.T) {
+	h, dir, _ := subSurface(t, &subScript{
+		channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 9)),
+	})
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	fat := append(append([]byte(`{"t":"pad","x":"`), bytes.Repeat([]byte("a"), 8<<20+1)...), '"', '}')
+	recs := []team.MirrorRecord{{
+		Seq: 1, Key: "lane/1", Author: shareSeat, At: "2026-11-14T09:30:00.000Z", Body: fat,
+	}}
+	for seq := 2; seq <= 8; seq++ {
+		body := json.RawMessage(`{"t":"pad"}`)
+		if seq == 2 {
+			body = json.RawMessage(laneSnap("Old", laneColor, subChatB, "2026-11-12T09:00:00Z"))
+		}
+		recs = append(recs, team.MirrorRecord{
+			Seq: uint64(seq), Key: fmt.Sprintf("lane/%d", seq), Author: shareSeat,
+			At: "2026-11-14T09:30:00.000Z", Body: body,
+		})
+	}
+	recs = append(recs, team.MirrorRecord{
+		Seq: 9, Key: "lane/9", Author: shareSeat, At: "2026-11-14T09:30:00.000Z",
+		Body: json.RawMessage(laneSnap("New", laneColor, subChatB, "2026-11-12T09:00:00Z")),
+	})
+	if err := team.AppendCopy(dir, id, team.MirrorLog, recs); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := readSubList(t, h)
+	view, ok := findSub(got, subOwner, subChat, subGen)
+	if !ok || view.Lane == nil || view.Lane.Name != "New" || view.Lane.Color != laneColor {
+		t.Fatalf("tail %+v ok %v", view.Lane, ok)
+	}
+}
