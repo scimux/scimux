@@ -317,7 +317,7 @@ test('a lane sub-group indents its header and colors only a safe stripe', () => 
   assert.equal(looseCard[1].includes("lane-indent"), false);
   assert.doesNotMatch(html, /card-team\/s\/o\/idx/);
   assert.doesNotMatch(html, /<img/);
-  assert.match(html, /foldlabel">&lt;img src=x onerror=1<\/span>/);
+  assert.match(html, /foldlabel">&lt;img src=x onerror=1&gt;<\/span>/);
   assert.doesNotMatch(html, /red;background|url\(x\)|#ABCDEF/);
   const owner = html.match(/<button class="([^"]*)" data-activity-group="owner\/s\/o"/);
   assert.equal(owner[1].includes('lane-group'), false);

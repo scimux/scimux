@@ -451,6 +451,10 @@ export function createCardsFeature(deps){
     </div>`;
   }
 
+  function laneBackground(color) {
+    if (typeof color !== "string" || !/^#[0-9a-f]{6}$/.test(color)) return "";
+    return ` style="background:${escape(color)}"`;
+  }
   function cardHTML(n){
     if (n.shared) {
       const view = n.shared;
@@ -458,8 +462,9 @@ export function createCardsFeature(deps){
       const selected = d.sharedTab?.selected?.() === n.id;
       const title = view.title || "Untitled chat";
       const status = view.state === "ended" ? "Sharing ended" : view.access === "write" ? "Can comment" : "Can view";
-      return `<div class="card shared-card ${selected ? "selected" : ""} ${g("actionCard", "") === n.id ? "actions-open" : ""}" ${g("cardTab", "current") === "pinned" ? 'draggable="true"' : ""} id="card-${escape(n.id)}">
-        <span class="stripe"></span><button class="go" data-open="${escape(n.id)}" aria-label="open ${escape(title)}"></button>
+      const indent = n.laneIndent ? " lane-indent" : "";
+      return `<div class="card shared-card ${selected ? "selected" : ""} ${g("actionCard", "") === n.id ? "actions-open" : ""}${indent}" ${g("cardTab", "current") === "pinned" ? 'draggable="true"' : ""} id="card-${escape(n.id)}">
+        <span class="stripe"${laneBackground(n.laneColor)}></span><button class="go" data-open="${escape(n.id)}" aria-label="open ${escape(title)}"></button>
         <div class="row1"><span class="agent-logo" title="Shared activity">${icons.ICON_USERS || ""}</span><span class="title">${escape(title)}</span>${pinned ? `<span class="pinflag" aria-label="pinned">${icons.ICON_PIN || ""}</span>` : ""}${view.unread ? '<span class="activity-unread" aria-label="unread"></span>' : view.unreadUnknown ? '<span title="Unread status unavailable" aria-label="Unread status unavailable">?</span>' : ""}</div>
         <div class="status">${escape(status)}</div><div class="actions roundactions"><button class="pin" data-pin-action="${escape(n.id)}" aria-label="${pinned ? "unpin" : "pin"}">${pinned ? (icons.ICON_UNPIN || "") : (icons.ICON_PIN || "")}</button></div></div>`;
     }
@@ -707,7 +712,11 @@ export function createCardsFeature(deps){
         list.innerHTML = foldHtml + (cardArr.length ? cardArr.map(cardHTML).join("") : emptyCardsHTML({ laneFilter, cardTab }));
         return;
       }
-      const header = (key, label, unread, unknown) => `<button class="attnfold activity-group ${activityFolds.has(key) ? "" : "open"}" data-activity-group="${escape(key)}" aria-expanded="${!activityFolds.has(key)}"><span class="foldlabel">${escape(label)}</span>${unread ? '<span class="activity-unread" aria-label="unread"></span>' : unknown ? '<span title="Unread status unavailable" aria-label="Unread status unavailable">?</span>' : ""}<span class="foldchev">&#8250;</span></button>`;
+      const header = (key, label, unread, unknown, lane) => {
+        const kind = lane ? " lane-group lane-indent" : "";
+        const swatch = lane ? `<span class="laneswatch"${laneBackground(lane.color)}></span>` : "";
+        return `<button class="attnfold activity-group${kind} ${activityFolds.has(key) ? "" : "open"}" data-activity-group="${escape(key)}" aria-expanded="${!activityFolds.has(key)}">${swatch}<span class="foldlabel">${escape(label)}</span>${unread ? '<span class="activity-unread" aria-label="unread"></span>' : unknown ? '<span title="Unread status unavailable" aria-label="Unread status unavailable">?</span>' : ""}<span class="foldchev">&#8250;</span></button>`;
+      };
       let html = "";
       if (cardTab === "current") {
         const mine = activityFolds.has("mine") ? cardArr.filter(hardAttention) : cardArr;
@@ -717,6 +726,11 @@ export function createCardsFeature(deps){
         const key = "owner/" + group.key;
         html += header(key, group.label, group.items.some(item => item.unread), group.items.some(item => item.unreadUnknown));
         if (!activityFolds.has(key)) html += group.items.map(view => cardHTML({id:sharedActivityId(view),shared:view})).join("");
+        for (const lane of group.lanes || []) {
+          const laneKey = "owner/" + lane.key;
+          html += header(laneKey, lane.label, lane.items.some(item => item.unread), lane.items.some(item => item.unreadUnknown), lane);
+          if (!activityFolds.has(laneKey)) html += lane.items.map(view => cardHTML({id:sharedActivityId(view), shared:view, laneColor:lane.color, laneIndent:true})).join("");
+        }
       }
       list.innerHTML = html || '<div class="empty">No shared activities yet.</div>';
     }, { document: doc, syncLanePicker: d.syncLanePicker });
