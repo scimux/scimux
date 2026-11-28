@@ -2030,6 +2030,37 @@ test("laneCountLine names archived chats only when some are archived", () => {
   );
 });
 
+test("an active lane share counts the chats on the view", async () => {
+  const facts = { name: "North", color: "#1a2b3c", open: 4, archived: ["a", "b"] };
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return { lane_shares: [laneOf({ chats: 3, excluded: 1 })] };
+    if (call.path === "/api/team/lane-shares/north") return laneOf({ chats: 3, excluded: 1 });
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  }, { laneFacts: () => facts });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.feature.openLane("north");
+  await ui.feature.settled();
+  assert.match(ui.body.innerHTML, /3 chats shared · 1 archived chat stays private · new chats in this lane are shared automatically/);
+  assert.doesNotMatch(ui.body.innerHTML, /Shares 4/);
+
+  const one = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return { lane_shares: [laneOf({ chats: 1, excluded: 0 })] };
+    if (call.path === "/api/team/lane-shares/north") return laneOf({ chats: 1, excluded: 0 });
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  }, { laneFacts: () => ({ name: "North", color: "#1a2b3c", open: 4, archived: ["a"] }) });
+  one.feature.select("node-1");
+  await one.feature.settled();
+  one.feature.openLane("north");
+  await one.feature.settled();
+  assert.match(one.body.innerHTML, /1 chat shared · new chats in this lane are shared automatically/);
+  assert.doesNotMatch(one.body.innerHTML, /archived chat/);
+});
+
 test("a new lane sheet shares the lane and lowercases its color", async () => {
   const facts = { name: "North", color: "#AABBCC", open: 2, archived: ["arch-1"] };
   const ui = setup((call) => {
