@@ -4005,8 +4005,10 @@ func TestLaneReconcileRetriesAFailedProvision(t *testing.T) {
 		if _, ok := shareForNode(t, dir, "fresh"); ok {
 			t.Fatal("stored a failed provision")
 		}
-		script.putStatus = http.StatusCreated
-		script.failPath = ""
+		script.set(func(s *outboxScript) {
+			s.putStatus = http.StatusCreated
+			s.failPath = ""
+		})
 		box.now = func() time.Time { return time.Date(2026, 11, 12, 9, 30, 5, 0, time.UTC) }
 		box.tick(context.Background())
 		got, ok := shareForNode(t, dir, "fresh")

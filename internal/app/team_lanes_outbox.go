@@ -130,7 +130,7 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 		}
 		have := byNode[id]
 		if len(have) == 1 && have[0].Lane == "" && have[0].Server == lane.Server && have[0].State == "active" {
-			uid, _, ok := o.nodeCursor(id, false)
+			uid, _, _, ok := o.nodeCursor(id, false)
 			if ok && uid == have[0].UID {
 				if o.mutateShare(have[0].UID, func(cur *team.Share) { cur.Lane, cur.LaneRev, cur.Members = lane.ID, 0, []team.Member{} }) != nil {
 					return shares, lane, false
@@ -146,13 +146,14 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 		if len(have) != 0 {
 			continue
 		}
-		uid, records, ok := o.nodeCursor(id, true)
+		uid, records, size, ok := o.nodeCursor(id, true)
 		if !ok {
 			continue
 		}
 		scope, start := "all", 0
 		if n, known := lane.Starts[id]; known {
 			if records <= n {
+				o.keepLaneLook(id, size)
 				continue
 			}
 			scope, start = "from_now", n
@@ -165,6 +166,7 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 			}
 			lane, refreshed = next, true
 		}
+		o.forgetLaneLook(id)
 		saved, err := provisionChat(ctx, o.client, o.now, o.saveNewShare, entry, owner, openedShare{
 			Node: id, UID: uid, Title: snap.title, Scope: scope, Start: start,
 			Lane: lane.ID, LaneRev: lane.Rev, Members: []team.Member{}, Channel: lane.Members,
@@ -178,20 +180,20 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 	}
 	return shares, lane, true
 }
-func (o *shareOutbox) nodeCursor(node string, gate bool) (string, int, bool) {
+func (o *shareOutbox) nodeCursor(node string, gate bool) (string, int, int64, bool) {
 	size, err := o.fileSize(shareLogPath(o.dataDir, node))
 	if err != nil {
 		o.forgetLaneLook(node)
-		return "", 0, false
+		return "", 0, 0, false
 	}
 	if gate && o.sameLaneLook(node, size) {
-		return "", 0, false
+		return "", 0, size, false
 	}
 	uid, n, ok := o.readCursor(node)
-	if gate {
+	if gate && !ok {
 		o.keepLaneLook(node, size)
 	}
-	return uid, n, ok
+	return uid, n, size, ok
 }
 func (o *shareOutbox) sameLaneLook(node string, size int64) bool {
 	o.mu.Lock()

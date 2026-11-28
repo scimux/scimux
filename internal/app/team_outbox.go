@@ -43,8 +43,9 @@ type shareOutbox struct {
 	logSize func(path string) (int64, error)
 	// cursor reads one node's session log for lane enroll. Nil uses chatCursor.
 	cursor func(node string) (string, int, bool)
-	// laneLook is the session-log size last parsed while enrolling a node
-	// that has no share yet. A missing log is not a look.
+	// laneLook is the session-log size of a node whose last enroll look
+	// had nothing to share yet. A provisioning attempt drops it.
+	// A missing log is not a look.
 	laneLook map[string]int64
 	// readNodes reads nodes.jsonl. A test counts the calls. Nil reads the file.
 	readNodes func(dir string) ([]byte, error)
