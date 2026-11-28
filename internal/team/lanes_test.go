@@ -430,7 +430,7 @@ func TestLaneShareUnreadableFileIsAnError(t *testing.T) {
 }
 
 func TestLaneShareNilExcludedIsRejected(t *testing.T) {
-	if validExcluded(nil) {
+	if ValidExcluded(nil) || !ValidLaneID("north") || ValidLaneID("") || !ValidLaneName("North") || ValidLaneName("") || !ValidLaneColor("#1a2b3c") || ValidLaneColor("blue") {
 		t.Fatal("nil excluded accepted")
 	}
 }

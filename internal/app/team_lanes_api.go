@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/scimux/scimux/internal/identity"
 	"github.com/scimux/scimux/internal/team"
@@ -75,25 +73,10 @@ func (h *teamHandler) serveLaneShares(w http.ResponseWriter, r *http.Request) {
 
 func laneSharePath(path string) (string, bool) {
 	rest := strings.TrimPrefix(path, "/api/team/lane-shares/")
-	if rest == "" || strings.Contains(rest, "/") || !laneToken(rest) {
+	if rest == "" || strings.Contains(rest, "/") || !team.ValidLaneID(rest) {
 		return "", false
 	}
 	return rest, true
-}
-
-func laneToken(s string) bool {
-	if len(s) > 80 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func (h *teamHandler) listLanes(w http.ResponseWriter) {
@@ -127,7 +110,7 @@ func (h *teamHandler) getLane(w http.ResponseWriter, lane string) {
 
 func (h *teamHandler) putLane(w http.ResponseWriter, r *http.Request, lane string) {
 	var req lanePutRequest
-	if decodeSharePut(w, r, &req) != nil || (req.Scope != "from_now" && req.Scope != "all") || !laneLabel(req.Name) || !laneColorOK(req.Color) || !excludedOK(req.Excluded) {
+	if decodeSharePut(w, r, &req) != nil || (req.Scope != "from_now" && req.Scope != "all") || req.Excluded == nil || !team.ValidLaneName(req.Name) || !team.ValidLaneColor(req.Color) || !team.ValidExcluded(*req.Excluded) {
 		writeTeamError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
@@ -427,62 +410,6 @@ func sameMembers(a, b []team.Member) bool {
 	}
 	for i := range a {
 		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func laneLabel(s string) bool {
-	if len(s) < 1 || len(s) > 80 || !utf8.ValidString(s) {
-		return false
-	}
-	for _, r := range s {
-		if unicode.IsControl(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func laneColorOK(s string) bool {
-	if len(s) != 7 || s[0] != '#' {
-		return false
-	}
-	for i := 1; i < 7; i++ {
-		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-func excludedOK(ids *[]string) bool {
-	if ids == nil {
-		return false
-	}
-	seen := make(map[string]struct{}, len(*ids))
-	for _, id := range *ids {
-		if !nodeToken(id) {
-			return false
-		}
-		if _, ok := seen[id]; ok {
-			return false
-		}
-		seen[id] = struct{}{}
-	}
-	return true
-}
-
-func nodeToken(s string) bool {
-	if len(s) < 1 || len(s) > 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || (i > 0 && (c == '_' || c == '-'))
-		if !ok {
 			return false
 		}
 	}

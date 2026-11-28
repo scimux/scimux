@@ -222,19 +222,19 @@ func laneFromWire(w laneWire) (LaneShare, bool) {
 }
 
 func validLaneShare(s LaneShare) bool {
-	if !validHex(s.ID, 16) || !validLaneID(s.Lane) || s.ID == s.Lane || !validHex(s.Server, 32) {
+	if !validHex(s.ID, 16) || !ValidLaneID(s.Lane) || s.ID == s.Lane || !validHex(s.Server, 32) {
 		return false
 	}
 	if s.Scope != "from_now" && s.Scope != "all" {
 		return false
 	}
-	if !validLaneName(s.Name) || !validLaneColor(s.Color) || !validShareMembers(s.Members) {
+	if !ValidLaneName(s.Name) || !ValidLaneColor(s.Color) || !validShareMembers(s.Members) {
 		return false
 	}
 	if s.Rev < 1 || s.IndexRev < 0 || s.IndexKey < 0 {
 		return false
 	}
-	if !validStarts(s.Starts) || !validExcluded(s.Excluded) || !validHex(s.Generation, 16) {
+	if !validStarts(s.Starts) || !ValidExcluded(s.Excluded) || !validHex(s.Generation, 16) {
 		return false
 	}
 	if !validIndexHash(s.IndexHash) || !validCheckedAt(s.CheckedAt) {
@@ -246,7 +246,8 @@ func validLaneShare(s LaneShare) bool {
 	return validJoinedAt(s.SharedAt)
 }
 
-func validLaneID(s string) bool {
+// ValidLaneID reports whether s is one local lane id.
+func ValidLaneID(s string) bool {
 	if len(s) < 1 || len(s) > maxLaneName {
 		return false
 	}
@@ -262,7 +263,8 @@ func validLaneID(s string) bool {
 	return true
 }
 
-func validLaneName(s string) bool {
+// ValidLaneName reports whether s is 1 to 80 bytes of UTF-8 without controls.
+func ValidLaneName(s string) bool {
 	if len(s) < 1 || len(s) > maxLaneName || !utf8.ValidString(s) {
 		return false
 	}
@@ -274,7 +276,8 @@ func validLaneName(s string) bool {
 	return true
 }
 
-func validLaneColor(s string) bool {
+// ValidLaneColor reports whether s is '#' and six lowercase hex digits.
+func ValidLaneColor(s string) bool {
 	return len(s) == 7 && s[0] == '#' && validHex(s[1:], 6)
 }
 
@@ -298,7 +301,8 @@ func validStarts(starts map[string]int) bool {
 	return true
 }
 
-func validExcluded(ids []string) bool {
+// ValidExcluded reports whether ids are distinct local node ids.
+func ValidExcluded(ids []string) bool {
 	if ids == nil {
 		return false
 	}
