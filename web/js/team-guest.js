@@ -232,7 +232,7 @@ export function guestGroups(subs, servers, people = {}) {
     });
     assignLanes(group);
   }
-  return result;
+  return result.filter(group => group.items.length || group.lanes.some(lane => lane.items.length));
 }
 
 export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, toast, retainPeople, assetURL = path => path, people = () => ({}), localNodes = () => [], panel, bubbleController = createBubbleActionController(), storage = null, peopleFileStore = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove, classificationTimeoutMs = 8000 }) {

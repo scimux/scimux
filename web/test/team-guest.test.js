@@ -5355,8 +5355,7 @@ test("lane chats form ordered sub-groups and a chat joins only the first", () =>
     ["s/o/lane/zdx", "zeta", "red;background:url(x)", ["early", "late"]],
   ]);
   assert.deepEqual(home.items.map(item => item.chat), ["loose"]);
-  const away = groups.find(group => group.key === "other/p");
-  assert.deepEqual(away.lanes.map(lane => lane.items.length), [0]);
+  assert.equal(groups.some(group => group.key === "other/p"), false);
   assert.equal(guestModule.laneForChat(chat, [protein, zeta]).name, "Protein");
   assert.equal(guestModule.laneForChat(chat, [other, protein]).index, "idx");
   assert.equal(guestModule.laneForChat(protein, [protein]), null);
