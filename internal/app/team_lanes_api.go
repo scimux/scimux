@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -139,7 +140,7 @@ func (h *teamHandler) putLane(w http.ResponseWriter, r *http.Request, lane strin
 		return
 	}
 	if existing, found := laneByLocal(lanes, lane); found {
-		h.reviseLane(w, entry, existing, req, baseline, seen)
+		h.reviseLane(w, r, entry, string(inst), existing, req, baseline, seen)
 		return
 	}
 	if req.MembershipOnly != nil {
@@ -149,7 +150,7 @@ func (h *teamHandler) putLane(w http.ResponseWriter, r *http.Request, lane strin
 	h.openLane(w, r, entry, string(inst), lane, req)
 }
 
-func (h *teamHandler) reviseLane(w http.ResponseWriter, entry team.Entry, existing team.LaneShare, req lanePutRequest, baseline map[string]bool, seen map[string]struct{}) {
+func (h *teamHandler) reviseLane(w http.ResponseWriter, r *http.Request, entry team.Entry, inst string, existing team.LaneShare, req lanePutRequest, baseline map[string]bool, seen map[string]struct{}) {
 	if existing.Server != entry.ID || existing.Scope != req.Scope {
 		writeTeamError(w, http.StatusConflict, "share_fixed")
 		return
@@ -159,12 +160,21 @@ func (h *teamHandler) reviseLane(w http.ResponseWriter, entry team.Entry, existi
 		return
 	}
 	members := *req.Members
+	stored := existing.Members
 	if req.MembershipOnly != nil {
 		if req.MembershipOnly.UID != existing.ID || req.MembershipOnly.Generation == "" || req.MembershipOnly.Generation != existing.Generation {
 			writeTeamError(w, http.StatusConflict, "share_changed")
 			return
 		}
-		folded, ok := foldMembership(existing.Members, members, seen, baseline)
+		if !sameMembers(stored, members) {
+			next, err := h.dropIndexLeavers(r.Context(), entry, inst, existing)
+			if err != nil {
+				writeShareCallError(w, err)
+				return
+			}
+			stored = next
+		}
+		folded, ok := foldMembership(stored, members, seen, baseline)
 		if !ok {
 			writeTeamError(w, http.StatusBadRequest, "bad_request")
 			return
@@ -361,6 +371,36 @@ func laneByLocal(lanes []team.LaneShare, lane string) (team.LaneShare, bool) {
 		}
 	}
 	return team.LaneShare{}, false
+}
+
+func (h *teamHandler) dropIndexLeavers(ctx context.Context, entry team.Entry, inst string, lane team.LaneShare) ([]team.Member, error) {
+	if err := h.confirmed(ctx, entry); err != nil {
+		return nil, err
+	}
+	list, err := h.client.Channels(ctx, entry.URL, entry.Token, false)
+	if err != nil {
+		return nil, err
+	}
+	var on []team.Member
+	found := false
+	for _, ch := range list {
+		if ch.Owner == inst && ch.Chat == lane.ID {
+			on, found = ch.Members, true
+		}
+	}
+	if !found {
+		return lane.Members, nil
+	}
+	next := make([]team.Member, 0, len(lane.Members))
+	for _, m := range lane.Members {
+		for _, got := range on {
+			if got.Seat == m.Seat {
+				next = append(next, m)
+				break
+			}
+		}
+	}
+	return next, nil
 }
 
 func sameMembers(a, b []team.Member) bool {

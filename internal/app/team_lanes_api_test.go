@@ -266,7 +266,7 @@ func TestLaneShareOwnedChatRejectsMutation(t *testing.T) {
 
 func TestLaneShareEdges(t *testing.T) {
 	script := &shareScript{}
-	h, dir, _, inst := readySurface(t, script)
+	h, dir, calls, inst := readySurface(t, script)
 	script.channel = channelJSON(inst, shareUID, "Shared lane · North", shareGen)
 	th := asTeamHandler(t, h)
 	if rec := doTeam(h, http.MethodPost, "/api/team/lane-shares", ""); rec.Code != http.StatusNotFound {
@@ -334,7 +334,12 @@ func TestLaneShareEdges(t *testing.T) {
 	rec = putLane(h, laneLocal, only)
 	assertAPIError(t, rec, http.StatusConflict, "share_changed")
 	only = fmt.Sprintf(`{"server":%q,"scope":"all","members":[{"seat":%q,"access":"read"}],"name":"Kept","color":%q,"excluded":[],"membership_only":{"uid":%q,"generation":%q,"baseline":[%q]}}`, teamServerID, shareSeat, laneColor, lanes[0].ID, shareGen, shareSeat)
+	script.channelsBody = ownerChannels(inst, ownerChannel(inst, lanes[0].ID, "North", shareGen, "[]"))
+	before := callCount(calls, http.MethodGet, "/v1/channels")
 	rec = putLane(h, laneLocal, only)
+	if callCount(calls, http.MethodGet, "/v1/channels") != before {
+		t.Fatalf("same members read the index %+v", snapshotCalls(calls))
+	}
 	if rec.Code != http.StatusOK || kicked != 2 {
 		t.Fatalf("fold = %d %s", rec.Code, rec.Body.String())
 	}
@@ -783,6 +788,43 @@ func TestLaneLeaveSurvivesAMemberEdit(t *testing.T) {
 	}
 	if pushed != 2 {
 		t.Fatalf("pushes %d %+v", pushed, snapshotCalls(calls))
+	}
+}
+
+func TestLaneMemberEditReportsAFailedIndexRead(t *testing.T) {
+	stored := team.LaneShare{
+		ID: shareUID, Lane: laneLocal, Server: teamServerID, Scope: "all", Name: "North", Color: laneColor,
+		Members: []team.Member{{Seat: shareSeat, Access: "write"}, {Seat: shareSeatB, Access: "read"}},
+		Rev:     1, Starts: map[string]int{}, Excluded: []string{}, Generation: shareGen, IndexRev: 1,
+		State: "active", SharedAt: "2026-11-12T09:30:00Z",
+	}
+	body, err := json.Marshal(map[string]any{
+		"server": teamServerID, "scope": "all", "name": "North", "color": laneColor, "excluded": []string{},
+		"members":         []team.Member{{Seat: shareSeat, Access: "write"}},
+		"membership_only": map[string]any{"uid": shareUID, "generation": shareGen, "baseline": []string{shareSeatB}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, code string
+		script     *shareScript
+	}{
+		{"hello", "unreachable", &shareScript{failPath: "/v1/hello"}},
+		{"channels", "bad_server", &shareScript{channelsStatus: http.StatusInternalServerError}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, dir, _, _ := readySurface(t, tc.script)
+			if err := team.SaveLaneShare(dir, stored); err != nil {
+				t.Fatal(err)
+			}
+			rec := putLane(h, laneLocal, string(body))
+			lanes, err := team.LoadLaneShares(dir)
+			if err != nil || len(lanes) != 1 || lanes[0].Rev != 1 || len(lanes[0].Members) != 2 {
+				t.Fatalf("stored %+v %v", lanes, err)
+			}
+			assertAPIError(t, rec, http.StatusBadGateway, tc.code)
+		})
 	}
 }
 

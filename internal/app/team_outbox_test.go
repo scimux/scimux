@@ -3271,6 +3271,7 @@ func TestLaneReconcileLeavesLostAndFull(t *testing.T) {
 func TestLaneReconcileEnrollsLiveChats(t *testing.T) {
 	box, dir, calls, script := laneBox(t)
 	script.putStatus = http.StatusCreated
+	script.channelsBody = `{"channels":[]}`
 	appendLaneNode(t, dir, "old", "Old", laneLocal, "2026-11-12T09:00:00Z")
 	appendDelete(t, dir, "old")
 	appendLaneNode(t, dir, "south", "South", "south", "2026-11-12T09:00:00Z")
@@ -3319,6 +3320,7 @@ func TestLaneReconcileEnrollsLiveChats(t *testing.T) {
 func TestLaneReconcileCreateFailureStoresNothing(t *testing.T) {
 	box, dir, calls, script := laneBox(t)
 	script.putStatus = http.StatusInternalServerError
+	script.channelsBody = `{"channels":[]}`
 	appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
 	writeChatLog(t, dir, "fresh", shareUIDB, 0)
 	saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
@@ -3597,10 +3599,47 @@ func TestLaneReconcileDropsALeaverBeforeANewChat(t *testing.T) {
 	appendLaneNode(t, dir, "also", "Also", laneLocal, "2026-11-12T09:01:00Z")
 	writeChatLog(t, dir, "also", shareUIDC, 0)
 	box.tick(context.Background())
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 || len(lanes[0].Members) != 1 || lanes[0].Members[0].Seat != shareSeat || callCount(calls, http.MethodGet, "/v1/channels") != 1 {
+		t.Fatalf("lanes %+v gets %+v %v", lanes, snapshotCalls(calls), err)
+	}
 	for _, c := range snapshotCalls(calls) {
 		if c.method == http.MethodPut && strings.HasSuffix(c.path, "/members") && strings.Contains(c.body, shareSeatB) {
 			t.Fatalf("members %s", c.body)
 		}
+	}
+}
+
+func TestLaneReconcileSkipsALeaverRefreshWhenTheIndexIsBehind(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	inst := installationOf(t, dir)
+	saveLane(t, dir, team.LaneShare{
+		Members: []team.Member{{Seat: shareSeat, Access: "write"}, {Seat: shareSeatB, Access: "read"}},
+		Rev:     2, IndexRev: 1,
+	}, "2026-11-12T09:30:00Z")
+	script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUID, "North", shareGen, `[{"seat":"`+shareSeat+`","access":"write"}]`))
+	script.putStatus = http.StatusCreated
+	script.channel = channelJSON(inst, shareUIDB, "Fresh", shareGen)
+	appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "fresh", shareUIDB, 0)
+	box.tick(context.Background())
+	if callCount(calls, http.MethodGet, "/v1/channels") != 0 {
+		t.Fatalf("gets %+v", snapshotCalls(calls))
+	}
+}
+
+func TestLaneReconcileCreateStopsWhenTheLeaverReadFails(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	saveLane(t, dir, team.LaneShare{Members: []team.Member{{Seat: shareSeat, Access: "write"}, {Seat: shareSeatB, Access: "read"}}}, "2026-11-12T09:30:00Z")
+	script.channelsStatus = http.StatusInternalServerError
+	script.putStatus = http.StatusCreated
+	appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "fresh", shareUIDB, 0)
+	box.tick(context.Background())
+	_, ok := shareForNode(t, dir, "fresh")
+	lanes, err := team.LoadLaneShares(dir)
+	if ok || err != nil || lanes[0].Rev != 1 || len(lanes[0].Members) != 2 || pathCount(calls, http.MethodPut, "/v1/channels") != 0 {
+		t.Fatalf("stored %v lanes %+v calls %+v", ok, lanes, snapshotCalls(calls))
 	}
 }
 

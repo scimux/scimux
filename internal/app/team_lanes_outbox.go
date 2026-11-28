@@ -44,12 +44,16 @@ func (o *shareOutbox) reconcileLane(ctx context.Context, entries []team.Entry, o
 		o.stopLane(ctx, entry, owner, lane, shares)
 		return
 	}
-	shares, ok = o.enrollLane(ctx, entry, owner, lane, nodes, shares)
+	shares, lane, ok = o.enrollLane(ctx, entry, owner, lane, nodes, shares, seen)
 	if !ok || !o.pushLaneMembers(ctx, entry, owner, lane, shares) {
 		return
 	}
-	if lane.IndexRev == lane.Rev && o.laneDue(lane) && !o.noteLeavers(ctx, entry, owner, lane, seen) {
-		return
+	if lane.IndexRev == lane.Rev && o.laneDue(lane) {
+		next, kept := o.noteLeavers(ctx, entry, owner, lane, seen)
+		if !kept {
+			return
+		}
+		lane = next
 	}
 	o.publishLane(ctx, entry, owner, lane, shares, nodes)
 }
@@ -110,7 +114,7 @@ func (o *shareOutbox) stopLane(ctx context.Context, entry team.Entry, owner stri
 		o.noteFailure(entry.ID, err)
 	}
 }
-func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner string, lane team.LaneShare, nodes map[string]nodeSnap, shares []team.Share) ([]team.Share, bool) {
+func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner string, lane team.LaneShare, nodes map[string]nodeSnap, shares []team.Share, seen map[string][]team.Channel) ([]team.Share, team.LaneShare, bool) {
 	excluded := map[string]bool{}
 	for _, id := range lane.Excluded {
 		excluded[id] = true
@@ -119,6 +123,7 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 	for _, s := range shares {
 		byNode[s.Node] = append(byNode[s.Node], s)
 	}
+	refreshed := false
 	for id, snap := range nodes {
 		if !snap.live || snap.lane != lane.Lane || excluded[id] {
 			continue
@@ -128,7 +133,7 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 			uid, _, ok := o.nodeCursor(id, false)
 			if ok && uid == have[0].UID {
 				if o.mutateShare(have[0].UID, func(cur *team.Share) { cur.Lane, cur.LaneRev, cur.Members = lane.ID, 0, []team.Member{} }) != nil {
-					return shares, false
+					return shares, lane, false
 				}
 				for i := range shares {
 					if shares[i].UID == have[0].UID {
@@ -152,6 +157,14 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 			}
 			scope, start = "from_now", n
 		}
+		if lane.IndexRev == lane.Rev && !refreshed {
+			next, kept := o.noteLeavers(ctx, entry, owner, lane, seen)
+			if !kept {
+				o.forgetLaneLook(id)
+				return shares, lane, false
+			}
+			lane, refreshed = next, true
+		}
 		saved, err := provisionChat(ctx, o.client, o.now, o.saveNewShare, entry, owner, openedShare{
 			Node: id, UID: uid, Title: snap.title, Scope: scope, Start: start,
 			Lane: lane.ID, LaneRev: lane.Rev, Members: []team.Member{}, Channel: lane.Members,
@@ -159,11 +172,11 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 		if err != nil {
 			o.forgetLaneLook(id)
 			o.noteFailure(entry.ID, err)
-			return shares, false
+			return shares, lane, false
 		}
 		shares = append(shares, saved)
 	}
-	return shares, true
+	return shares, lane, true
 }
 func (o *shareOutbox) nodeCursor(node string, gate bool) (string, int, bool) {
 	size, err := o.fileSize(shareLogPath(o.dataDir, node))
@@ -229,10 +242,10 @@ func (o *shareOutbox) setLaneMembers(ctx context.Context, entry team.Entry, owne
 	}
 	return err == nil
 }
-func (o *shareOutbox) noteLeavers(ctx context.Context, entry team.Entry, owner string, lane team.LaneShare, seen map[string][]team.Channel) bool {
+func (o *shareOutbox) noteLeavers(ctx context.Context, entry team.Entry, owner string, lane team.LaneShare, seen map[string][]team.Channel) (team.LaneShare, bool) {
 	list, ok := o.channelsOnce(ctx, entry, seen)
 	if !ok {
-		return false
+		return lane, false
 	}
 	on, have := []team.Member(nil), false
 	for _, ch := range list {
@@ -257,9 +270,14 @@ func (o *shareOutbox) noteLeavers(ctx context.Context, entry team.Entry, owner s
 	if len(next) != len(lane.Members) {
 		rev++
 	}
-	return o.mutateLane(lane.ID, func(cur *team.LaneShare) {
-		cur.Members, cur.Rev, cur.CheckedAt = next, rev, o.now().UTC().Format(time.RFC3339)
-	}) == nil
+	checked := o.now().UTC().Format(time.RFC3339)
+	if o.mutateLane(lane.ID, func(cur *team.LaneShare) {
+		cur.Members, cur.Rev, cur.CheckedAt = next, rev, checked
+	}) != nil {
+		return lane, false
+	}
+	lane.Members, lane.Rev, lane.CheckedAt = next, rev, checked
+	return lane, true
 }
 func (o *shareOutbox) channelsOnce(ctx context.Context, entry team.Entry, seen map[string][]team.Channel) ([]team.Channel, bool) {
 	if ch, ok := seen[entry.ID]; ok {
