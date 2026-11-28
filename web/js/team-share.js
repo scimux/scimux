@@ -12,7 +12,7 @@ const SERVERS = "/api/team/servers";
 const INTERVAL = 10000;
 const LEFT = "a server you left";
 
-const SHARE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2"></circle><circle cx="18" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle><path d="M8 11.2 15.2 7.2"></path><path d="M8 12.8 15.2 16.8"></path></svg>';
+export const SHARE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2"></circle><circle cx="18" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle><path d="M8 11.2 15.2 7.2"></path><path d="M8 12.8 15.2 16.8"></path></svg>';
 
 const ERROR_TEXT = {
   unreachable: "The server could not be reached.",
@@ -26,7 +26,19 @@ const ERROR_TEXT = {
   share_fixed: "Stop sharing first to change the server or the scope.",
   share_changed: "Sharing changed. Close this sheet and review it again.",
   store_unavailable: "This computer could not save the change. Try again.",
+  lane_share: "This chat is shared through its lane.",
 };
+
+export function laneCountLine(open, archived, shared){
+  const n = open || 0;
+  const head = shared
+    ? (n === 1 ? "1 chat shared" : n + " chats shared")
+    : (n === 1 ? "Shares 1 chat now" : "Shares " + n + " chats now");
+  const tail = "new chats in this lane are shared automatically";
+  if (!archived) return head + " · " + tail;
+  const mid = archived === 1 ? "1 archived chat stays private" : archived + " archived chats stay private";
+  return head + " · " + mid + " · " + tail;
+}
 
 export function shareStatusText(view, serverName) {
   const count = (view.members || []).length;
@@ -50,7 +62,7 @@ export function shareErrorText(code) {
   return ERROR_TEXT[code] || "That did not work. Try again.";
 }
 
-export function createShareFeature({ api, doc, openSheet, closeSheets, now, onChange = () => {} }) {
+export function createShareFeature({ api, doc, openSheet, closeSheets, now, onChange = () => {}, laneFacts, onLanes = () => {} }) {
   const $ = (sel) => doc.querySelector(sel);
 
   let destroyed = false;
@@ -69,6 +81,12 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
   let drawnMembers = [];
   let seatsReady = false;
   let chain = Promise.resolve();
+  let sheetKind = "chat";
+  let laneTarget = "";
+  let laneView = null;
+  let laneShares = [];
+  let laneFlight = false;
+  let laneTicket = 0;
   const side = new Set();
   const cleanups = [];
 
@@ -164,11 +182,53 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
         onChange(node, null);
         paintHeader();
       }
+      refreshLanes(gen);
       return;
     }
     view = shareBody && typeof shareBody === "object" ? shareBody : null;
     onChange(node, view);
     paintHeader();
+    refreshLanes(gen);
+  }
+
+  function refreshLanes(gen) {
+    if (typeof laneFacts !== "function") return;
+    const pending = api("/api/team/lane-shares").then(
+      (body) => {
+        if (stale(gen)) return;
+        laneShares = body && Array.isArray(body.lane_shares) ? body.lane_shares : [];
+        onLanes();
+        reconcileLane();
+      },
+      () => {},
+    );
+    track(pending);
+  }
+
+  function reconcileLane() {
+    if (laneFlight) return;
+    for (const share of laneShares) {
+      if (!share || share.state !== "active") continue;
+      const facts = laneFacts(share.lane);
+      if (!facts) continue;
+      const color = String(facts.color).toLowerCase();
+      if (facts.name === share.name && color === share.color) continue;
+      laneFlight = true;
+      const pending = api("/api/team/lane-shares/" + share.lane, {
+        method: "PUT",
+        body: JSON.stringify({
+          server: share.server,
+          scope: share.scope,
+          members: share.members,
+          name: facts.name,
+          color,
+          excluded: facts.archived,
+        }),
+      });
+      const done = () => { laneFlight = false; };
+      track(pending.then(done, done));
+      return;
+    }
   }
 
   function select(node) {
@@ -269,47 +329,92 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     return '<label><input type="checkbox" data-seat="' + esc(seat.id) + '"' + checked + '>' + esc(seat.name) + '</label>';
   }
 
+  function activeView() {
+    return sheetKind === "lane" ? laneView : view;
+  }
+
+  function paintTitle() {
+    const title = $("#sh_title");
+    if (!title) return;
+    title.textContent = sheetKind === "lane" ? "Share lane" : "Share chat";
+  }
+
+  function countHTML(sharedView) {
+    if (sheetKind !== "lane") return "";
+    if (sharedView) return "<p>" + esc(laneCountLine(sharedView.chats, sharedView.excluded, true)) + "</p>";
+    const facts = laneFacts(laneTarget);
+    return "<p>" + esc(laneCountLine(facts.open || 0, facts.archived.length)) + "</p>";
+  }
+
   function renderNew(body) {
-    body.innerHTML = serverFields() + scopeFields() + '<div id="sh_people">Loading people…</div>';
-    setApply("Share chat", false, true);
+    body.innerHTML = serverFields() + scopeFields() + countHTML() + '<div id="sh_people">Loading people…</div>';
+    setApply(sheetKind === "lane" ? "Share lane" : "Share chat", false, true);
     setStop(true);
+    paintTitle();
   }
 
   function renderActive(body) {
-    const scope = view.scope === "all" ? "Entire history" : "From now on";
+    const current = activeView();
+    const scope = current.scope === "all" ? "Entire history" : "From now on";
     body.innerHTML =
-      "<p>" + esc(nameOf(view.server)) + "</p>" +
+      "<p>" + esc(nameOf(current.server)) + "</p>" +
       "<p>" + scope + "</p>" +
       "<p>To change the server or the scope, stop sharing and share again.</p>" +
+      countHTML(current) +
       '<div id="sh_people">Loading people…</div>' +
       "<p>Members keep what they already received.</p>";
     setApply("Save people", false, true);
     setStop(false);
+    paintTitle();
   }
 
   function renderEnded(body) {
+    const current = activeView();
     body.innerHTML =
-      "<p>" + esc(shareStatusText(view, nameOf(view.server))) + "</p>" +
+      "<p>" + esc(shareStatusText(current, nameOf(current.server))) + "</p>" +
       "<p>Members keep what they already received.</p>";
     setApply("", true, true);
     setStop(false);
+    paintTitle();
   }
 
   function renderStopping(body) {
-    body.innerHTML = "<p>" + esc(shareStatusText(view, nameOf(view.server))) + "</p>";
+    const current = activeView();
+    body.innerHTML = "<p>" + esc(shareStatusText(current, nameOf(current.server))) + "</p>";
     setApply("", true, true);
     setStop(true);
+    paintTitle();
+  }
+
+  function ownedLane() {
+    for (const item of laneShares) {
+      if (item && item.id === view.lane) return item;
+    }
+    return null;
+  }
+
+  function renderThrough(body) {
+    const owned = ownedLane() || {};
+    const facts = typeof laneFacts === "function" ? laneFacts(owned.lane) : null;
+    const name = (facts && facts.name) || owned.name || "";
+    body.innerHTML = "<p>Shared through lane " + esc(name) + "</p>" +
+      '<button type="button" id="sh_lane">Open lane</button>';
+    setApply("", true, true);
+    setStop(true);
+    paintTitle();
   }
 
   function renderSheet() {
     seatsGen += 1;
     seatsReady = false;
-    drawnMembers = view && Array.isArray(view.members) ? view.members.map(member => member && { ...member }) : [];
+    const current = activeView();
+    drawnMembers = current && Array.isArray(current.members) ? current.members.map(member => member && { ...member }) : [];
     armed = false;
     const body = $("#sh_body");
-    if (!view) renderNew(body);
-    else if (view.state === "active") renderActive(body);
-    else if (view.state === "lost" || view.state === "full") renderEnded(body);
+    if (sheetKind === "chat" && view && view.lane) renderThrough(body);
+    else if (!current) renderNew(body);
+    else if (current.state === "active") renderActive(body);
+    else if (current.state === "lost" || current.state === "full") renderEnded(body);
     else renderStopping(body);
     rememberDrawn();
   }
@@ -319,14 +424,20 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     return String(v.uid) + "\n" + String(v.generation) + "\n" + String(v.state) + "\n" + String(v.server) + "\n" + String(v.scope) + "\n" + String(v.shared_at);
   }
 
+  function sheetNodeKey() {
+    return sheetKind === "lane" ? laneTarget : selected;
+  }
+
   function rememberDrawn() {
-    drawnNode = selected;
-    drawnShare = shareToken(view);
+    drawnNode = sheetNodeKey();
+    drawnShare = shareToken(activeView());
   }
 
   function wantsPeople() {
-    if (!view) return true;
-    return view.state === "active";
+    if (sheetKind === "chat" && view && view.lane) return false;
+    const current = activeView();
+    if (!current) return true;
+    return current.state === "active";
   }
 
   function checkedValue(name, fallback) {
@@ -342,7 +453,8 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
   }
 
   function seatServer() {
-    if (view) return view.server;
+    const current = activeView();
+    if (current) return current.server;
     return checkedValue("sh_server", firstServerId());
   }
 
@@ -356,18 +468,37 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     return members;
   }
 
+  function laneExtra() {
+    if (sheetKind !== "lane") return null;
+    const facts = laneFacts(laneTarget);
+    return {
+      name: facts.name,
+      color: String(facts.color).toLowerCase(),
+      excluded: facts.archived,
+    };
+  }
+
   function putBody() {
-    if (!view) {
+    const current = activeView();
+    const extra = laneExtra() || {};
+    if (!current) {
       return {
         server: checkedValue("sh_server", firstServerId()),
         scope: checkedValue("sh_scope", "from_now"),
         members: chosenMembers(),
+        ...extra,
       };
     }
     const baseline = Array.from($("#sh_body").querySelectorAll("input"))
       .filter(input => input.type === "checkbox" && input.dataset.seat && accessOf(input.dataset.seat))
       .map(input => input.dataset.seat);
-    return { server: view.server, scope: view.scope, members: chosenMembers(), membership_only: { uid: view.uid, generation: view.generation, baseline } };
+    return {
+      server: current.server,
+      scope: current.scope,
+      members: chosenMembers(),
+      membership_only: { uid: current.uid, generation: current.generation, baseline },
+      ...extra,
+    };
   }
 
   function chosenServerJoined() {
@@ -379,9 +510,10 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
   }
 
   function sheetDrifted() {
-    if (drawnNode !== selected) return true;
-    if (shareToken(view) !== drawnShare) return true;
-    if (view && JSON.stringify(view.members || []) !== JSON.stringify(drawnMembers)) return true;
+    const current = activeView();
+    if (drawnNode !== sheetNodeKey()) return true;
+    if (shareToken(current) !== drawnShare) return true;
+    if (current && JSON.stringify(current.members || []) !== JSON.stringify(drawnMembers)) return true;
     if (drawnShare === "" && !chosenServerJoined()) return true;
     return false;
   }
@@ -406,11 +538,11 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
   }
 
   function syncApply() {
-    $("#sh_apply").disabled = !seatsReady || (Boolean(view) && sameAsView());
+    $("#sh_apply").disabled = !seatsReady || (Boolean(activeView()) && sameAsView());
   }
 
   function applyShouldDisable() {
-    return $("#sh_apply").hidden || !seatsReady || (Boolean(view) && sameAsView());
+    return $("#sh_apply").hidden || !seatsReady || (Boolean(activeView()) && sameAsView());
   }
 
   function loadSeats(serverId) {
@@ -464,6 +596,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
   }
 
   function onOpen() {
+    sheetKind = "chat";
     sheetNode = selected;
     showSheet();
     openSheet("#sharesheet");
@@ -480,6 +613,10 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
   }
 
   function onSheetClick(ev) {
+    if (ev.target.id === "sh_lane") {
+      openLane(ownedLane().lane);
+      return;
+    }
     if (ev.target === $("#sh_stop")) {
       onStop();
       return;
@@ -511,8 +648,9 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     $("#sh_apply").disabled = true;
     stop.disabled = true;
     const node = selected;
-    const pending = api("/api/team/shares/" + node, { method: "DELETE" });
-    enqueue(() => finishDelete(pending, node));
+    const kind = sheetKind;
+    const pending = api(targetPath(), { method: "DELETE" });
+    enqueue(() => finishDelete(pending, node, kind));
   }
 
   function onApply() {
@@ -525,20 +663,27 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
       return;
     }
     const restore = doc.activeElement === apply;
-    const hadView = Boolean(view);
+    const hadView = Boolean(activeView());
     const body = JSON.stringify(putBody());
     sheetBusy = true;
     apply.disabled = true;
     $("#sh_stop").disabled = true;
     const node = selected;
-    const pending = api("/api/team/shares/" + node, {
+    const kind = sheetKind;
+    const lane = laneTarget;
+    const pending = api(targetPath(), {
       method: "PUT",
       body,
     });
-    enqueue(() => finishPut(pending, hadView, restore, node));
+    enqueue(() => finishPut(pending, hadView, restore, node, kind, lane));
   }
 
-  async function finishPut(pending, hadView, restore, node) {
+  function targetPath() {
+    if (sheetKind === "lane") return "/api/team/lane-shares/" + laneTarget;
+    return "/api/team/shares/" + selected;
+  }
+
+  async function finishPut(pending, hadView, restore, node, kind, lane) {
     let body = null;
     let err = null;
     try {
@@ -547,16 +692,19 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
       err = e;
     }
     sheetBusy = false;
-    if (destroyed || node !== selected) return;
+    if (destroyed || node !== selected || (kind === "lane" && lane !== laneTarget)) return;
     if (err) {
       showNote(codeOf(err));
       $("#sh_stop").disabled = false;
       $("#sh_apply").disabled = applyShouldDisable();
       return;
     }
-    view = body;
-    onChange(selected, view);
-    paintHeader();
+    if (kind === "lane") laneView = { ...body, uid: body.id };
+    else {
+      view = body;
+      onChange(selected, view);
+      paintHeader();
+    }
     showSheet();
     $("#sh_live").textContent = hadView ? "People updated." : "Sharing started.";
     if (restore) $("#sh_apply").focus();
@@ -571,7 +719,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     $("#sh_live").textContent = "Sharing stopped.";
   }
 
-  async function finishDelete(pending, node) {
+  async function finishDelete(pending, node, kind) {
     let body = null;
     let err = null;
     try {
@@ -582,8 +730,11 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     sheetBusy = false;
     if (destroyed || node !== selected) return;
     if (err) {
-      if (err.status === 404) markStopped();
-      else showNote(codeOf(err));
+      if (kind === "lane" || err.status !== 404) showNote(codeOf(err));
+      else markStopped();
+    } else if (kind === "lane") {
+      laneView = { ...body, uid: body.id };
+      showSheet();
     } else if (typeof body === "object") {
       view = body;
       onChange(selected, view);
@@ -628,5 +779,49 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     } while (chain !== prev || side.size > 0);
   }
 
-  return { select, ensureSelected, tick, bind, destroy, settled };
+  function showLane() {
+    clearNote();
+    const id = laneTarget;
+    const ticket = ++laneTicket;
+    const pending = api("/api/team/lane-shares/" + id);
+    enqueue(async () => {
+      let body = null;
+      let err = null;
+      try {
+        body = await pending;
+      } catch (e) {
+        err = e;
+      }
+      if (ticket !== laneTicket || destroyed) return;
+      if (err) {
+        if (err.status === 404) laneView = null;
+        else {
+          showNote(codeOf(err));
+          return;
+        }
+      } else laneView = { ...body, uid: body.id };
+      showSheet();
+    });
+  }
+
+  function openLane(id) {
+    sheetKind = "lane";
+    laneTarget = id;
+    if (!sheetNode) sheetNode = selected;
+    showLane();
+    openSheet("#sharesheet");
+  }
+
+  function laneShare(id) {
+    for (const share of laneShares) {
+      if (share.lane === id) return share;
+    }
+    return null;
+  }
+
+  function serverName(id) {
+    return nameOf(id);
+  }
+
+  return { select, ensureSelected, tick, bind, destroy, settled, openLane, laneShare, serverName };
 }

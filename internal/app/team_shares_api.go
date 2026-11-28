@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -49,6 +51,7 @@ type teamShareView struct {
 	State      string        `json:"state"`
 	Delivery   string        `json:"delivery"`
 	Members    []team.Member `json:"members"`
+	Lane       string        `json:"lane,omitempty"`
 	SharedAt   string        `json:"shared_at"`
 }
 
@@ -176,11 +179,28 @@ func shareViewLess(a, b teamShareView) bool {
 }
 
 func (h *teamHandler) shareAPI(s team.Share) teamShareView {
+	members := s.Members
+	if s.Lane != "" {
+		members = h.membersOfLane(s.Lane)
+	}
 	return teamShareView{
 		UID: s.UID, Node: s.Node, Server: s.Server, Scope: s.Scope, Generation: s.Generation,
 		State: s.State, Delivery: h.deliveryOf(s.Server),
-		Members: s.Members, SharedAt: s.SharedAt,
+		Members: members, Lane: s.Lane, SharedAt: s.SharedAt,
 	}
+}
+
+func (h *teamHandler) membersOfLane(id string) []team.Member {
+	lanes, err := team.LoadLaneShares(h.dataDir)
+	if err != nil {
+		return []team.Member{}
+	}
+	for _, lane := range lanes {
+		if lane.ID == id {
+			return lane.Members
+		}
+	}
+	return []team.Member{}
 }
 
 func (h *teamHandler) deliveryOf(server string) string {
@@ -209,46 +229,19 @@ func (h *teamHandler) putShare(w http.ResponseWriter, r *http.Request, node stri
 		writeTeamError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	if req.Members == nil || len(*req.Members) > maxShareRequestMembers {
-		writeTeamError(w, http.StatusBadRequest, "bad_request")
+	baseline, seen, code := screenShareMembers(req)
+	if code != "" {
+		writeTeamError(w, http.StatusBadRequest, code)
 		return
-	}
-	baseline := make(map[string]bool)
-	if req.MembershipOnly != nil {
-		if req.MembershipOnly.Baseline == nil || len(*req.MembershipOnly.Baseline) > maxShareRequestMembers {
-			writeTeamError(w, http.StatusBadRequest, "bad_request")
-			return
-		}
-		for _, seat := range *req.MembershipOnly.Baseline {
-			if !validShareSeat(seat) || baseline[seat] {
-				writeTeamError(w, http.StatusBadRequest, "bad_request")
-				return
-			}
-			baseline[seat] = true
-		}
-	}
-	seen := make(map[string]struct{}, len(*req.Members))
-	for _, m := range *req.Members {
-		if !validShareSeat(m.Seat) || (m.Access != "read" && m.Access != "write") {
-			writeTeamError(w, http.StatusBadRequest, "bad_request")
-			return
-		}
-		if _, ok := seen[m.Seat]; ok {
-			writeTeamError(w, http.StatusBadRequest, "bad_request")
-			return
-		}
-		seen[m.Seat] = struct{}{}
 	}
 	inst, err := identity.LoadInstallation(h.dataDir)
 	if err != nil {
 		writeTeamError(w, http.StatusInternalServerError, "identity_unavailable")
 		return
 	}
-	for _, m := range *req.Members {
-		if m.Seat == string(inst) {
-			writeTeamError(w, http.StatusBadRequest, "bad_request")
-			return
-		}
+	if shareIncludesSelf(*req.Members, string(inst)) {
+		writeTeamError(w, http.StatusBadRequest, "bad_request")
+		return
 	}
 	title, found, err := h.nodeTitle(node)
 	if err != nil {
@@ -274,36 +267,21 @@ func (h *teamHandler) putShare(w http.ResponseWriter, r *http.Request, node stri
 		return
 	}
 	if existing, ok := shareByUID(shares, uid); ok {
+		if existing.Lane != "" {
+			writeTeamError(w, http.StatusConflict, "lane_share")
+			return
+		}
 		if req.MembershipOnly != nil {
 			if req.MembershipOnly.UID != existing.UID || req.MembershipOnly.Generation == "" || req.MembershipOnly.Generation != existing.Generation {
 				writeTeamError(w, http.StatusConflict, "share_changed")
 				return
 			}
-			roles := make(map[string]string, len(existing.Members))
-			for _, m := range existing.Members {
-				roles[m.Seat] = m.Access
-			}
-			members := make([]team.Member, 0, len(*req.Members))
-			for _, m := range *req.Members {
-				if role, found := roles[m.Seat]; found {
-					m.Access = role
-				} else if baseline[m.Seat] {
-					continue // A concurrent removal is not a new invitation.
-				} else {
-					m.Access = "write"
-				}
-				members = append(members, m)
-			}
-			*req.Members = members
-			for _, m := range existing.Members {
-				if _, chosen := seen[m.Seat]; !chosen && !baseline[m.Seat] {
-					*req.Members = append(*req.Members, m)
-				}
-			}
-			if len(*req.Members) > maxShareRequestMembers {
+			members, ok := foldMembership(existing.Members, *req.Members, seen, baseline)
+			if !ok {
 				writeTeamError(w, http.StatusBadRequest, "bad_request")
 				return
 			}
+			*req.Members = members
 		}
 		h.updateShare(w, r, entry, string(inst), existing, req.Scope, *req.Members)
 		return
@@ -342,63 +320,113 @@ func (h *teamHandler) updateShare(w http.ResponseWriter, r *http.Request, entry 
 	writeJSONStatus(w, http.StatusOK, h.shareAPI(updated))
 }
 
-// createShare sends Hello, then the channel, then the members. A channel
-// that already exists is a leftover: it is deleted and created once more.
-// A second answer that it exists is bad_server. Any failure after the
-// channel exists deletes it again, best effort, and stores nothing.
+// errShareStore wraps a failure to save a share after the channel existed.
+// errChannelLeftOver means the channel already existed after one replacement.
+var (
+	errShareStore      = errors.New("team: share store")
+	errChannelLeftOver = errors.New("team: channel already exists")
+)
+
+// openedShare is the chat a provision creates. Channel is what SetMembers
+// sends when it differs from the members stored on the share. Nil uses Members.
+type openedShare struct {
+	Node, UID, Title, Scope, Lane string
+	Start, LaneRev                int
+	Members                       []team.Member
+	Channel                       []team.Member
+}
+
+// createShare sends Hello, then the channel, then the members. The stored
+// cursor is records for from_now and 0 for all.
 func (h *teamHandler) createShare(w http.ResponseWriter, r *http.Request, entry team.Entry, inst, node, uid, title string, records int, scope string, members []team.Member) {
-	ctx := r.Context()
-	if err := h.confirmed(ctx, entry); err != nil {
-		writeShareCallError(w, err)
-		return
-	}
-	sentTitle := channelTitle(title)
-	gen, created, err := h.client.PutChannel(ctx, entry.URL, entry.Token, inst, uid, sentTitle)
-	if err != nil {
-		writeShareCallError(w, err)
-		return
-	}
-	if !created {
-		if err := h.client.DeleteChannel(ctx, entry.URL, entry.Token, inst, uid, gen); err != nil {
-			writeShareCallError(w, err)
-			return
-		}
-		gen, created, err = h.client.PutChannel(ctx, entry.URL, entry.Token, inst, uid, sentTitle)
-		if err != nil {
-			writeShareCallError(w, err)
-			return
-		}
-		if !created {
-			h.bestEffortDelete(ctx, entry, inst, uid, gen)
-			writeTeamError(w, http.StatusBadGateway, "bad_server")
-			return
-		}
-	}
-	if err := h.client.SetMembers(ctx, entry.URL, entry.Token, inst, uid, members); err != nil {
-		h.bestEffortDelete(ctx, entry, inst, uid, gen)
-		writeShareCallError(w, err)
-		return
-	}
 	start := 0
 	if scope == "from_now" {
 		start = records
 	}
-	share := team.Share{
-		UID: uid, Node: node, Server: entry.ID, Scope: scope,
-		Start: start, Next: start, StartSent: false,
-		Title: sentTitle, Generation: gen, Members: members,
-		State: "active", SharedAt: h.now().UTC().Format("2006-01-02T15:04:05Z"),
-	}
-	if err := h.writeShare(share); err != nil {
-		h.bestEffortDelete(ctx, entry, inst, uid, gen)
-		writeShareSaveError(w, err)
+	share, err := provisionChat(r.Context(), h.client, h.now, h.writeShare, entry, inst, openedShare{
+		Node: node, UID: uid, Title: title, Scope: scope, Start: start, Members: members,
+	})
+	if err != nil {
+		if errors.Is(err, errShareStore) {
+			writeShareSaveError(w, err)
+			return
+		}
+		writeShareCallError(w, err)
 		return
 	}
 	writeJSONStatus(w, http.StatusCreated, h.shareAPI(share))
 }
 
-func (h *teamHandler) bestEffortDelete(ctx context.Context, entry team.Entry, inst, chat, gen string) {
-	_ = h.client.DeleteChannel(ctx, entry.URL, entry.Token, inst, chat, gen)
+// provisionChat confirms Hello, creates the channel, sets its members, and
+// stores the share at spec.Start. A leftover channel is replaced once. A
+// second answer that it exists, or any later failure, deletes it and stores
+// nothing. The handler and the lane reconcile both use this function.
+func provisionChat(ctx context.Context, client *team.Client, now func() time.Time, save func(team.Share) error, entry team.Entry, inst string, spec openedShare) (team.Share, error) {
+	gen, sent, err := openChannel(ctx, client, entry, inst, spec.UID, spec.Title, channelMembers(spec))
+	if err != nil {
+		return team.Share{}, err
+	}
+	share := team.Share{
+		UID: spec.UID, Node: spec.Node, Server: entry.ID, Scope: spec.Scope,
+		Start: spec.Start, Next: spec.Start, StartSent: false,
+		Title: sent, Generation: gen, Members: spec.Members,
+		Lane: spec.Lane, LaneRev: spec.LaneRev,
+		State: "active", SharedAt: now().UTC().Format("2006-01-02T15:04:05Z"),
+	}
+	if err := save(share); err != nil {
+		_ = client.DeleteChannel(ctx, entry.URL, entry.Token, inst, spec.UID, gen)
+		return team.Share{}, fmt.Errorf("%w: %w", errShareStore, err)
+	}
+	return share, nil
+}
+
+func channelMembers(spec openedShare) []team.Member {
+	if spec.Channel != nil {
+		return spec.Channel
+	}
+	return spec.Members
+}
+
+// openChannel creates a channel and sets its members. A channel that already
+// exists is deleted and created once more. Failure after it exists deletes it.
+func openChannel(ctx context.Context, client *team.Client, entry team.Entry, inst, chat, title string, members []team.Member) (string, string, error) {
+	if err := confirmEntry(ctx, client, entry); err != nil {
+		return "", "", err
+	}
+	sent := channelTitle(title)
+	gen, created, err := client.PutChannel(ctx, entry.URL, entry.Token, inst, chat, sent)
+	if err != nil {
+		return "", "", err
+	}
+	if !created {
+		if err := client.DeleteChannel(ctx, entry.URL, entry.Token, inst, chat, gen); err != nil {
+			return "", "", err
+		}
+		gen, created, err = client.PutChannel(ctx, entry.URL, entry.Token, inst, chat, sent)
+		if err != nil {
+			return "", "", err
+		}
+		if !created {
+			_ = client.DeleteChannel(ctx, entry.URL, entry.Token, inst, chat, gen)
+			return "", "", errChannelLeftOver
+		}
+	}
+	if err := client.SetMembers(ctx, entry.URL, entry.Token, inst, chat, members); err != nil {
+		_ = client.DeleteChannel(ctx, entry.URL, entry.Token, inst, chat, gen)
+		return "", "", err
+	}
+	return gen, sent, nil
+}
+
+func confirmEntry(ctx context.Context, client *team.Client, entry team.Entry) error {
+	hello, err := client.Hello(ctx, entry.URL)
+	if err != nil {
+		return err
+	}
+	if hello.ID != entry.ID {
+		return errHelloMismatch
+	}
+	return nil
 }
 
 // stopShare reads the installation and the server before it marks the share
@@ -413,6 +441,10 @@ func (h *teamHandler) stopShare(w http.ResponseWriter, r *http.Request, node str
 	share, ok := h.pickShare(shares, node)
 	if !ok {
 		writeTeamError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if share.Lane != "" {
+		writeTeamError(w, http.StatusConflict, "lane_share")
 		return
 	}
 	inst, err := identity.LoadInstallation(h.dataDir)
@@ -482,14 +514,78 @@ func (h *teamHandler) finishStop(w http.ResponseWriter, share team.Share) {
 }
 
 func (h *teamHandler) confirmed(ctx context.Context, entry team.Entry) error {
-	hello, err := h.client.Hello(ctx, entry.URL)
-	if err != nil {
-		return err
+	return confirmEntry(ctx, h.client, entry)
+}
+
+// screenShareMembers checks seats, access, duplicates, and the membership
+// baseline. It does not know the installation id. An empty code means the
+// body can proceed. seen is the requested seats.
+func screenShareMembers(req sharePutRequest) (baseline map[string]bool, seen map[string]struct{}, code string) {
+	if req.Members == nil || len(*req.Members) > maxShareRequestMembers {
+		return nil, nil, "bad_request"
 	}
-	if hello.ID != entry.ID {
-		return errHelloMismatch
+	baseline = map[string]bool{}
+	if req.MembershipOnly != nil {
+		if req.MembershipOnly.Baseline == nil || len(*req.MembershipOnly.Baseline) > maxShareRequestMembers {
+			return nil, nil, "bad_request"
+		}
+		for _, seat := range *req.MembershipOnly.Baseline {
+			if !validShareSeat(seat) || baseline[seat] {
+				return nil, nil, "bad_request"
+			}
+			baseline[seat] = true
+		}
 	}
-	return nil
+	seen = make(map[string]struct{}, len(*req.Members))
+	for _, m := range *req.Members {
+		if !validShareSeat(m.Seat) || (m.Access != "read" && m.Access != "write") {
+			return nil, nil, "bad_request"
+		}
+		if _, ok := seen[m.Seat]; ok {
+			return nil, nil, "bad_request"
+		}
+		seen[m.Seat] = struct{}{}
+	}
+	return baseline, seen, ""
+}
+
+func shareIncludesSelf(members []team.Member, self string) bool {
+	for _, m := range members {
+		if m.Seat == self {
+			return true
+		}
+	}
+	return false
+}
+
+// foldMembership applies a membership-only save. The bool is false when the
+// merged list is over the member cap. A baseline seat that is no longer
+// stored stays absent. A stored seat the request did not name is kept.
+func foldMembership(existing, requested []team.Member, seen map[string]struct{}, baseline map[string]bool) ([]team.Member, bool) {
+	roles := make(map[string]string, len(existing))
+	for _, m := range existing {
+		roles[m.Seat] = m.Access
+	}
+	members := make([]team.Member, 0, len(requested)+len(existing))
+	for _, m := range requested {
+		if role, found := roles[m.Seat]; found {
+			m.Access = role
+		} else if baseline[m.Seat] {
+			continue
+		} else {
+			m.Access = "write"
+		}
+		members = append(members, m)
+	}
+	for _, m := range existing {
+		if _, chosen := seen[m.Seat]; !chosen && !baseline[m.Seat] {
+			members = append(members, m)
+		}
+	}
+	if len(members) > maxShareRequestMembers {
+		return nil, false
+	}
+	return members, true
 }
 
 func (h *teamHandler) readShares() ([]team.Share, error) {

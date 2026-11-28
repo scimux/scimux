@@ -74,6 +74,9 @@ import {
   laneOptionsHTML as laneOptionsHTMLMod,
   laneSelectHTML as laneSelectHTMLMod,
   readLaneChoiceFromValues,
+  laneShareNotice,
+  paintLaneShareNotice,
+  laneShareFacts,
 } from "./lane-picker.js";
 import {
   hardAttention, orderedNodes as orderedNodesMod,
@@ -124,7 +127,7 @@ import {
 import { createSheetsFeature } from "./sheets.js";
 import { createPairingFeature, createDeviceList, createUnlinkControl, createPairControl, createHomeScreenControl, homeScreenInstallable } from "./pairing-ui.js";
 import { createSharingSection } from "./team-ui.js";
-import { createShareFeature } from "./team-share.js";
+import { createShareFeature, SHARE_ICON } from "./team-share.js";
 import { createGuestFeature } from "./team-guest.js";
 import { createBubbleActionController } from "./menu.js";
 import { createPollingFeature } from "./polling.js";
@@ -597,6 +600,7 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
     select.value = selected;
     syncLanePicker(select);
   }
+  let shareFeature;
   function syncLanePicker(select){
     if (!select) return;
     const pick = select.closest(".lanepick");
@@ -604,6 +608,8 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
     const swatch = pick?.querySelector(".laneswatch");
     if (input) input.hidden = select.value !== NEW_LANE_VALUE;
     if (swatch) swatch.style.background = select.value === NEW_LANE_VALUE ? nextLaneColor() : laneColor(select.value);
+    const share = shareFeature && shareFeature.laneShare(select.value);
+    paintLaneShareNotice(pick, laneShareNotice(share, share ? shareFeature.serverName(share.server) : ""));
   }
   function readLaneChoice(select, input){
     return readLaneChoiceFromValues(select?.value || "", input?.value || "", { makeLane });
@@ -781,7 +787,9 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
     laneById,
     nodeById: id => nodeById(id),
     agentLogo,
-    icons: { ICON_PENCIL, ICON_END, ICON_MAP_EXPAND, ICON_MAP_CONTRACT, ICON_LAYERS },
+    icons: { ICON_PENCIL, ICON_END, ICON_MAP_EXPAND, ICON_MAP_CONTRACT, ICON_LAYERS, ICON_USERS, SHARE_ICON },
+    laneShare: (id) => shareFeature.laneShare(id),
+    openLaneShare: (id) => shareFeature.openLane(id),
     uiMutate,
     selectNode: (id, how) => {
       /* a wall-map "Open chat" is a jump: remember the map so #chatback leads
@@ -1311,13 +1319,15 @@ export async function createApp({ fetchImpl, assetURL, retryAsset, document, win
     api, doc: document,
     onJoined: () => { if (sel && nodeById(sel)) shareFeature.select(sel); guestFeature.refresh(); },
   }));
-  const shareFeature = own(createShareFeature({
+  shareFeature = own(createShareFeature({
     api,
     doc: document,
     openSheet: (id) => sheetsFeature.openSheet(id),
     closeSheets: () => sheetsFeature.closeSheets(),
     now: () => Date.now(),
     onChange: (node, share) => { ownerShareUID = share?.uid || ""; ownerExpected = !!(share && share.state === "active" && share.generation && (!localLogIdentity.uid || localLogIdentity.uid === ownerShareUID)); ownerPending = ownerExpected; guestFeature.setOwnerShare(node, share); if (guestFeature.peopleContext()?.owner) ownerPending = false; composerFeature.contextChanged(); },
+    laneFacts: (id) => laneShareFacts(id, laneByIdMod(id, getUI().lanes), laneColor(id), nodes, getUI().archived),
+    onLanes: () => document.querySelectorAll("[data-lane-select]").forEach(syncLanePicker),
   }));
 
   /* Shell navigation into/out of Journeys (not map-local chrome). */

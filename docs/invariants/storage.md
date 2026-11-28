@@ -45,7 +45,10 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   A damaged file is never overwritten.
   It is untouched until a server is joined.
 - **Shared chats name a server and who may read them.** `team-shares.json`
-  holds each share's server, scope, members, and delivery cursor.
+  holds each share's server, scope, members, delivery cursor, and, when
+  the chat belongs to a lane, that lane share's id and the member revision
+  last applied. A lane-owned share stores an empty member list. The file
+  holds at most 1000 shares and 4 MiB.
   It holds no chat content and no token. Only the muxer reads and writes
   it. It is untouched until a share exists.
   The sharing UI selects people without a permission dropdown. Newly invited
@@ -57,6 +60,15 @@ Claude lifecycle changes also require `docs/invariants/claude-hooks.md`.
   baseline members, and check UID and generation. Queued outbox work refreshes
   its share under the same gate before wire work; a missing, damaged or replaced
   identity cannot upload or alter another generation.
+- **A shared lane names one server and who may read its chats.** `team-lane-shares.json`
+  holds each lane share's index channel, local lane, server, scope, name,
+  color, members, start cursors, archived chats, and index snapshot cursor.
+  It holds no chat content and no token. Only the muxer reads and writes
+  it. A missing file is an empty list and is not created. At most 64 lane
+  shares, one per local lane, and the file is at most 1 MiB. The index
+  channel id is never the local lane id. The index channel is titled
+  `Shared lane · ` plus the lane name. Its mirror holds the lane snapshot
+  and no chat text.
 - **Early native discussion stays accessible.** A comment accepted at an
   initial empty frontier can predate the first native seam. When there are no
   earlier agent turns and thus no history control, display that discussion in

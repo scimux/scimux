@@ -97,7 +97,7 @@
 .railrow { display: flex; gap: 8px; align-items: center; min-height: 30px; }
 .railrow .k { font-size: 12px; color: var(--dim); width: 84px; flex: none; }
 .railrow select { margin-top: 0; }
-.lanepick { display: flex; gap: 8px; align-items: center; }
+.lanepick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .lanepick select, .lanepick input { margin-top: 0; }
 .lanepick input[hidden] { display: none; }
 .laneswatch { width: 12px; height: 12px; border-radius: 6px; flex: none; background: var(--unlane); }
@@ -211,5 +211,8 @@
 
 /* Flat section labels keep disclosure and unread feedback distinct from cards. */
 #cardlist .activity-group { min-height: 44px; background: var(--bg); border: 0; border-bottom: 1px dashed var(--perf); border-radius: 0; margin: 14px 2px 6px; padding: 10px 12px; color: var(--ink); font-size: 13px; }
+#cardlist .activity-group.lane-group { border-bottom: 0; }
+#cardlist .activity-group.lane-indent { margin-left: 12px; }
+#cardlist .card.lane-indent { margin-left: 12px; }
 #cardlist .activity-unread { width: 8px; height: 8px; border-radius: 50%; background: var(--attn); flex: none; }
 #cardlist .shared-card .stripe { background: var(--dim); }

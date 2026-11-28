@@ -41,6 +41,12 @@ type shareOutbox struct {
 	save    func(dir string, s team.Share) error
 	readLog func(path string) []sessionlog.Event
 	logSize func(path string) (int64, error)
+	// cursor reads one node's session log for lane enroll. Nil uses chatCursor.
+	cursor func(node string) (string, int, bool)
+	// laneLook is the session-log size of a node whose last enroll look
+	// had nothing to share yet. A provisioning attempt drops it.
+	// A missing log is not a look.
+	laneLook map[string]int64
 	// readNodes reads nodes.jsonl. A test counts the calls. Nil reads the file.
 	readNodes func(dir string) ([]byte, error)
 	// readFrom reads a session log from an offset. A test records the offsets.
@@ -150,7 +156,10 @@ func (o *shareOutbox) tick(ctx context.Context) {
 		return
 	}
 	if len(shares) == 0 {
-		return
+		lanes, _ := team.LoadLaneShares(o.dataDir)
+		if len(lanes) == 0 {
+			return
+		}
 	}
 	inst, err := identity.LoadInstallation(o.dataDir)
 	if err != nil {
@@ -161,6 +170,7 @@ func (o *shareOutbox) tick(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	o.reconcileLanes(ctx, entries, owner, nodes)
 	for _, share := range shares {
 		o.one(ctx, entries, owner, share, nodes)
 	}
@@ -363,8 +373,10 @@ func (o *shareOutbox) readNodeBytes() ([]byte, error) {
 
 // nodeSnap is the latest node record in nodes.jsonl.
 type nodeSnap struct {
-	title string
-	live  bool
+	title     string
+	live      bool
+	lane      string
+	createdAt string
 }
 
 // parseNodeLog is the one parser for nodes.jsonl. A blank line, a line that
@@ -385,7 +397,7 @@ func parseNodeLog(raw []byte) map[string]nodeSnap {
 			if rec.Node == nil {
 				continue
 			}
-			nodes[rec.Node.ID] = nodeSnap{title: rec.Node.Title, live: true}
+			nodes[rec.Node.ID] = nodeSnap{title: rec.Node.Title, live: true, lane: rec.Node.LaneID, createdAt: rec.Node.CreatedAt}
 			continue
 		}
 		if rec.Type == "delete" {
@@ -971,6 +983,7 @@ func installShareOutbox(a *app, dataDir string, now func() time.Time) {
 		return n != nil && n.InstanceID != "" && n.InstanceID == instance && n.EndedAt == ""
 	}
 	box := &shareOutbox{dataDir: dataDir, now: now, client: client, files: &th.mu, shareOps: &th.shareOps}
+	th.kickShares = box.kick
 	th.shareDelivery = box.delivery
 	a.teamHandler = h
 	a.shareOutbox = box

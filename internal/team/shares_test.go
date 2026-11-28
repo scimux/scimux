@@ -697,3 +697,76 @@ func TestLoadSharesOfAFileDataDirIsAnError(t *testing.T) {
 		t.Fatalf("file = %q", raw)
 	}
 }
+
+func TestShareLimitsAreOneThousandAndFourMiB(t *testing.T) {
+	if maxShares != 1000 || maxSharesFile != 4<<20 {
+		t.Fatalf("maxShares = %d file = %d, want 1000 and %d", maxShares, maxSharesFile, 4<<20)
+	}
+}
+
+func TestLaneOwnedShareStoresAnEmptyMemberList(t *testing.T) {
+	t.Run("round trip", func(t *testing.T) {
+		dir := t.TempDir()
+		s := sampleShare(1)
+		s.Lane = s.UID
+		s.LaneRev = 2
+		s.Members = nil
+		if err := SaveShare(dir, s); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadShares(dir)
+		if err != nil || len(got) != 1 || got[0].Lane != s.Lane || got[0].LaneRev != 2 || len(got[0].Members) != 0 {
+			t.Fatalf("shares = %+v err = %v", got, err)
+		}
+	})
+	t.Run("old file", func(t *testing.T) {
+		dir := t.TempDir()
+		plain := sampleShare(2)
+		raw, err := json.Marshal(sharesFile{V: 1, Shares: []Share{plain}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := bytes.ReplaceAll(raw, []byte(`,"lane":"","lane_rev":0`), nil)
+		writeSharesRaw(t, dir, append(old, '\n'))
+		loaded, err := LoadShares(dir)
+		if err != nil || len(loaded) != 1 || loaded[0].Lane != "" || loaded[0].LaneRev != 0 || loaded[0].UID != plain.UID {
+			t.Fatalf("old file = %+v err = %v", loaded, err)
+		}
+	})
+	t.Run("members", func(t *testing.T) {
+		dir := t.TempDir()
+		owned := sampleShare(3)
+		owned.Lane = owned.UID
+		owned.Members = []Member{{Seat: fmt.Sprintf("%032x", 9), Access: "read"}}
+		if err := SaveShare(dir, owned); !errors.Is(err, ErrSharesDamaged) {
+			t.Fatalf("members on a lane share: %v", err)
+		}
+	})
+	t.Run("rev without lane", func(t *testing.T) {
+		dir := t.TempDir()
+		loose := sampleShare(4)
+		loose.LaneRev = 2
+		if err := SaveShare(dir, loose); !errors.Is(err, ErrSharesDamaged) {
+			t.Fatalf("rev without a lane: %v", err)
+		}
+	})
+	t.Run("negative rev", func(t *testing.T) {
+		dir := t.TempDir()
+		bad := sampleShare(6)
+		bad.Lane = bad.UID
+		bad.LaneRev = -1
+		bad.Members = []Member{}
+		if err := SaveShare(dir, bad); !errors.Is(err, ErrSharesDamaged) {
+			t.Fatalf("negative rev: %v", err)
+		}
+	})
+	t.Run("lane id", func(t *testing.T) {
+		dir := t.TempDir()
+		bad := sampleShare(5)
+		bad.Lane = "lane-1"
+		bad.Members = []Member{}
+		if err := SaveShare(dir, bad); !errors.Is(err, ErrSharesDamaged) {
+			t.Fatalf("lane id: %v", err)
+		}
+	})
+}

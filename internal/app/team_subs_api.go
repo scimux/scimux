@@ -84,6 +84,18 @@ type subscriptionView struct {
 	LocalOrder         *int                `json:"local_order,omitempty"`
 	LocalFrontier      *team.OwnerFrontier `json:"local_frontier,omitempty"`
 	PeopleCopyInstance string              `json:"people_copy_instance,omitempty"`
+	Lane               *sharedLane         `json:"lane,omitempty"`
+}
+
+type sharedLane struct {
+	Name  string         `json:"name"`
+	Color string         `json:"color"`
+	Chats []laneChatView `json:"chats"`
+}
+
+type laneChatView struct {
+	Chat string `json:"chat"`
+	At   string `json:"created_at"`
 }
 
 type subscriptionServerView struct {
@@ -285,7 +297,89 @@ func (h *teamHandler) listSubscriptions(w http.ResponseWriter, r *http.Request) 
 		writeTeamError(w, http.StatusInternalServerError, "store_unavailable")
 		return
 	}
+	h.attachLanes(r, &view)
 	writeJSONStatus(w, http.StatusOK, view)
+}
+
+func (h *teamHandler) attachLanes(r *http.Request, view *subListResponse) {
+	entries, _ := h.readServers()
+	for i := range view.Subscriptions {
+		sub := &view.Subscriptions[i]
+		if !strings.HasPrefix(sub.Title, "Shared lane · ") {
+			continue
+		}
+		id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
+		records, last, err := laneMirrorTail(h.dataDir, id)
+		entry, joined := serverFor(entries, sub.Server)
+		if err == nil && sub.State == "live" && sub.MirrorLast > 0 && joined && last < sub.MirrorLast {
+			h.pullLaneMirror(r, entry, id, *sub, last)
+			records, _, err = laneMirrorTail(h.dataDir, id)
+		}
+		if err != nil {
+			continue
+		}
+		sub.Lane = sharedLaneFrom(records)
+	}
+}
+
+func (h *teamHandler) pullLaneMirror(r *http.Request, entry team.Entry, id team.CopyID, sub subscriptionView, after uint64) {
+	if h.confirmed(r.Context(), entry) != nil {
+		return
+	}
+	page, err := h.client.ReadMirror(r.Context(), entry.URL, entry.Token, sub.Owner, sub.Chat, after)
+	if err != nil || page.Generation != sub.Generation || len(page.Entries) == 0 {
+		return
+	}
+	req, release := h.beginPeopleCopyOperation(r, id, "")
+	defer release()
+	_, _, _, _ = h.appendSubscriptionPage(req, id, team.Subscription{Access: sub.Access}, entry, team.MirrorLog, page.Entries)
+}
+
+// laneMirrorTail reads the newest few mirror records. A probe with no
+// entries returns the copy's last sequence, so a fat prefix is not parsed.
+func laneMirrorTail(dir string, id team.CopyID) ([]team.MirrorRecord, uint64, error) {
+	_, last, err := team.ReadCopy(dir, id, team.MirrorLog, ^uint64(0), 1, 1)
+	if err != nil {
+		return nil, 0, err
+	}
+	after := uint64(0)
+	if last > 8 {
+		after = last - 8
+	}
+	return team.ReadCopy(dir, id, team.MirrorLog, after, 8, 8<<20)
+}
+
+func sharedLaneFrom(records []team.MirrorRecord) *sharedLane {
+	var got *sharedLane
+	for _, rec := range records {
+		var doc struct {
+			T     string         `json:"t"`
+			Name  string         `json:"name"`
+			Color string         `json:"color"`
+			Chats []laneChatView `json:"chats"`
+		}
+		if json.Unmarshal(rec.Body, &doc) != nil || doc.T != "lane" || !team.ValidLaneName(doc.Name) || !team.ValidLaneColor(doc.Color) || len(doc.Chats) > 1000 {
+			continue
+		}
+		bad := false
+		for _, c := range doc.Chats {
+			bad = bad || !laneChatOK(c)
+		}
+		if !bad {
+			got = &sharedLane{Name: doc.Name, Color: doc.Color, Chats: append([]laneChatView{}, doc.Chats...)}
+		}
+	}
+	return got
+}
+
+func laneChatOK(c laneChatView) bool {
+	parsed, err := time.Parse(time.RFC3339, c.At)
+	ok := len(c.Chat) == 16 && err == nil && parsed.UTC().Format(time.RFC3339) == c.At
+	for i := 0; ok && i < len(c.Chat); i++ {
+		b := c.Chat[i]
+		ok = (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')
+	}
+	return ok
 }
 
 func (h *teamHandler) readSubs() ([]team.Subscription, error) {

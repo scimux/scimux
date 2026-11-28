@@ -8,6 +8,7 @@ import { bubbleActionsHTML } from '../js/chat.js';
 import { createBubbleActionController } from '../js/menu.js';
 import { createPeopleFileStore, createIndexedDBPeopleDriver } from "../js/people-file-store.js";
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
+import { createCardsFeature } from "../js/cards.js";
 import { harnessTermsHTML } from "../js/harness.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
@@ -432,6 +433,7 @@ function nativeViewFixture(api, commentsApi = async () => ({ entries: [], names:
     const listeners = new Map();
     const el = { id, innerHTML: "", textContent: "", value: "", disabled: false, hidden: false, dataset: {}, scrollTop: 0, scrollHeight: 1000, clientHeight: 200, listeners,
       addEventListener(type, fn) { listeners.set(type, fn); }, removeEventListener(type) { listeners.delete(type); },
+      attrs: {}, title: "", setAttribute(name, value) { this.attrs[name] = String(value); }, getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; },
       focus() { doc.activeElement = el; }, contains(node) { return node === el; }, getBoundingClientRect() { return {left:0, top:0, right:400, bottom:600, width:400, height:600}; },
       querySelector() { return null; }, querySelectorAll() { return []; }, insertAdjacentHTML(_where, html) { this.innerHTML += html; } };
     elements.set("#" + id, el);
@@ -5132,4 +5134,396 @@ test("read-only and ended copies show confirmed participants and inspect without
     assert.doesNotMatch(dom.bubble.children[0].innerHTML, /pending|not confirmed/, JSON.stringify(over));
     f.feature.destroy();
   }
+});
+
+function laneIndex(extra = {}) {
+  return { ...base, chat: "idx", title: "Shared lane · Protein", unread: true, mirror_last: 1, seen_mirror: 0, comments_last: 1, seen_comments: 0, lane: { name: "Protein", color: "#11aa22", chats: [{ chat: "c", created_at: "1" }] }, ...extra };
+}
+
+test("a title prefix or a non-object lane stays an ordinary chat", () => {
+  const plain = { ...base, chat: "p", title: "Shared lane · Fake" };
+  const arrayLane = { ...base, chat: "w", title: "Shared lane · Weird", lane: ["nope"] };
+  const textLane = { ...base, chat: "t", title: "Shared lane · Text", lane: "nope" };
+  assert.deepEqual(guestGroups([plain, arrayLane, textLane], [])[0].items.map(view => view.chat).sort(), ["p", "t", "w"]);
+});
+
+test("an index subscription is left out of its sharer group", () => {
+  const groups = guestGroups([laneIndex(), { ...base, unread: false, mirror_last: 0, seen_mirror: 0 }], []);
+  const kept = groups[0].items.concat(...groups[0].lanes.map(lane => lane.items));
+  assert.deepEqual(kept.map(view => view.chat), ["c"]);
+});
+
+test("an index subscription is not pinned", () => {
+  const index = laneIndex();
+  const chat = { ...base };
+  const pinned = guestModule.sharedPinnedOrder([], [index, chat], [guestModule.sharedActivityId(index), guestModule.sharedActivityId(chat)]);
+  assert.deepEqual(pinned.map(item => item.id), [guestModule.sharedActivityId(chat)]);
+});
+
+test("an index subscription is not a count, a search target, or a jump target", async () => {
+  const index = laneIndex({ mirror_last: 0 });
+  const chat = { ...base, unread: false, mirror_last: 0, seen_mirror: 0, comments_last: 0 };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([index, chat]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(f.feature.tab.activities().some(view => view.chat === "idx"), false);
+  assert.doesNotMatch(f.feature.tab.tabHTML(false), /tabbadge/);
+  assert.equal(f.feature.hasActivity("team/" + guestKey(index)), false);
+  assert.equal(f.feature.jumpToSource({ server: "s", owner: "o", chat: "idx", generation: "g", log: "mirror", seq: 1 }), false);
+  f.feature.destroy();
+});
+
+test("an index subscription is not classified for unread comments", async () => {
+  const index = laneIndex({ mirror_last: 0 });
+  const needy = { ...base, chat: "need", unread: true, mirror_last: 0, seen_mirror: 0, comments_last: 1, seen_comments: 0 };
+  const paths = [];
+  const f = nativeViewFixture(
+    async path => path === "/api/team/subscriptions" ? list([index, needy]) : readAnswer(),
+    async path => { paths.push(path); return commentsAnswer(); },
+  );
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(paths.some(path => path.includes("/idx/")), false);
+  assert.equal(paths.some(path => path.includes("/need/")), true);
+  f.feature.destroy();
+});
+
+test("the activity list renders a lane sub-group from the feature groups", async () => {
+  const index = laneIndex({ lane: { name: "Protein", color: "#11aa22", chats: [{ chat: "two", created_at: "2" }, { chat: "one", created_at: "1" }] } });
+  const two = { ...base, chat: "two", title: "Two", unread: false, mirror_last: 0, seen_mirror: 0 };
+  const one = { ...base, chat: "one", title: "One", unread: false, mirror_last: 0, seen_mirror: 0 };
+  const owner = { ...base, chat: "owned", title: "Owned", access: "owner" };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([index, two, one, owner]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(f.feature.tab.activities().map(view => view.chat), ["two", "one"], "activities stay index-free and owner-free");
+  const groups = f.feature.tab.groups();
+  assert.equal(groups.length, 1);
+  assert.equal(groups.flatMap(group => group.items.concat(...(group.lanes || []).map(lane => lane.items))).some(view => view.access === "owner"), false, "an owner copy stays out of the lane group");
+  assert.equal(groups[0].lanes.length, 1);
+  assert.equal(groups[0].lanes[0].label, "Protein");
+  assert.equal(groups[0].lanes[0].color, "#11aa22");
+  assert.deepEqual(groups[0].lanes[0].items.map(view => view.chat), ["one", "two"]);
+  const listEl = { innerHTML: "", querySelectorAll() { return []; } };
+  const cards = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll() { return []; } }, list: listEl },
+    document: { title: "", querySelector() { return null; } },
+    CSS: { escape: value => value },
+    sharedTab: f.feature.tab,
+    nodes: () => [], pinned: () => [], archived: () => [],
+    cardTab: () => "current", expanded: () => new Set(),
+    setInterval: () => 0, clearInterval() {},
+  });
+  cards.render();
+  const html = listEl.innerHTML;
+  assert.match(html, /class="attnfold activity-group lane-group lane-indent open" data-activity-group="owner\/s\/o\/lane\/idx"/);
+  assert.match(html, /<span class="laneswatch" style="background:#11aa22"><\/span><span class="foldlabel">Protein<\/span>/);
+  assert.match(html, /class="card shared-card[^"]*lane-indent[^"]*"\s+id="card-team\/s\/o\/one\/g">[\s\S]*?<span class="stripe" style="background:#11aa22"><\/span>/);
+  assert.match(html, /class="card shared-card[^"]*lane-indent[^"]*"\s+id="card-team\/s\/o\/two\/g">[\s\S]*?<span class="stripe" style="background:#11aa22"><\/span>/);
+  assert.equal((html.match(/card-team\/s\/o\/one\/g/g) || []).length, 1);
+  assert.doesNotMatch(html, /card-team\/s\/o\/idx|card-team\/s\/o\/owned/);
+  cards.destroy();
+  f.feature.destroy();
+});
+
+test("a live lane keeps the chats an ended index also lists", async () => {
+  const chats = [{ chat: "a", created_at: "1" }, { chat: "b", created_at: "2" }];
+  const earlyIndex = laneIndex({ chat: "aaa", state: "ended", title: "Shared lane · aaa", lane: { name: "aaa", color: "#000000", chats } });
+  const oldIndex = laneIndex({ chat: "old", state: "ended", title: "Shared lane · old", lane: { name: "old", color: "#111111", chats } });
+  const liveIndex = laneIndex({ chat: "new", title: "Shared lane · new", lane: { name: "new", color: "#11aa22", chats } });
+  const liveA = { ...base, chat: "a", title: "A", generation: "g" };
+  const liveB = { ...base, chat: "b", title: "B", generation: "g" };
+  const endedA = { ...base, chat: "a", title: "A ended", generation: "e", state: "ended" };
+  const views = [earlyIndex, oldIndex, liveIndex, liveA, liveB, endedA];
+  const deleted = [];
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") {
+      deleted.push(path);
+      return {};
+    }
+    return readAnswer([], 0, false, liveA);
+  }, undefined, undefined, { confirm: () => true });
+  f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(f.feature.tab.activities().map(view => view.chat).sort(), ["a", "a", "b"], "activities stay index-free");
+  const groups = f.feature.tab.groups();
+  assert.deepEqual(groups[0].lanes.map(lane => [lane.label, lane.items.map(item => item.generation + ":" + item.chat)]), [["new", ["g:a", "g:b"]]]);
+  assert.deepEqual(groups[0].items.map(item => item.generation + ":" + item.chat), ["e:a"]);
+  assert.equal(guestModule.laneForChat(liveA, views).name, "new");
+  assert.equal(guestModule.laneForChat(liveA, views).index, "new");
+  const listEl = { innerHTML: "", querySelectorAll() { return []; } };
+  const cards = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll() { return []; } }, list: listEl },
+    document: { title: "", querySelector() { return null; } },
+    CSS: { escape: value => value },
+    sharedTab: f.feature.tab,
+    nodes: () => [], pinned: () => [], archived: () => [],
+    cardTab: () => "current", expanded: () => new Set(),
+    setInterval: () => 0, clearInterval() {},
+  });
+  cards.render();
+  const html = listEl.innerHTML;
+  const laneAt = html.indexOf('data-activity-group="owner/s/o/lane/new"');
+  const liveAt = html.indexOf('id="card-team/s/o/a/g"');
+  const endedAt = html.indexOf('id="card-team/s/o/a/e"');
+  assert.ok(laneAt !== -1 && liveAt !== -1 && endedAt !== -1 && laneAt < liveAt && liveAt < endedAt, html);
+  assert.equal((html.match(/lane-group/g) || []).length, 1);
+  assert.doesNotMatch(html, /lane\/(?:aaa|old)|foldlabel">(?:aaa|old)/);
+  cards.destroy();
+  f.open("team/" + guestKey(liveA));
+  await f.feature.settled();
+  f.click("guestremove");
+  await f.feature.settled();
+  assert.deepEqual(deleted, [
+    "/api/team/subscriptions/s/o/a/g",
+    "/api/team/subscriptions/s/o/a/e",
+    "/api/team/subscriptions/s/o/b/g",
+    "/api/team/subscriptions/s/o/new/g",
+  ]);
+  f.feature.destroy();
+});
+
+test("ended indexes alone leave no sharer group", async () => {
+  const chats = [{ chat: "a", created_at: "1" }];
+  const oldIndex = laneIndex({ chat: "old", state: "ended", owner_name: "Ada", server_name: "lab", title: "Shared lane · old", lane: { name: "old", color: "#111111", chats } });
+  const olderIndex = laneIndex({ chat: "older", state: "ended", owner_name: "Ada", server_name: "lab", title: "Shared lane · older", lane: { name: "older", color: "#222222", chats } });
+  const plain = { ...base, server: "t", owner: "p", chat: "plain", owner_name: "Bea", server_name: "desk", title: "Plain" };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([oldIndex, olderIndex, plain]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(f.feature.tab.activities().map(view => view.chat), ["plain"], "activities stay index-free");
+  const groups = f.feature.tab.groups();
+  assert.deepEqual(groups.map(group => group.key), ["t/p"]);
+  const listEl = { innerHTML: "", querySelectorAll() { return []; } };
+  const cards = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll() { return []; } }, list: listEl },
+    document: { title: "", querySelector() { return null; } },
+    CSS: { escape: value => value },
+    sharedTab: f.feature.tab,
+    nodes: () => [], pinned: () => [], archived: () => [],
+    cardTab: () => "current", expanded: () => new Set(),
+    setInterval: () => 0, clearInterval() {},
+  });
+  cards.render();
+  const html = listEl.innerHTML;
+  assert.doesNotMatch(html, /data-activity-group="owner\/s\/o"|foldlabel">Ada/);
+  assert.match(html, /data-activity-group="owner\/t\/p"/);
+  assert.match(html, /foldlabel">Bea · desk/);
+  cards.destroy();
+  assert.deepEqual(guestGroups([laneIndex()], []), []);
+  f.feature.destroy();
+});
+
+test("a lane chat notice names the shared lane", () => {
+  const html = guestModule.sharingNoticeHTML("Ada <b>", [], "<img src=x onerror=1>");
+  assert.match(html, /Part of Ada &lt;b&gt;'s shared lane &lt;img src=x onerror=1&gt;/);
+  assert.doesNotMatch(html, /<img|<b>/);
+  assert.doesNotMatch(guestModule.sharingNoticeHTML("Ada", []), /shared lane/);
+});
+
+test("opening a lane chat adds the lane to the sharing notice", async () => {
+  const index = laneIndex();
+  const zeta = { ...base, chat: "zdx", title: "Shared lane · zeta", lane: { name: "zeta", color: "#334455", chats: [{ chat: "c", created_at: "1" }] } };
+  const other = { ...base, server: "other", owner: "p", chat: "odx", owner_name: "Zed", server_name: "Other", title: "Shared lane · Other", lane: { name: "Other", color: "#abcdef", chats: [{ chat: "c", created_at: "1" }] } };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([index, zeta, other, { ...base }]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  assert.match(f.get("msgs").innerHTML, /Part of Owner's shared lane Protein/);
+  assert.doesNotMatch(f.get("msgs").innerHTML, /shared lane zeta|shared lane Other/);
+  f.feature.destroy();
+});
+
+test("a sharer with no lane has an empty lane list", () => {
+  assert.deepEqual(guestGroups([{ ...base }], [])[0].lanes, []);
+});
+
+test("lane chats form ordered sub-groups and a chat joins only the first", () => {
+  const alpha = { ...base, chat: "adx", title: "Shared lane · Alpha", lane: { name: "Alpha", color: "#334455", chats: [{ chat: "only", created_at: "1" }] } };
+  const same = { ...base, chat: "bdx", title: "Shared lane · alpha", lane: { name: "alpha", color: 4, chats: [] } };
+  const empty = { ...base, chat: "edx", title: "Shared lane · Empty", lane: { name: 5 } };
+  const protein = { ...base, chat: "idx", title: "Shared lane · Protein", lane: { name: "Protein", color: "#11aa22", chats: [null, { chat: "c", created_at: "1" }] } };
+  const zeta = { ...base, chat: "zdx", title: "Shared lane · zeta", lane: { name: "zeta", color: "red;background:url(x)", chats: [{ chat: "late", created_at: "2" }, { chat: "early", created_at: "1" }, { chat: "c", created_at: "1" }] } };
+  const other = { ...base, server: "other", owner: "p", chat: "odx", owner_name: "Zed", server_name: "Other", title: "Shared lane · Other", lane: { name: "Other", color: "#abcdef", chats: [{ chat: "c", created_at: "1" }] } };
+  const early = { ...base, chat: "early", title: "A", first_seen: "1" };
+  const late = { ...base, chat: "late", title: "A", first_seen: "2" };
+  const chat = { ...base, chat: "c", title: "C" };
+  const only = { ...base, chat: "only", title: "Only" };
+  const loose = { ...base, chat: "loose", title: "Zed" };
+  const groups = guestGroups([zeta, protein, alpha, same, empty, other, late, early, chat, only, loose], []);
+  const home = groups.find(group => group.key === "s/o");
+  assert.deepEqual(home.lanes.map(lane => [lane.key, lane.label, lane.color, lane.items.map(item => item.chat)]), [
+    ["s/o/lane/edx", "", "", []],
+    ["s/o/lane/adx", "Alpha", "#334455", ["only"]],
+    ["s/o/lane/bdx", "alpha", "", []],
+    ["s/o/lane/idx", "Protein", "#11aa22", ["c"]],
+    ["s/o/lane/zdx", "zeta", "red;background:url(x)", ["early", "late"]],
+  ]);
+  assert.deepEqual(home.items.map(item => item.chat), ["loose"]);
+  assert.equal(groups.some(group => group.key === "other/p"), false);
+  assert.equal(guestModule.laneForChat(chat, [protein, zeta]).name, "Protein");
+  assert.equal(guestModule.laneForChat(chat, [other, protein]).index, "idx");
+  assert.equal(guestModule.laneForChat(protein, [protein]), null);
+  assert.equal(guestModule.laneForChat(null, null), null);
+  assert.equal(guestModule.laneForChat(early, [protein]), null);
+  assert.equal(guestModule.laneForChat(chat, null), null);
+  const uncolored = { ...base, chat: "bdx", lane: { name: "alpha", color: 4, chats: [{ chat: "c", created_at: "1" }] } };
+  assert.equal(guestModule.laneForChat(chat, [uncolored]).color, "");
+});
+
+function leaveLaneList() {
+  const copy = "a".repeat(32);
+  const index = laneIndex({ lane: { name: "Protein", color: "#11aa22", chats: [null, { chat: "" }, { chat: "c", created_at: "1" }, { chat: "late", created_at: "2" }, { chat: "missing", created_at: "3" }] } });
+  const late = { ...base, chat: "late", title: "Late", people_copy_instance: copy };
+  const loose = { ...base, chat: "loose", title: "Loose" };
+  return { copy, index, late, loose, views: [index, { ...base }, late, loose, { ...base, server: "other", owner: "p", chat: "late" }, { ...base, owner: "p", chat: "c" }] };
+}
+
+test("the sharing section explains lane sharing", () => {
+  const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf8");
+  const section = readme.slice(readme.indexOf("Team sharing never gives"), readme.indexOf("When People file support"));
+  assert.match(section, /share a lane/);
+  assert.match(section, /archived chats in that lane stay private/);
+  assert.match(section, /new chat started in the lane is shared automatically/);
+  assert.match(section, /Leave lane/);
+});
+
+test("a plain chat keeps the single-chat leave label", async () => {
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([base]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  assert.equal(f.get("guestremove").getAttribute("aria-label"), "Leave shared chat and remove local copy");
+  assert.equal(f.get("guestremove").title, "Leave shared chat and remove local copy");
+  f.feature.destroy();
+});
+
+test("a lane chat offers leave lane and deletes the lane after one confirm", async () => {
+  const { copy, views } = leaveLaneList();
+  const deleted = [];
+  let message = "";
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") {
+      deleted.push(path);
+      if (path.includes("/late/")) throw Object.assign(new Error("missing"), { status: 404 });
+      return {};
+    }
+    return readAnswer();
+  }, undefined, undefined, { confirm: text => { message = text; return true; } });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  assert.equal(f.get("guestremove").getAttribute("aria-label"), "Leave lane");
+  assert.equal(f.get("guestremove").title, "Leave lane");
+  f.click("guestremove");
+  await f.feature.settled();
+  assert.equal(message, "Leave the shared lane Protein and remove its saved chats from this computer? The owner's chats will not be deleted.");
+  assert.deepEqual(deleted, [
+    "/api/team/subscriptions/s/o/c/g",
+    "/api/team/subscriptions/s/o/late/g?copy_instance=" + copy,
+    "/api/team/subscriptions/s/o/idx/g",
+  ]);
+  assert.equal(f.feature.tab.activities().some(view => view.server === "s" && view.owner === "o" && (view.chat === "c" || view.chat === "late")), false);
+  assert.equal(f.feature.tab.activities().some(view => view.chat === "loose"), true);
+  assert.equal(f.feature.tab.activities().some(view => view.server === "other" && view.chat === "late"), true);
+  assert.equal(f.feature.tab.activities().some(view => view.owner === "p" && view.chat === "c"), true);
+  f.feature.destroy();
+});
+
+test("a finished lane leave keeps the chat the reader moved to", async () => {
+  const { views, loose } = leaveLaneList();
+  const pending = deferred();
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") return pending.promise;
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  f.click("guestremove");
+  f.open("team/" + guestKey(loose));
+  pending.resolve({});
+  await f.feature.settled();
+  assert.equal(f.feature.tab.selected(), "team/" + guestKey(loose));
+  assert.equal(f.feature.hasActivity("team/s/o/c/g"), false);
+  assert.equal(f.feature.hasActivity("team/s/o/late/g"), false);
+  f.feature.destroy();
+});
+
+test("a lane leave stops on the first failed removal and keeps the local list", async () => {
+  for (const [error, note] of [
+    [Object.assign(new Error(JSON.stringify({ error: "unreachable" })), { status: 503 }), "The server could not be reached. Try again later."],
+    [new Error("not json"), "That did not work. Try again."],
+  ]) {
+    const { views } = leaveLaneList();
+    const deleted = [];
+    const f = nativeViewFixture(async (path, opts) => {
+      if (path === "/api/team/subscriptions") return list(views);
+      if (opts?.method === "DELETE") {
+        deleted.push(path);
+        if (path.includes("/late/")) throw error;
+        return {};
+      }
+      return readAnswer();
+    });
+    f.feature.tick(); await f.feature.settled();
+    f.open(); await f.feature.settled();
+    f.click("guestremove");
+    await f.feature.settled();
+    assert.deepEqual(deleted, ["/api/team/subscriptions/s/o/c/g", "/api/team/subscriptions/s/o/late/g?copy_instance=" + "a".repeat(32)]);
+    assert.equal(f.get("guestnote").textContent, note);
+    assert.equal(f.get("guestremove").disabled, false);
+    assert.equal(f.doc.activeElement, f.get("guestremove"));
+    assert.equal(f.feature.tab.activities().some(view => view.server === "s" && view.owner === "o" && view.chat === "c"), true);
+    f.feature.destroy();
+  }
+});
+
+test("a lane leave that fails after the reader moves on leaves the new view alone", async () => {
+  const { views, loose } = leaveLaneList();
+  const pending = deferred();
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") return pending.promise;
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  f.click("guestremove");
+  f.open("team/" + guestKey(loose));
+  pending.reject(new Error(JSON.stringify({ error: "unreachable" })));
+  await f.feature.settled();
+  assert.equal(f.feature.tab.selected(), "team/" + guestKey(loose));
+  assert.equal(f.get("guestnote").textContent, "");
+  assert.equal(f.feature.tab.activities().some(view => view.server === "s" && view.owner === "o" && view.chat === "c"), true);
+  f.feature.destroy();
+});
+
+test("a lane leave that finishes after destroy does not refresh the list", async () => {
+  const { views } = leaveLaneList();
+  const pending = deferred();
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") return pending.promise;
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  const before = f.invalidations();
+  f.click("guestremove");
+  f.feature.destroy();
+  pending.resolve({});
+  await f.feature.settled();
+  assert.equal(f.invalidations(), before);
+});
+
+test("cancelling a lane leave deletes nothing", async () => {
+  const { views } = leaveLaneList();
+  let message = "", deletes = 0;
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") deletes++;
+    return readAnswer();
+  }, undefined, undefined, { confirm: text => { message = text; return false; } });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  f.click("guestremove");
+  assert.equal(message, "Leave the shared lane Protein and remove its saved chats from this computer? The owner's chats will not be deleted.");
+  assert.equal(deletes, 0);
+  assert.equal(f.doc.activeElement, f.get("guestremove"));
+  f.feature.destroy();
 });

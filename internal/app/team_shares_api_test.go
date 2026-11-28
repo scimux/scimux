@@ -81,17 +81,19 @@ type shareCall struct {
 }
 
 type shareScript struct {
-	helloStatus   int
-	helloID       string
-	helloBody     string
-	putStatuses   []int
-	memberStatus  int
-	deleteStatus  int
-	deleteQueries []string
-	seatsStatus   int
-	seatsBody     string
-	channel       string
-	failPath      string
+	helloStatus    int
+	helloID        string
+	helloBody      string
+	putStatuses    []int
+	memberStatus   int
+	deleteStatus   int
+	deleteQueries  []string
+	seatsStatus    int
+	seatsBody      string
+	channel        string
+	channelsBody   string
+	channelsStatus int
+	failPath       string
 }
 
 func (s *shareScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +154,19 @@ func (s *shareScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusNoContent
 		}
 		w.WriteHeader(status)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/channels":
+		status := s.channelsStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			body := s.channelsBody
+			if body == "" {
+				body = `{"channels":[]}`
+			}
+			_, _ = io.WriteString(w, body)
+		}
 	case r.Method == http.MethodPut:
 		status := http.StatusCreated
 		if len(s.putStatuses) > 0 {
@@ -1116,13 +1131,13 @@ func TestStartSharingFailureStoresNothing(t *testing.T) {
 	})
 	t.Run("share list full", func(t *testing.T) {
 		b := setup(t, &shareScript{})
-		for i := 0; i < 256; i++ {
+		for i := 0; i < 1000; i++ {
 			mustSaveShare(t, b.dir, team.Share{UID: fmt.Sprintf("a%015x", i), Node: "parked"})
 		}
 		rec := putShare(b.h, shareNode, body)
 		assertClean(t, b, rec, http.StatusInsufficientStorage, "too_many", 1)
 		left, err := team.LoadShares(b.dir)
-		if err != nil || len(left) != 256 {
+		if err != nil || len(left) != 1000 {
 			t.Fatalf("left = %d err %v", len(left), err)
 		}
 	})

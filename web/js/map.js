@@ -81,6 +81,7 @@ import {
   hardAttention, headStopKey, toggleMapSelection,
 } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
+import { SHARE_ICON } from "./team-share.js";
 import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
 import { createPopoverMenu } from "./menu.js";
 
@@ -413,11 +414,17 @@ export function buildStackBlocks(lanes, stations, { served = servedLanes, inGrou
     .sort((a, b) => byNameID(a.lane, b.lane));
 }
 
-export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull, lm, selectedId, seenAt } = {}){
+export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull, lm, selectedId, seenAt, shares } = {}){
   const hasAttn = b => b.rows.some(s => hardAttention(s.n)) ? 1 : 0;
   const fold = mapFold || new Set();
+  const shareMark = id => {
+    const share = shares && shares[id];
+    if (!share) return "";
+    const n = Array.isArray(share.members) ? share.members.length : 0;
+    return String(share.state || "") + ":" + n;
+  };
   return JSON.stringify((blocks || []).map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
-      fold.has(b.lane.id), hasAttn(b),
+      fold.has(b.lane.id), hasAttn(b), shareMark(b.lane.id),
       b.rows.map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, l.title, l.desc,
         s.n.agent, s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
         s.n.live, s.n.attention, displayReady(s.n, { selectedId, seenAt }) ? 1 : 0]; })]))
@@ -1182,6 +1189,7 @@ export function createMapFeature(deps){
   let lastSelKey = "";
   let lastSelRow = null;
   let mapSig = "";
+  let revealedLane = "";
   /* Last painted map-tabs signature (selected tab + group set + waiting
      counts). Live counts put #maptabs on the poll path; the gate keeps a
      steady bar from rewriting every tick. */
@@ -1839,6 +1847,23 @@ export function createMapFeature(deps){
     updateMapPill(rows);
   }
 
+  function laneHead(b, col, folded, dimBlock){
+    const id = escape(b.lane.id);
+    const name = escape(b.lane.name || b.lane.id);
+    const icons = d.icons || {};
+    const share = typeof d.laneShare === "function" ? d.laneShare(b.lane.id) : null;
+    const active = share && share.state === "active";
+    const count = active ? (Array.isArray(share.members) ? share.members.length : 0) : 0;
+    const badge = active
+      ? `<button type="button" class="lshared" data-share-lane="${id}" aria-label="Shared with ${count} people">│${icons.ICON_USERS || ""}${count}</button>`
+      : "";
+    const revealed = revealedLane === b.lane.id ? " revealed" : "";
+    const fold = mapFull ? "" : ` data-fold="${id}"`;
+    const chev = mapFull ? "" : `<span class="chev">${folded ? "&#9656;" : "&#9662;"}</span>`;
+    const attn = b.rows.some(s => hardAttention(s.n)) ? `<span class="lattn"></span>` : "";
+    return `<div class="lheadrow${revealed}" data-lane-head="${id}"><button class="lhead ${dimBlock ? "dimmed" : ""}"${fold}>${chev}<span class="lswatch" style="background:${col}"></span><span class="lname">${name}</span><span class="lcount">${new Set(b.rows.map(s => s.n.id)).size}</span>${attn}</button><button type="button" class="lshare" data-share-lane="${id}" aria-label="Share lane ${name}">${icons.SHARE_ICON || SHARE_ICON}</button>${badge}</div>`;
+  }
+
   function renderMap(){
     if (!mapVisible()) return;
     /* Live tab badges: refresh before the wall/stack signature gate so a poll
@@ -1860,8 +1885,12 @@ export function createMapFeature(deps){
       saveMapFold(model);
     }
 
+    const shares = {};
+    if (typeof d.laneShare === "function") {
+      for (const b of blocks) shares[b.lane.id] = d.laneShare(b.lane.id);
+    }
     const sig = stackMapSignature(blocks, {
-      mapFold, focusLane, mapTab, mapFull, lm: model, ...readyCtx(),
+      mapFold, focusLane, mapTab, mapFull, lm: model, shares, ...readyCtx(),
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;
@@ -1878,14 +1907,7 @@ export function createMapFeature(deps){
       const col = escape(model.color(b.lane.id));
       const folded = !mapFull && mapFold.has(b.lane.id);
       const dimBlock = focusLane && b.lane.id !== focusLane;
-      const head = `
-      <button class="lhead ${dimBlock ? "dimmed" : ""}" ${mapFull ? "" : `data-fold="${escape(b.lane.id)}"`}>
-        ${mapFull ? "" : `<span class="chev">${folded ? "&#9656;" : "&#9662;"}</span>`}
-        <span class="lswatch" style="background:${col}"></span>
-        <span class="lname">${escape(b.lane.name || b.lane.id)}</span>
-        <span class="lcount">${new Set(b.rows.map(s => s.n.id)).size}</span>
-        ${hasAttn(b) ? `<span class="lattn"></span>` : ""}
-      </button>`;
+      const head = laneHead(b, col, folded, dimBlock);
       if (folded) return `<div class="lblock" data-lane="${escape(b.lane.id)}">${head}</div>`;
 
       let svg = "";
@@ -2094,6 +2116,19 @@ export function createMapFeature(deps){
       openFareTicket(cap.dataset.fareNode, cap.dataset.fareSeg);
       return;
     }
+    const shareBtn = e.target.closest("[data-share-lane]");
+    if (shareBtn){
+      if (typeof d.openLaneShare === "function") d.openLaneShare(shareBtn.dataset.shareLane);
+      return;
+    }
+    const row = e.target.closest("[data-lane-head]");
+    if (row){
+      revealedLane = row.dataset.laneHead;
+      const fold = e.target.closest("[data-fold]");
+      if (fold) toggleMapFold(fold.dataset.fold);
+      else { mapSig = ""; renderMap(); }
+      return;
+    }
     const f = e.target.closest("[data-fold]");
     if (f){ toggleMapFold(f.dataset.fold); return; }
     /* P6: ring hit circle (and any other data-jump in the wrap) opens chat —
@@ -2249,7 +2284,16 @@ export function createMapFeature(deps){
     renderMap();
   }
 
+  function clearRevealed(target){
+    if (target && typeof target.closest === "function" && target.closest(".lheadrow")) return;
+    revealedLane = "";
+    const row = mapwrap.querySelector(".lheadrow.revealed");
+    if (!row) return;
+    row.classList.remove("revealed");
+  }
+
   function onLayersDocClick(e){
+    if (revealedLane) clearRevealed(e && e.target);
     if (layersMenu.shouldCloseForClick(e && e.target, { exclude: "#layersbtn" }))
       layersMenu.close();
   }

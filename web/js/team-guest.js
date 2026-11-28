@@ -53,7 +53,7 @@ function joinAgents(parts) {
 
 /* Presentation only. Callers pass mirror entries already read; this does not
  * fetch, and the result is not a turn. */
-export function sharingNoticeHTML(owner, entries) {
+export function sharingNoticeHTML(owner, entries, laneName) {
   const agents = evidencedAgents(entries);
   const parts = [];
   const linked = [];
@@ -77,7 +77,8 @@ export function sharingNoticeHTML(owner, entries) {
   else if (linked.length > 1) terms = "provider terms (" + linked.map(item => sharingTermsAnchor(item.agent, item.vendor)).join(", ") + ")";
   const caveat = unspecified ? " Terms depend on the configured provider." : "";
   const who = esc(owner);
-  return `<div class="sharing-notice" role="note"><p class="sharing-notice-lead">${lead}</p><p class="sharing-notice-body">AI responses may be inaccurate. Verify before relying on them. Preserve attribution and respect applicable rights and ${terms}. Only ${who} can send to the agent.${caveat}</p></div>`;
+  const lane = laneName ? `<p class="sharing-notice-lane">Part of ${who}'s shared lane ${esc(laneName)}</p>` : "";
+  return `<div class="sharing-notice" role="note">${lane}<p class="sharing-notice-lead">${lead}</p><p class="sharing-notice-body">AI responses may be inaccurate. Verify before relying on them. Preserve attribution and respect applicable rights and ${terms}. Only ${who} can send to the agent.${caveat}</p></div>`;
 }
 
 export function guestCapture(entry, view, names, people = {}) {
@@ -116,6 +117,68 @@ export function guestCapture(entry, view, names, people = {}) {
 
 function compare(a, b) {
   return a.localeCompare(b, undefined, { sensitivity: "base" });
+}
+
+function isLaneIndex(view) {
+  const lane = view.lane;
+  return !!lane && typeof lane === "object" && !Array.isArray(lane);
+}
+
+function liveLaneIndex(view) {
+  return isLaneIndex(view) && view.state === "live";
+}
+
+function laneLabel(index) {
+  const name = index.lane.name;
+  return typeof name === "string" ? name : "";
+}
+
+function sortedLaneIndexes(views) {
+  return views.filter(liveLaneIndex).sort((a, b) => {
+    const order = compare(laneLabel(a), laneLabel(b));
+    if (order) return order;
+    return String(a.chat).localeCompare(String(b.chat));
+  });
+}
+
+function indexListsChat(index, chat) {
+  const chats = index.lane.chats;
+  if (!Array.isArray(chats)) return false;
+  for (const entry of chats) if (entry && entry.chat === chat) return true;
+  return false;
+}
+
+export function laneForChat(view, subs) {
+  if (!view || isLaneIndex(view)) return null;
+  const same = (subs || []).filter(item => item.server === view.server && item.owner === view.owner);
+  const index = sortedLaneIndexes(same).find(item => indexListsChat(item, view.chat));
+  if (!index) return null;
+  return {
+    name: laneLabel(index),
+    color: typeof index.lane.color === "string" ? index.lane.color : "",
+    index: index.chat,
+  };
+}
+
+function assignLanes(group) {
+  const taken = new Set();
+  const placed = new Set();
+  group.lanes = sortedLaneIndexes(group.items).map(index => {
+    const items = [];
+    for (const item of group.items) {
+      if (isLaneIndex(item) || taken.has(item.chat) || !indexListsChat(index, item.chat)) continue;
+      taken.add(item.chat);
+      placed.add(item);
+      items.push(item);
+    }
+    return {
+      key: group.key + "/lane/" + index.chat,
+      label: laneLabel(index),
+      color: typeof index.lane.color === "string" ? index.lane.color : "",
+      items,
+    };
+  });
+  group.items = group.items.filter(item => !isLaneIndex(item) && !placed.has(item));
 }
 
 export function guestGroups(subs, servers, people = {}) {
@@ -167,8 +230,9 @@ export function guestGroups(subs, servers, people = {}) {
       if (order) return order;
       return a.first_seen.localeCompare(b.first_seen);
     });
+    assignLanes(group);
   }
-  return result;
+  return result.filter(group => group.items.length || group.lanes.some(lane => lane.items.length));
 }
 
 export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes, uiMutate, bookmarks, openSendTo, toast, retainPeople, assetURL = path => path, people = () => ({}), localNodes = () => [], panel, bubbleController = createBubbleActionController(), storage = null, peopleFileStore = null, selectedNode, selectedUID, localAgentAvailable, confirmRemove, classificationTimeoutMs = 8000 }) {
@@ -522,6 +586,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function classifyList(views) {
     for (const view of views) {
+      if (isLaneIndex(view)) continue;
       if (view.state !== "live" || !view.unread || view.comments_last <= view.seen_comments || (view.access !== "owner" && view.mirror_last > view.seen_mirror)) continue;
       const key = classificationKey(view);
       const result = classificationResults.get(key);
@@ -673,7 +738,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
      changed. Assigning #msgs.innerHTML would drop the reader's scroll position. */
   function syncNotice(current) {
     const body = $("msgs");
-    const html = sharingNoticeHTML(guestName(current.view.server, current.view.owner, current.view.owner_name, knownPeople), mirrorEntries(current));
+    const ownerName = guestName(current.view.server, current.view.owner, current.view.owner_name, knownPeople);
+    const found = laneForChat(current.view, answer.subscriptions);
+    const html = sharingNoticeHTML(ownerName, mirrorEntries(current), found ? found.name : "");
     const first = body.firstElementChild;
     if (!(first && first.classList.contains("sharing-notice"))) {
       body.innerHTML = html + body.innerHTML;
@@ -716,6 +783,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     $("chatmission").dataset.seat = view.owner;
     $("chatmission").textContent = "From " + owner + " · " + view.server_name;
     $("gueststate").textContent = guestStateText(view);
+    const button = $("guestremove");
+    const lane = laneForChat(view, answer.subscriptions);
+    const label = lane ? "Leave lane" : "Leave shared chat and remove local copy";
+    button.setAttribute("aria-label", label);
+    button.title = label;
   }
   function openView(view) {
     reactionUI.close();
@@ -964,7 +1036,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function removeClick() {
     if (!open || open.removing) return;
     const current = open;
-    if (!confirmRemove("Leave this shared chat and remove its saved copy from this computer? The owner's chat will not be deleted.")) {
+    const lane = laneForChat(current.view, answer.subscriptions);
+    const message = lane
+      ? "Leave the shared lane " + lane.name + " and remove its saved chats from this computer? The owner's chats will not be deleted."
+      : "Leave this shared chat and remove its saved copy from this computer? The owner's chat will not be deleted.";
+    if (!confirmRemove(message)) {
       $("guestremove").focus();
       return;
     }
@@ -972,7 +1048,59 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     current.removing = true;
     current.removeNote = true;
     $("guestremove").disabled = true;
-    track(remove(current));
+    track(lane ? removeLane(current) : remove(current));
+  }
+  async function deleteSubscription(view) {
+    const instance = view.people_copy_instance || "";
+    try {
+      await api(LIST + "/" + guestKey(view) + (instance ? "?copy_instance=" + encodeURIComponent(instance) : ""), { method: "DELETE" });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  function removalFailed(current, error) {
+    if (open !== current) return;
+    current.removing = false;
+    current.removeNote = true;
+    $("guestremove").disabled = false;
+    let code = "";
+    try { code = JSON.parse(error.message).error; } catch {}
+    let text = "That did not work. Try again.";
+    if (code === "unreachable") text = "The server could not be reached. Try again later.";
+    $("guestnote").textContent = text;
+    $("guestremove").focus();
+  }
+  function removalFinished(current, keys) {
+    if (destroyed) return;
+    const gone = new Set(keys);
+    answer.subscriptions = answer.subscriptions.filter(view => !gone.has(guestKey(view)));
+    invalidateCards();
+    if (open !== current) return;
+    open = null;
+    reactionUI.close();
+    readGeneration++;
+    clearDisclosure();
+    panel.removed();
+  }
+  async function removeLane(current) {
+    const lane = laneForChat(current.view, answer.subscriptions);
+    const index = answer.subscriptions.find(view => liveLaneIndex(view) && view.server === current.view.server && view.owner === current.view.owner && view.chat === lane.index);
+    const targets = [];
+    for (const entry of index.lane.chats) {
+      const id = entry && entry.chat;
+      if (!id) continue;
+      for (const item of answer.subscriptions) {
+        if (item.server === current.view.server && item.owner === current.view.owner && item.chat === id) targets.push(item);
+      }
+    }
+    targets.push(index);
+    try {
+      for (const view of targets) await deleteSubscription(view);
+    } catch (error) {
+      removalFailed(current, error);
+      return;
+    }
+    removalFinished(current, targets.map(guestKey));
   }
   function actionView() { return open || (actionOwner && ownerCurrent(actionOwner) ? actionOwner : owner); }
   function sharedClick(event) {
@@ -1217,7 +1345,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   async function settled() {
     while (pending.size) await Promise.all([...pending]);
   }
-  function activities() { return answer.subscriptions.filter(view => view.access !== "owner").map(presented); }
+  function activities() { return answer.subscriptions.filter(view => view.access !== "owner" && !isLaneIndex(view)).map(presented); }
   function mineUnread() { return answer.subscriptions.some(view => view.access === "owner" && unreadState(view) === "unread"); }
   function mineUnknown() { return answer.subscriptions.some(view => view.access === "owner" && unreadState(view) === "unknown"); }
   function ownerUnreadStatus(id) {
@@ -1226,7 +1354,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   }
   function ownerUnread(id) { return !!id && ownerUnreadStatus(id) === "unread"; }
   function groups() { return sharedGroups(); }
-  function sharedGroups() { return guestGroups(activities(), answer.servers, knownPeople); }
+  function sharedGroups() { return guestGroups(answer.subscriptions.filter(view => view.access !== "owner").map(presented), answer.servers, knownPeople); }
   function openActivity(id) {
     const view = activities().find(item => "team/" + guestKey(item) === id);
     if (!view) return;
@@ -1237,7 +1365,7 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     if (!source || !promptSourceKey(source) || !["mirror", "comments"].includes(source.log)) return false;
     const key = guestKey(source);
     const view = answer.subscriptions.find(item => guestKey(item) === key);
-    if (!view) return false;
+    if (!view || isLaneIndex(view)) return false;
     bubbleController.clear();
     if (view.access === "owner") {
       if (!view.local_node || view.local_node.startsWith("team/") || !panel.ownerJump) return false;
@@ -1911,7 +2039,7 @@ export function sharedActivityGroups(views, servers, people) {
   return guestGroups((views || []).filter(view => view.access !== "owner"), servers || [], people || {});
 }
 export function sharedPinnedOrder(nodes, views, pinned) {
-  const shares = (views || []).filter(view => view.access !== "owner").map(view => ({id:sharedActivityId(view), shared:view}));
+  const shares = (views || []).filter(view => view.access !== "owner" && !isLaneIndex(view)).map(view => ({id:sharedActivityId(view), shared:view}));
   return pinnedOrder([...(nodes || []), ...shares].filter(item => (pinned || []).includes(item.id)), pinned);
 }
 export function readActivityFolds(storage) {

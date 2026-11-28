@@ -125,7 +125,6 @@ func TestHelloRejectsShape(t *testing.T) {
 		{"name not a string", http.StatusOK, `{"protocol":1,"server":{"id":"` + helloID + `","name":1}}`, ErrProtocol},
 		{"missing server", http.StatusOK, `{"protocol":1}`, ErrProtocol},
 		{"not json", http.StatusOK, `not-json`, ErrProtocol},
-		{"unknown field", http.StatusOK, `{"protocol":1,"extra":true,"server":{"id":"` + helloID + `","name":"Lab relay"}}`, ErrProtocol},
 		{"trailing value", http.StatusOK, helloBody(helloID, helloName) + `{}`, ErrProtocol},
 		{"created instead of ok", http.StatusCreated, helloBody(helloID, helloName), ErrProtocol},
 		{"other error code", http.StatusInternalServerError, `{"error":"internal"}`, ErrProtocol},
@@ -141,6 +140,28 @@ func TestHelloRejectsShape(t *testing.T) {
 			_, err := clientOn(srv).Hello(context.Background(), srv.URL)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestHelloAcceptsAnUnknownField(t *testing.T) {
+	bodies := []string{
+		`{"protocol":1,"extra":true,"server":{"id":"` + helloID + `","name":"Lab relay"}}`,
+		`{"protocol":1,"server":{"id":"` + helloID + `","name":"Lab relay","extra":true}}`,
+	}
+	for _, body := range bodies {
+		t.Run(body, func(t *testing.T) {
+			srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, body)
+			})
+			got, err := clientOn(srv).Hello(context.Background(), srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID != helloID || got.Name != helloName {
+				t.Fatalf("server = %+v", got)
 			}
 		})
 	}
@@ -210,7 +231,7 @@ func TestRegisterMapsErrors(t *testing.T) {
 		{"bad request", http.StatusBadRequest, `{"error":"bad_request"}`, ErrRejected},
 		{"other code", http.StatusInternalServerError, `{"error":"internal"}`, ErrProtocol},
 		{"not json", http.StatusBadRequest, `nope`, ErrProtocol},
-		{"unknown field", http.StatusForbidden, `{"error":"join_refused","detail":"x"}`, ErrProtocol},
+		{"unknown field", http.StatusForbidden, `{"error":"join_refused","detail":"x"}`, ErrJoinRefused},
 		{"ok instead of created", http.StatusOK, registerBody(regToken, helloID, helloName), ErrProtocol},
 		{"short token", http.StatusCreated, registerBody("abcd", helloID, helloName), ErrProtocol},
 		{"uppercase token", http.StatusCreated, registerBody(strings.ToUpper(regToken), helloID, helloName), ErrProtocol},

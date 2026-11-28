@@ -488,6 +488,7 @@ test("createCardsFeature: skip mid-drag; ages on equal sig; rebuild on change", 
   });
   feature.render();
   assert.match(list.innerHTML, /id="card-a"/);
+  assert.match(list.innerHTML, /data-lane-share/);
   assert.match(list.innerHTML, /data-pin-action="a"/);
   assert.match(list.innerHTML, /class="pinflag"/);
   assert.match(list.innerHTML, /aria-label="unpin"/);
@@ -2091,8 +2092,22 @@ test('card deletion carries the selected instance in the transported URL', async
  await h.clickList(actTarget({trash:'n1'},['[data-trash]']));assert.equal(calls[0].url,'/api/nodes/n1?chat_instance=old%20id');assert.equal(calls[0].opts.method,'DELETE');
 });
 
+test("a card that already has a lane does not carry the share notice", () => {
+  const call = cardsSrc.indexOf(": railboxHTML(n)");
+  const lane = cardsSrc.slice(cardsSrc.lastIndexOf("!n.lane_id", call), call);
+  assert.match(lane, /data-lane-share/);
+  assert.doesNotMatch(cardsSrc.slice(call, call + 40), /data-lane-share/);
+});
+
 test('production card removal refuses a missing chat identity', async () => {
  const h=cardsActionHarness({nodes:[{id:'n1',title:'Legacy closed'}],sel:'n1',requireChatIdentity:true});
  await h.clickList(actTarget({trash:'n1'},['[data-trash]']));
  assert.equal(h.effects.apiCalls.length,0);assert.equal(h.effects.removeNode.length,0);assert.equal(h.state.sel,'n1');assert.match(h.effects.alerts[0],/identity.*unavailable/i);
+});
+
+test("the lane share notice wraps under the picker", () => {
+  assert.match(cardsCssSrc, /\.lanepick\s*\{[^}]*flex-wrap:\s*wrap/);
+  const sheets = readFileSync(join(__dirname, "../css/sheets.css"), "utf8");
+  assert.match(sheets, /\.laneshare\s*\{[^}]*width:\s*100%/);
+  assert.match(sheets, /\.laneshare\s*\{[^}]*flex:\s*1 0 100%/);
 });

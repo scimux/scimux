@@ -51,6 +51,8 @@ type subScript struct {
 	channelsBody   string
 	seatsStatus    int
 	seatsBody      string
+	mirrorBody     string
+	hellosLeft     int
 	dropPath       string
 	calls          []subCall
 }
@@ -60,9 +62,15 @@ func (s *subScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.calls = append(s.calls, subCall{method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization")})
 	drop := s.dropPath != "" && r.URL.Path == s.dropPath
 	helloStatus, helloID := s.helloStatus, s.helloID
+	if r.URL.Path == "/v1/hello" && s.hellosLeft > 0 {
+		s.hellosLeft--
+		if s.hellosLeft == 0 {
+			helloStatus = http.StatusInternalServerError
+		}
+	}
 	chStatus, chBody := s.channelsStatus, s.channelsBody
 	seatStatus, seatBody := s.seatsStatus, s.seatsBody
-	mirrorStatus := s.mirrorStatus
+	mirrorStatus, mirrorBody := s.mirrorStatus, s.mirrorBody
 	s.mu.Unlock()
 	if drop {
 		hj, ok := w.(http.Hijacker)
@@ -111,8 +119,15 @@ func (s *subScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, seatBody)
 		}
 	default:
-		if strings.HasSuffix(r.URL.Path, "/mirror") && mirrorStatus != 0 {
-			w.WriteHeader(mirrorStatus)
+		if strings.HasSuffix(r.URL.Path, "/mirror") && (mirrorStatus != 0 || mirrorBody != "") {
+			status := mirrorStatus
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			if status == http.StatusOK && mirrorBody != "" {
+				_, _ = io.WriteString(w, mirrorBody)
+			}
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -217,6 +232,16 @@ type subView struct {
 	LocalOrder         *int                `json:"local_order,omitempty"`
 	LocalFrontier      *team.OwnerFrontier `json:"local_frontier,omitempty"`
 	PeopleCopyInstance string              `json:"people_copy_instance,omitempty"`
+	Lane               *subLane            `json:"lane,omitempty"`
+}
+
+type subLane struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+	Chats []struct {
+		Chat string `json:"chat"`
+		At   string `json:"created_at"`
+	} `json:"chats"`
 }
 
 type subServerView struct {
@@ -5070,5 +5095,208 @@ func TestEndSubscriptionPreservesCanceledCopyAndSubscription(t *testing.T) {
 	}
 	if got, err := team.ReadPeopleCopyInstance(dir, id); err != nil || got != instance {
 		t.Fatalf("copy identity changed: %v", err)
+	}
+}
+
+func laneEntry(seq int, body string) string {
+	return fmt.Sprintf(`{"seq":%d,"key":"lane/%d","author":"%s","at":"2026-11-14T09:30:00.000Z","body":%s}`, seq, seq, shareSeat, body)
+}
+
+func laneSnap(name, color, chat, at string) string {
+	return fmt.Sprintf(`{"v":1,"t":"lane","name":%q,"color":%q,"chats":[{"chat":%q,"created_at":%q}]}`, name, color, chat, at)
+}
+
+func lanePage(gen string, last int, more bool, entries ...string) string {
+	return fmt.Sprintf(`{"generation":%q,"entries":[%s],"last":%d,"more":%t}`, gen, strings.Join(entries, ","), last, more)
+}
+
+func mirrorGets(script *subScript) int {
+	n := 0
+	for _, c := range script.snapshot() {
+		if strings.HasSuffix(c.path, "/mirror") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestLaneSnapshotsOnSubscriptionLists(t *testing.T) {
+	valid := laneSnap("North", laneColor, subChatB, "2026-11-12T09:00:00Z")
+	script := &subScript{
+		channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 1)),
+		mirrorBody:   lanePage(subGen, 1, false, laneEntry(1, valid)),
+	}
+	h, _, _ := subSurface(t, script)
+	got, _ := readSubList(t, h)
+	view, ok := findSub(got, subOwner, subChat, subGen)
+	if !ok || view.Lane == nil || view.Lane.Name != "North" || view.Lane.Color != laneColor || len(view.Lane.Chats) != 1 || view.Lane.Chats[0].Chat != subChatB || mirrorGets(script) != 1 {
+		t.Fatalf("lane %+v reads %d", view.Lane, mirrorGets(script))
+	}
+	got, _ = readSubList(t, h)
+	view, _ = findSub(got, subOwner, subChat, subGen)
+	if view.Lane == nil || view.Lane.Name != "North" || mirrorGets(script) != 1 {
+		t.Fatalf("second %+v reads %d", view.Lane, mirrorGets(script))
+	}
+	script.mu.Lock()
+	script.calls = nil
+	script.mu.Unlock()
+	script.mirrorBody = lanePage(subGen, 2, true, laneEntry(1, valid))
+	script.channelsBody = channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 5))
+	fresh, _, _ := subSurface(t, script)
+	got, _ = readSubList(t, fresh)
+	view, _ = findSub(got, subOwner, subChat, subGen)
+	if view.Lane == nil || view.Lane.Name != "North" || mirrorGets(script) != 1 {
+		t.Fatalf("page %+v reads %d", view.Lane, mirrorGets(script))
+	}
+}
+
+func TestLaneSnapshotFallsBackToTheNewestValid(t *testing.T) {
+	valid := laneSnap("North", laneColor, subChatB, "2026-11-12T09:00:00Z")
+	newer := laneSnap("South", "blue", subChatB, "2026-11-12T09:00:00Z")
+	script := &subScript{
+		channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 2)),
+		mirrorBody:   lanePage(subGen, 2, false, laneEntry(1, valid), laneEntry(2, newer)),
+	}
+	h, _, _ := subSurface(t, script)
+	got, _ := readSubList(t, h)
+	view, _ := findSub(got, subOwner, subChat, subGen)
+	if view.Lane == nil || view.Lane.Name != "North" || view.Lane.Color != laneColor {
+		t.Fatalf("fallback %+v", view.Lane)
+	}
+	script.mirrorBody = lanePage(subGen, 1, false, laneEntry(1, newer))
+	plain, _, _ := subSurface(t, script)
+	got, _ = readSubList(t, plain)
+	view, _ = findSub(got, subOwner, subChat, subGen)
+	if view.Lane != nil {
+		t.Fatalf("plain %+v", view.Lane)
+	}
+}
+
+func TestOwnerIndexSubscriptionGainsALane(t *testing.T) {
+	h, dir, srv := subSurface(t, &subScript{})
+	inst := installationOf(t, dir)
+	script := srv.Config.Handler.(*subScript)
+	script.channelsBody = channelsOf(fmt.Sprintf(`{"owner":%q,"chat":%q,"title":"Shared lane · North","generation":%q,"created_at":"2026-11-14T09:30:00.000Z","access":"owner","mirror_last":1,"comments_last":0,"members":[]}`, inst, subChat, subGen))
+	script.mirrorBody = lanePage(subGen, 1, false, laneEntry(1, laneSnap("North", laneColor, subChatB, "2026-11-12T09:00:00Z")))
+	got, _ := readSubList(t, h)
+	view, ok := findSub(got, inst, subChat, subGen)
+	if !ok || view.Access != "owner" || view.Lane == nil || view.Lane.Name != "North" {
+		t.Fatalf("owner %+v ok %v", view, ok)
+	}
+}
+
+func TestLaneSnapshotEdges(t *testing.T) {
+	valid := laneSnap("North", laneColor, subChatB, "2026-11-12T09:00:00Z")
+	t.Run("plain title", func(t *testing.T) {
+		script := &subScript{
+			channelsBody: channelsOf(guestChannel(subOwner, subChat, "Synthetic title", subGen, "read", 1)),
+			mirrorBody:   lanePage(subGen, 1, false, laneEntry(1, valid)),
+		}
+		h, _, _ := subSurface(t, script)
+		got, _ := readSubList(t, h)
+		view, _ := findSub(got, subOwner, subChat, subGen)
+		if view.Lane != nil || mirrorGets(script) != 0 {
+			t.Fatalf("plain %+v reads %d", view.Lane, mirrorGets(script))
+		}
+	})
+	t.Run("no mirror", func(t *testing.T) {
+		script := &subScript{channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 0))}
+		h, _, _ := subSurface(t, script)
+		got, _ := readSubList(t, h)
+		view, _ := findSub(got, subOwner, subChat, subGen)
+		if view.Lane != nil || mirrorGets(script) != 0 {
+			t.Fatalf("quiet %+v reads %d", view.Lane, mirrorGets(script))
+		}
+	})
+	t.Run("bad chat", func(t *testing.T) {
+		script := &subScript{
+			channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 1)),
+			mirrorBody:   lanePage(subGen, 1, false, laneEntry(1, laneSnap("North", laneColor, "not-a-chat-id!!", "2026-11-12T09:00:00Z"))),
+		}
+		h, _, _ := subSurface(t, script)
+		got, _ := readSubList(t, h)
+		view, _ := findSub(got, subOwner, subChat, subGen)
+		if view.Lane != nil {
+			t.Fatalf("bad chat %+v", view.Lane)
+		}
+	})
+	t.Run("wrong generation", func(t *testing.T) {
+		script := &subScript{
+			channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 1)),
+			mirrorBody:   lanePage(subGenB, 1, false, laneEntry(1, valid)),
+		}
+		h, _, _ := subSurface(t, script)
+		got, _ := readSubList(t, h)
+		view, _ := findSub(got, subOwner, subChat, subGen)
+		if view.Lane != nil || mirrorGets(script) != 1 {
+			t.Fatalf("gen %+v reads %d", view.Lane, mirrorGets(script))
+		}
+	})
+	t.Run("hello", func(t *testing.T) {
+		script := &subScript{
+			channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 1)),
+			mirrorBody:   lanePage(subGen, 1, false, laneEntry(1, valid)),
+			hellosLeft:   2,
+		}
+		h, _, _ := subSurface(t, script)
+		got, _ := readSubList(t, h)
+		view, ok := findSub(got, subOwner, subChat, subGen)
+		if !ok || view.Lane != nil || mirrorGets(script) != 0 {
+			t.Fatalf("hello %+v ok %v reads %d", view.Lane, ok, mirrorGets(script))
+		}
+	})
+	t.Run("damaged", func(t *testing.T) {
+		script := &subScript{
+			channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 1)),
+			mirrorBody:   lanePage(subGen, 1, false, laneEntry(1, valid)),
+		}
+		h, dir, _ := subSurface(t, script)
+		got, _ := readSubList(t, h)
+		view, _ := findSub(got, subOwner, subChat, subGen)
+		if view.Lane == nil || mirrorGets(script) != 1 {
+			t.Fatalf("before %+v reads %d", view.Lane, mirrorGets(script))
+		}
+		path := filepath.Join(dir, team.CopiesDir, teamServerID, subOwner, subChat, subGen, "mirror.jsonl")
+		if err := os.WriteFile(path, []byte("broken\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, _ = readSubList(t, h)
+		view, _ = findSub(got, subOwner, subChat, subGen)
+		if view.Lane != nil || mirrorGets(script) != 1 {
+			t.Fatalf("damaged %+v reads %d", view.Lane, mirrorGets(script))
+		}
+	})
+}
+
+func TestLaneSnapshotSurvivesAFatPrefix(t *testing.T) {
+	h, dir, _ := subSurface(t, &subScript{
+		channelsBody: channelsOf(guestChannel(subOwner, subChat, "Shared lane · North", subGen, "read", 9)),
+	})
+	id := team.CopyID{Server: teamServerID, Owner: subOwner, Chat: subChat, Generation: subGen}
+	fat := append(append([]byte(`{"t":"pad","x":"`), bytes.Repeat([]byte("a"), 8<<20+1)...), '"', '}')
+	recs := []team.MirrorRecord{{
+		Seq: 1, Key: "lane/1", Author: shareSeat, At: "2026-11-14T09:30:00.000Z", Body: fat,
+	}}
+	for seq := 2; seq <= 8; seq++ {
+		body := json.RawMessage(`{"t":"pad"}`)
+		if seq == 2 {
+			body = json.RawMessage(laneSnap("Old", laneColor, subChatB, "2026-11-12T09:00:00Z"))
+		}
+		recs = append(recs, team.MirrorRecord{
+			Seq: uint64(seq), Key: fmt.Sprintf("lane/%d", seq), Author: shareSeat,
+			At: "2026-11-14T09:30:00.000Z", Body: body,
+		})
+	}
+	recs = append(recs, team.MirrorRecord{
+		Seq: 9, Key: "lane/9", Author: shareSeat, At: "2026-11-14T09:30:00.000Z",
+		Body: json.RawMessage(laneSnap("New", laneColor, subChatB, "2026-11-12T09:00:00Z")),
+	})
+	if err := team.AppendCopy(dir, id, team.MirrorLog, recs); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := readSubList(t, h)
+	view, ok := findSub(got, subOwner, subChat, subGen)
+	if !ok || view.Lane == nil || view.Lane.Name != "New" || view.Lane.Color != laneColor {
+		t.Fatalf("tail %+v ok %v", view.Lane, ok)
 	}
 }

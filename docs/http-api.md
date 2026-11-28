@@ -1753,6 +1753,7 @@ time stay as they were. Any other state is `409` `not_active`.
 | 409 | `no_history` | The node has no single chat id in its session log |
 | 409 | `share_fixed` | The server or the scope differs from the stored share |
 | 409 | `not_active` | The share is stopping, lost, or full |
+| 409 | `lane_share` | The chat is owned by a lane share. Change it through the lane route |
 | 422 | `unknown_member` | The team server rejected a member |
 | 500 | `identity_unavailable` | The installation ID cannot be read |
 | 500 | `store_unavailable` | A file cannot be read or written |
@@ -1760,7 +1761,11 @@ time stay as they were. Any other state is `409` `not_active`.
 | 502 | `bad_server` | Hello named another server, or the answer was not protocol 1 |
 | 502 | `refused` | The team server answered 401 |
 | 507 | `server_full` | The team server is at its quota |
-| 507 | `too_many` | This seat already has 256 shares |
+| 507 | `too_many` | This seat already has 1000 shares |
+
+A chat owned by a lane share answers `409` `lane_share` to `PUT` and
+`DELETE`. `GET` still returns the view, with `lane` set to that lane share's
+id and `members` taken from the lane.
 
 `DELETE /api/team/shares/{node}` stops sharing. The share is saved as
 `stopping` before any call, and from then on the outbox sends no content
@@ -1780,6 +1785,64 @@ the answer is `204`.
 | 502 | `bad_server` | Hello or the delete call failed for a reason other than being unreachable or naming another server. The share stays `stopping` |
 | 202 | `stopping` | The server could not be reached, or Hello named another server |
 
+### Lane shares
+
+`GET /api/team/lane-shares` answers `200` and `{"lane_shares":[<view>]}`.
+An empty list is `{"lane_shares":[]}`. The file is not created when there
+are no lane shares.
+`GET /api/team/lane-shares/{lane}` answers one view, or `404` `not_found`.
+`{lane}` is the local lane id. Neither call contacts a team server.
+
+```json
+{"lane":"north","id":"...","server":"...","scope":"from_now","name":"North",
+ "color":"#1a2b3c","members":[{"seat":"...","access":"write"}],"state":"active",
+ "delivery":"ok","chats":0,"excluded":1,"shared_at":"2026-11-12T09:30:00Z"}
+```
+
+`chats` is how many chat shares this lane owns. `excluded` is how many
+chats were archived when the lane was shared. `delivery` is the same word
+as on a chat share.
+
+`PUT /api/team/lane-shares/{lane}` takes the chat share body, including
+`membership_only` with the same rules, plus `name`, `color`, and
+`excluded`. `name` is 1 to 80 bytes of UTF-8 without control characters.
+`color` is `#` and six lowercase hex digits. `excluded` is the local ids
+of chats archived at that moment. The PUT does not create chat shares.
+
+No lane share yet: Hello, create the index channel titled `Shared lane · `
+plus the name, set its members, and save `rev` 1 and `index_rev` 1.
+Success is `201` and the view. `from_now` records the record count of
+every lane chat that already has a log. `all` records none.
+
+A lane share already: `server` and `scope` must equal the stored ones,
+otherwise `409` `share_fixed`. State `active` changes the name, the color,
+and the members, and increases `rev` when the members change. `excluded`
+stays as stored at create. Any other state is `409` `not_active`.
+
+`DELETE /api/team/lane-shares/{lane}` marks the lane share and each chat
+share it owns stopping, kicks the outbox, and answers `202` and the view
+with state `stopping`. An unknown lane is `404` `not_found`. The outbox
+deletes the index channel and then the lane share. A server that is no
+longer in the server file is removed locally, with its chat shares, and
+no call is made. The answer is never `204`. DELETE does not call the team
+server, so it does not answer 502.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `bad_request` | The body, the name, the color, the scope, or a member is not usable |
+| 404 | `not_found` | The lane or the server is not known |
+| 409 | `share_fixed` | The server or the scope differs from the stored lane share |
+| 409 | `share_changed` | `membership_only` names another index channel or generation, or the lane is not shared |
+| 409 | `not_active` | The lane share is stopping, lost, or full |
+| 422 | `unknown_member` | The team server rejected a member |
+| 500 | `identity_unavailable` | The installation ID cannot be read |
+| 500 | `store_unavailable` | A file cannot be read or written |
+| 502 | `unreachable` | Hello or a channel call could not reach the server |
+| 502 | `bad_server` | Hello named another server, or the answer was not protocol 1 |
+| 502 | `refused` | The team server answered 401 |
+| 507 | `server_full` | The team server is at its quota |
+| 507 | `too_many` | This seat already has 64 lane shares |
+
 ### Subscriptions
 
 `GET /api/team/subscriptions` lists chats shared with this seat. It answers
@@ -1790,6 +1853,11 @@ A view contains `server`, `server_name`, `owner`, `owner_name`, `chat`,
 sighting. Access is `read`, `write` or `owner`; state is `live` or `ended`.
 Unread means the subscription is live and comments are unseen, or, for a
 guest, mirror entries are unseen. The owner's own mirror entries do not count.
+A view whose title starts with `Shared lane · ` and whose local copy contains a
+valid lane snapshot gains `lane` (`name`, `color`, `chats`). An invalid snapshot
+leaves the field absent, so the chat stays a plain subscription. The list reads
+at most one unseen mirror page per candidate, including an owner's index, and
+does not use the unread flag.
 `truncated` says the 4096-entry
 limit prevented a new subscription from being stored. Delivery is `ok`,
 `offline`, `refused` or `changed` as in the share view, and starts at `ok`.

@@ -228,6 +228,24 @@ func TestPeopleBlobRejectsUnsafeRequestsBeforeTransfer(t *testing.T) {
 	}
 }
 
+func TestPeopleBlobReceiptAcceptsAnUnknownField(t *testing.T) {
+	payload := []byte("synthetic bytes")
+	digest := sha256.Sum256(payload)
+	hash := hex.EncodeToString(digest[:])
+	srv, _ := serveTeam(t, func(w http.ResponseWriter, r *http.Request, _ *capturedRequest) {
+		if r.URL.Path == "/v1/hello" {
+			w.Header().Set("Scimux-Blob-Generation", "1")
+			_, _ = io.WriteString(w, helloBody(helloID, helloName))
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"id":"`+hash+`","size":15,"extra":true}`)
+	})
+	if err := clientOn(srv).PutPeopleBlob(context.Background(), srv.URL, regToken, helloID, seatID, "main", "0001020304050607", hash, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPeopleBlobUploadRejectsRelayFailuresAndInvalidReceipts(t *testing.T) {
 	payload := []byte("x")
 	sum := sha256.Sum256(payload)
