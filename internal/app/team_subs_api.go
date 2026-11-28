@@ -309,11 +309,11 @@ func (h *teamHandler) attachLanes(r *http.Request, view *subListResponse) {
 			continue
 		}
 		id := team.CopyID{Server: sub.Server, Owner: sub.Owner, Chat: sub.Chat, Generation: sub.Generation}
-		records, last, err := team.ReadCopy(h.dataDir, id, team.MirrorLog, 0, 1<<20, 8<<20)
+		records, last, err := laneMirrorTail(h.dataDir, id)
 		entry, joined := serverFor(entries, sub.Server)
 		if err == nil && sub.State == "live" && sub.MirrorLast > 0 && joined && last < sub.MirrorLast {
 			h.pullLaneMirror(r, entry, id, *sub, last)
-			records, _, err = team.ReadCopy(h.dataDir, id, team.MirrorLog, 0, 1<<20, 8<<20)
+			records, _, err = laneMirrorTail(h.dataDir, id)
 		}
 		if err != nil {
 			continue
@@ -333,6 +333,20 @@ func (h *teamHandler) pullLaneMirror(r *http.Request, entry team.Entry, id team.
 	req, release := h.beginPeopleCopyOperation(r, id, "")
 	defer release()
 	_, _, _, _ = h.appendSubscriptionPage(req, id, team.Subscription{Access: sub.Access}, entry, team.MirrorLog, page.Entries)
+}
+
+// laneMirrorTail reads the newest few mirror records. A probe with no
+// entries returns the copy's last sequence, so a fat prefix is not parsed.
+func laneMirrorTail(dir string, id team.CopyID) ([]team.MirrorRecord, uint64, error) {
+	_, last, err := team.ReadCopy(dir, id, team.MirrorLog, ^uint64(0), 1, 1)
+	if err != nil {
+		return nil, 0, err
+	}
+	after := uint64(0)
+	if last > 8 {
+		after = last - 8
+	}
+	return team.ReadCopy(dir, id, team.MirrorLog, after, 8, 8<<20)
 }
 
 func sharedLaneFrom(records []team.MirrorRecord) *sharedLane {
