@@ -5182,3 +5182,38 @@ test("an index subscription is not classified for unread comments", async () => 
   assert.equal(paths.some(path => path.includes("/need/")), true);
   f.feature.destroy();
 });
+
+test("a sharer with no lane has an empty lane list", () => {
+  assert.deepEqual(guestGroups([{ ...base }], [])[0].lanes, []);
+});
+
+test("lane chats form ordered sub-groups and a chat joins only the first", () => {
+  const alpha = { ...base, chat: "adx", title: "Shared lane · Alpha", lane: { name: "Alpha", color: "#334455", chats: [{ chat: "only", created_at: "1" }] } };
+  const same = { ...base, chat: "bdx", title: "Shared lane · alpha", lane: { name: "alpha", color: 4, chats: [] } };
+  const empty = { ...base, chat: "edx", title: "Shared lane · Empty", lane: { name: 5 } };
+  const protein = { ...base, chat: "idx", title: "Shared lane · Protein", lane: { name: "Protein", color: "#11aa22", chats: [null, { chat: "c", created_at: "1" }] } };
+  const zeta = { ...base, chat: "zdx", title: "Shared lane · zeta", lane: { name: "zeta", color: "red;background:url(x)", chats: [{ chat: "late", created_at: "2" }, { chat: "early", created_at: "1" }, { chat: "c", created_at: "1" }] } };
+  const other = { ...base, server: "other", owner: "p", chat: "odx", owner_name: "Zed", server_name: "Other", title: "Shared lane · Other", lane: { name: "Other", color: "#abcdef", chats: [{ chat: "c", created_at: "1" }] } };
+  const early = { ...base, chat: "early", title: "A", first_seen: "1" };
+  const late = { ...base, chat: "late", title: "A", first_seen: "2" };
+  const chat = { ...base, chat: "c", title: "C" };
+  const only = { ...base, chat: "only", title: "Only" };
+  const loose = { ...base, chat: "loose", title: "Zed" };
+  const groups = guestGroups([zeta, protein, alpha, same, empty, other, late, early, chat, only, loose], []);
+  const home = groups.find(group => group.key === "s/o");
+  assert.deepEqual(home.lanes.map(lane => [lane.key, lane.label, lane.color, lane.items.map(item => item.chat)]), [
+    ["s/o/lane/adx", "Alpha", "#334455", ["only"]],
+    ["s/o/lane/bdx", "alpha", "", []],
+    ["s/o/lane/edx", "", "", []],
+    ["s/o/lane/idx", "Protein", "#11aa22", ["c"]],
+    ["s/o/lane/zdx", "zeta", "red;background:url(x)", ["early", "late"]],
+  ]);
+  assert.deepEqual(home.items.map(item => item.chat), ["loose"]);
+  const away = groups.find(group => group.key === "other/p");
+  assert.deepEqual(away.lanes.map(lane => lane.items.length), [0]);
+  assert.equal(guestModule.laneForChat(chat, [protein, zeta]).name, "Protein");
+  assert.equal(guestModule.laneForChat(chat, [other, protein]).index, "idx");
+  assert.equal(guestModule.laneForChat(protein, [protein]), null);
+  assert.equal(guestModule.laneForChat(null, null), null);
+  assert.equal(guestModule.laneForChat(early, [protein]), null);
+});
