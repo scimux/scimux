@@ -5244,7 +5244,7 @@ function leaveLaneList() {
   const index = laneIndex({ lane: { name: "Protein", color: "#11aa22", chats: [null, { chat: "" }, { chat: "c", created_at: "1" }, { chat: "late", created_at: "2" }, { chat: "missing", created_at: "3" }] } });
   const late = { ...base, chat: "late", title: "Late", people_copy_instance: copy };
   const loose = { ...base, chat: "loose", title: "Loose" };
-  return { copy, index, late, loose, views: [index, { ...base }, late, loose] };
+  return { copy, index, late, loose, views: [index, { ...base }, late, loose, { ...base, server: "other", owner: "p", chat: "late" }, { ...base, owner: "p", chat: "c" }] };
 }
 
 test("a plain chat keeps the single-chat leave label", async () => {
@@ -5281,8 +5281,30 @@ test("a lane chat offers leave lane and deletes the lane after one confirm", asy
     "/api/team/subscriptions/s/o/late/g?copy_instance=" + copy,
     "/api/team/subscriptions/s/o/idx/g",
   ]);
-  assert.equal(f.feature.tab.activities().some(view => view.chat === "c" || view.chat === "late" || view.chat === "idx"), false);
+  assert.equal(f.feature.tab.activities().some(view => view.server === "s" && view.owner === "o" && (view.chat === "c" || view.chat === "late")), false);
   assert.equal(f.feature.tab.activities().some(view => view.chat === "loose"), true);
+  assert.equal(f.feature.tab.activities().some(view => view.server === "other" && view.chat === "late"), true);
+  assert.equal(f.feature.tab.activities().some(view => view.owner === "p" && view.chat === "c"), true);
+  f.feature.destroy();
+});
+
+test("a finished lane leave keeps the chat the reader moved to", async () => {
+  const { views, loose } = leaveLaneList();
+  const pending = deferred();
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") return pending.promise;
+    return readAnswer();
+  });
+  f.feature.tick(); await f.feature.settled();
+  f.open(); await f.feature.settled();
+  f.click("guestremove");
+  f.open("team/" + guestKey(loose));
+  pending.resolve({});
+  await f.feature.settled();
+  assert.equal(f.feature.tab.selected(), "team/" + guestKey(loose));
+  assert.equal(f.feature.hasActivity("team/s/o/c/g"), false);
+  assert.equal(f.feature.hasActivity("team/s/o/late/g"), false);
   f.feature.destroy();
 });
 
@@ -5310,7 +5332,7 @@ test("a lane leave stops on the first failed removal and keeps the local list", 
     assert.equal(f.get("guestnote").textContent, note);
     assert.equal(f.get("guestremove").disabled, false);
     assert.equal(f.doc.activeElement, f.get("guestremove"));
-    assert.equal(f.feature.tab.activities().some(view => view.chat === "c"), true);
+    assert.equal(f.feature.tab.activities().some(view => view.server === "s" && view.owner === "o" && view.chat === "c"), true);
     f.feature.destroy();
   }
 });
@@ -5331,7 +5353,7 @@ test("a lane leave that fails after the reader moves on leaves the new view alon
   await f.feature.settled();
   assert.equal(f.feature.tab.selected(), "team/" + guestKey(loose));
   assert.equal(f.get("guestnote").textContent, "");
-  assert.equal(f.feature.tab.activities().some(view => view.chat === "c"), true);
+  assert.equal(f.feature.tab.activities().some(view => view.server === "s" && view.owner === "o" && view.chat === "c"), true);
   f.feature.destroy();
 });
 

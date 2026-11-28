@@ -779,6 +779,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     $("chatmission").dataset.seat = view.owner;
     $("chatmission").textContent = "From " + owner + " · " + view.server_name;
     $("gueststate").textContent = guestStateText(view);
+    const button = $("guestremove");
+    const lane = laneForChat(view, answer.subscriptions);
+    const label = lane ? "Leave lane" : "Leave shared chat and remove local copy";
+    button.setAttribute("aria-label", label);
+    button.title = label;
   }
   function openView(view) {
     reactionUI.close();
@@ -1027,7 +1032,11 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
   function removeClick() {
     if (!open || open.removing) return;
     const current = open;
-    if (!confirmRemove("Leave this shared chat and remove its saved copy from this computer? The owner's chat will not be deleted.")) {
+    const lane = laneForChat(current.view, answer.subscriptions);
+    const message = lane
+      ? "Leave the shared lane " + lane.name + " and remove its saved chats from this computer? The owner's chats will not be deleted."
+      : "Leave this shared chat and remove its saved copy from this computer? The owner's chat will not be deleted.";
+    if (!confirmRemove(message)) {
       $("guestremove").focus();
       return;
     }
@@ -1035,7 +1044,59 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
     current.removing = true;
     current.removeNote = true;
     $("guestremove").disabled = true;
-    track(remove(current));
+    track(lane ? removeLane(current) : remove(current));
+  }
+  async function deleteSubscription(view) {
+    const instance = view.people_copy_instance || "";
+    try {
+      await api(LIST + "/" + guestKey(view) + (instance ? "?copy_instance=" + encodeURIComponent(instance) : ""), { method: "DELETE" });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  function removalFailed(current, error) {
+    if (open !== current) return;
+    current.removing = false;
+    current.removeNote = true;
+    $("guestremove").disabled = false;
+    let code = "";
+    try { code = JSON.parse(error.message).error; } catch {}
+    let text = "That did not work. Try again.";
+    if (code === "unreachable") text = "The server could not be reached. Try again later.";
+    $("guestnote").textContent = text;
+    $("guestremove").focus();
+  }
+  function removalFinished(current, keys) {
+    if (destroyed) return;
+    const gone = new Set(keys);
+    answer.subscriptions = answer.subscriptions.filter(view => !gone.has(guestKey(view)));
+    invalidateCards();
+    if (open !== current) return;
+    open = null;
+    reactionUI.close();
+    readGeneration++;
+    clearDisclosure();
+    panel.removed();
+  }
+  async function removeLane(current) {
+    const lane = laneForChat(current.view, answer.subscriptions);
+    const index = answer.subscriptions.find(view => isLaneIndex(view) && view.server === current.view.server && view.owner === current.view.owner && view.chat === lane.index);
+    const targets = [];
+    for (const entry of index.lane.chats) {
+      const id = entry && entry.chat;
+      if (!id) continue;
+      for (const item of answer.subscriptions) {
+        if (item.server === current.view.server && item.owner === current.view.owner && item.chat === id) targets.push(item);
+      }
+    }
+    targets.push(index);
+    try {
+      for (const view of targets) await deleteSubscription(view);
+    } catch (error) {
+      removalFailed(current, error);
+      return;
+    }
+    removalFinished(current, targets.map(guestKey));
   }
   function actionView() { return open || (actionOwner && ownerCurrent(actionOwner) ? actionOwner : owner); }
   function sharedClick(event) {
