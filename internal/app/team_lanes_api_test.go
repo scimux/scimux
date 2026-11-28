@@ -697,6 +697,9 @@ func TestLaneShareStoreEdges(t *testing.T) {
 		if err != nil || lanes[0].State != "active" {
 			t.Fatalf("lane = %+v %v", lanes, err)
 		}
+		if err := asTeamHandler(t, h).markLaneChatsStopping(shareUID); err == nil {
+			t.Fatal("damaged share file marked")
+		}
 	})
 
 	t.Run("other chat", func(t *testing.T) {
@@ -712,8 +715,12 @@ func TestLaneShareStoreEdges(t *testing.T) {
 	})
 
 	t.Run("helpers", func(t *testing.T) {
-		h, _, _, _ := readySurface(t, &shareScript{})
+		h, dir, _, _ := readySurface(t, &shareScript{})
 		th := asTeamHandler(t, h)
+		seedLane(t, dir, laneLocal, shareUID)
+		if err := th.removeLane(shareUID); err != nil {
+			t.Fatalf("remove = %v", err)
+		}
 		if err := th.removeLane(shareUID); err != nil {
 			t.Fatalf("missing remove = %v", err)
 		}

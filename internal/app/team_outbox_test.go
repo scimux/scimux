@@ -3334,6 +3334,7 @@ func TestLaneReconcileAdoptsASameServerShare(t *testing.T) {
 	box, dir, _, script := laneBox(t)
 	script.putStatus = http.StatusInternalServerError
 	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, "", "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
+	saveQuietChat(t, dir, "held", "Held", shareUIDC, shareUID, shareGen, "active", "2026-11-12T09:00:00Z", 1)
 	saveLane(t, dir, team.LaneShare{Members: []team.Member{{Seat: shareSeat, Access: "write"}}, Rev: 4}, "2026-11-12T09:30:00Z")
 	box.tick(context.Background())
 	stored, ok := storedShare(t, dir, shareUIDB)
@@ -3734,6 +3735,79 @@ func TestOutboxDeliversPastADamagedLaneFile(t *testing.T) {
 	stored, ok := storedShare(t, dir, shareUID)
 	if string(raw) != "{" || err != nil || !ok || len(snapshotCalls(calls)) == 0 {
 		t.Fatalf("lane %q share %+v calls %d %v", raw, stored, len(snapshotCalls(calls)), err)
+	}
+}
+
+func TestLaneReconcileStoreEdges(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	saveLane(t, dir, team.LaneShare{ID: shareUIDB, Lane: "south"}, "2026-11-12T09:30:00Z")
+	box.reconcileLane(context.Background(), nil, "", nil, "aaaaaaaaaaaaaaaa", map[string][]team.Channel{})
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 {
+		t.Fatalf("missing id removed %+v %v", lanes, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, team.LaneSharesFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := box.freshLane(shareUIDB); ok {
+		t.Fatal("damaged lane file loaded")
+	}
+	if err := os.Remove(filepath.Join(dir, team.LaneSharesFile)); err != nil {
+		t.Fatal(err)
+	}
+	saveLane(t, dir, team.LaneShare{}, "2026-11-12T09:30:00Z")
+	if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := box.freshLane(shareUID); ok {
+		t.Fatal("damaged share file loaded")
+	}
+	if err := os.Remove(filepath.Join(dir, team.SharesFile)); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(box.mutateShare("aaaaaaaaaaaaaaaa", func(*team.Share) {}), team.ErrNotFound) {
+		t.Fatal("missing share was saved")
+	}
+	if !errors.Is(box.mutateLane("aaaaaaaaaaaaaaaa", func(*team.LaneShare) {}), team.ErrNotFound) {
+		t.Fatal("missing lane was saved")
+	}
+	if err := os.WriteFile(filepath.Join(dir, team.SharesFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if errors.Is(box.mutateShare(shareUIDB, func(*team.Share) {}), team.ErrNotFound) {
+		t.Fatal("damaged share file looked empty")
+	}
+	if err := os.WriteFile(filepath.Join(dir, team.LaneSharesFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if errors.Is(box.mutateLane(shareUID, func(*team.LaneShare) {}), team.ErrNotFound) {
+		t.Fatal("damaged lane file looked empty")
+	}
+	if err := os.Remove(filepath.Join(dir, team.SharesFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, team.LaneSharesFile)); err != nil {
+		t.Fatal(err)
+	}
+	script.failPath = "/v1/hello"
+	saveLane(t, dir, team.LaneShare{}, "")
+	box.shareOps = nil
+	box.tick(context.Background())
+	lanes, err = team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 || lanes[0].CheckedAt != "" || callCount(calls, http.MethodGet, "/v1/channels") != 0 {
+		t.Fatalf("hello lanes %+v calls %+v %v", lanes, snapshotCalls(calls), err)
+	}
+}
+
+func TestLaneReconcileKeepsALaneTheFileWillNotDrop(t *testing.T) {
+	box, dir, calls, _ := laneBox(t)
+	saveLane(t, dir, team.LaneShare{State: "stopping"}, "2026-11-12T09:30:00Z")
+	denyDataWrites(t, dir)
+	box.tick(context.Background())
+	_ = os.Chmod(dir, 0o700)
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || len(lanes) != 1 || lanes[0].State != "stopping" || suffixCount(calls, http.MethodDelete, "/"+shareUID) != 1 {
+		t.Fatalf("lanes %+v deletes %+v %v", lanes, snapshotCalls(calls), err)
 	}
 }
 

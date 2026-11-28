@@ -150,7 +150,10 @@ func (o *shareOutbox) tick(ctx context.Context) {
 		return
 	}
 	if len(shares) == 0 {
-		return
+		lanes, _ := team.LoadLaneShares(o.dataDir)
+		if len(lanes) == 0 {
+			return
+		}
 	}
 	inst, err := identity.LoadInstallation(o.dataDir)
 	if err != nil {
@@ -161,6 +164,7 @@ func (o *shareOutbox) tick(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	o.reconcileLanes(ctx, entries, owner, nodes)
 	for _, share := range shares {
 		o.one(ctx, entries, owner, share, nodes)
 	}
