@@ -739,6 +739,9 @@ function unsupportedSelector(method, selector){
 const KNOWN_CLOSEST = new Set([
   "[data-fare-capsule]",
   "[data-fold]",
+  "[data-share-lane]",
+  "[data-lane-head]",
+  ".lheadrow",
   ".attnstation-hit",
   "[data-jump]",
   "[data-medit]",
@@ -5887,4 +5890,174 @@ test("P7: tab bar rebuilds only when counts (or tab set) change", () => {
 
   feature.destroy();
   void first;
+});
+
+function laneMap(opts = {}) {
+  const node = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  const name = opts.name || "Lane";
+  const mapwrap = fakeEl("mapwrap");
+  const body = { classList: { _set: new Set(), toggle(){}, contains(){ return false; }, add(){}, remove(){} } };
+  const opened = [];
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, mapscroll: fakeEl("mapscroll"), maptoolbar: fakeEl("tb"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
+    },
+    document: layersDoc(body),
+    storage: memoryStorage({
+      [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+      [MAP_FOLD_KEY]: JSON.stringify([]),
+      ...(opts.full ? { [MAP_FULL_KEY]: "1" } : {}),
+    }),
+    isDesktop: () => opts.desktop !== false,
+    mapOpen: () => opts.desktop !== false,
+    level: () => opts.level || 1,
+    nodes: () => [node],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name }],
+      color: () => "#00f", name: () => name, byId: { a: node },
+    }),
+    laneColor: () => "#00f",
+    agentLogo: () => "",
+    icons: { SHARE_ICON: "SHAREMARK", ICON_USERS: "USERMARK" },
+    laneShare: opts.laneShare,
+    openLaneShare: opts.open === false ? undefined : (id) => opened.push(id),
+  });
+  feature.bind();
+  feature.restoreChrome();
+  feature.render();
+  return { feature, mapwrap, opened, storage: null };
+}
+
+test("a stack lane header offers share and keeps the fold button", () => {
+  const ui = laneMap();
+  assert.match(ui.mapwrap.innerHTML, /class="lhead /);
+  assert.match(ui.mapwrap.innerHTML, /class="lheadrow"/);
+  assert.match(ui.mapwrap.innerHTML, /class="lshare"/);
+  assert.match(ui.mapwrap.innerHTML, /aria-label="Share lane Lane"/);
+  assert.match(ui.mapwrap.innerHTML, /SHAREMARK/);
+  assert.doesNotMatch(ui.mapwrap.innerHTML, /class="lshared"/);
+  assert.doesNotMatch(ui.mapwrap.innerHTML, /lheadrow revealed/);
+  const doc = ui.feature && ui.mapwrap;
+  void doc;
+  firstListener(ui.mapwrap, "click")({
+    target: fakeTarget({ shareLane: "L" }, "[data-share-lane]"),
+  });
+  assert.deepEqual(ui.opened, ["L"]);
+  ui.feature.destroy();
+});
+
+test("a shared lane header counts people and escapes the lane name", () => {
+  const nasty = "<img src=x onerror=1>";
+  const shared = laneMap({
+    name: nasty,
+    laneShare: () => ({ state: "active", members: [{ seat: "a" }, { seat: "b" }] }),
+  });
+  assert.match(shared.mapwrap.innerHTML, /aria-label="Shared with 2 people"/);
+  assert.match(shared.mapwrap.innerHTML, /class="lshared"/);
+  assert.match(shared.mapwrap.innerHTML, /USERMARK/);
+  assert.match(shared.mapwrap.innerHTML, /aria-label="Share lane &lt;img src=x onerror=1&gt;"/);
+  assert.doesNotMatch(shared.mapwrap.innerHTML, /<img/);
+  firstListener(shared.mapwrap, "click")({
+    target: fakeTarget({ shareLane: "L" }, "[data-share-lane]"),
+  });
+  assert.deepEqual(shared.opened, ["L"]);
+  shared.feature.destroy();
+
+  const quiet = laneMap({ laneShare: () => ({ state: "stopping", members: [{}, {}] }) });
+  assert.doesNotMatch(quiet.mapwrap.innerHTML, /class="lshared"/);
+  quiet.feature.destroy();
+
+  const zero = laneMap({ laneShare: () => ({ state: "active" }) });
+  assert.match(zero.mapwrap.innerHTML, /aria-label="Shared with 0 people"/);
+  zero.feature.destroy();
+
+  const one = laneMap({ laneShare: () => ({ state: "active", members: [{}] }) });
+  assert.match(one.mapwrap.innerHTML, /aria-label="Shared with 1 people"/);
+  one.feature.destroy();
+});
+
+test("a header tap reveals the share button, folds, and survives a re-render", () => {
+  const ui = laneMap();
+  firstListener(ui.mapwrap, "click")({
+    target: fakeTarget({ fold: "L", laneHead: "L" }, ["[data-lane-head]", "[data-fold]"]),
+  });
+  assert.match(ui.mapwrap.innerHTML, /lheadrow revealed/);
+  assert.match(ui.mapwrap.innerHTML, /class="lshare"/);
+  const kept = ui.mapwrap.innerHTML;
+  ui.feature.render();
+  assert.equal(ui.mapwrap.innerHTML, kept);
+  ui.feature.invalidate();
+  ui.feature.render();
+  assert.match(ui.mapwrap.innerHTML, /lheadrow revealed/);
+  ui.feature.destroy();
+});
+
+test("a tap elsewhere hides the revealed share button and a tap on the header does not", () => {
+  const node = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
+  const mapwrap = fakeEl("mapwrap");
+  const body = { classList: { _set: new Set(), toggle(){}, contains(){ return false; }, add(){}, remove(){} } };
+  const doc = layersDoc(body);
+  const feature = createMapFeature({
+    roots: {
+      mapwrap, mapscroll: fakeEl("mapscroll"), maptoolbar: fakeEl("tb"),
+      lanechips: fakeEl("chips"), maptabs: fakeEl("tabs"),
+    },
+    document: doc,
+    storage: memoryStorage({
+      [MAP_FOLD_KNOWN_KEY]: JSON.stringify(["L"]),
+      [MAP_FOLD_KEY]: JSON.stringify([]),
+    }),
+    isDesktop: () => true,
+    mapOpen: () => true,
+    level: () => 1,
+    nodes: () => [node],
+    groups: () => [],
+    laneFilter: () => "",
+    uiLoaded: () => true,
+    laneModel: () => ({
+      lanes: [{ id: "L", name: "Lane" }],
+      color: () => "#00f", name: () => "Lane", byId: { a: node },
+    }),
+    icons: { SHARE_ICON: "SHAREMARK", ICON_USERS: "USERMARK" },
+  });
+  feature.bind();
+  feature.render();
+  firstListener(mapwrap, "click")({
+    target: fakeTarget({ fold: "L", laneHead: "L" }, ["[data-lane-head]", "[data-fold]"]),
+  });
+  assert.match(mapwrap.innerHTML, /lheadrow revealed/);
+  firstListener(doc, "click")({ target: { closest(sel){ return sel === ".lheadrow" ? {} : null; } } });
+  assert.match(mapwrap.innerHTML, /lheadrow revealed/);
+  firstListener(doc, "click")({ target: { closest(){ return null; } } });
+  assert.doesNotMatch(mapwrap.innerHTML, /lheadrow revealed/);
+  feature.invalidate();
+  feature.render();
+  assert.doesNotMatch(mapwrap.innerHTML, /lheadrow revealed/);
+  feature.destroy();
+});
+
+test("the phone full-screen map keeps the share row and the desktop wall does not", () => {
+  const phone = laneMap({ desktop: false, level: 3, full: true });
+  assert.match(phone.mapwrap.innerHTML, /class="lshare"/);
+  assert.doesNotMatch(phone.mapwrap.innerHTML, /data-fold=/);
+  phone.feature.destroy();
+  const wall = laneMap({ desktop: true, full: true });
+  assert.doesNotMatch(wall.mapwrap.innerHTML, /class="lshare"/);
+  assert.doesNotMatch(wall.mapwrap.innerHTML, /class="lhead /);
+  wall.feature.destroy();
+});
+
+test("the lane share button is a 44px round target beside the unchanged head rule", () => {
+  assert.match(mapCssSrc, /\.lhead \{/);
+  assert.match(mapCssSrc, /\.lheadrow \.lhead\s*\{[^}]*width:\s*auto/);
+  assert.match(mapCssSrc, /\.lshare\s*,\s*\.lheadrow \.lshared\s*\{[^}]*min-width:\s*44px/);
+  assert.match(mapCssSrc, /min-height:\s*44px/);
+  assert.match(mapCssSrc, /border-radius:\s*999px/);
+  assert.match(mapCssSrc, /\.lheadrow:hover \.lshare/);
+  assert.match(mapCssSrc, /\.lheadrow:focus-within \.lshare/);
+  assert.match(mapCssSrc, /\.lheadrow\.revealed \.lshare/);
 });
