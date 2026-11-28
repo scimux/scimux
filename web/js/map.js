@@ -81,6 +81,7 @@ import {
   hardAttention, headStopKey, toggleMapSelection,
 } from "./map-model.js";
 import { cardConfigText } from "./cards.js";
+import { SHARE_ICON } from "./team-share.js";
 import { usageAgentDisplayName, vibeMetricLabels } from "./usage.js";
 import { createPopoverMenu } from "./menu.js";
 
@@ -1182,6 +1183,7 @@ export function createMapFeature(deps){
   let lastSelKey = "";
   let lastSelRow = null;
   let mapSig = "";
+  let revealedLane = "";
   /* Last painted map-tabs signature (selected tab + group set + waiting
      counts). Live counts put #maptabs on the poll path; the gate keeps a
      steady bar from rewriting every tick. */
@@ -1839,6 +1841,23 @@ export function createMapFeature(deps){
     updateMapPill(rows);
   }
 
+  function laneHead(b, col, folded, dimBlock){
+    const id = escape(b.lane.id);
+    const name = escape(b.lane.name || b.lane.id);
+    const icons = d.icons || {};
+    const share = typeof d.laneShare === "function" ? d.laneShare(b.lane.id) : null;
+    const active = share && share.state === "active";
+    const count = active ? (Array.isArray(share.members) ? share.members.length : 0) : 0;
+    const badge = active
+      ? `<button type="button" class="lshared" data-share-lane="${id}" aria-label="Shared with ${count} people">│${icons.ICON_USERS || ""}${count}</button>`
+      : "";
+    const revealed = revealedLane === b.lane.id ? " revealed" : "";
+    const fold = mapFull ? "" : ` data-fold="${id}"`;
+    const chev = mapFull ? "" : `<span class="chev">${folded ? "&#9656;" : "&#9662;"}</span>`;
+    const attn = b.rows.some(s => hardAttention(s.n)) ? `<span class="lattn"></span>` : "";
+    return `<div class="lheadrow${revealed}" data-lane-head="${id}"><button class="lhead ${dimBlock ? "dimmed" : ""}"${fold}>${chev}<span class="lswatch" style="background:${col}"></span><span class="lname">${name}</span><span class="lcount">${new Set(b.rows.map(s => s.n.id)).size}</span>${attn}</button><button type="button" class="lshare" data-share-lane="${id}" aria-label="Share lane ${name}">${icons.SHARE_ICON || SHARE_ICON}</button>${badge}</div>`;
+  }
+
   function renderMap(){
     if (!mapVisible()) return;
     /* Live tab badges: refresh before the wall/stack signature gate so a poll
@@ -1878,14 +1897,7 @@ export function createMapFeature(deps){
       const col = escape(model.color(b.lane.id));
       const folded = !mapFull && mapFold.has(b.lane.id);
       const dimBlock = focusLane && b.lane.id !== focusLane;
-      const head = `
-      <button class="lhead ${dimBlock ? "dimmed" : ""}" ${mapFull ? "" : `data-fold="${escape(b.lane.id)}"`}>
-        ${mapFull ? "" : `<span class="chev">${folded ? "&#9656;" : "&#9662;"}</span>`}
-        <span class="lswatch" style="background:${col}"></span>
-        <span class="lname">${escape(b.lane.name || b.lane.id)}</span>
-        <span class="lcount">${new Set(b.rows.map(s => s.n.id)).size}</span>
-        ${hasAttn(b) ? `<span class="lattn"></span>` : ""}
-      </button>`;
+      const head = laneHead(b, col, folded, dimBlock);
       if (folded) return `<div class="lblock" data-lane="${escape(b.lane.id)}">${head}</div>`;
 
       let svg = "";
@@ -2094,6 +2106,19 @@ export function createMapFeature(deps){
       openFareTicket(cap.dataset.fareNode, cap.dataset.fareSeg);
       return;
     }
+    const shareBtn = e.target.closest("[data-share-lane]");
+    if (shareBtn){
+      if (typeof d.openLaneShare === "function") d.openLaneShare(shareBtn.dataset.shareLane);
+      return;
+    }
+    const row = e.target.closest("[data-lane-head]");
+    if (row){
+      revealedLane = row.dataset.laneHead;
+      const fold = e.target.closest("[data-fold]");
+      if (fold) toggleMapFold(fold.dataset.fold);
+      else { mapSig = ""; renderMap(); }
+      return;
+    }
     const f = e.target.closest("[data-fold]");
     if (f){ toggleMapFold(f.dataset.fold); return; }
     /* P6: ring hit circle (and any other data-jump in the wrap) opens chat —
@@ -2249,7 +2274,14 @@ export function createMapFeature(deps){
     renderMap();
   }
 
+  function clearRevealed(target){
+    if (target && typeof target.closest === "function" && target.closest(".lheadrow")) return;
+    revealedLane = "";
+    if (mapwrap) mapwrap.innerHTML = mapwrap.innerHTML.replaceAll("lheadrow revealed", "lheadrow");
+  }
+
   function onLayersDocClick(e){
+    if (revealedLane) clearRevealed(e && e.target);
     if (layersMenu.shouldCloseForClick(e && e.target, { exclude: "#layersbtn" }))
       layersMenu.close();
   }

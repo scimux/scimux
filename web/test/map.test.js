@@ -5894,7 +5894,7 @@ test("P7: tab bar rebuilds only when counts (or tab set) change", () => {
 
 function laneMap(opts = {}) {
   const node = p4Node("a", "2026-01-01T00:00:00Z", "Alpha");
-  const name = opts.name || "Lane";
+  const name = opts.name === undefined ? "Lane" : opts.name;
   const mapwrap = fakeEl("mapwrap");
   const body = { classList: { _set: new Set(), toggle(){}, contains(){ return false; }, add(){}, remove(){} } };
   const opened = [];
@@ -5914,7 +5914,7 @@ function laneMap(opts = {}) {
     level: () => opts.level || 1,
     nodes: () => [node],
     groups: () => [],
-    laneFilter: () => "",
+    laneFilter: () => opts.focus || "",
     uiLoaded: () => true,
     laneModel: () => ({
       lanes: [{ id: "L", name }],
@@ -5922,7 +5922,10 @@ function laneMap(opts = {}) {
     }),
     laneColor: () => "#00f",
     agentLogo: () => "",
-    icons: { SHARE_ICON: "SHAREMARK", ICON_USERS: "USERMARK" },
+    icons: {
+      SHARE_ICON: "SHAREMARK",
+      ...(opts.users === false ? {} : { ICON_USERS: "USERMARK" }),
+    },
     laneShare: opts.laneShare,
     openLaneShare: opts.open === false ? undefined : (id) => opened.push(id),
   });
@@ -5948,6 +5951,9 @@ test("a stack lane header offers share and keeps the fold button", () => {
   });
   assert.deepEqual(ui.opened, ["L"]);
   ui.feature.destroy();
+  const dim = laneMap({ focus: "Z" });
+  assert.match(dim.mapwrap.innerHTML, /class="lhead dimmed"/);
+  dim.feature.destroy();
 });
 
 test("a shared lane header counts people and escapes the lane name", () => {
@@ -5967,11 +5973,12 @@ test("a shared lane header counts people and escapes the lane name", () => {
   assert.deepEqual(shared.opened, ["L"]);
   shared.feature.destroy();
 
-  const quiet = laneMap({ laneShare: () => ({ state: "stopping", members: [{}, {}] }) });
+  const quiet = laneMap({ name: "", laneShare: () => ({ state: "stopping", members: [{}, {}] }) });
   assert.doesNotMatch(quiet.mapwrap.innerHTML, /class="lshared"/);
+  assert.match(quiet.mapwrap.innerHTML, /aria-label="Share lane L"/);
   quiet.feature.destroy();
 
-  const zero = laneMap({ laneShare: () => ({ state: "active" }) });
+  const zero = laneMap({ laneShare: () => ({ state: "active" }), users: false });
   assert.match(zero.mapwrap.innerHTML, /aria-label="Shared with 0 people"/);
   zero.feature.destroy();
 
@@ -6034,6 +6041,9 @@ test("a tap elsewhere hides the revealed share button and a tap on the header do
   assert.match(mapwrap.innerHTML, /lheadrow revealed/);
   firstListener(doc, "click")({ target: { closest(){ return null; } } });
   assert.doesNotMatch(mapwrap.innerHTML, /lheadrow revealed/);
+  firstListener(mapwrap, "click")({
+    target: fakeTarget({ shareLane: "L" }, "[data-share-lane]"),
+  });
   feature.invalidate();
   feature.render();
   assert.doesNotMatch(mapwrap.innerHTML, /lheadrow revealed/);
@@ -6043,6 +6053,11 @@ test("a tap elsewhere hides the revealed share button and a tap on the header do
 test("the phone full-screen map keeps the share row and the desktop wall does not", () => {
   const phone = laneMap({ desktop: false, level: 3, full: true });
   assert.match(phone.mapwrap.innerHTML, /class="lshare"/);
+  assert.doesNotMatch(phone.mapwrap.innerHTML, /data-fold=/);
+  firstListener(phone.mapwrap, "click")({
+    target: fakeTarget({ laneHead: "L" }, "[data-lane-head]"),
+  });
+  assert.match(phone.mapwrap.innerHTML, /lheadrow revealed/);
   assert.doesNotMatch(phone.mapwrap.innerHTML, /data-fold=/);
   phone.feature.destroy();
   const wall = laneMap({ desktop: true, full: true });
