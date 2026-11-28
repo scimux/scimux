@@ -53,7 +53,7 @@ function joinAgents(parts) {
 
 /* Presentation only. Callers pass mirror entries already read; this does not
  * fetch, and the result is not a turn. */
-export function sharingNoticeHTML(owner, entries) {
+export function sharingNoticeHTML(owner, entries, laneName) {
   const agents = evidencedAgents(entries);
   const parts = [];
   const linked = [];
@@ -77,7 +77,8 @@ export function sharingNoticeHTML(owner, entries) {
   else if (linked.length > 1) terms = "provider terms (" + linked.map(item => sharingTermsAnchor(item.agent, item.vendor)).join(", ") + ")";
   const caveat = unspecified ? " Terms depend on the configured provider." : "";
   const who = esc(owner);
-  return `<div class="sharing-notice" role="note"><p class="sharing-notice-lead">${lead}</p><p class="sharing-notice-body">AI responses may be inaccurate. Verify before relying on them. Preserve attribution and respect applicable rights and ${terms}. Only ${who} can send to the agent.${caveat}</p></div>`;
+  const lane = laneName ? `<p class="sharing-notice-lane">Part of ${who}'s shared lane ${esc(laneName)}</p>` : "";
+  return `<div class="sharing-notice" role="note">${lane}<p class="sharing-notice-lead">${lead}</p><p class="sharing-notice-body">AI responses may be inaccurate. Verify before relying on them. Preserve attribution and respect applicable rights and ${terms}. Only ${who} can send to the agent.${caveat}</p></div>`;
 }
 
 export function guestCapture(entry, view, names, people = {}) {
@@ -733,7 +734,9 @@ export function createGuestFeature({ api, doc, now, invalidateCards, randomBytes
      changed. Assigning #msgs.innerHTML would drop the reader's scroll position. */
   function syncNotice(current) {
     const body = $("msgs");
-    const html = sharingNoticeHTML(guestName(current.view.server, current.view.owner, current.view.owner_name, knownPeople), mirrorEntries(current));
+    const ownerName = guestName(current.view.server, current.view.owner, current.view.owner_name, knownPeople);
+    const found = laneForChat(current.view, answer.subscriptions);
+    const html = sharingNoticeHTML(ownerName, mirrorEntries(current), found ? found.name : "");
     const first = body.firstElementChild;
     if (!(first && first.classList.contains("sharing-notice"))) {
       body.innerHTML = html + body.innerHTML;
