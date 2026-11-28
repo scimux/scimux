@@ -5133,3 +5133,52 @@ test("read-only and ended copies show confirmed participants and inspect without
     f.feature.destroy();
   }
 });
+
+function laneIndex(extra = {}) {
+  return { ...base, chat: "idx", title: "Shared lane · Protein", unread: true, mirror_last: 1, seen_mirror: 0, comments_last: 1, seen_comments: 0, lane: { name: "Protein", color: "#11aa22", chats: [{ chat: "c", created_at: "1" }] }, ...extra };
+}
+
+test("a title prefix or a non-object lane stays an ordinary chat", () => {
+  const plain = { ...base, chat: "p", title: "Shared lane · Fake" };
+  const arrayLane = { ...base, chat: "w", title: "Shared lane · Weird", lane: ["nope"] };
+  const textLane = { ...base, chat: "t", title: "Shared lane · Text", lane: "nope" };
+  assert.deepEqual(guestGroups([plain, arrayLane, textLane], [])[0].items.map(view => view.chat).sort(), ["p", "t", "w"]);
+});
+
+test("an index subscription is left out of its sharer group", () => {
+  const groups = guestGroups([laneIndex(), { ...base, unread: false, mirror_last: 0, seen_mirror: 0 }], []);
+  assert.deepEqual(groups[0].items.map(view => view.chat), ["c"]);
+});
+
+test("an index subscription is not pinned", () => {
+  const index = laneIndex();
+  const chat = { ...base };
+  const pinned = guestModule.sharedPinnedOrder([], [index, chat], [guestModule.sharedActivityId(index), guestModule.sharedActivityId(chat)]);
+  assert.deepEqual(pinned.map(item => item.id), [guestModule.sharedActivityId(chat)]);
+});
+
+test("an index subscription is not a count, a search target, or a jump target", async () => {
+  const index = laneIndex({ mirror_last: 0 });
+  const chat = { ...base, unread: false, mirror_last: 0, seen_mirror: 0, comments_last: 0 };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([index, chat]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(f.feature.tab.activities().some(view => view.chat === "idx"), false);
+  assert.doesNotMatch(f.feature.tab.tabHTML(false), /tabbadge/);
+  assert.equal(f.feature.hasActivity("team/" + guestKey(index)), false);
+  assert.equal(f.feature.jumpToSource({ server: "s", owner: "o", chat: "idx", generation: "g", log: "mirror", seq: 1 }), false);
+  f.feature.destroy();
+});
+
+test("an index subscription is not classified for unread comments", async () => {
+  const index = laneIndex({ mirror_last: 0 });
+  const needy = { ...base, chat: "need", unread: true, mirror_last: 0, seen_mirror: 0, comments_last: 1, seen_comments: 0 };
+  const paths = [];
+  const f = nativeViewFixture(
+    async path => path === "/api/team/subscriptions" ? list([index, needy]) : readAnswer(),
+    async path => { paths.push(path); return commentsAnswer(); },
+  );
+  f.feature.tick(); await f.feature.settled();
+  assert.equal(paths.some(path => path.includes("/idx/")), false);
+  assert.equal(paths.some(path => path.includes("/need/")), true);
+  f.feature.destroy();
+});
