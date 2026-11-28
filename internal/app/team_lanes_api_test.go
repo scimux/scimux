@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -733,6 +734,56 @@ func TestLaneShareStoreEdges(t *testing.T) {
 			t.Fatalf("stored list = %+v", got)
 		}
 	})
+}
+
+func TestLaneLeaveSurvivesAMemberEdit(t *testing.T) {
+	const dana = "aabbccddeeff00112233445566778899"
+	script := &shareScript{}
+	h, dir, calls, inst := readySurface(t, script)
+	script.channel = channelJSON(inst, shareUID, "Shared lane · North", shareGen)
+	if err := team.SaveLaneShare(dir, team.LaneShare{
+		ID: shareUID, Lane: laneLocal, Server: teamServerID, Scope: "all", Name: "North", Color: laneColor,
+		Members: []team.Member{{Seat: shareSeat, Access: "write"}, {Seat: shareSeatB, Access: "read"}},
+		Rev:     1, Starts: map[string]int{}, Excluded: []string{}, Generation: shareGen, IndexRev: 1,
+		State: "active", SharedAt: "2026-11-12T09:30:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, shareUID, shareGen, "active", "2026-11-12T09:00:00Z", 1)
+	script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUID, "North", shareGen, `[{"seat":"`+shareSeat+`","access":"write"}]`))
+	raw, err := json.Marshal(map[string]any{
+		"server": teamServerID, "scope": "all", "name": "North", "color": laneColor, "excluded": []string{},
+		"members": []team.Member{
+			{Seat: shareSeat, Access: "write"},
+			{Seat: shareSeatB, Access: "write"},
+			{Seat: dana, Access: "write"},
+		},
+		"membership_only": map[string]any{"uid": shareUID, "generation": shareGen, "baseline": []string{shareSeat, shareSeatB}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := putLane(h, laneLocal, string(raw))
+	lanes, err := team.LoadLaneShares(dir)
+	if err != nil || rec.Code != http.StatusOK || len(lanes) != 1 || len(lanes[0].Members) != 2 || lanes[0].Members[0].Seat != shareSeat || lanes[0].Members[1].Seat != dana {
+		t.Fatalf("stored %d %+v %v", rec.Code, lanes, err)
+	}
+	th := asTeamHandler(t, h)
+	box := &shareOutbox{dataDir: dir, now: th.now, client: th.client, shareOps: &th.shareOps, files: &th.mu}
+	box.tick(context.Background())
+	pushed := 0
+	for _, c := range snapshotCalls(calls) {
+		if c.method != http.MethodPut || !strings.HasSuffix(c.path, "/members") {
+			continue
+		}
+		pushed++
+		if strings.Contains(c.body, shareSeatB) {
+			t.Fatalf("push %s", c.body)
+		}
+	}
+	if pushed != 2 {
+		t.Fatalf("pushes %d %+v", pushed, snapshotCalls(calls))
+	}
 }
 
 func TestLaneShareRoutesAreDocumented(t *testing.T) {

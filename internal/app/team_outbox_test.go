@@ -3584,6 +3584,26 @@ func TestLaneReconcileNotesLeavers(t *testing.T) {
 	})
 }
 
+func TestLaneReconcileDropsALeaverBeforeANewChat(t *testing.T) {
+	box, dir, calls, script := laneBox(t)
+	inst := installationOf(t, dir)
+	saveLane(t, dir, team.LaneShare{Members: []team.Member{{Seat: shareSeat, Access: "write"}, {Seat: shareSeatB, Access: "read"}}}, "2026-11-12T09:30:00Z")
+	script.channelsBody = ownerChannels(inst, ownerChannel(inst, shareUID, "North", shareGen, `[{"seat":"`+shareSeat+`","access":"write"}]`))
+	script.putStatus = http.StatusCreated
+	script.channel = channelJSON(inst, shareUIDB, "Fresh", shareGen)
+	box.now = func() time.Time { return time.Date(2026, 11, 12, 9, 30, 5, 0, time.UTC) }
+	appendLaneNode(t, dir, "fresh", "Fresh", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "fresh", shareUIDB, 0)
+	appendLaneNode(t, dir, "also", "Also", laneLocal, "2026-11-12T09:01:00Z")
+	writeChatLog(t, dir, "also", shareUIDC, 0)
+	box.tick(context.Background())
+	for _, c := range snapshotCalls(calls) {
+		if c.method == http.MethodPut && strings.HasSuffix(c.path, "/members") && strings.Contains(c.body, shareSeatB) {
+			t.Fatalf("members %s", c.body)
+		}
+	}
+}
+
 func TestLaneReconcilePublishesTheSnapshot(t *testing.T) {
 	box, dir, _, script := laneBox(t)
 	saveQuietChat(t, dir, "bee", "Bee", shareUIDB, shareUID, "1111222233334444", "active", "2026-11-12T09:00:00Z", 1)

@@ -81,17 +81,19 @@ type shareCall struct {
 }
 
 type shareScript struct {
-	helloStatus   int
-	helloID       string
-	helloBody     string
-	putStatuses   []int
-	memberStatus  int
-	deleteStatus  int
-	deleteQueries []string
-	seatsStatus   int
-	seatsBody     string
-	channel       string
-	failPath      string
+	helloStatus    int
+	helloID        string
+	helloBody      string
+	putStatuses    []int
+	memberStatus   int
+	deleteStatus   int
+	deleteQueries  []string
+	seatsStatus    int
+	seatsBody      string
+	channel        string
+	channelsBody   string
+	channelsStatus int
+	failPath       string
 }
 
 func (s *shareScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +154,19 @@ func (s *shareScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusNoContent
 		}
 		w.WriteHeader(status)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/channels":
+		status := s.channelsStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			body := s.channelsBody
+			if body == "" {
+				body = `{"channels":[]}`
+			}
+			_, _ = io.WriteString(w, body)
+		}
 	case r.Method == http.MethodPut:
 		status := http.StatusCreated
 		if len(s.putStatuses) > 0 {
