@@ -496,6 +496,7 @@ export function createCardsFeature(deps){
         <div class="lanepick">
           <span class="laneswatch"></span>
           ${laneSelectHTML("", true)}
+          <p class="laneshare" data-lane-share hidden></p>
         </div>
         <input data-lane-new="${escape(n.id)}" hidden placeholder="New lane name">
       </div>` : railboxHTML(n)}

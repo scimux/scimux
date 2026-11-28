@@ -3172,6 +3172,14 @@ test("a failed or malformed probe does not invent a Copilot offer", () => {
   assert.equal(Object.prototype.hasOwnProperty.call(models, "copilot"), false);
 });
 
+test("the new-chat lane picker keeps a share notice beside the select", () => {
+  const index = readFileSync(join(__dirname, "../index.html"), "utf8");
+  const block = index.slice(index.indexOf('id="nc_lane_s"'), index.indexOf('id="nc_muse_privacy"'));
+  assert.match(block, /data-lane-select[\s\S]*data-lane-share/);
+  assert.match(block, /<p class="laneshare" data-lane-share hidden><\/p>/);
+  assert.match(index, /<h3 id="sh_title">Share chat<\/h3>/);
+});
+
 test("the new-activity dialog lists Copilot by its agent key, like the other ACP harnesses", () => {
   const html = agentOptionsHTML({ copilot: [""], claude: [""] });
   assert.match(html, /<option>copilot<\/option>/);

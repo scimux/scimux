@@ -7,6 +7,7 @@ import {
   laneSelectHTML,
   readLaneChoiceFromValues,
   laneShareNotice,
+  laneShareFacts,
   paintLaneShareNotice,
 } from "../js/lane-picker.js";
 
@@ -55,6 +56,25 @@ test("readLaneChoiceFromValues: existing id, new lane, and empty-name error", ()
   assert.deepEqual(
     readLaneChoiceFromValues(NEW_LANE_VALUE, "  Trip  ", { makeLane }),
     { laneID: "new-Trip", lane: { id: "new-Trip", name: "Trip", color: "#000" } },
+  );
+});
+
+test("laneShareFacts counts open chats and archived ones, and is empty without a lane", () => {
+  const nodes = [
+    { id: "a", lane_id: "north" },
+    null,
+    { id: "b", lane_id: "north" },
+    { id: "c", lane_id: "south" },
+    { lane_id: "north" },
+  ];
+  assert.deepEqual(
+    laneShareFacts("north", { id: "north", name: "North" }, "#AABBCC", nodes, ["b"]),
+    { name: "North", color: "#AABBCC", open: 2, archived: ["b"] },
+  );
+  assert.equal(laneShareFacts("north", null, "#AABBCC", nodes, ["b"]), null);
+  assert.deepEqual(
+    laneShareFacts("north", { id: "north" }, "", null, "nope"),
+    { name: "north", color: "", open: 0, archived: [] },
   );
 });
 

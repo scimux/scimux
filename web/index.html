@@ -328,6 +328,7 @@
     <div class="lanepick">
       <span class="laneswatch" id="nc_lane_swatch"></span>
       <select id="nc_lane" data-lane-select></select>
+      <p class="laneshare" data-lane-share hidden></p>
     </div>
     <input id="nc_lane_new" hidden placeholder="New lane name">
     <div class="nc-hint" id="nc_lane_hint" hidden>The lane is this fork&rsquo;s decision:
@@ -365,7 +366,7 @@
 
 <div class="sheet" id="sharesheet">
   <div class="grab"></div>
-  <h3>Share chat</h3>
+  <h3 id="sh_title">Share chat</h3>
   <div class="sect" id="sh_body"></div>
   <div id="sh_note" hidden></div>
   <button class="cta" id="sh_apply"></button>

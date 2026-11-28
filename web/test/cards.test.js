@@ -488,6 +488,7 @@ test("createCardsFeature: skip mid-drag; ages on equal sig; rebuild on change", 
   });
   feature.render();
   assert.match(list.innerHTML, /id="card-a"/);
+  assert.match(list.innerHTML, /data-lane-share/);
   assert.match(list.innerHTML, /data-pin-action="a"/);
   assert.match(list.innerHTML, /class="pinflag"/);
   assert.match(list.innerHTML, /aria-label="unpin"/);
@@ -2089,6 +2090,13 @@ test('a delayed removal response cannot retire a recreated chat with the same id
 test('card deletion carries the selected instance in the transported URL', async () => {
  const calls=[];const h=cardsActionHarness({nodes:[{id:'n1',instance_id:'old id',title:'Old'}],sel:'n1',api:async (url,opts)=>{calls.push({url,opts});return {}}});
  await h.clickList(actTarget({trash:'n1'},['[data-trash]']));assert.equal(calls[0].url,'/api/nodes/n1?chat_instance=old%20id');assert.equal(calls[0].opts.method,'DELETE');
+});
+
+test("a card that already has a lane does not carry the share notice", () => {
+  const call = cardsSrc.indexOf(": railboxHTML(n)");
+  const lane = cardsSrc.slice(cardsSrc.lastIndexOf("!n.lane_id", call), call);
+  assert.match(lane, /data-lane-share/);
+  assert.doesNotMatch(cardsSrc.slice(call, call + 40), /data-lane-share/);
 });
 
 test('production card removal refuses a missing chat identity', async () => {

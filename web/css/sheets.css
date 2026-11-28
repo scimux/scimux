@@ -8,6 +8,7 @@
     120  #searchoverlay
     125  #backdrop         130 .sheet          ← modal layer
     200  #toast            (topmost by definition) */
+.laneshare { margin: 6px 0 0; color: var(--dim); font-size: 13px; }
 .sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 130;
   background: var(--surface); border-radius: 16px 16px 0 0;
