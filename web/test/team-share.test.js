@@ -2164,3 +2164,195 @@ test("the share tick leaves a lane whose name and color already match", async ()
   assert.equal(ui.feature.laneShare("missing"), null);
   assert.equal(ui.feature.serverName("gone"), "a server you left");
 });
+
+test("a late lane list does not replace a newer one", async () => {
+  const first = deferred();
+  let laneGets = 0;
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") {
+      laneGets += 1;
+      if (laneGets === 1) return first.promise;
+      return { lane_shares: [laneOf({ name: "New" })] };
+    }
+    return viewOf();
+  }, { laneFacts: () => ({ name: "North", color: "#aabbcc", open: 0, archived: [] }) });
+  ui.feature.select("node-1");
+  await until(() => laneGets === 1);
+  ui.feature.select("node-2");
+  await until(() => ui.feature.laneShare("north") && ui.feature.laneShare("north").name === "New");
+  first.resolve({ lane_shares: [laneOf({ name: "Old" })] });
+  await ui.feature.settled();
+  assert.equal(ui.feature.laneShare("north").name, "New");
+});
+
+test("a broken or failed lane list leaves no lane", async () => {
+  for (const answer of [{ lane_shares: null }, null]) {
+    const ui = setup((call) => {
+      if (call.path === "/api/team/servers") return { servers: [north] };
+      if (call.path === "/api/team/lane-shares") return answer;
+      return viewOf();
+    }, { laneFacts: () => ({ name: "North", color: "#aabbcc", open: 0, archived: [] }) });
+    ui.feature.select("node-1");
+    await ui.feature.settled();
+    assert.equal(ui.feature.laneShare("north"), null);
+  }
+  const failed = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return rejected(500, "no");
+    return viewOf();
+  }, { laneFacts: () => ({ name: "North", color: "#aabbcc", open: 0, archived: [] }) });
+  failed.feature.select("node-1");
+  await failed.feature.settled();
+  assert.equal(failed.feature.laneShare("north"), null);
+});
+
+test("the share tick skips a lane that is quiet or gone and renames when only the color differs", async () => {
+  const shares = [
+    null,
+    laneOf({ lane: "stop", state: "stopping", name: "Stop", color: "#aabbcc" }),
+    laneOf({ lane: "gone", name: "Gone", color: "#aabbcc" }),
+    laneOf({ lane: "north", name: "North", color: "#112233" }),
+  ];
+  const facts = {
+    gone: null,
+    north: { name: "North", color: "#AABBCC", open: 0, archived: [] },
+  };
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares" && call.method === "GET") return { lane_shares: shares };
+    if (call.method === "PUT") return laneOf({ name: call.body.name, color: call.body.color });
+    return viewOf();
+  }, { laneFacts: (id) => facts[id] });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  const put = ui.calls.find((call) => call.method === "PUT");
+  assert.equal(put.path, "/api/team/lane-shares/north");
+  assert.equal(put.body.color, "#aabbcc");
+  assert.equal(put.body.name, "North");
+  assert.equal(ui.calls.filter((call) => call.method === "PUT").length, 1);
+});
+
+test("the sheet title follows the chat or the lane", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return { lane_shares: [] };
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return rejected(404, JSON.stringify({ error: "not_found" }));
+  }, { laneFacts: () => ({ name: "North", color: "#AABBCC", open: 0, archived: [] }) });
+  const title = slot(ui.doc, "sh_title", "h3");
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  assert.equal(title.textContent, "Share chat");
+  ui.feature.openLane("north");
+  await ui.feature.settled();
+  assert.equal(title.textContent, "Share lane");
+});
+
+test("a lane-owned chat names the lane from the list when the page has no local name", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") {
+      return { lane_shares: [null, { id: "other", lane: "south", name: "South" }, laneOf({ name: "Listed" })] };
+    }
+    return viewOf({ lane: "index-1" });
+  }, { laneFacts: () => ({ color: "#aabbcc", open: 0, archived: [] }) });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  assert.match(ui.body.innerHTML, /Shared through lane Listed/);
+});
+
+test("a lane-owned chat with no lane list shows an empty name", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    return viewOf({ lane: "missing" });
+  });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.btn.click();
+  await ui.feature.settled();
+  assert.match(ui.body.innerHTML, /Shared through lane <\/p>/);
+  assert.equal(ui.body.querySelector("#sh_people"), null);
+});
+
+test("a lane sheet shows a note when the lane cannot be read", async () => {
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return { lane_shares: [] };
+    if (call.path === "/api/team/lane-shares/north") return rejected(500, JSON.stringify({ error: "store_unavailable" }));
+    return viewOf();
+  }, { laneFacts: () => ({ name: "North", color: "#aabbcc", open: 0, archived: [] }) });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.feature.openLane("north");
+  await ui.feature.settled();
+  assert.equal(ui.note.hidden, false);
+  assert.equal(ui.note.textContent, "This computer could not save the change. Try again.");
+});
+
+test("a slower lane sheet does not replace the lane opened after it", async () => {
+  const first = deferred();
+  let gets = 0;
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return { lane_shares: [] };
+    if (call.path === "/api/team/lane-shares/north") { gets += 1; return first.promise; }
+    if (call.path === "/api/team/lane-shares/south") return laneOf({ lane: "south", id: "index-2", name: "South" });
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  }, { laneFacts: (id) => ({ name: id === "south" ? "South" : "North", color: "#aabbcc", open: 1, archived: [] }) });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.feature.openLane("north");
+  await until(() => gets === 1);
+  ui.feature.openLane("south");
+  first.resolve(laneOf({ name: "North", server: "server-old" }));
+  await ui.feature.settled();
+  assert.match(ui.body.innerHTML, /<p>North<\/p>/);
+  assert.doesNotMatch(ui.body.innerHTML, /a server you left/);
+});
+
+test("stopping a lane deletes that lane and a missing lane stays a note", async () => {
+  const facts = { name: "North", color: "#1a2b3c", open: 1, archived: [] };
+  const ui = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return { lane_shares: [laneOf()] };
+    if (call.method === "DELETE") return laneOf({ state: "stopping" });
+    if (call.path === "/api/team/lane-shares/north") return laneOf();
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  }, { laneFacts: () => facts });
+  ui.feature.select("node-1");
+  await ui.feature.settled();
+  ui.feature.openLane("north");
+  await ui.feature.settled();
+  ui.stop.click();
+  ui.stop.click();
+  await ui.feature.settled();
+  const del = ui.calls.find((call) => call.method === "DELETE");
+  assert.equal(del.path, "/api/team/lane-shares/north");
+  assert.match(ui.body.innerHTML, /Stopping sharing/);
+  assert.equal(ui.status.hidden, false);
+
+  const missed = setup((call) => {
+    if (call.path === "/api/team/servers") return { servers: [north] };
+    if (call.path === "/api/team/lane-shares") return { lane_shares: [laneOf()] };
+    if (call.method === "DELETE") return rejected(404, JSON.stringify({ error: "store_unavailable" }));
+    if (call.path === "/api/team/lane-shares/north") return laneOf();
+    if (call.path.endsWith("/seats")) return roster([selfSeat(), blue]);
+    return viewOf();
+  }, { laneFacts: () => facts });
+  missed.feature.select("node-1");
+  await missed.feature.settled();
+  missed.feature.openLane("north");
+  await missed.feature.settled();
+  missed.stop.click();
+  missed.stop.click();
+  await missed.feature.settled();
+  assert.equal(missed.note.textContent, "This computer could not save the change. Try again.");
+  assert.equal(missed.status.hidden, false);
+});
