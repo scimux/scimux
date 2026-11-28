@@ -115,26 +115,34 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 	for _, id := range lane.Excluded {
 		excluded[id] = true
 	}
+	byNode := map[string][]team.Share{}
+	for _, s := range shares {
+		byNode[s.Node] = append(byNode[s.Node], s)
+	}
 	for id, snap := range nodes {
 		if !snap.live || snap.lane != lane.Lane || excluded[id] {
 			continue
 		}
-		uid, records, ok := o.readCursor(id)
-		if !ok {
-			continue
-		}
-		if existing, found := shareByUID(shares, uid); found {
-			if existing.Lane != "" || existing.Server != lane.Server || existing.State != "active" {
-				continue
-			}
-			if o.mutateShare(existing.UID, func(cur *team.Share) { cur.Lane, cur.LaneRev, cur.Members = lane.ID, 0, []team.Member{} }) != nil {
-				return shares, false
-			}
-			for i := range shares {
-				if shares[i].UID == existing.UID {
-					shares[i].Lane, shares[i].LaneRev, shares[i].Members = lane.ID, 0, []team.Member{}
+		have := byNode[id]
+		if len(have) == 1 && have[0].Lane == "" && have[0].Server == lane.Server && have[0].State == "active" {
+			uid, _, ok := o.nodeCursor(id, false)
+			if ok && uid == have[0].UID {
+				if o.mutateShare(have[0].UID, func(cur *team.Share) { cur.Lane, cur.LaneRev, cur.Members = lane.ID, 0, []team.Member{} }) != nil {
+					return shares, false
+				}
+				for i := range shares {
+					if shares[i].UID == have[0].UID {
+						shares[i].Lane, shares[i].LaneRev, shares[i].Members = lane.ID, 0, []team.Member{}
+					}
 				}
 			}
+			continue
+		}
+		if len(have) != 0 {
+			continue
+		}
+		uid, records, ok := o.nodeCursor(id, true)
+		if !ok {
 			continue
 		}
 		scope, start := "all", 0
@@ -149,12 +157,47 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 			Lane: lane.ID, LaneRev: lane.Rev, Members: []team.Member{}, Channel: lane.Members,
 		})
 		if err != nil {
+			o.forgetLaneLook(id)
 			o.noteFailure(entry.ID, err)
 			return shares, false
 		}
 		shares = append(shares, saved)
 	}
 	return shares, true
+}
+func (o *shareOutbox) nodeCursor(node string, gate bool) (string, int, bool) {
+	size, err := o.fileSize(shareLogPath(o.dataDir, node))
+	if err != nil {
+		o.forgetLaneLook(node)
+		return "", 0, false
+	}
+	if gate && o.sameLaneLook(node, size) {
+		return "", 0, false
+	}
+	uid, n, ok := o.readCursor(node)
+	if gate {
+		o.keepLaneLook(node, size)
+	}
+	return uid, n, ok
+}
+func (o *shareOutbox) sameLaneLook(node string, size int64) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	got, ok := o.laneLook[node]
+	return ok && got == size
+}
+func (o *shareOutbox) keepLaneLook(node string, size int64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.laneLook == nil {
+		o.laneLook = map[string]int64{}
+	}
+	o.laneLook[node] = size
+}
+func (o *shareOutbox) forgetLaneLook(node string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	delete(o.laneLook, node)
 }
 func (o *shareOutbox) readCursor(node string) (string, int, bool) {
 	if o.cursor != nil {

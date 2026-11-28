@@ -3328,6 +3328,11 @@ func TestLaneReconcileCreateFailureStoresNothing(t *testing.T) {
 	if ok || err != nil || lanes[0].State != "active" || pathCount(calls, http.MethodPut, "/v1/channels") == 0 {
 		t.Fatalf("stored %v lanes %+v calls %+v", ok, lanes, snapshotCalls(calls))
 	}
+	box.now = func() time.Time { return time.Date(2026, 11, 12, 9, 30, 5, 0, time.UTC) }
+	box.tick(context.Background())
+	if pathCount(calls, http.MethodPut, "/v1/channels") != 2 {
+		t.Fatalf("retry calls %+v", snapshotCalls(calls))
+	}
 }
 
 func TestLaneReconcileAdoptsASameServerShare(t *testing.T) {
@@ -3335,11 +3340,17 @@ func TestLaneReconcileAdoptsASameServerShare(t *testing.T) {
 	script.putStatus = http.StatusInternalServerError
 	saveQuietChat(t, dir, "keep", "Keep", shareUIDB, "", "1111222233334444", "active", "2026-11-12T09:00:00Z", 0)
 	saveQuietChat(t, dir, "held", "Held", shareUIDC, shareUID, shareGen, "active", "2026-11-12T09:00:00Z", 1)
+	saveQuietChat(t, dir, "odd", "Odd", "0000000000000009", "", shareGen, "active", "2026-11-12T09:00:00Z", 0)
+	if err := os.Remove(chatLogPath(dir, "odd")); err != nil {
+		t.Fatal(err)
+	}
+	writeChatLog(t, dir, "odd", "0000000000000008", 0)
 	saveLane(t, dir, team.LaneShare{Members: []team.Member{{Seat: shareSeat, Access: "write"}}, Rev: 4}, "2026-11-12T09:30:00Z")
 	box.tick(context.Background())
 	stored, ok := storedShare(t, dir, shareUIDB)
-	if !ok || stored.Lane != shareUID || stored.LaneRev != 0 || len(stored.Members) != 0 || stored.Scope != "from_now" {
-		t.Fatalf("adopted %+v", stored)
+	odd, oddOK := storedShare(t, dir, "0000000000000009")
+	if !ok || stored.Lane != shareUID || stored.LaneRev != 0 || len(stored.Members) != 0 || stored.Scope != "from_now" || !oddOK || odd.Lane != "" {
+		t.Fatalf("adopted %+v odd %+v", stored, odd)
 	}
 }
 
