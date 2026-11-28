@@ -17,6 +17,7 @@
 .lshare, .lheadrow .lshared { display: inline-flex; align-items: center; justify-content: center;
   gap: 4px; flex: none; min-width: 44px; min-height: 44px; padding: 0 8px; border-radius: 999px; }
 .lheadrow .lshare { display: none; }
+.lheadrow .lshared svg { width: 16px; height: 13px; fill: currentColor; }
 .lheadrow:hover .lshare, .lheadrow:focus-within .lshare, .lheadrow.revealed .lshare { display: inline-flex; }
 .lhead.dimmed { opacity: .32; }
 .lhead .chev { color: var(--dim); font-size: 15px; width: 16px; flex: none; text-align: center; }
