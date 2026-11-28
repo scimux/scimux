@@ -2009,12 +2009,24 @@ function laneOf(over = {}) {
 
 test("laneCountLine names archived chats only when some are archived", () => {
   assert.equal(
+    laneCountLine(1, 0),
+    "Shares 1 chat now · new chats in this lane are shared automatically",
+  );
+  assert.equal(
+    laneCountLine(1, 1),
+    "Shares 1 chat now · 1 archived chat stays private · new chats in this lane are shared automatically",
+  );
+  assert.equal(
     laneCountLine(2, 1),
-    "Shares 2 chats now · 1 archived chats stay private · new chats in this lane are shared automatically",
+    "Shares 2 chats now · 1 archived chat stays private · new chats in this lane are shared automatically",
   );
   assert.equal(
     laneCountLine(2, 0),
     "Shares 2 chats now · new chats in this lane are shared automatically",
+  );
+  assert.equal(
+    laneCountLine(2, 2),
+    "Shares 2 chats now · 2 archived chats stay private · new chats in this lane are shared automatically",
   );
 });
 
