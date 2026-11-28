@@ -414,11 +414,17 @@ export function buildStackBlocks(lanes, stations, { served = servedLanes, inGrou
     .sort((a, b) => byNameID(a.lane, b.lane));
 }
 
-export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull, lm, selectedId, seenAt } = {}){
+export function stackMapSignature(blocks, { mapFold, focusLane, mapTab, mapFull, lm, selectedId, seenAt, shares } = {}){
   const hasAttn = b => b.rows.some(s => hardAttention(s.n)) ? 1 : 0;
   const fold = mapFold || new Set();
+  const shareMark = id => {
+    const share = shares && shares[id];
+    if (!share) return "";
+    const n = Array.isArray(share.members) ? share.members.length : 0;
+    return String(share.state || "") + ":" + n;
+  };
   return JSON.stringify((blocks || []).map(b => [b.lane.id, b.lane.name, lm.color(b.lane.id),
-      fold.has(b.lane.id), hasAttn(b),
+      fold.has(b.lane.id), hasAttn(b), shareMark(b.lane.id),
       b.rows.map(s => { const l = stopLabel(s); return [stopKey(s), s.time, s.head, l.title, l.desc,
         s.n.agent, s.n.model, s.n.effort, s.n.lane_id, s.n.parent || "", s.n.ended_at || "",
         s.n.live, s.n.attention, displayReady(s.n, { selectedId, seenAt }) ? 1 : 0]; })]))
@@ -1879,8 +1885,12 @@ export function createMapFeature(deps){
       saveMapFold(model);
     }
 
+    const shares = {};
+    if (typeof d.laneShare === "function") {
+      for (const b of blocks) shares[b.lane.id] = d.laneShare(b.lane.id);
+    }
     const sig = stackMapSignature(blocks, {
-      mapFold, focusLane, mapTab, mapFull, lm: model, ...readyCtx(),
+      mapFold, focusLane, mapTab, mapFull, lm: model, shares, ...readyCtx(),
     });
     if (mapRenderDecision(sig, mapSig) === "skip") return;
     mapSig = sig;

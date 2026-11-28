@@ -740,6 +740,10 @@ test("the stack signature changes when a lane share or its member count changes"
   assert.equal(stackMapSignature(blocks, base), plain);
   const missing = stackMapSignature(blocks, { ...base, shares: { L: { state: "active" } } });
   assert.notEqual(missing, active);
+  const blank = stackMapSignature(blocks, { ...base, shares: { L: {} } });
+  assert.notEqual(blank, plain);
+  const other = stackMapSignature(blocks, { ...base, shares: { Z: { state: "active", members: [] } } });
+  assert.equal(other, plain);
 });
 
 test("a lane share change rebuilds the header badge", () => {
