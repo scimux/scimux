@@ -295,6 +295,54 @@ test('Mine unread header refreshes when owner comments become unread without inv
  views[0]={...views[0],unread:true}; f.feature.render(); assert.match(f.list.innerHTML,/aria-label="unread"/);
 });
 
+test('a lane sub-group indents its header and colors only a safe stripe', () => {
+  const badName = '<img src=x onerror=1>';
+  const bad = sub('s','o','idx',{title:'Shared lane · bad', lane:{name:badName, color:'red;background:url(x)', chats:[{chat:'bad'}]}});
+  const good = sub('s','o','gidx',{title:'Shared lane · Good', lane:{name:'Good', color:'#11aa22', chats:[{chat:'c'}]}});
+  const upper = sub('s','o','uidx',{title:'Shared lane · Upper', lane:{name:'Upper', color:'#ABCDEF', chats:[{chat:'q'}]}});
+  const ask = sub('s','o','aidx',{title:'Shared lane · Ask', lane:{name:'Ask', chats:[{chat:'u'}]}});
+  const chat = sub('s','o','c',{title:'Chat', unread:true});
+  const unknown = sub('s','o','u',{title:'Unknown', unreadUnknown:true});
+  const quiet = sub('s','o','q',{title:'Quiet'});
+  const poisoned = sub('s','o','bad',{title:'Poison'});
+  const loose = sub('s','o','loose',{title:'Loose'});
+  const f = cardsFixture({views:[bad, good, upper, ask, chat, unknown, quiet, poisoned, loose]});
+  f.feature.render();
+  const html = f.list.innerHTML;
+  assert.match(html, /class="attnfold activity-group lane-group lane-indent open" data-activity-group="owner\/s\/o\/lane\/gidx"/);
+  assert.match(html, /data-activity-group="owner\/s\/o\/lane\/gidx"[^]*<span class="laneswatch" style="background:#11aa22"><\/span><span class="foldlabel">Good<\/span><span class="activity-unread" aria-label="unread">/);
+  assert.match(html, /data-activity-group="owner\/s\/o\/lane\/aidx"[^]*<span class="laneswatch"><\/span><span class="foldlabel">Ask<\/span><span title="Unread status unavailable"/);
+  assert.match(html, /class="card shared-card[^"]*lane-indent[^"]*"\s+id="card-team\/s\/o\/c\/g">[\s\S]*?<span class="stripe" style="background:#11aa22"><\/span>/);
+  const looseCard = html.match(/class="(card shared-card[^"]*)"\s+id="card-team\/s\/o\/loose\/g">[\s\S]*?<span class="stripe"><\/span>/);
+  assert.equal(looseCard[1].includes("lane-indent"), false);
+  assert.doesNotMatch(html, /card-team\/s\/o\/idx/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /foldlabel">&lt;img src=x onerror=1<\/span>/);
+  assert.doesNotMatch(html, /red;background|url\(x\)|#ABCDEF/);
+  const owner = html.match(/<button class="([^"]*)" data-activity-group="owner\/s\/o"/);
+  assert.equal(owner[1].includes('lane-group'), false);
+  assert.equal((html.match(/card-team\/s\/o\/c\/g/g) || []).length, 1);
+});
+
+test('a lane sub-group folds on its own key', async () => {
+  const good = sub('s','o','gidx',{lane:{name:'Good', color:'#11aa22', chats:[{chat:'c'}]}});
+  const chat = sub('s','o','c',{unread:true});
+  const f = cardsFixture({views:[good, chat]});
+  f.feature.render();
+  assert.match(f.list.innerHTML, /card-team\/s\/o\/c\/g/);
+  await f.handlers.click({target:target('[data-activity-group]',{activityGroup:'owner/s/o/lane/gidx'})});
+  assert.doesNotMatch(f.list.innerHTML, /card-team\/s\/o\/c\/g/);
+  assert.match(f.list.innerHTML, /data-activity-group="owner\/s\/o\/lane\/gidx"[^>]*aria-expanded="false"/);
+  assert.equal(readActivityFolds(f.storage).has('owner/s/o/lane/gidx'), true);
+});
+
+test('lane sub-groups drop the dashed rule and indent 12px', () => {
+  const file = readFileSync(new URL('../css/cards.css', import.meta.url), 'utf8');
+  assert.match(file, /#cardlist \.activity-group\.lane-group\s*\{[^}]*border-bottom:\s*0/);
+  assert.match(file, /#cardlist \.activity-group\.lane-indent\s*\{[^}]*margin-left:\s*12px/);
+  assert.match(file, /#cardlist \.card\.lane-indent\s*\{[^}]*margin-left:\s*12px/);
+});
+
 test('a temporarily empty grouping with a retained subscription shows a shared empty state',()=>{
  const views=[sub('s','o','c')], list={innerHTML:'',querySelectorAll:()=>[]}; let tab='shared';
  const cards=createCardsFeature({roots:{list,tabs:{innerHTML:''}},document:{},nodes:()=>[],cardTab:()=>tab,setCardTab:v=>{tab=v},sharedTab:{activities:()=>views,groups:()=>[],tabHTML:()=>''},pinned:()=>[],archived:()=>[],expanded:()=>new Set()});
