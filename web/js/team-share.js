@@ -28,6 +28,10 @@ const ERROR_TEXT = {
   store_unavailable: "This computer could not save the change. Try again.",
 };
 
+export function laneCountLine(){
+  return "";
+}
+
 export function shareStatusText(view, serverName) {
   const count = (view.members || []).length;
   const name = serverName;
@@ -628,5 +632,7 @@ export function createShareFeature({ api, doc, openSheet, closeSheets, now, onCh
     } while (chain !== prev || side.size > 0);
   }
 
-  return { select, ensureSelected, tick, bind, destroy, settled };
+  function openLane(){}
+
+  return { select, ensureSelected, tick, bind, destroy, settled, openLane, laneShare(){ return null; }, serverName(){ return ""; } };
 }
