@@ -41,6 +41,8 @@ type shareOutbox struct {
 	save    func(dir string, s team.Share) error
 	readLog func(path string) []sessionlog.Event
 	logSize func(path string) (int64, error)
+	// cursor reads one node's session log for lane enroll. Nil uses chatCursor.
+	cursor func(node string) (string, int, bool)
 	// readNodes reads nodes.jsonl. A test counts the calls. Nil reads the file.
 	readNodes func(dir string) ([]byte, error)
 	// readFrom reads a session log from an offset. A test records the offsets.

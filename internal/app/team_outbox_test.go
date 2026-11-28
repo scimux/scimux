@@ -3841,3 +3841,52 @@ func TestLaneReconcileRacesTheTick(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestLaneReconcileSkipsUnchangedLogs(t *testing.T) {
+	box, dir, _, script := laneBox(t)
+	script.putStatus = http.StatusCreated
+	var reads []string
+	box.cursor = func(node string) (string, int, bool) {
+		reads = append(reads, node)
+		return (&teamHandler{dataDir: dir}).chatCursor(node)
+	}
+	saveQuietChat(t, dir, "owned", "Owned", shareUIDB, shareUID, shareGen, "active", "2026-11-12T09:00:00Z", 1)
+	appendLaneNode(t, dir, "a", "A", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "a", "0000000000000002", 0)
+	appendLaneNode(t, dir, "b", "B", laneLocal, "2026-11-12T09:00:00Z")
+	writeChatLog(t, dir, "b", "0000000000000003", 0)
+	appendLaneNode(t, dir, "nolog", "Nolog", laneLocal, "2026-11-12T09:00:00Z")
+	saveLane(t, dir, team.LaneShare{Starts: map[string]int{"a": 100, "b": 100}}, "2026-11-12T09:30:00Z")
+	box.tick(context.Background())
+	if !laneRead(reads, "a") || !laneRead(reads, "b") || laneRead(reads, "owned") || laneRead(reads, "nolog") {
+		t.Fatalf("first %v", reads)
+	}
+	reads = nil
+	box.tick(context.Background())
+	if len(reads) != 0 {
+		t.Fatalf("second %v", reads)
+	}
+	f, err := os.OpenFile(chatLogPath(dir, "a"), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	box.tick(context.Background())
+	if len(reads) != 1 || reads[0] != "a" {
+		t.Fatalf("grown %v", reads)
+	}
+}
+
+func laneRead(reads []string, node string) bool {
+	for _, id := range reads {
+		if id == node {
+			return true
+		}
+	}
+	return false
+}

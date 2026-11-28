@@ -119,7 +119,7 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 		if !snap.live || snap.lane != lane.Lane || excluded[id] {
 			continue
 		}
-		uid, records, ok := (&teamHandler{dataDir: o.dataDir}).chatCursor(id)
+		uid, records, ok := o.readCursor(id)
 		if !ok {
 			continue
 		}
@@ -155,6 +155,12 @@ func (o *shareOutbox) enrollLane(ctx context.Context, entry team.Entry, owner st
 		shares = append(shares, saved)
 	}
 	return shares, true
+}
+func (o *shareOutbox) readCursor(node string) (string, int, bool) {
+	if o.cursor != nil {
+		return o.cursor(node)
+	}
+	return (&teamHandler{dataDir: o.dataDir}).chatCursor(node)
 }
 func (o *shareOutbox) saveNewShare(s team.Share) error {
 	return o.withFiles(func() error { return team.SaveShare(o.dataDir, s) })
