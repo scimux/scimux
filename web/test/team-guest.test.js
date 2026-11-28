@@ -5147,7 +5147,8 @@ test("a title prefix or a non-object lane stays an ordinary chat", () => {
 
 test("an index subscription is left out of its sharer group", () => {
   const groups = guestGroups([laneIndex(), { ...base, unread: false, mirror_last: 0, seen_mirror: 0 }], []);
-  assert.deepEqual(groups[0].items.map(view => view.chat), ["c"]);
+  const kept = groups[0].items.concat(...groups[0].lanes.map(lane => lane.items));
+  assert.deepEqual(kept.map(view => view.chat), ["c"]);
 });
 
 test("an index subscription is not pinned", () => {
@@ -5202,9 +5203,9 @@ test("lane chats form ordered sub-groups and a chat joins only the first", () =>
   const groups = guestGroups([zeta, protein, alpha, same, empty, other, late, early, chat, only, loose], []);
   const home = groups.find(group => group.key === "s/o");
   assert.deepEqual(home.lanes.map(lane => [lane.key, lane.label, lane.color, lane.items.map(item => item.chat)]), [
+    ["s/o/lane/edx", "", "", []],
     ["s/o/lane/adx", "Alpha", "#334455", ["only"]],
     ["s/o/lane/bdx", "alpha", "", []],
-    ["s/o/lane/edx", "", "", []],
     ["s/o/lane/idx", "Protein", "#11aa22", ["c"]],
     ["s/o/lane/zdx", "zeta", "red;background:url(x)", ["early", "late"]],
   ]);

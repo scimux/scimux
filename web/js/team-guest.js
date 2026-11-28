@@ -123,6 +123,59 @@ function isLaneIndex(view) {
   return !!lane && typeof lane === "object" && !Array.isArray(lane);
 }
 
+function laneLabel(index) {
+  const name = index.lane.name;
+  return typeof name === "string" ? name : "";
+}
+
+function sortedLaneIndexes(views) {
+  return views.filter(isLaneIndex).sort((a, b) => {
+    const order = compare(laneLabel(a), laneLabel(b));
+    if (order) return order;
+    return String(a.chat).localeCompare(String(b.chat));
+  });
+}
+
+function indexListsChat(index, chat) {
+  const chats = index.lane.chats;
+  if (!Array.isArray(chats)) return false;
+  for (const entry of chats) if (entry && entry.chat === chat) return true;
+  return false;
+}
+
+export function laneForChat(view, subs) {
+  if (!view || isLaneIndex(view)) return null;
+  const same = (subs || []).filter(item => item.server === view.server && item.owner === view.owner);
+  const index = sortedLaneIndexes(same).find(item => indexListsChat(item, view.chat));
+  if (!index) return null;
+  return {
+    name: laneLabel(index),
+    color: typeof index.lane.color === "string" ? index.lane.color : "",
+    index: index.chat,
+  };
+}
+
+function assignLanes(group) {
+  const taken = new Set();
+  const placed = new Set();
+  group.lanes = sortedLaneIndexes(group.items).map(index => {
+    const items = [];
+    for (const item of group.items) {
+      if (isLaneIndex(item) || taken.has(item.chat) || !indexListsChat(index, item.chat)) continue;
+      taken.add(item.chat);
+      placed.add(item);
+      items.push(item);
+    }
+    return {
+      key: group.key + "/lane/" + index.chat,
+      label: laneLabel(index),
+      color: typeof index.lane.color === "string" ? index.lane.color : "",
+      items,
+    };
+  });
+  group.items = group.items.filter(item => !isLaneIndex(item) && !placed.has(item));
+}
+
 export function guestGroups(subs, servers, people = {}) {
   const groups = new Map();
   for (const view of subs) {
@@ -172,7 +225,7 @@ export function guestGroups(subs, servers, people = {}) {
       if (order) return order;
       return a.first_seen.localeCompare(b.first_seen);
     });
-    group.items = group.items.filter(view => !isLaneIndex(view));
+    assignLanes(group);
   }
   return result;
 }
