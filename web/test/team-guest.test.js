@@ -8,6 +8,7 @@ import { bubbleActionsHTML } from '../js/chat.js';
 import { createBubbleActionController } from '../js/menu.js';
 import { createPeopleFileStore, createIndexedDBPeopleDriver } from "../js/people-file-store.js";
 import { createGuestFeature, guestGroups, guestKey, guestStateText, guestErrorText, guestEntryHTML, guestMessageHTML, guestHexKey } from "../js/team-guest.js";
+import { createCardsFeature } from "../js/cards.js";
 import { harnessTermsHTML } from "../js/harness.js";
 
 const base = { server: "s", server_name: "Server", owner: "o", owner_name: "Owner", chat: "c", generation: "g", title: "Chat", access: "read", state: "live", mirror_last: 1, seen_mirror: 0, comments_last: 0, seen_comments: 0, unread: false, first_seen: "1" };
@@ -5182,6 +5183,43 @@ test("an index subscription is not classified for unread comments", async () => 
   f.feature.tick(); await f.feature.settled();
   assert.equal(paths.some(path => path.includes("/idx/")), false);
   assert.equal(paths.some(path => path.includes("/need/")), true);
+  f.feature.destroy();
+});
+
+test("the activity list renders a lane sub-group from the feature groups", async () => {
+  const index = laneIndex({ lane: { name: "Protein", color: "#11aa22", chats: [{ chat: "two", created_at: "2" }, { chat: "one", created_at: "1" }] } });
+  const two = { ...base, chat: "two", title: "Two", unread: false, mirror_last: 0, seen_mirror: 0 };
+  const one = { ...base, chat: "one", title: "One", unread: false, mirror_last: 0, seen_mirror: 0 };
+  const owner = { ...base, chat: "owned", title: "Owned", access: "owner" };
+  const f = nativeViewFixture(async path => path === "/api/team/subscriptions" ? list([index, two, one, owner]) : readAnswer());
+  f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(f.feature.tab.activities().map(view => view.chat), ["two", "one"], "activities stay index-free and owner-free");
+  const groups = f.feature.tab.groups();
+  assert.equal(groups.length, 1);
+  assert.equal(groups.flatMap(group => group.items.concat(...(group.lanes || []).map(lane => lane.items))).some(view => view.access === "owner"), false, "an owner copy stays out of the lane group");
+  assert.equal(groups[0].lanes.length, 1);
+  assert.equal(groups[0].lanes[0].label, "Protein");
+  assert.equal(groups[0].lanes[0].color, "#11aa22");
+  assert.deepEqual(groups[0].lanes[0].items.map(view => view.chat), ["one", "two"]);
+  const listEl = { innerHTML: "", querySelectorAll() { return []; } };
+  const cards = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll() { return []; } }, list: listEl },
+    document: { title: "", querySelector() { return null; } },
+    CSS: { escape: value => value },
+    sharedTab: f.feature.tab,
+    nodes: () => [], pinned: () => [], archived: () => [],
+    cardTab: () => "current", expanded: () => new Set(),
+    setInterval: () => 0, clearInterval() {},
+  });
+  cards.render();
+  const html = listEl.innerHTML;
+  assert.match(html, /class="attnfold activity-group lane-group lane-indent open" data-activity-group="owner\/s\/o\/lane\/idx"/);
+  assert.match(html, /<span class="laneswatch" style="background:#11aa22"><\/span><span class="foldlabel">Protein<\/span>/);
+  assert.match(html, /class="card shared-card[^"]*lane-indent[^"]*"\s+id="card-team\/s\/o\/one\/g">[\s\S]*?<span class="stripe" style="background:#11aa22"><\/span>/);
+  assert.match(html, /class="card shared-card[^"]*lane-indent[^"]*"\s+id="card-team\/s\/o\/two\/g">[\s\S]*?<span class="stripe" style="background:#11aa22"><\/span>/);
+  assert.equal((html.match(/card-team\/s\/o\/one\/g/g) || []).length, 1);
+  assert.doesNotMatch(html, /card-team\/s\/o\/idx|card-team\/s\/o\/owned/);
+  cards.destroy();
   f.feature.destroy();
 });
 
