@@ -5223,6 +5223,63 @@ test("the activity list renders a lane sub-group from the feature groups", async
   f.feature.destroy();
 });
 
+test("a live lane keeps the chats an ended index also lists", async () => {
+  const chats = [{ chat: "a", created_at: "1" }, { chat: "b", created_at: "2" }];
+  const earlyIndex = laneIndex({ chat: "aaa", state: "ended", title: "Shared lane · aaa", lane: { name: "aaa", color: "#000000", chats } });
+  const oldIndex = laneIndex({ chat: "old", state: "ended", title: "Shared lane · old", lane: { name: "old", color: "#111111", chats } });
+  const liveIndex = laneIndex({ chat: "new", title: "Shared lane · new", lane: { name: "new", color: "#11aa22", chats } });
+  const liveA = { ...base, chat: "a", title: "A", generation: "g" };
+  const liveB = { ...base, chat: "b", title: "B", generation: "g" };
+  const endedA = { ...base, chat: "a", title: "A ended", generation: "e", state: "ended" };
+  const views = [earlyIndex, oldIndex, liveIndex, liveA, liveB, endedA];
+  const deleted = [];
+  const f = nativeViewFixture(async (path, opts) => {
+    if (path === "/api/team/subscriptions") return list(views);
+    if (opts?.method === "DELETE") {
+      deleted.push(path);
+      return {};
+    }
+    return readAnswer();
+  }, undefined, undefined, { confirm: () => true });
+  f.feature.tick(); await f.feature.settled();
+  assert.deepEqual(f.feature.tab.activities().map(view => view.chat).sort(), ["a", "a", "b"], "activities stay index-free");
+  const groups = f.feature.tab.groups();
+  assert.deepEqual(groups[0].lanes.map(lane => [lane.label, lane.items.map(item => item.generation + ":" + item.chat)]), [["new", ["g:a", "g:b"]]]);
+  assert.deepEqual(groups[0].items.map(item => item.generation + ":" + item.chat), ["e:a"]);
+  assert.equal(guestModule.laneForChat(liveA, views).name, "new");
+  assert.equal(guestModule.laneForChat(liveA, views).index, "new");
+  const listEl = { innerHTML: "", querySelectorAll() { return []; } };
+  const cards = createCardsFeature({
+    roots: { tabs: { innerHTML: "", querySelectorAll() { return []; } }, list: listEl },
+    document: { title: "", querySelector() { return null; } },
+    CSS: { escape: value => value },
+    sharedTab: f.feature.tab,
+    nodes: () => [], pinned: () => [], archived: () => [],
+    cardTab: () => "current", expanded: () => new Set(),
+    setInterval: () => 0, clearInterval() {},
+  });
+  cards.render();
+  const html = listEl.innerHTML;
+  const laneAt = html.indexOf('data-activity-group="owner/s/o/lane/new"');
+  const liveAt = html.indexOf('id="card-team/s/o/a/g"');
+  const endedAt = html.indexOf('id="card-team/s/o/a/e"');
+  assert.ok(laneAt !== -1 && liveAt !== -1 && endedAt !== -1 && laneAt < liveAt && liveAt < endedAt, html);
+  assert.equal((html.match(/lane-group/g) || []).length, 1);
+  assert.doesNotMatch(html, /lane\/(?:aaa|old)|foldlabel">(?:aaa|old)/);
+  cards.destroy();
+  f.open("team/" + guestKey(liveA));
+  await f.feature.settled();
+  f.click("guestremove");
+  await f.feature.settled();
+  assert.deepEqual(deleted, [
+    "/api/team/subscriptions/s/o/a/g",
+    "/api/team/subscriptions/s/o/a/e",
+    "/api/team/subscriptions/s/o/b/g",
+    "/api/team/subscriptions/s/o/new/g",
+  ]);
+  f.feature.destroy();
+});
+
 test("a lane chat notice names the shared lane", () => {
   const html = guestModule.sharingNoticeHTML("Ada <b>", [], "<img src=x onerror=1>");
   assert.match(html, /Part of Ada &lt;b&gt;'s shared lane &lt;img src=x onerror=1&gt;/);
