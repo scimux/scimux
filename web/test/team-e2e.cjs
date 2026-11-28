@@ -2942,6 +2942,79 @@ async function permissionLifecycle(mode,ownerSeat,readerSeat) {
   assertID('permission-closed-owner-no-prompt-'+mode,await owner.locator('[data-gact=prompt]').count()===0);
   manifest['permission-'+mode]={key,denied,before,after:counts(ownerSeat)};
 }
+async function lanesShare(owner, reader) {
+  const minted = '#007AFF';
+  const lane = 'protein';
+  const kept = await node(owner, 'codex', 'Lane kept', 'Synthetic lane kept');
+  const archived = await node(owner, 'codex', 'Lane archived', 'Synthetic lane archived');
+  await owner.api('/api/nodes/' + kept.id, 'PATCH', {lane_id: lane});
+  await owner.api('/api/nodes/' + archived.id, 'PATCH', {lane_id: lane});
+  const ui = await owner.api('/api/ui');
+  await owner.uiSetup({...ui, lanes: [...(ui.lanes || []), {id: lane, name: 'Protein', color: minted}], archived: [...(ui.archived || []), archived.id]});
+  const share = await owner.api('/api/team/lane-shares/' + lane, 'PUT', {server: owner.serverID, scope: 'all', name: 'Protein', color: minted.toLowerCase(), excluded: [archived.id], members: [{seat: reader.self, access: 'read'}]});
+  const listed = () => ownerShares(reader, owner.self);
+  const index = await until(async () => (await listed()).find(view => view.lane && view.lane.name === 'Protein'), 30000, 'lane index');
+  const keptSub = await until(async () => (await listed()).find(view => view.title === 'Lane kept'), 30000, 'kept lane chat');
+  assertID('lanes-share-excludes-archived', index.chat === share.id && share.color === minted.toLowerCase() && share.excluded === 1 && !(await listed()).some(view => view.title === 'Lane archived'));
+  const shown = {};
+  for (const mode of ['desktop', 'phone']) {
+    const page = await pageFor(reader, mode, 'lanes-' + mode);
+    shown[mode] = page;
+    const ownerKey = 'owner/' + keptSub.server + '/' + keptSub.owner + '/lane/' + index.chat;
+    const view = await until(async () => page.evaluate(key => {
+      const group = document.querySelector('#cardlist .lane-group');
+      if (!group || group.getAttribute('data-activity-group') !== key) return null;
+      const cards = [...document.querySelectorAll('#cardlist .card.lane-indent')];
+      return {label: group.querySelector('.foldlabel')?.textContent, swatch: group.querySelector('.laneswatch')?.getAttribute('style') || '', titles: cards.map(card => card.querySelector('.title')?.textContent), stripes: cards.map(card => card.querySelector('.stripe')?.getAttribute('style') || ''), archived: [...document.querySelectorAll('#cardlist .title')].some(title => title.textContent === 'Lane archived')};
+    }, ownerKey), 30000, 'lane sub-group ' + mode);
+    assertID('lanes-subgroup-' + mode, view.label === 'Protein' && view.swatch === 'background:#007aff' && view.titles.length === 1 && view.titles[0] === 'Lane kept' && view.stripes[0] === 'background:#007aff' && !view.archived);
+    await screenshot(page, 'lanes-' + mode + '.png');
+  }
+  const added = await node(owner, 'codex', 'Lane added', 'Synthetic lane added');
+  await owner.api('/api/nodes/' + added.id, 'PATCH', {lane_id: lane});
+  await until(async () => (await listed()).some(view => view.title === 'Lane added'), 30000, 'added lane chat');
+  await owner.api('/api/team/lane-shares/' + lane, 'PUT', {server: owner.serverID, scope: 'all', name: 'Folded', color: minted.toLowerCase(), excluded: [archived.id], members: [{seat: reader.self, access: 'read'}]});
+  for (const mode of ['desktop', 'phone']) {
+    const titles = await until(async () => shown[mode].evaluate(() => {
+      const group = document.querySelector('#cardlist .lane-group');
+      const cards = [...document.querySelectorAll('#cardlist .card.lane-indent .title')].map(title => title.textContent);
+      if (!group || group.querySelector('.foldlabel')?.textContent !== 'Folded' || cards.length !== 2) return null;
+      return cards;
+    }), 30000, 'renamed lane ' + mode);
+    assertID('lanes-renamed-added-' + mode, titles.includes('Lane kept') && titles.includes('Lane added'));
+  }
+  const page = shown.desktop;
+  await open(page, 'team/' + [keptSub.server, keptSub.owner, keptSub.chat, keptSub.generation].join('/'));
+  const button = page.locator('#guestremove');
+  await button.waitFor({timeout: 30000});
+  assertID('lanes-leave-label', (await button.getAttribute('aria-label')) === 'Leave lane');
+  const relayBefore = await indexSeats(owner, share.id);
+  assertID('lanes-relay-lists-recipient', relayBefore.includes(reader.self));
+  page.once('dialog', dialog => dialog.accept());
+  await button.click();
+  await until(async () => (await listed()).length === 0, 30000, 'lane copies removed');
+  await until(async () => (await page.locator('#cardlist .lane-group').count()) === 0, 30000, 'desktop lane cleared');
+  await until(async () => (await shown.phone.locator('#cardlist .lane-group').count()) === 0, 30000, 'phone lane cleared');
+  assertID('lanes-left', (await page.locator('#cardlist .lane-group').count()) === 0 && (await shown.phone.locator('#cardlist .lane-group').count()) === 0);
+  // The owner rechecks lane membership a minute after checked_at, and no hook shortens that wait.
+  const relayAfter = await indexSeats(owner, share.id);
+  assertID('lanes-relay-index-without-recipient', !relayAfter.includes(reader.self));
+  manifest['lanes-desktop'] = {before: counts(owner), after: counts(owner)};
+  manifest['lanes-phone'] = {before: counts(reader), after: counts(reader)};
+}
+function ownerShares(reader, ownerID) {
+  return reader.api('/api/team/subscriptions').then(body => body.subscriptions.filter(view => view.owner === ownerID));
+}
+async function indexSeats(ownerSeat, indexID) {
+  const doc = JSON.parse(fs.readFileSync(path.join(ownerSeat.data, 'team.json'), 'utf8'));
+  const token = doc.servers.find(item => item.id === ownerSeat.serverID).token;
+  const response = await fetch(relay.url + '/v1/channels', {headers: {Accept: 'application/json', Authorization: 'Bearer ' + token}});
+  if (!response.ok) throw Error('relay channels ' + response.status);
+  const body = await response.json();
+  const channel = (body.channels || []).find(item => item.chat === indexID && item.owner === ownerSeat.self);
+  if (!channel) throw Error('relay index missing');
+  return (channel.members || []).map(item => item.seat);
+}
 async function recipientLeave(mode,ownerSeat,readerSeat) {
   const chat=await node(ownerSeat,'codex','Leave source '+mode,'Synthetic leave initial');
   await ownerSeat.api('/api/team/shares/'+chat.id,'PUT',{server:ownerSeat.serverID,scope:'all',members:[{seat:readerSeat.self,access:'write'}]});
@@ -3418,6 +3491,7 @@ async function run() {
  if(selected==='ui-join')return;
  for(const s of selected==='default'?[r,observer]:seats){const issue=JSON.parse(execFileSync(relayBin,['-state-dir',relay.dir,'-url',relay.url,'-json','issue'],{env:baseEnv,encoding:'utf8'}));await s.api('/api/team/servers','POST',{link:issue.link,name:selected==='received-offline'&&s===a?'Synthetic sharer':s.name});}
  for(const s of seats){s.serverID=(await s.api('/api/team/servers')).servers[0].id;s.self=(await s.api('/api/team/servers/'+s.serverID+'/seats')).self;}
+ if(selected==='lanes'){await lanesShare(a,r);return;}
  for(const s of [a,b])await s.api('/api/team/shares/'+s.node.id,'PUT',{server:s.serverID,scope:'all',members:[{seat:r.self,access:'write'},...(s===b?[{seat:observer.self,access:'write'}]:[])]});
  if(selected==='people-source-cancel'){for(const mode of ['desktop','phone'])await peopleSourceCancellation(mode,a,r);return;}
  if(selected==='people-image-bookmark'){for(const mode of ['desktop','phone'])await peopleImageBookmark(mode,a,r);return;}

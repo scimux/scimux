@@ -358,7 +358,8 @@ Use `SCIMUX_E2E_SCENARIO` for a bounded run. Set it to `people-stage-competition
 `conversation-trace`, `native-start-failure`, `recipient-boundary`,
 `received-offline`, `permission-lifecycle`, `recipient-leave`, `leave-stale`,
 `leave-empty`, `held-evidence`, `dropped-send`, `reshare-stale`, `ai-source`,
-`viewport-keyboard`, `media-contrast`, `unshared`, and `held-chat-loading`.
+`viewport-keyboard`, `media-contrast`, `unshared`, `held-chat-loading`, and `lanes`.
+`lanes` shares one lane that holds two chats, one of them archived, from owner-a to the recipient. Desktop and phone each show one sub-group in the lane color containing only the unarchived chat. The owner then starts a chat in that lane and renames the lane, and the recipient sees the new chat and the new name. The recipient leaves the lane. The owner's membership file is rechecked a minute later, so this scenario reads the relay index and requires that index to drop the recipient.
 The selections `stage1-scanner`, `stage1-unread`, and
 `stage1-owner-files` exercise active and stale chat selection, unread
 authorship and per-card indicators, and the owner's attachment composer.
