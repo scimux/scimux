@@ -2104,3 +2104,10 @@ test('production card removal refuses a missing chat identity', async () => {
  await h.clickList(actTarget({trash:'n1'},['[data-trash]']));
  assert.equal(h.effects.apiCalls.length,0);assert.equal(h.effects.removeNode.length,0);assert.equal(h.state.sel,'n1');assert.match(h.effects.alerts[0],/identity.*unavailable/i);
 });
+
+test("the lane share notice wraps under the picker", () => {
+  assert.match(cardsCssSrc, /\.lanepick\s*\{[^}]*flex-wrap:\s*wrap/);
+  const sheets = readFileSync(join(__dirname, "../css/sheets.css"), "utf8");
+  assert.match(sheets, /\.laneshare\s*\{[^}]*width:\s*100%/);
+  assert.match(sheets, /\.laneshare\s*\{[^}]*flex:\s*1 0 100%/);
+});
